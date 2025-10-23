@@ -1,0 +1,1 @@
+DEAP-bridge is a Python library that streamlines integration between DEAP and PettingZoo.
