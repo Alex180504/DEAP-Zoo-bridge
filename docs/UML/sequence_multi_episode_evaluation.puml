@@ -1,0 +1,131 @@
+@startuml sequence_multi_episode_evaluation
+!theme plain
+title Sequence Diagram: Multi-Episode Evaluation with Seed Management
+
+actor "DEAP\nAlgorithm" as DEAP
+participant "Multi\nEpisodeEvaluator" as MultiEval
+participant "Single\nEpisodeEvaluator" as SingleEval
+participant "SeedManager" as Seeds
+participant "PettingZoo\nWrapper" as Env
+participant "Logger" as Log
+
+== Initialization ==
+
+DEAP -> MultiEval : __init__(env_wrapper, config)
+activate MultiEval
+MultiEval -> Seeds : __init__(base_seed)
+activate Seeds
+Seeds -> Seeds : initialize RNG
+Seeds --> MultiEval : seed_manager
+deactivate Seeds
+
+MultiEval -> SingleEval : __init__(env_wrapper, config)
+activate SingleEval
+SingleEval --> MultiEval : single_evaluator
+deactivate SingleEval
+
+MultiEval -> MultiEval : num_episodes = config['num_episodes']
+MultiEval -> MultiEval : aggregation_method = config['aggregation']
+MultiEval --> DEAP : ready
+deactivate MultiEval
+
+== Multi-Episode Evaluation ==
+
+DEAP -> MultiEval : evaluate(individual)
+activate MultiEval
+
+MultiEval -> MultiEval : episode_fitnesses = []
+MultiEval -> MultiEval : episode_stats = []
+
+MultiEval -> Seeds : get_evaluation_seeds(num_episodes)
+activate Seeds
+Seeds -> Seeds : generate deterministic seeds
+note right
+  For reproducibility:
+  seeds[i] = base_seed + i * offset
+  or using np.random.Generator
+end note
+Seeds --> MultiEval : [seed_0, seed_1, ..., seed_N]
+deactivate Seeds
+
+loop for each episode in range(num_episodes)
+    
+    MultiEval -> MultiEval : seed = evaluation_seeds[episode]
+    
+    MultiEval -> SingleEval : evaluate(individual, seed)
+    activate SingleEval
+    
+    SingleEval -> Env : reset(seed)
+    activate Env
+    Env -> Env : seed environment RNG
+    Env --> SingleEval : initial_observations
+    deactivate Env
+    
+    SingleEval -> SingleEval : run episode
+    note right
+      Full episode execution
+      as in previous diagram
+    end note
+    
+    SingleEval --> MultiEval : fitness_value
+    deactivate SingleEval
+    
+    MultiEval -> MultiEval : episode_fitnesses.append(fitness_value)
+    
+    MultiEval -> Log : log_evaluation(individual, episode, fitness_value)
+    activate Log
+    Log -> Log : record to buffer
+    Log --> MultiEval : logged
+    deactivate Log
+    
+end
+
+== Statistical Aggregation ==
+
+MultiEval -> MultiEval : _calculate_statistics(episode_fitnesses)
+activate MultiEval
+
+MultiEval -> MultiEval : mean_fitness = np.mean(episode_fitnesses)
+MultiEval -> MultiEval : std_fitness = np.std(episode_fitnesses)
+MultiEval -> MultiEval : min_fitness = np.min(episode_fitnesses)
+MultiEval -> MultiEval : max_fitness = np.max(episode_fitnesses)
+
+alt aggregation_method == "mean"
+    MultiEval -> MultiEval : final_fitness = mean_fitness
+else aggregation_method == "median"
+    MultiEval -> MultiEval : final_fitness = np.median(episode_fitnesses)
+else aggregation_method == "worst_case"
+    MultiEval -> MultiEval : final_fitness = min_fitness
+else aggregation_method == "best_case"
+    MultiEval -> MultiEval : final_fitness = max_fitness
+end
+
+MultiEval -> MultiEval : statistics = {\n  'mean': mean_fitness,\n  'std': std_fitness,\n  'min': min_fitness,\n  'max': max_fitness,\n  'episodes': episode_fitnesses\n}
+
+MultiEval --> MultiEval : final_fitness, statistics
+deactivate MultiEval
+
+MultiEval --> DEAP : (final_fitness,)
+deactivate MultiEval
+
+note over DEAP
+  DEAP uses final_fitness for selection.
+  Statistics can be logged separately
+  for analysis and debugging.
+end note
+
+== Reproducibility Notes ==
+
+note over Seeds
+  **Seed Management for Reproducibility:**
+  
+  1. Base seed set at experiment start
+  2. Episode seeds deterministically generated
+  3. Same individual + same base_seed 
+     = identical fitness across runs
+  4. Different individuals get same
+     set of seeds for fair comparison
+  5. Seeds logged with results
+end note
+
+@enduml

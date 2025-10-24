@@ -1,0 +1,124 @@
+@startuml sequence_single_episode_evaluation
+!theme plain
+title Sequence Diagram: Single Episode Fitness Evaluation
+
+actor "DEAP\nAlgorithm" as DEAP
+participant "Single\nEpisodeEvaluator" as Evaluator
+participant "PettingZoo\nWrapper" as Env
+participant "SeedManager" as Seeds
+participant "Feedforward\nNeuralPolicy" as Policy
+collections "Agents\n(adversary_0..N)" as Agents
+
+== Evaluation Start ==
+
+DEAP -> Evaluator : evaluate(individual)
+activate Evaluator
+
+Evaluator -> Evaluator : _create_policies(individual)
+activate Evaluator
+
+loop for each agent in environment
+    Evaluator -> Policy : __init__(individual.genome, env_spec)
+    activate Policy
+    Policy -> Policy : build network from genome
+    Policy --> Evaluator : policy instance
+    deactivate Policy
+end
+
+Evaluator --> Evaluator : policies dict {agent_id: policy}
+deactivate Evaluator
+
+== Episode Reset ==
+
+Evaluator -> Seeds : get_episode_seed(0)
+activate Seeds
+Seeds --> Evaluator : episode_seed
+deactivate Seeds
+
+Evaluator -> Env : reset(seed=episode_seed)
+activate Env
+Env -> Env : seed RNG
+Env -> Agents : initialize positions
+activate Agents
+Agents --> Env : initial states
+deactivate Agents
+Env --> Evaluator : observations = {agent_id: obs}
+deactivate Env
+
+Evaluator -> Evaluator : rewards = {agent_id: 0.0}
+Evaluator -> Evaluator : step_count = 0
+
+== Episode Loop ==
+
+loop while not done and step_count < max_steps
+    Evaluator -> Evaluator : actions = {}
+    
+    loop for each agent_id, observation in observations
+        Evaluator -> Policy : get_action(observation)
+        activate Policy
+        Policy -> Policy : forward pass
+        Policy --> Evaluator : action
+        deactivate Policy
+        Evaluator -> Evaluator : actions[agent_id] = action
+    end
+    
+    Evaluator -> Env : step(actions)
+    activate Env
+    
+    Env -> Agents : apply actions
+    activate Agents
+    Agents -> Agents : update physics
+    Agents -> Agents : check collisions
+    Agents -> Agents : calculate rewards
+    Agents --> Env : new states, rewards, terminations
+    deactivate Agents
+    
+    Env --> Evaluator : observations, rewards, terminations, truncations, infos
+    deactivate Env
+    
+    Evaluator -> Evaluator : accumulate rewards
+    note right
+      For each agent:
+      total_reward[agent] += reward
+    end note
+    
+    Evaluator -> Evaluator : step_count += 1
+    
+    Evaluator -> Evaluator : check if all agents done
+end
+
+== Fitness Calculation ==
+
+Evaluator -> Evaluator : _calculate_fitness(rewards)
+activate Evaluator
+
+alt fitness_aggregation == "sum"
+    Evaluator -> Evaluator : fitness = sum(all agent rewards)
+else fitness_aggregation == "mean"
+    Evaluator -> Evaluator : fitness = mean(all agent rewards)
+else fitness_aggregation == "team_specific"
+    Evaluator -> Evaluator : fitness = sum(team_A) - sum(team_B)
+    note right
+      For competitive scenarios
+      like pursuit-evasion
+    end note
+else fitness_aggregation == "min"
+    Evaluator -> Evaluator : fitness = min(all agent rewards)
+    note right
+      For cooperative tasks
+      (worst-case performance)
+    end note
+end
+
+Evaluator --> Evaluator : fitness_value
+deactivate Evaluator
+
+Evaluator --> DEAP : (fitness_value,)
+deactivate Evaluator
+
+note over DEAP
+  DEAP expects fitness as tuple
+  even for single-objective optimization
+end note
+
+@enduml
