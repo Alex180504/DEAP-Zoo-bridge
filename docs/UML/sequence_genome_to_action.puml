@@ -1,0 +1,123 @@
+@startuml sequence_genome_to_action
+!theme plain
+title Sequence Diagram: Genome → Policy → Action Flow
+
+actor "Evolution\nAlgorithm" as EA
+participant "Individual\n(DEAP)" as Ind
+participant "FixedTopology\nGenome" as Genome
+participant "Feedforward\nNeuralPolicy" as Policy
+participant "PettingZoo\nWrapper" as Env
+participant "Agent" as Agent
+
+== Initialization Phase ==
+
+EA -> Ind : create individual
+activate Ind
+Ind -> Genome : __init__(architecture)
+activate Genome
+Genome -> Genome : validate architecture
+Genome -> Genome : initialize weight vector
+Genome --> Ind : genome instance
+deactivate Genome
+Ind --> EA : individual with genome
+deactivate Ind
+
+== Policy Creation Phase ==
+
+EA -> Policy : __init__(genome, env_spec)
+activate Policy
+Policy -> Genome : get_weights()
+activate Genome
+Genome --> Policy : weight_vector
+deactivate Genome
+
+Policy -> Policy : parse architecture
+Policy -> Policy : split weights into\nlayers and biases
+Policy -> Policy : construct network layers
+Policy -> Policy : set activation function
+Policy -> Env : get_action_space(agent_id)
+activate Env
+Env --> Policy : action_space
+deactivate Env
+
+Policy -> Env : get_observation_space(agent_id)
+activate Env
+Env --> Policy : observation_space
+deactivate Env
+
+Policy --> EA : ready policy
+deactivate Policy
+
+== Episode Execution Phase ==
+
+EA -> Env : reset(seed)
+activate Env
+Env --> EA : initial_observations
+deactivate Env
+
+loop for each step until done
+    EA -> Agent : get observation
+    activate Agent
+    Agent --> EA : observation
+    deactivate Agent
+    
+    EA -> Policy : get_action(observation)
+    activate Policy
+    
+    Policy -> Policy : _process_observation(obs)
+    note right
+      Normalize, flatten,
+      or reshape observation
+      to match input layer
+    end note
+    
+    Policy -> Policy : forward(processed_obs)
+    
+    loop for each layer
+        Policy -> Policy : layer_output = weights @ input + bias
+        Policy -> Policy : _apply_activation(layer_output)
+        note right
+          Apply ReLU, tanh,
+          or sigmoid activation
+        end note
+    end loop
+    
+    Policy -> Policy : _process_output(network_output)
+    note right
+      Convert network output to
+      action format (discrete/continuous)
+      matching action_space
+    end note
+    
+    Policy --> EA : action
+    deactivate Policy
+    
+    EA -> Env : step({agent_id: action})
+    activate Env
+    Env -> Agent : execute action
+    activate Agent
+    Agent --> Env : next_state, reward
+    deactivate Agent
+    Env --> EA : observations, rewards, dones
+    deactivate Env
+end
+
+== Action Space Handling ==
+
+alt Discrete Action Space
+    Policy -> Policy : argmax(output) or\nsample from softmax
+    note right
+      For discrete actions,
+      select action with
+      highest activation
+    end note
+else Continuous Action Space
+    Policy -> Policy : clip(tanh(output),\naction_low, action_high)
+    note right
+      For continuous actions,
+      scale output to
+      action bounds
+    end note
+end
+
+@enduml
