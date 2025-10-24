@@ -1,0 +1,251 @@
+@startuml class_diagram
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+
+title DEAP-PettingZoo Bridge - Class Diagram
+
+package "deap_pettingzoo.genomes" {
+    abstract class GenomeBase {
+        + weights: np.ndarray
+        + architecture: dict
+        + validate() -> bool
+        + to_dict() -> dict
+        + from_dict(data: dict) -> GenomeBase
+        + clone() -> GenomeBase
+    }
+    
+    class FixedTopologyGenome {
+        + layer_sizes: List[int]
+        + activation: str
+        + input_size: int
+        + output_size: int
+        + hidden_layers: List[int]
+        --
+        + __init__(architecture: dict)
+        + get_weight_count() -> int
+        + get_weight_ranges() -> List[tuple]
+        + set_weights(weights: np.ndarray)
+        + get_weights() -> np.ndarray
+        + mutate(mutation_rate: float, mutation_std: float)
+    }
+    
+    GenomeBase <|-- FixedTopologyGenome
+}
+
+package "deap_pettingzoo.policies" {
+    abstract class BasePolicy {
+        + {abstract} get_action(observation) -> action
+        + {abstract} reset() -> None
+        + seed(seed: int) -> None
+    }
+    
+    class FeedforwardNeuralPolicy {
+        - genome: FixedTopologyGenome
+        - layers: List[np.ndarray]
+        - biases: List[np.ndarray]
+        - activation_fn: callable
+        - action_space: gymnasium.Space
+        - observation_space: gymnasium.Space
+        --
+        + __init__(genome: GenomeBase, env_spec: dict)
+        + get_action(observation: np.ndarray) -> action
+        + reset() -> None
+        + forward(x: np.ndarray) -> np.ndarray
+        - _apply_activation(x: np.ndarray) -> np.ndarray
+        - _process_observation(obs) -> np.ndarray
+        - _process_output(output: np.ndarray) -> action
+    }
+    
+    BasePolicy <|-- FeedforwardNeuralPolicy
+    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+}
+
+package "deap_pettingzoo.environments" {
+    class PettingZooWrapper {
+        - env: AECEnv | ParallelEnv
+        - agent_ids: List[str]
+        - observation_spaces: dict
+        - action_spaces: dict
+        - current_seed: int
+        --
+        + __init__(env_name: str, **kwargs)
+        + reset(seed: Optional[int]) -> observations
+        + step(actions: dict) -> tuple
+        + get_agent_ids() -> List[str]
+        + get_observation_space(agent_id: str) -> Space
+        + get_action_space(agent_id: str) -> Space
+        + close() -> None
+        + render() -> None
+    }
+    
+    class SeedManager {
+        - base_seed: int
+        - episode_seeds: List[int]
+        - rng: np.random.Generator
+        --
+        + __init__(base_seed: int)
+        + get_episode_seed(episode_num: int) -> int
+        + get_evaluation_seeds(num_episodes: int) -> List[int]
+        + reset(seed: int) -> None
+    }
+    
+    PettingZooWrapper --> SeedManager : uses
+}
+
+package "deap_pettingzoo.evaluators" {
+    abstract class BaseEvaluator {
+        + env_wrapper: PettingZooWrapper
+        + {abstract} evaluate(individual) -> fitness
+    }
+    
+    class SingleEpisodeEvaluator {
+        - max_steps: int
+        - fitness_aggregation: str
+        - seed: Optional[int]
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate(individual) -> float
+        - _create_policies(individual) -> dict
+        - _run_episode(policies: dict, seed: int) -> dict
+        - _calculate_fitness(rewards: dict) -> float
+    }
+    
+    class MultiEpisodeEvaluator {
+        - num_episodes: int
+        - single_evaluator: SingleEpisodeEvaluator
+        - seed_manager: SeedManager
+        - aggregation_method: str
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate(individual) -> tuple
+        - _aggregate_fitness(fitnesses: List[float]) -> tuple
+        - _calculate_statistics(fitnesses: List[float]) -> dict
+    }
+    
+    class ParallelEvaluator {
+        - multi_evaluator: MultiEpisodeEvaluator
+        - num_workers: int
+        - pool: multiprocessing.Pool
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate_population(population: List) -> List[tuple]
+        - _evaluate_worker(individual) -> tuple
+        + close() -> None
+    }
+    
+    BaseEvaluator <|-- SingleEpisodeEvaluator
+    BaseEvaluator <|-- MultiEpisodeEvaluator
+    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : uses
+    ParallelEvaluator --> MultiEpisodeEvaluator : uses
+    
+    SingleEpisodeEvaluator --> PettingZooWrapper : uses
+    MultiEpisodeEvaluator --> SeedManager : uses
+}
+
+package "deap_pettingzoo.integration" {
+    class DEAPToolboxBuilder {
+        + evaluator: BaseEvaluator
+        + genome_config: dict
+        --
+        + {static} create_toolbox(config: dict) -> deap.base.Toolbox
+        + {static} create_individual(genome_class, config: dict)
+        + {static} setup_operators(toolbox, config: dict)
+        + {static} register_evaluation(toolbox, evaluator)
+    }
+    
+    class EvolutionRunner {
+        - toolbox: deap.base.Toolbox
+        - population: List
+        - stats: deap.tools.Statistics
+        - halloffame: deap.tools.HallOfFame
+        - logger: Logger
+        --
+        + __init__(toolbox: Toolbox, config: dict)
+        + run(num_generations: int) -> tuple
+        + resume(checkpoint_path: str) -> tuple
+        - _run_generation() -> None
+        - _save_checkpoint(generation: int) -> None
+        + get_best_individual() -> Individual
+    }
+    
+    DEAPToolboxBuilder --> BaseEvaluator : uses
+    EvolutionRunner --> DEAPToolboxBuilder : uses
+}
+
+package "deap_pettingzoo.utils" {
+    class Logger {
+        - log_dir: Path
+        - stats: List[dict]
+        --
+        + __init__(log_dir: str)
+        + log_generation(gen: int, stats: dict)
+        + log_evaluation(individual, fitness: float)
+        + save_to_csv() -> None
+        + save_to_json() -> None
+    }
+    
+    class Visualizer {
+        + {static} plot_fitness_evolution(stats: List[dict], output_path: str)
+        + {static} plot_diversity(population: List, output_path: str)
+        + {static} render_policy(policy: BasePolicy, env, output_path: str)
+    }
+    
+    class Checkpointer {
+        - checkpoint_dir: Path
+        --
+        + __init__(checkpoint_dir: str)
+        + save(population, generation, stats, filename: str)
+        + load(filename: str) -> dict
+        + list_checkpoints() -> List[str]
+    }
+    
+    EvolutionRunner --> Logger : uses
+    EvolutionRunner --> Checkpointer : uses
+}
+
+package "deap_pettingzoo.baselines" {
+    class RLPolicyWrapper {
+        - model: BaseAlgorithm
+        - policy_type: str
+        --
+        + __init__(model_path: str)
+        + get_action(observation) -> action
+        + reset() -> None
+    }
+    
+    class BaselineComparison {
+        - evaluator: BaseEvaluator
+        --
+        + __init__(evaluator: BaseEvaluator)
+        + compare(ea_policy, rl_policy, num_runs: int) -> dict
+        + statistical_test(results1, results2) -> dict
+    }
+    
+    BasePolicy <|.. RLPolicyWrapper : implements
+    BaselineComparison --> BaseEvaluator : uses
+}
+
+' Key relationships
+FeedforwardNeuralPolicy ..> PettingZooWrapper : interacts with
+SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
+EvolutionRunner ..> Logger : logs to
+
+note bottom of FixedTopologyGenome
+  Genome is a flat vector of weights
+  for a fixed network architecture
+end note
+
+note bottom of FeedforwardNeuralPolicy
+  Converts genome weights into
+  neural network layers and
+  produces actions from observations
+end note
+
+note bottom of MultiEpisodeEvaluator
+  Runs multiple episodes with
+  different seeds for robust
+  fitness estimation
+end note
+
+@enduml
