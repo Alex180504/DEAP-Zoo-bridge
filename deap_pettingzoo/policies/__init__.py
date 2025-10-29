@@ -1,3 +1,5 @@
 """Policy implementations for converting genomes to agent behaviors."""
 
-__all__ = []
+from .feedforward_neural import FeedforwardNeuralPolicy
+
+__all__ = ['FeedforwardNeuralPolicy']
