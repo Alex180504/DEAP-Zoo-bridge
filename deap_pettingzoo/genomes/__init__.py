@@ -1,3 +1,8 @@
-"""Genome representations for evolutionary algorithms."""
+"""
+Genome representations for evolutionary algorithms.
+"""
 
-__all__ = []
+from .fixed_topology import FixedTopologyGenome
+
+__all__ = ['FixedTopologyGenome']
+
