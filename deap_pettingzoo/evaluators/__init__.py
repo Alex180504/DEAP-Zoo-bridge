@@ -1,3 +1,9 @@
-"""Fitness evaluators for PettingZoo environments."""
+from .base_evaluator import BaseEvaluator
+from .single_episode import SingleEpisodeEvaluator
+from .multi_episode import MultiEpisodeEvaluator
 
-__all__ = []
+__all__ = [
+    'BaseEvaluator',
+    'SingleEpisodeEvaluator',
+    'MultiEpisodeEvaluator',
+]
