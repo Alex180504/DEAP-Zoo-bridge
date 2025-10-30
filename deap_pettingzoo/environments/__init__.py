@@ -1,3 +1,5 @@
 """Environment wrappers and utilities for PettingZoo."""
 
-__all__ = []
+from .pettingzoo_wrapper import PettingZooWrapper
+
+__all__ = ['PettingZooWrapper']

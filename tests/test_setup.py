@@ -1,7 +1,3 @@
-"""
-Basic setup tests to verify the package structure and dependencies.
-"""
-
 import sys
 
 
