@@ -104,7 +104,7 @@ class TestToolboxCreation:
         return SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
-            fitness_aggregation='sum'
+            aggregation_method='sum'
         )
     
     def test_create_toolbox_registers_operators(self, evaluator):
