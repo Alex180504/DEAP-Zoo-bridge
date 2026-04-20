@@ -16,7 +16,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         self,
         env_wrapper: PettingZooWrapper,
         max_steps: int = 500,
-        fitness_aggregation: str = 'sum',
+        aggregation_method: str = 'sum',
         team_mapping: Optional[Dict[str, str]] = None
     ) -> None:
         """
@@ -25,7 +25,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         Args:
             env_wrapper: PettingZoo environment wrapper
             max_steps: Maximum steps per episode
-            fitness_aggregation: How to combine agent rewards
+            aggregation_method: How to combine agent rewards
                 - 'sum': Sum of all agent rewards
                 - 'mean': Average of agent rewards
                 - 'min': Minimum reward (worst agent)
@@ -36,15 +36,15 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         Raises:
             ValueError: If invalid aggregation method
         """
-        if fitness_aggregation not in self.VALID_AGGREGATIONS:
+        if aggregation_method not in self.VALID_AGGREGATIONS:
             raise ValueError(
-                f"Invalid fitness_aggregation '{fitness_aggregation}'. "
+                f"Invalid aggregation_method '{aggregation_method}'. "
                 f"Must be one of {self.VALID_AGGREGATIONS}"
             )
         
         self.env_wrapper = env_wrapper
         self.max_steps = max_steps
-        self.fitness_aggregation = fitness_aggregation
+        self.aggregation_method = aggregation_method
         self.team_mapping = team_mapping or {}
     
     def evaluate(
@@ -61,7 +61,22 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             
         Returns:
             Tuple containing single fitness value (DEAP format)
+            
+        Raises:
+            ValueError: If individual or genome is None/invalid
         """
+        # Validate inputs
+        if individual is None:
+            raise ValueError("Individual cannot be None")
+        
+        if not hasattr(individual, 'genome'):
+            raise ValueError(
+                f"Individual must have 'genome' attribute, got type {type(individual)}"
+            )
+        
+        if individual.genome is None:
+            raise ValueError("Individual's genome cannot be None")
+        
         # Reset environment
         observations = self.env_wrapper.reset(seed=seed)
         
@@ -73,28 +88,32 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         done = False
         steps = 0
         
-        while not done and steps < self.max_steps:
-            # Get actions from policies
-            actions = {}
-            for agent, obs in observations.items():
-                if agent in policies:
-                    actions[agent] = policies[agent].get_action(obs, deterministic=True)
+        try:
+            while not done and steps < self.max_steps:
+                # Get actions from policies
+                actions = {}
+                for agent, obs in observations.items():
+                    if agent in policies:
+                        actions[agent] = policies[agent].get_action(obs, deterministic=True)
+                
+                # Step environment
+                observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)
+                
+                # Accumulate rewards
+                for agent, reward in rewards.items():
+                    cumulative_rewards[agent] += reward
+                
+                # Check if episode is done
+                done = all(dones.values()) or truncated
+                steps += 1
             
-            # Step environment
-            observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)
+            # Aggregate fitness across agents
+            fitness = self._aggregate_fitness(cumulative_rewards)
             
-            # Accumulate rewards
-            for agent, reward in rewards.items():
-                cumulative_rewards[agent] += reward
-            
-            # Check if episode is done
-            done = all(dones.values()) or truncated
-            steps += 1
-        
-        # Aggregate fitness across agents
-        fitness = self._aggregate_fitness(cumulative_rewards)
-        
-        return (fitness,)
+            return (fitness,)
+        except Exception as e:
+            # Log error and re-raise with context
+            raise RuntimeError(f"Error during episode evaluation: {e}") from e
     
     def _create_policies(
         self,
@@ -292,15 +311,15 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         
         rewards = list(cumulative_rewards.values())
         
-        if self.fitness_aggregation == 'sum':
+        if self.aggregation_method == 'sum':
             return float(np.sum(rewards))
-        elif self.fitness_aggregation == 'mean':
+        elif self.aggregation_method == 'mean':
             return float(np.mean(rewards))
-        elif self.fitness_aggregation == 'min':
+        elif self.aggregation_method == 'min':
             return float(np.min(rewards))
-        elif self.fitness_aggregation == 'max':
+        elif self.aggregation_method == 'max':
             return float(np.max(rewards))
-        elif self.fitness_aggregation == 'team':
+        elif self.aggregation_method == 'team':
             return self._aggregate_team_fitness(cumulative_rewards)
         
         return 0.0

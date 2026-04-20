@@ -70,7 +70,22 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             
         Returns:
             Tuple with fitness (and optionally statistics)
+            
+        Raises:
+            ValueError: If individual is None or invalid
         """
+        # Validate inputs
+        if individual is None:
+            raise ValueError("Individual cannot be None")
+        
+        if not hasattr(individual, 'genome'):
+            raise ValueError(
+                f"Individual must have 'genome' attribute, got type {type(individual)}"
+            )
+        
+        if individual.genome is None:
+            raise ValueError("Individual's genome cannot be None")
+        
         # Run multiple episodes with different seeds
         episode_fitnesses = []
         
@@ -78,7 +93,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             # Generate deterministic seed for this episode
             episode_seed = self.base_seed + episode_idx
             
-            # Evaluate single episode
+            # Evaluate single episode (validation happens in single_evaluator)
             fitness = self.single_evaluator.evaluate(individual, seed=episode_seed)
             episode_fitnesses.append(fitness[0])
         

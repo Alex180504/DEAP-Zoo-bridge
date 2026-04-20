@@ -72,7 +72,7 @@ class TestSingleEpisodeEvaluator:
         """Test evaluate with different fitness aggregation methods."""
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
-            fitness_aggregation=method
+            aggregation_method=method
         )
         
         fitness = evaluator.evaluate(individual, seed=42)
@@ -106,7 +106,7 @@ class TestSingleEpisodeEvaluator:
         with pytest.raises(ValueError, match="aggregation"):
             SingleEpisodeEvaluator(
                 env_wrapper=wrapper,
-                fitness_aggregation='invalid_method'
+                aggregation_method='invalid_method'
             )
 
 
@@ -227,7 +227,7 @@ class TestEvaluatorIntegration:
         single_eval = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
-            fitness_aggregation='sum'
+            aggregation_method='sum'
         )
         
         # Multi-episode evaluator with 1 episode
@@ -236,7 +236,7 @@ class TestEvaluatorIntegration:
             num_episodes=1,
             base_seed=42,
             max_steps=25,
-            fitness_aggregation='sum'
+            aggregation_method='sum'
         )
         
         single_fitness = single_eval.evaluate(individual, seed=42)
