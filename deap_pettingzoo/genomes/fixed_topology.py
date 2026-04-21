@@ -1,6 +1,5 @@
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
-import copy
 
 
 class FixedTopologyGenome:
@@ -66,14 +65,14 @@ class FixedTopologyGenome:
         self.layer_sizes = layer_sizes
         self.activation = activation
         self._weight_range = weight_range
+        self._random_seed = random_seed
         
-        # Set random seed if provided
-        if random_seed is not None:
-            np.random.seed(random_seed)
+        # Use an encapsulated random number generator
+        self.rng = np.random.default_rng(random_seed)
         
         # Initialize weights
         weight_count = self.get_weight_count()
-        self.weights = np.random.uniform(
+        self.weights = self.rng.uniform(
             low=weight_range[0],
             high=weight_range[1],
             size=weight_count
@@ -186,12 +185,20 @@ class FixedTopologyGenome:
     
     def clone(self) -> 'FixedTopologyGenome':
         """
-        Create deep copy of genome.
+        Create a deep copy of the genome.
         
         Returns:
             FixedTopologyGenome: Cloned genome instance
         """
-        return copy.deepcopy(self)
+        cloned_genome = FixedTopologyGenome(
+            layer_sizes=self.layer_sizes,
+            activation=self.activation,
+            weight_range=self._weight_range,
+            random_seed=None  # Let the clone have its own independent RNG stream
+        )
+        cloned_genome.set_weights(self.get_weights().copy())
+        # Keep the clone's own freshly seeded RNG so it produces an independent stream
+        return cloned_genome
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -204,6 +211,8 @@ class FixedTopologyGenome:
             'layer_sizes': self.layer_sizes,
             'activation': self.activation,
             'weights': self.weights.tolist(),  # Convert to list for JSON compatibility
+            '_weight_range': self._weight_range,
+            '_random_seed': self._random_seed,
         }
     
     @staticmethod
@@ -220,10 +229,10 @@ class FixedTopologyGenome:
         genome = FixedTopologyGenome(
             layer_sizes=data['layer_sizes'],
             activation=data['activation'],
-            weight_range=(-1.0, 1.0),  # Default range, will be overwritten
-            random_seed=None  # Don't randomize, we'll set weights directly
+            weight_range=data.get('_weight_range', (-1.0, 1.0)),
+            random_seed=data.get('_random_seed', None)
         )
-        genome.weights = np.array(data['weights'], dtype=np.float64)
+        genome.set_weights(np.array(data['weights'], dtype=np.float64))
         return genome
     
     def mutate(
@@ -244,21 +253,28 @@ class FixedTopologyGenome:
             None if inplace, otherwise new mutated genome
             
         Example:
-            >>> genome.mutate(mutation_rate=0.15, mutation_std=0.1)
+            >>> genome = FixedTopologyGenome([3, 2], random_seed=42)
+            >>> original_weights = genome.get_weights().copy()
+            >>> genome.mutate(mutation_rate=1.0, mutation_std=0.1)
+            >>> np.all(original_weights != genome.get_weights())
+            True
         """
-        # Determine which genome to mutate
         if inplace:
             target = self
         else:
             target = self.clone()
         
         # Create mutation mask (which weights to mutate)
-        mutation_mask = np.random.random(len(target.weights)) < mutation_rate
+        mutation_mask = target.rng.random(len(target.weights)) < mutation_rate
         
         # Apply Gaussian noise to selected weights
         if np.any(mutation_mask):
-            noise = np.random.normal(0, mutation_std, size=len(target.weights))
-            target.weights[mutation_mask] += noise[mutation_mask]
+            noise = target.rng.normal(
+                loc=0.0,
+                scale=mutation_std,
+                size=np.count_nonzero(mutation_mask)
+            )
+            target.weights[mutation_mask] += noise
         
         if not inplace:
             return target
