@@ -32,6 +32,10 @@ class FeedforwardNeuralPolicy:
             >>> observation = np.random.randn(10)
             >>> action = policy.get_action(observation)
         """
+        if genome is None:
+            raise ValueError("Genome cannot be None")
+        if not isinstance(genome, FixedTopologyGenome):
+            raise TypeError(f"Expected FixedTopologyGenome, got {type(genome)}")
         self.genome = genome
     
     @property
