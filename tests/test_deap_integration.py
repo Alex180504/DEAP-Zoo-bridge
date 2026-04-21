@@ -208,7 +208,7 @@ class TestEvaluationIntegration:
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
-            fitness_aggregation='sum'
+            aggregation_method='sum'
         )
         
         if hasattr(creator, "FitnessMax"):
@@ -246,7 +246,7 @@ class TestSimpleEvolutionWorkflow:
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
-            fitness_aggregation='sum'
+            aggregation_method='sum'
         )
         
         toolbox = create_toolbox(
