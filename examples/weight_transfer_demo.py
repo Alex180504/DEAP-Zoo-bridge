@@ -8,7 +8,7 @@ from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 
-def run_heterogeneous_weight_transfer():
+def demo_heterogeneous_weight_transfer():
     """Verify that evolved weights transfer to heterogeneous agents."""
     
     # Create a genome for simple_tag_v3 (pursuer obs=16, evader obs=14)
@@ -74,4 +74,4 @@ def run_heterogeneous_weight_transfer():
     print("\n✓ Weight transfer test passed!")
 
 if __name__ == "__main__":
-    run_heterogeneous_weight_transfer()
+    demo_heterogeneous_weight_transfer()
