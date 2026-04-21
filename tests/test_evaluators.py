@@ -81,14 +81,14 @@ class TestSingleEpisodeEvaluator:
         assert isinstance(fitness[0], (int, float))
     
     def test_evaluate_different_seeds_different_results(self, wrapper, individual):
-        """Test different seeds produce different results."""
+        """Test same seed yields identical fitness (reproducibility check)."""
         evaluator = SingleEpisodeEvaluator(env_wrapper=wrapper)
         
         fitness1 = evaluator.evaluate(individual, seed=42)
-        fitness2 = evaluator.evaluate(individual, seed=123)
+        fitness2 = evaluator.evaluate(individual, seed=42)
         
-        # May occasionally be equal, but unlikely
-        assert fitness1 != fitness2 or True  # Soft assertion
+        # Same seed should produce identical results
+        assert fitness1 == fitness2
     
     def test_max_steps_limits_episode(self, wrapper, individual):
         """Test max_steps parameter limits episode length."""
@@ -178,7 +178,7 @@ class TestMultiEpisodeEvaluator:
             env_wrapper=wrapper,
             num_episodes=3,
             max_steps=5,
-            fitness_aggregation='mean'
+            aggregation_method='mean'
         )
         
         fitness = evaluator.evaluate(individual)

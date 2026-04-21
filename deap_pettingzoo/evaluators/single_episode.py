@@ -104,7 +104,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                     cumulative_rewards[agent] += reward
                 
                 # Check if episode is done
-                done = all(dones.values()) or truncated
+                done = all(dones.values()) or all(truncated.values())
                 steps += 1
             
             # Aggregate fitness across agents
@@ -215,21 +215,21 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                     target_layers[i]['weights'] = source_layers[i]['weights'].copy()
                     target_layers[i]['biases'] = source_layers[i]['biases'].copy()
         
-        # Hidden→Output: Transfer hidden part, keep new output initialization
+        # Hidden→Output: Transfer rows up to min output dim when hidden dim matches.
+        # Weights are stored as (out_size, in_size), so rows = outputs, cols = hidden units.
         last_idx = len(target_layers) - 1
         if last_idx < len(source_layers):
-            source_hidden_dim = source_layers[last_idx]['weights'].shape[0]
-            target_hidden_dim = target_layers[last_idx]['weights'].shape[0]
+            source_hidden_dim = source_layers[last_idx]['weights'].shape[1]  # cols = in_size
+            target_hidden_dim = target_layers[last_idx]['weights'].shape[1]  # cols = in_size
             
             if source_hidden_dim == target_hidden_dim:
-                # Transfer weights from hidden layer (rows), but not output (cols may differ)
-                # This preserves the evolved hidden→output transformation for the hidden dimension
+                # Transfer rows (output neurons) up to min output dim
                 min_output_dim = min(
-                    source_layers[last_idx]['weights'].shape[1],
-                    target_layers[last_idx]['weights'].shape[1]
+                    source_layers[last_idx]['weights'].shape[0],  # rows = out_size
+                    target_layers[last_idx]['weights'].shape[0]   # rows = out_size
                 )
-                target_layers[last_idx]['weights'][:, :min_output_dim] = \
-                    source_layers[last_idx]['weights'][:, :min_output_dim].copy()
+                target_layers[last_idx]['weights'][:min_output_dim, :] = \
+                    source_layers[last_idx]['weights'][:min_output_dim, :].copy()
                 
                 # Transfer biases up to compatible dimensions
                 min_bias_dim = min(len(source_layers[last_idx]['biases']), 
@@ -261,9 +261,10 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             in_size = genome.layer_sizes[i]
             out_size = genome.layer_sizes[i + 1]
             
-            # Extract weights for this layer (in_size × out_size matrix)
+            # Extract weights for this layer as (out_size, in_size) matrix
+            # to match FeedforwardNeuralPolicy.forward() which uses reshape(output_dim, input_dim)
             num_weights = in_size * out_size
-            layer_weights = np.array(weights[idx:idx + num_weights]).reshape(in_size, out_size)
+            layer_weights = np.array(weights[idx:idx + num_weights]).reshape(out_size, in_size)
             idx += num_weights
             
             # Extract biases for this layer

@@ -1,6 +1,5 @@
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
-import copy
 
 
 class FixedTopologyGenome:
@@ -195,11 +194,10 @@ class FixedTopologyGenome:
             layer_sizes=self.layer_sizes,
             activation=self.activation,
             weight_range=self._weight_range,
-            random_seed=self._random_seed
+            random_seed=None  # Let the clone have its own independent RNG stream
         )
         cloned_genome.set_weights(self.get_weights().copy())
-        # Copy the RNG state to ensure the clone's random stream is independent
-        cloned_genome.rng = copy.deepcopy(self.rng)
+        # Keep the clone's own freshly seeded RNG so it produces an independent stream
         return cloned_genome
     
     def to_dict(self) -> Dict[str, Any]:
