@@ -25,6 +25,7 @@ from deap_pettingzoo.baselines.base import (
     PolicyProtocol,
 )
 from deap_pettingzoo.baselines.ea_trainer import EATrainer
+from deap_pettingzoo.baselines.maddpg_trainer import MADDPGTrainer, MADDPGPolicyWrapper
 from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.baselines.comparison import (
     compare_baselines,
@@ -42,10 +43,10 @@ __all__ = [
     'ComparisonConfig',
     'PolicyProtocol',
     'EATrainer',
+    'MADDPGTrainer',
+    'MADDPGPolicyWrapper',
     'UnifiedEvaluator',
     'compare_baselines',
     'register_trainer',
     'get_trainer',
 ]
-
-__all__ = []
