@@ -205,25 +205,138 @@ package "deap_pettingzoo.utils" {
 }
 
 package "deap_pettingzoo.baselines" {
-    class RLPolicyWrapper {
-        - model: BaseAlgorithm
-        - policy_type: str
-        --
-        + __init__(model_path: str)
-        + get_action(observation) -> action
-        + reset() -> None
+    enum BudgetMode {
+        ENV_STEPS
+        EVAL_EPISODES
+        WALL_CLOCK
     }
     
-    class BaselineComparison {
-        - evaluator: BaseEvaluator
-        --
-        + __init__(evaluator: BaseEvaluator)
-        + compare(ea_policy, rl_policy, num_runs: int) -> dict
-        + statistical_test(results1, results2) -> dict
+    interface PolicyProtocol {
+        + {abstract} get_action(observation) -> action
+        + {abstract} reset() -> None
     }
     
-    BasePolicy <|.. RLPolicyWrapper : implements
-    BaselineComparison --> BaseEvaluator : uses
+    class TrainingConfig {
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + algorithm_params: dict
+        + output_dir: Path
+        + render: bool
+        --
+        + __post_init__() -> None
+    }
+    
+    class TrainingResult {
+        + algorithm: str
+        + policy: PolicyProtocol
+        + metrics: dict
+        + metadata: dict
+        + seed: int
+        + training_time: float
+    }
+    
+    class EvalResult {
+        + mean_reward: float
+        + std_reward: float
+        + min_reward: float
+        + max_reward: float
+        + num_episodes: int
+        + episode_rewards: List[float]
+        + episode_lengths: List[int]
+        --
+        + to_dict() -> dict
+    }
+    
+    class ComparisonConfig {
+        + algorithms: List[str]
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + eval_episodes: int
+        + algorithm_configs: dict
+        + output_dir: Path
+        --
+        + __post_init__() -> None
+    }
+    
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+    }
+    
+    abstract class BaselineEvaluator {
+        + {abstract} evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+    }
+    
+    class EATrainer {
+        - toolbox_builder: DEAPToolboxBuilder
+        - genome_class: type
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + get_capabilities() -> dict
+        - _translate_budget(config: TrainingConfig) -> dict
+        - _wrap_genome_as_policy(genome) -> PolicyProtocol
+    }
+    
+    class MADDPGTrainer {
+        - cleanmarl_path: str
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + get_capabilities() -> dict
+        - _launch_subprocess(config: TrainingConfig) -> subprocess.Popen
+        - _monitor_training(process) -> dict
+        - _load_checkpoint(checkpoint_path: str) -> PolicyProtocol
+    }
+    
+    class UnifiedEvaluator {
+        - env_cache: dict
+        --
+        + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+        - _run_episode(policy, env, seed: int) -> tuple
+        - _aggregate_results(episode_data: List) -> EvalResult
+    }
+    
+    class ComparisonRunner {
+        - trainer_registry: dict
+        - evaluator: UnifiedEvaluator
+        --
+        + compare_baselines(config: ComparisonConfig) -> dict
+        - _run_algorithm(algorithm: str, config: TrainingConfig) -> List[TrainingResult]
+        - _evaluate_policies(results: List[TrainingResult], eval_config) -> dict
+        - _save_results(comparison_data: dict, output_dir: Path)
+    }
+    
+    class CleanMARLAdapter {
+        + {static} adapt_observation(obs) -> np.ndarray
+        + {static} adapt_action(action, action_space) -> Any
+        + {static} create_env_config(env_name: str) -> dict
+    }
+    
+    ' Relationships
+    TrainingConfig --> BudgetMode : uses
+    ComparisonConfig --> BudgetMode : uses
+    TrainingResult --> PolicyProtocol : contains
+    
+    BaselineTrainer <|-- EATrainer
+    BaselineTrainer <|-- MADDPGTrainer
+    BaselineEvaluator <|-- UnifiedEvaluator
+    
+    EATrainer --> DEAPToolboxBuilder : uses
+    EATrainer --> FixedTopologyGenome : creates
+    MADDPGTrainer --> CleanMARLAdapter : uses
+    
+    ComparisonRunner --> BaselineTrainer : uses
+    ComparisonRunner --> UnifiedEvaluator : uses
+    ComparisonRunner --> ComparisonConfig : uses
+    
+    BasePolicy ..|> PolicyProtocol : implements
+    FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
 }
 
 ' Key relationships
