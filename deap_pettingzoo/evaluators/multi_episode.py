@@ -58,22 +58,48 @@ class MultiEpisodeEvaluator(BaseEvaluator):
     
     def evaluate(
         self,
-        individual: Any,
-        return_stats: bool = False
-    ) -> Tuple[float, ...]:
+        individual: Any
+    ) -> Tuple[float]:
         """
         Evaluate individual across multiple episodes.
         
         Args:
             individual: DEAP individual with genome
-            return_stats: If True, return (mean, std, min, max)
             
         Returns:
-            Tuple with fitness (and optionally statistics)
+            Tuple with a single aggregated fitness value (DEAP format)
             
         Raises:
             ValueError: If individual is None or invalid
         """
+        fitnesses = self._evaluate_episodes(individual)
+        aggregated_fitness = self._aggregate_fitnesses(fitnesses)
+        return (aggregated_fitness,)
+
+    def evaluate_with_stats(self, individual: Any) -> Tuple[float, float, float, float]:
+        """
+        Evaluate individual across multiple episodes and return statistics.
+
+        Args:
+            individual: DEAP individual with genome
+
+        Returns:
+            Tuple of (mean, std, min, max) fitness values
+
+        Raises:
+            ValueError: If individual is None or invalid
+        """
+        fitnesses = self._evaluate_episodes(individual)
+
+        return (
+            float(np.mean(fitnesses)),
+            float(np.std(fitnesses)),
+            float(np.min(fitnesses)),
+            float(np.max(fitnesses))
+        )
+
+    def _evaluate_episodes(self, individual: Any) -> np.ndarray:
+        """Run all evaluation episodes and return raw fitness values."""
         # Validate inputs
         if individual is None:
             raise ValueError("Individual cannot be None")
@@ -96,22 +122,8 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             # Evaluate single episode (validation happens in single_evaluator)
             fitness = self.single_evaluator.evaluate(individual, seed=episode_seed)
             episode_fitnesses.append(fitness[0])
-        
-        fitnesses = np.array(episode_fitnesses)
-        
-        # Aggregate across episodes
-        aggregated_fitness = self._aggregate_fitnesses(fitnesses)
-        
-        if return_stats:
-            # Return (mean, std, min, max)
-            return (
-                float(np.mean(fitnesses)),
-                float(np.std(fitnesses)),
-                float(np.min(fitnesses)),
-                float(np.max(fitnesses))
-            )
-        
-        return (aggregated_fitness,)
+
+        return np.array(episode_fitnesses)
     
     def _aggregate_fitnesses(self, fitnesses: np.ndarray) -> float:
         """
