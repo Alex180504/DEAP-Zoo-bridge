@@ -210,13 +210,12 @@ def _register_builtins():
         register_trainer('ea', EATrainer)
     except ImportError:
         pass
-    
-    # MADDPG will be registered when implemented
-    # try:
-    #     from deap_pettingzoo.baselines.maddpg_trainer import MADDPGTrainer
-    #     register_trainer('maddpg', MADDPGTrainer)
-    # except ImportError:
-    #     pass
+
+    try:
+        from deap_pettingzoo.baselines.maddpg_trainer import MADDPGTrainer
+        register_trainer('maddpg', MADDPGTrainer)
+    except ImportError:
+        pass
 
 
 _register_builtins()
