@@ -56,7 +56,10 @@ def get_trainer(name: str, **kwargs) -> BaselineTrainer:
     return _TRAINER_REGISTRY[name](**kwargs)
 
 
-def compare_baselines(config: ComparisonConfig) -> Dict[str, Any]:
+def compare_baselines(
+    config: ComparisonConfig,
+    validate: bool = True,
+) -> Dict[str, Any]:
     """Compare multiple baseline algorithms.
     
     High-level function that:
@@ -67,6 +70,8 @@ def compare_baselines(config: ComparisonConfig) -> Dict[str, Any]:
     
     Args:
         config: Comparison configuration.
+        validate: If True (default), run compatibility checks before training
+            and skip algorithms that are incompatible with the environment.
         
     Returns:
         Dictionary with comparison results:
@@ -121,6 +126,20 @@ def compare_baselines(config: ComparisonConfig) -> Dict[str, Any]:
         if not trainer.supports_budget_mode(config.budget_mode):
             print(f"Warning: {algorithm} does not support {config.budget_mode.value}")
             continue
+        
+        # Validate environment compatibility
+        if validate:
+            from deap_pettingzoo.baselines.compatibility import validate_compatibility
+            compat = validate_compatibility(trainer, config.env_name, algorithm)
+            if not compat.compatible:
+                print(f"Warning: {algorithm} is incompatible with {config.env_name}:")
+                for issue in compat.issues:
+                    print(f"  - {issue}")
+                results[algorithm] = {'skipped': True, 'issues': compat.issues}
+                continue
+            if compat.warnings:
+                for w in compat.warnings:
+                    print(f"[{algorithm}] Warning: {w}")
         
         # Train across seeds
         seed_results = []

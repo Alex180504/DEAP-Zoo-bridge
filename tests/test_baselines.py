@@ -507,3 +507,409 @@ class TestMADDPGTrainer:
 
         wrapper.reset()  # should be no-op, not raise
 
+
+# ===========================================================================
+# Phase 5: Extensibility — compatibility module
+# ===========================================================================
+
+from deap_pettingzoo.baselines.compatibility import (
+    EnvironmentInfo,
+    CompatibilityResult,
+    inspect_environment,
+    check_compatibility,
+    validate_compatibility,
+    build_compatibility_matrix,
+    get_compatible_algorithms,
+    format_compatibility_matrix,
+)
+
+
+class TestEnvironmentInfo:
+    """Tests for the EnvironmentInfo data model."""
+
+    def _make_info(self, **kwargs) -> EnvironmentInfo:
+        defaults = dict(
+            env_name='simple_spread_v3',
+            num_agents=3,
+            agent_ids=['agent_0', 'agent_1', 'agent_2'],
+            has_continuous_actions=True,
+            has_discrete_actions=False,
+            has_global_state=False,
+            obs_dim=18,
+            act_dim=5,
+            action_low=np.full(5, -1.0),
+            action_high=np.full(5, 1.0),
+        )
+        defaults.update(kwargs)
+        return EnvironmentInfo(**defaults)
+
+    def test_to_dict_keys(self):
+        info = self._make_info()
+        d = info.to_dict()
+        for key in ('env_name', 'num_agents', 'has_continuous_actions',
+                    'has_discrete_actions', 'has_global_state', 'obs_dim', 'act_dim'):
+            assert key in d
+
+    def test_to_dict_action_bounds_serialised(self):
+        info = self._make_info()
+        d = info.to_dict()
+        assert isinstance(d['action_low'], list)
+        assert isinstance(d['action_high'], list)
+
+    def test_to_dict_none_bounds(self):
+        info = self._make_info(
+            has_continuous_actions=False,
+            action_low=None,
+            action_high=None,
+        )
+        d = info.to_dict()
+        assert d['action_low'] is None
+        assert d['action_high'] is None
+
+
+class TestCompatibilityResult:
+    """Tests for the CompatibilityResult data model."""
+
+    def test_compatible_no_raise(self):
+        result = CompatibilityResult(
+            compatible=True, algorithm='ea', env_name='simple_spread_v3'
+        )
+        result.raise_if_incompatible()  # should not raise
+
+    def test_incompatible_raises_value_error(self):
+        result = CompatibilityResult(
+            compatible=False,
+            algorithm='ea',
+            env_name='simple_spread_v3',
+            issues=['Discrete action only'],
+        )
+        with pytest.raises(ValueError, match="incompatible"):
+            result.raise_if_incompatible()
+
+    def test_to_dict(self):
+        result = CompatibilityResult(
+            compatible=True,
+            algorithm='ea',
+            env_name='simple_spread_v3',
+            warnings=['many agents'],
+        )
+        d = result.to_dict()
+        assert d['compatible'] is True
+        assert d['warnings'] == ['many agents']
+        assert 'issues' in d
+
+
+class TestInspectEnvironment:
+    """Tests for inspect_environment() — uses real PettingZoo envs."""
+
+    def test_inspect_simple_spread(self):
+        # simple_spread_v3 uses Discrete action spaces by default in MPE
+        info = inspect_environment('simple_spread_v3')
+        assert info.env_name == 'simple_spread_v3'
+        assert info.num_agents == 3
+        assert len(info.agent_ids) == 3
+        assert info.has_discrete_actions is True
+        assert info.has_continuous_actions is False
+        assert info.obs_dim is not None
+        assert info.act_dim is not None
+
+    def test_inspect_returns_environment_info(self):
+        info = inspect_environment('simple_spread_v3')
+        assert isinstance(info, EnvironmentInfo)
+
+    def test_inspect_unsupported_env_raises(self):
+        with pytest.raises(ValueError, match="Unsupported"):
+            inspect_environment('nonexistent_env_v99')
+
+    def test_inspect_global_state_flag_is_bool(self):
+        info = inspect_environment('simple_spread_v3')
+        assert isinstance(info.has_global_state, bool)
+
+    def test_inspect_discrete_env_has_no_action_bounds(self):
+        # Discrete environments have no low/high bounds
+        info = inspect_environment('simple_spread_v3')
+        assert info.has_discrete_actions is True
+        assert info.action_low is None
+        assert info.action_high is None
+
+    def test_inspect_all_supported_envs(self):
+        from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
+        for env_name in PettingZooWrapper.SUPPORTED_ENVS:
+            info = inspect_environment(env_name)
+            assert info.env_name == env_name
+            assert info.num_agents >= 2
+
+
+class TestCheckCompatibility:
+    """Tests for check_compatibility() using mock capabilities."""
+
+    def _make_info(
+        self,
+        continuous=True,
+        discrete=False,
+        global_state=False,
+        num_agents=3,
+        obs_dim=18,
+        act_dim=5,
+    ) -> EnvironmentInfo:
+        return EnvironmentInfo(
+            env_name='test_env',
+            num_agents=num_agents,
+            agent_ids=[f'agent_{i}' for i in range(num_agents)],
+            has_continuous_actions=continuous,
+            has_discrete_actions=discrete,
+            has_global_state=global_state,
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            action_low=np.full(5, -1.0) if continuous else None,
+            action_high=np.full(5, 1.0) if continuous else None,
+        )
+
+    def _patched_trainer(self, caps: dict):
+        trainer = EATrainer()
+        trainer.get_capabilities = lambda: caps
+        return trainer
+
+    def test_compatible_continuous_trainer_on_continuous_env(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        result = check_compatibility(trainer, self._make_info(continuous=True), 'ea')
+        assert result.compatible is True
+        assert result.issues == []
+
+    def test_discrete_only_trainer_fails_on_continuous_env(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': False, 'discrete_action': True,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        result = check_compatibility(trainer, self._make_info(continuous=True), 'myalgo')
+        assert result.compatible is False
+        assert any('continuous' in i.lower() for i in result.issues)
+
+    def test_continuous_only_trainer_fails_on_discrete_env(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': False}
+        )
+        result = check_compatibility(
+            trainer, self._make_info(continuous=False, discrete=True), 'maddpg'
+        )
+        assert result.compatible is False
+        assert any('discrete' in i.lower() for i in result.issues)
+
+    def test_global_state_required_but_absent(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': True, 'on_policy': False}
+        )
+        result = check_compatibility(trainer, self._make_info(global_state=False), 'algo')
+        assert result.compatible is False
+        assert any('global state' in i.lower() for i in result.issues)
+
+    def test_global_state_required_and_present(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': True, 'on_policy': False}
+        )
+        result = check_compatibility(trainer, self._make_info(global_state=True), 'algo')
+        assert result.compatible is True
+
+    def test_many_agents_generates_warning(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        result = check_compatibility(trainer, self._make_info(num_agents=10), 'ea')
+        assert result.compatible is True
+        assert any('agent' in w.lower() for w in result.warnings)
+
+    def test_heterogeneous_obs_generates_warning(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        info = self._make_info(obs_dim=None)
+        result = check_compatibility(trainer, info, 'ea')
+        assert result.compatible is True
+        assert any('observation' in w.lower() for w in result.warnings)
+
+    def test_heterogeneous_act_generates_warning(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        info = self._make_info(act_dim=None)
+        result = check_compatibility(trainer, info, 'ea')
+        assert result.compatible is True
+        assert any('action' in w.lower() for w in result.warnings)
+
+    def test_result_stores_algorithm_and_env_name(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': True, 'discrete_action': False,
+             'needs_global_state': False, 'on_policy': True}
+        )
+        result = check_compatibility(trainer, self._make_info(), 'myalgo')
+        assert result.algorithm == 'myalgo'
+        assert result.env_name == 'test_env'
+
+    def test_multiple_issues_accumulated(self):
+        trainer = self._patched_trainer(
+            {'continuous_action': False, 'discrete_action': False,
+             'needs_global_state': True, 'on_policy': True}
+        )
+        result = check_compatibility(
+            trainer, self._make_info(continuous=True, global_state=False), 'bad'
+        )
+        assert result.compatible is False
+        assert len(result.issues) >= 2
+
+
+class TestValidateCompatibility:
+    """Tests for validate_compatibility() — end-to-end with real envs."""
+
+    def test_ea_compatible_with_simple_spread(self):
+        trainer = EATrainer()
+        result = validate_compatibility(trainer, 'simple_spread_v3', 'ea')
+        assert isinstance(result, CompatibilityResult)
+        assert result.compatible is True
+
+    def test_maddpg_incompatible_with_discrete_env(self):
+        # simple_spread_v3 is Discrete; MADDPG requires continuous actions
+        trainer = MADDPGTrainer()
+        result = validate_compatibility(trainer, 'simple_spread_v3', 'maddpg')
+        assert result.compatible is False
+        assert any('discrete' in i.lower() for i in result.issues)
+
+    def test_unsupported_env_raises(self):
+        trainer = EATrainer()
+        with pytest.raises(ValueError, match="Unsupported"):
+            validate_compatibility(trainer, 'nonexistent_env_v99', 'ea')
+
+    def test_raise_if_incompatible_does_not_raise_when_compatible(self):
+        trainer = EATrainer()
+        result = validate_compatibility(trainer, 'simple_spread_v3', 'ea')
+        result.raise_if_incompatible()  # must not raise
+
+
+class TestBuildCompatibilityMatrix:
+    """Tests for build_compatibility_matrix()."""
+
+    def test_matrix_structure(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea', 'maddpg'],
+            env_names=['simple_spread_v3'],
+        )
+        assert set(matrix.keys()) == {'ea', 'maddpg'}
+        assert 'simple_spread_v3' in matrix['ea']
+        assert 'simple_spread_v3' in matrix['maddpg']
+
+    def test_matrix_values_are_compatibility_results(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['simple_spread_v3'],
+        )
+        assert isinstance(matrix['ea']['simple_spread_v3'], CompatibilityResult)
+
+    def test_invalid_env_captured_not_raised(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['nonexistent_env_v99'],
+        )
+        result = matrix['ea']['nonexistent_env_v99']
+        assert result.compatible is False
+        assert result.issues
+
+    def test_unknown_algorithm_captured_not_raised(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['not_a_real_algo'],
+            env_names=['simple_spread_v3'],
+        )
+        result = matrix['not_a_real_algo']['simple_spread_v3']
+        assert result.compatible is False
+        assert result.issues
+
+    def test_multiple_envs(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['simple_spread_v3', 'simple_tag_v3'],
+        )
+        assert 'simple_spread_v3' in matrix['ea']
+        assert 'simple_tag_v3' in matrix['ea']
+
+    def test_ea_compatible_maddpg_incompatible_with_discrete_env(self):
+        # EA handles Discrete; MADDPG (continuous-only) does not
+        matrix = build_compatibility_matrix(
+            algorithms=['ea', 'maddpg'],
+            env_names=['simple_spread_v3'],
+        )
+        assert matrix['ea']['simple_spread_v3'].compatible is True
+        assert matrix['maddpg']['simple_spread_v3'].compatible is False
+
+
+class TestGetCompatibleAlgorithms:
+    """Tests for get_compatible_algorithms()."""
+
+    def test_returns_list(self):
+        algos = get_compatible_algorithms('simple_spread_v3')
+        assert isinstance(algos, list)
+
+    def test_ea_in_compatible_list(self):
+        algos = get_compatible_algorithms('simple_spread_v3')
+        assert 'ea' in algos
+
+    def test_maddpg_not_in_compatible_list_for_discrete_env(self):
+        # MADDPG is continuous-only; discrete envs should exclude it
+        algos = get_compatible_algorithms('simple_spread_v3')
+        assert 'maddpg' not in algos
+
+    def test_sorted_output(self):
+        algos = get_compatible_algorithms('simple_spread_v3')
+        assert algos == sorted(algos)
+
+    def test_unregistered_discovery_raises(self):
+        with pytest.raises(NotImplementedError):
+            get_compatible_algorithms('simple_spread_v3', registered_only=False)
+
+    def test_invalid_env_raises(self):
+        with pytest.raises(ValueError, match="Unsupported"):
+            get_compatible_algorithms('nonexistent_env_v99')
+
+
+class TestFormatCompatibilityMatrix:
+    """Tests for format_compatibility_matrix()."""
+
+    def test_empty_matrix(self):
+        assert format_compatibility_matrix({}) == "(empty matrix)"
+
+    def test_output_contains_algorithm_and_env(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['simple_spread_v3'],
+        )
+        output = format_compatibility_matrix(matrix)
+        assert 'ea' in output
+        assert 'simple_spread_v3' in output
+
+    def test_yes_for_compatible(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['simple_spread_v3'],
+        )
+        assert 'YES' in format_compatibility_matrix(matrix)
+
+    def test_no_for_incompatible_env(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['nonexistent_env_v99'],
+        )
+        assert 'NO' in format_compatibility_matrix(matrix)
+
+    def test_show_warnings_flag_no_crash(self):
+        matrix = build_compatibility_matrix(
+            algorithms=['ea'],
+            env_names=['simple_spread_v3'],
+        )
+        output = format_compatibility_matrix(matrix, show_warnings=True)
+        assert isinstance(output, str)

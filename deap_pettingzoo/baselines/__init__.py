@@ -32,6 +32,16 @@ from deap_pettingzoo.baselines.comparison import (
     register_trainer,
     get_trainer,
 )
+from deap_pettingzoo.baselines.compatibility import (
+    EnvironmentInfo,
+    CompatibilityResult,
+    inspect_environment,
+    check_compatibility,
+    validate_compatibility,
+    build_compatibility_matrix,
+    get_compatible_algorithms,
+    format_compatibility_matrix,
+)
 
 __all__ = [
     'BaselineTrainer',
@@ -49,4 +59,12 @@ __all__ = [
     'compare_baselines',
     'register_trainer',
     'get_trainer',
+    'EnvironmentInfo',
+    'CompatibilityResult',
+    'inspect_environment',
+    'check_compatibility',
+    'validate_compatibility',
+    'build_compatibility_matrix',
+    'get_compatible_algorithms',
+    'format_compatibility_matrix',
 ]
