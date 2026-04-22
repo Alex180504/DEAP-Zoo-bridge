@@ -9,6 +9,12 @@ from .deap_integration import (
     mutate_gaussian,
     clone_individual
 )
+from .cma_integration import (
+    setup_cma_strategy,
+    make_cma_ind_init,
+    register_cma_toolbox,
+    make_cma_stats,
+)
 
 __all__ = [
     'setup_deap_creators',
@@ -18,4 +24,8 @@ __all__ = [
     'crossover_blend',
     'mutate_gaussian',
     'clone_individual',
+    'setup_cma_strategy',
+    'make_cma_ind_init',
+    'register_cma_toolbox',
+    'make_cma_stats',
 ]
