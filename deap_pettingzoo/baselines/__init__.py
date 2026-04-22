@@ -1,4 +1,4 @@
-﻿"""Baseline comparisons with reinforcement learning algorithms.
+"""Baseline comparisons with reinforcement learning algorithms.
 
 This module provides a unified API for training and comparing different
 baseline algorithms (EA, MARL, etc.) under fair budget constraints.

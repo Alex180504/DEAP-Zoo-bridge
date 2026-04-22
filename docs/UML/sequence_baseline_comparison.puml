@@ -90,19 +90,6 @@ loop for each algorithm
             note right: Reset env, run to\ncompletion, collect reward
         end
 
-
-== Evaluation Phase ==
-
-loop for each algorithm
-    loop for each trained policy (seed)
-        Runner -> Evaluator: evaluate(policy, env_name, eval_episodes)
-        activate Evaluator
-
-        loop for eval_episodes times
-            Evaluator -> Evaluator: _run_episode(policy, seed)
-            note right: Reset env, run to\ncompletion, collect reward
-        end
-
         Evaluator -> Evaluator: _aggregate_results()
         Evaluator --> Runner: EvalResult(mean, std, min, max)
         deactivate Evaluator

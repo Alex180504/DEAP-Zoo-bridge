@@ -5,7 +5,7 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -30,7 +30,7 @@ class UnifiedEvaluator(BaselineEvaluator):
             max_steps: Maximum steps per episode.
         """
         self.max_steps = max_steps
-        self._env_cache: Dict[str, PettingZooWrapper] = {}
+        self._env_cache: Dict[Tuple, PettingZooWrapper] = {}
     
     def evaluate(
         self,
@@ -38,7 +38,8 @@ class UnifiedEvaluator(BaselineEvaluator):
         env_name: str,
         num_episodes: int,
         seed: Optional[int] = None,
-        render: bool = False
+        render: bool = False,
+        env_config: Optional[Dict[str, Any]] = None,
     ) -> EvalResult:
         """Evaluate a policy on the given environment.
         
@@ -48,17 +49,26 @@ class UnifiedEvaluator(BaselineEvaluator):
             num_episodes: Number of episodes to evaluate.
             seed: Random seed for reproducibility.
             render: Whether to render episodes.
+            env_config: Optional environment configuration dict. Must match
+                the config used during training so observation/action shapes
+                are consistent.
             
         Returns:
             EvalResult with reward statistics.
         """
+        # Build a hashable cache key that includes env_config and render_mode
+        render_mode = 'human' if render else None
+        config_key = tuple(sorted(env_config.items())) if env_config else None
+        cache_key = (env_name, config_key, render_mode)
+
         # Get or create environment
-        if env_name not in self._env_cache:
-            self._env_cache[env_name] = PettingZooWrapper(
+        if cache_key not in self._env_cache:
+            self._env_cache[cache_key] = PettingZooWrapper(
                 env_name,
-                render_mode='human' if render else None
+                env_config=env_config,
+                render_mode=render_mode,
             )
-        env = self._env_cache[env_name]
+        env = self._env_cache[cache_key]
         
         # Setup RNG for episode seeds
         rng = np.random.default_rng(seed)
@@ -120,22 +130,27 @@ class UnifiedEvaluator(BaselineEvaluator):
         for step in range(self.max_steps):
             steps = step + 1
             
-            # Get actions for all agents
+            # Terminate if no active agents remain
+            if not observations:
+                break
+
+            # Get actions for active agents only
             actions = {}
-            for agent in env.possible_agents:
-                obs = observations[agent]
-                actions[agent] = policy.get_action(obs)
+            for agent in observations:
+                actions[agent] = policy.get_action(observations[agent])
             
             # Step environment
             observations, rewards, terminations, truncations, _ = env.step(actions)
             
-            # Accumulate rewards
-            for agent in env.possible_agents:
-                if agent in rewards:
-                    agent_rewards[agent] += rewards[agent]
+            # Accumulate rewards for active agents
+            for agent, reward in rewards.items():
+                if agent in agent_rewards:
+                    agent_rewards[agent] += reward
             
             # Check if episode is done
-            if all(terminations.values()) or all(truncations.values()):
+            if terminations and all(terminations.values()):
+                break
+            if truncations and all(truncations.values()):
                 break
             
             if render:

@@ -145,11 +145,12 @@ class EATrainer(BaselineTrainer):
         setup_deap_creators()
         
         # Create genome configuration
+        seed = config.algorithm_params.get('seed', None)
         genome_config = {
             'layer_sizes': [input_size, self.hidden_size, output_size],
             'activation': 'tanh',
             'weight_range': (-1.0, 1.0),
-            'random_seed': config.algorithm_params.get('seed', None) or (config.num_seeds if config.num_seeds == 1 else None),
+            'random_seed': seed if seed is not None else (config.num_seeds if config.num_seeds == 1 else None),
         }
         
         # Create toolbox
