@@ -1,0 +1,394 @@
+@startuml class_diagram
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+
+title DEAP-PettingZoo Bridge - Class Diagram
+
+package "deap_pettingzoo.genomes" {
+    abstract class GenomeBase {
+        + weights: np.ndarray
+        + architecture: dict
+        + validate() -> bool
+        + to_dict() -> dict
+        + from_dict(data: dict) -> GenomeBase
+        + clone() -> GenomeBase
+    }
+    
+    class FixedTopologyGenome {
+        + layer_sizes: List[int]
+        + activation: str
+        + input_size: int
+        + output_size: int
+        + hidden_layers: List[int]
+        --
+        + __init__(architecture: dict)
+        + get_weight_count() -> int
+        + get_weight_ranges() -> List[tuple]
+        + set_weights(weights: np.ndarray)
+        + get_weights() -> np.ndarray
+        + mutate(mutation_rate: float, mutation_std: float)
+    }
+    
+    GenomeBase <|-- FixedTopologyGenome
+}
+
+package "deap_pettingzoo.policies" {
+    abstract class BasePolicy {
+        + {abstract} get_action(observation) -> action
+        + {abstract} reset() -> None
+        + seed(seed: int) -> None
+    }
+    
+    class FeedforwardNeuralPolicy {
+        - genome: FixedTopologyGenome
+        - layers: List[np.ndarray]
+        - biases: List[np.ndarray]
+        - activation_fn: callable
+        - action_space: gymnasium.Space
+        - observation_space: gymnasium.Space
+        --
+        + __init__(genome: GenomeBase, env_spec: dict)
+        + get_action(observation: np.ndarray) -> action
+        + reset() -> None
+        + forward(x: np.ndarray) -> np.ndarray
+        - _apply_activation(x: np.ndarray) -> np.ndarray
+        - _process_observation(obs) -> np.ndarray
+        - _process_output(output: np.ndarray) -> action
+    }
+    
+    BasePolicy <|-- FeedforwardNeuralPolicy
+    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+}
+
+package "deap_pettingzoo.environments" {
+    class PettingZooWrapper {
+        - env: AECEnv | ParallelEnv
+        - agent_ids: List[str]
+        - observation_spaces: dict
+        - action_spaces: dict
+        - current_seed: int
+        --
+        + __init__(env_name: str, **kwargs)
+        + reset(seed: Optional[int]) -> observations
+        + step(actions: dict) -> tuple
+        + get_agent_ids() -> List[str]
+        + get_observation_space(agent_id: str) -> Space
+        + get_action_space(agent_id: str) -> Space
+        + close() -> None
+        + render() -> None
+    }
+    
+    class SeedManager {
+        - base_seed: int
+        - episode_seeds: List[int]
+        - rng: np.random.Generator
+        --
+        + __init__(base_seed: int)
+        + get_episode_seed(episode_num: int) -> int
+        + get_evaluation_seeds(num_episodes: int) -> List[int]
+        + reset(seed: int) -> None
+    }
+    
+    PettingZooWrapper --> SeedManager : uses
+}
+
+package "deap_pettingzoo.evaluators" {
+    abstract class BaseEvaluator {
+        + env_wrapper: PettingZooWrapper
+        + {abstract} evaluate(individual) -> fitness
+    }
+    
+    class SingleEpisodeEvaluator {
+        - max_steps: int
+        - fitness_aggregation: str
+        - seed: Optional[int]
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate(individual) -> float
+        - _create_policies(individual) -> dict
+        - _run_episode(policies: dict, seed: int) -> dict
+        - _calculate_fitness(rewards: dict) -> float
+    }
+    
+    class MultiEpisodeEvaluator {
+        - num_episodes: int
+        - single_evaluator: SingleEpisodeEvaluator
+        - seed_manager: SeedManager
+        - aggregation_method: str
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate(individual) -> tuple
+        - _aggregate_fitness(fitnesses: List[float]) -> tuple
+        - _calculate_statistics(fitnesses: List[float]) -> dict
+    }
+    
+    class ParallelEvaluator {
+        - multi_evaluator: MultiEpisodeEvaluator
+        - num_workers: int
+        - pool: multiprocessing.Pool
+        --
+        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + evaluate_population(population: List) -> List[tuple]
+        - _evaluate_worker(individual) -> tuple
+        + close() -> None
+    }
+    
+    BaseEvaluator <|-- SingleEpisodeEvaluator
+    BaseEvaluator <|-- MultiEpisodeEvaluator
+    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : uses
+    ParallelEvaluator --> MultiEpisodeEvaluator : uses
+    
+    SingleEpisodeEvaluator --> PettingZooWrapper : uses
+    MultiEpisodeEvaluator --> SeedManager : uses
+}
+
+package "deap_pettingzoo.integration" {
+    class DEAPToolboxBuilder {
+        + evaluator: BaseEvaluator
+        + genome_config: dict
+        --
+        + {static} create_toolbox(config: dict) -> deap.base.Toolbox
+        + {static} create_individual(genome_class, config: dict)
+        + {static} setup_operators(toolbox, config: dict)
+        + {static} register_evaluation(toolbox, evaluator)
+    }
+    
+    class EvolutionRunner {
+        - toolbox: deap.base.Toolbox
+        - population: List
+        - stats: deap.tools.Statistics
+        - halloffame: deap.tools.HallOfFame
+        - logger: Logger
+        --
+        + __init__(toolbox: Toolbox, config: dict)
+        + run(num_generations: int) -> tuple
+        + resume(checkpoint_path: str) -> tuple
+        - _run_generation() -> None
+        - _save_checkpoint(generation: int) -> None
+        + get_best_individual() -> Individual
+    }
+    
+    DEAPToolboxBuilder --> BaseEvaluator : uses
+    EvolutionRunner --> DEAPToolboxBuilder : uses
+}
+
+package "deap_pettingzoo.utils" {
+    class Logger {
+        - log_dir: Path
+        - stats: List[dict]
+        --
+        + __init__(log_dir: str)
+        + log_generation(gen: int, stats: dict)
+        + log_evaluation(individual, fitness: float)
+        + save_to_csv() -> None
+        + save_to_json() -> None
+    }
+    
+    class Visualizer {
+        + {static} plot_fitness_evolution(stats: List[dict], output_path: str)
+        + {static} plot_diversity(population: List, output_path: str)
+        + {static} render_policy(policy: BasePolicy, env, output_path: str)
+    }
+    
+    class Checkpointer {
+        - checkpoint_dir: Path
+        --
+        + __init__(checkpoint_dir: str)
+        + save(population, generation, stats, filename: str)
+        + load(filename: str) -> dict
+        + list_checkpoints() -> List[str]
+    }
+    
+    EvolutionRunner --> Logger : uses
+    EvolutionRunner --> Checkpointer : uses
+}
+
+package "deap_pettingzoo.baselines" {
+    enum BudgetMode {
+        ENV_STEPS
+        EVAL_EPISODES
+        WALL_CLOCK
+    }
+    
+    interface PolicyProtocol {
+        + {abstract} get_action(observation) -> action
+        + {abstract} reset() -> None
+    }
+    
+    class TrainingConfig {
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + algorithm_params: dict
+        + output_dir: Path
+        + render: bool
+        --
+        + __post_init__() -> None
+    }
+    
+    class TrainingResult {
+        + algorithm: str
+        + policy: PolicyProtocol
+        + metrics: dict
+        + metadata: dict
+        + seed: int
+        + training_time: float
+    }
+    
+    class EvalResult {
+        + mean_reward: float
+        + std_reward: float
+        + min_reward: float
+        + max_reward: float
+        + num_episodes: int
+        + episode_rewards: List[float]
+        + episode_lengths: List[int]
+        --
+        + to_dict() -> dict
+    }
+    
+    class ComparisonConfig {
+        + algorithms: List[str]
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + eval_episodes: int
+        + algorithm_configs: dict
+        + output_dir: Path
+        --
+        + __post_init__() -> None
+    }
+    
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+    }
+    
+    abstract class BaselineEvaluator {
+        + {abstract} evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+    }
+    
+    class EATrainer {
+        - toolbox_builder: DEAPToolboxBuilder
+        - genome_class: type
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + get_capabilities() -> dict
+        - _translate_budget(config: TrainingConfig) -> dict
+        - _wrap_genome_as_policy(genome) -> PolicyProtocol
+    }
+    
+    abstract class AgileRLTrainer {
+        # ALGORITHM_NAME: str
+        # ALGORITHM_IMPORT: tuple[str, str]
+        # ON_POLICY: bool
+        # DEFAULT_PARAMS: dict
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        # _import_algorithm() -> type
+        # _build_agent(cls, obs_spaces, act_spaces, agent_ids, kwargs)
+        # _run_off_policy(env, agent, ...) -> dict
+        # _run_on_policy(env, agent, ...) -> dict
+    }
+
+    class MADDPGTrainer {
+        # ALGORITHM_NAME = "maddpg"
+        # ON_POLICY = False
+    }
+    class MATD3Trainer {
+        # ALGORITHM_NAME = "matd3"
+        # ON_POLICY = False
+    }
+    class IPPOTrainer {
+        # ALGORITHM_NAME = "ippo"
+        # ON_POLICY = True
+    }
+    class MAPPOTrainer {
+        # ALGORITHM_NAME = "mappo"
+        # ON_POLICY = True
+        + _build_agent(...) : enables shared critic
+    }
+
+    class AgileRLPolicyWrapper {
+        - _agent: agilerl.EvolvableAlgorithm
+        - _agent_ids: list[str]
+        - _call_index: int
+        --
+        + get_action(obs: np.ndarray) -> Any
+        + reset() -> None
+    }
+
+    class UnifiedEvaluator {
+        - env_cache: dict
+        --
+        + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+        - _run_episode(policy, env, seed: int) -> tuple
+        - _aggregate_results(episode_data: List) -> EvalResult
+    }
+    
+    class ComparisonRunner {
+        - trainer_registry: dict
+        - evaluator: UnifiedEvaluator
+        --
+        + compare_baselines(config: ComparisonConfig) -> dict
+        - _run_algorithm(algorithm: str, config: TrainingConfig) -> List[TrainingResult]
+        - _evaluate_policies(results: List[TrainingResult], eval_config) -> dict
+        - _save_results(comparison_data: dict, output_dir: Path)
+    }
+
+    ' Relationships
+    TrainingConfig --> BudgetMode : uses
+    ComparisonConfig --> BudgetMode : uses
+    TrainingResult --> PolicyProtocol : contains
+
+    BaselineTrainer <|-- EATrainer
+    BaselineTrainer <|-- AgileRLTrainer
+    AgileRLTrainer <|-- MADDPGTrainer
+    AgileRLTrainer <|-- MATD3Trainer
+    AgileRLTrainer <|-- IPPOTrainer
+    IPPOTrainer <|-- MAPPOTrainer
+    BaselineEvaluator <|-- UnifiedEvaluator
+
+    EATrainer --> DEAPToolboxBuilder : uses
+    EATrainer --> FixedTopologyGenome : creates
+    AgileRLTrainer --> AgileRLPolicyWrapper : produces
+    AgileRLPolicyWrapper ..|> PolicyProtocol : implements
+    
+    ComparisonRunner --> BaselineTrainer : uses
+    ComparisonRunner --> UnifiedEvaluator : uses
+    ComparisonRunner --> ComparisonConfig : uses
+    
+    BasePolicy ..|> PolicyProtocol : implements
+    FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
+}
+
+' Key relationships
+FeedforwardNeuralPolicy ..> PettingZooWrapper : interacts with
+SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
+EvolutionRunner ..> Logger : logs to
+
+note bottom of FixedTopologyGenome
+  Genome is a flat vector of weights
+  for a fixed network architecture
+end note
+
+note bottom of FeedforwardNeuralPolicy
+  Converts genome weights into
+  neural network layers and
+  produces actions from observations
+end note
+
+note bottom of MultiEpisodeEvaluator
+  Runs multiple episodes with
+  different seeds for robust
+  fitness estimation
+end note
+
+@enduml
