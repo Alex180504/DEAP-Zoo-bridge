@@ -255,12 +255,18 @@ package "deap_pettingzoo.baselines" {
         - population_size: int
         - mutation_rate: float
         - crossover_rate: float
-        - activation: str
+        - strategy: str  ' simple | mu_plus_lambda | mu_comma_lambda
+        - mu: int
+        - lambda_: int
+        - selection_method: str
+        - crossover_method: str
+        - mutation_method: str
         --
-        + __init__(hidden_size, population_size, mutation_rate, crossover_rate, activation, weight_range)
+        + __init__(hidden_size, population_size, ..., strategy, mu, lambda_, selection_method, crossover_method, mutation_method, selection_params, crossover_params, mutation_params)
         + train(config) -> TrainingResult
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
+        - _run_simple(...) -> None
         - _translate_budget(config) -> dict
     }
 
@@ -269,11 +275,13 @@ package "deap_pettingzoo.baselines" {
         - population_size: int
         - sigma0: float
         - activation: str
+        - variant: str  ' mu_mu_lambda | one_plus_lambda
         --
-        + __init__(hidden_size, population_size, sigma0, activation, weight_range)
+        + __init__(hidden_size, population_size, sigma0, activation, weight_range, variant)
         + train(config) -> TrainingResult
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
+        - _build_strategy(genome_config) -> (Strategy, int)
         - _translate_budget(config) -> dict
     }
 
@@ -307,6 +315,13 @@ package "deap_pettingzoo.baselines" {
     class MAPPOTrainer {
         # ALGORITHM_NAME = "mappo"
         # ON_POLICY = True
+    }
+    class GroupedIPPOTrainer {
+        # ALGORITHM_NAME = "ippo-grouped"
+        # ON_POLICY = True
+        --
+        + {static} _group_prefix(agent_id) -> str
+        + {static} _validate_grouping(agent_ids, obs, act) -> dict
     }
 
     class AgileRLPolicyWrapper {
@@ -349,6 +364,7 @@ package "deap_pettingzoo.baselines" {
     AgileRLTrainer <|-- MATD3Trainer
     AgileRLTrainer <|-- IPPOTrainer
     IPPOTrainer <|-- MAPPOTrainer
+    IPPOTrainer <|-- GroupedIPPOTrainer
     BaselineEvaluator <|-- UnifiedEvaluator
 
     EATrainer ..> deap_integration_mod : uses
