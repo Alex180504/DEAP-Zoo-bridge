@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "deap>=1.4.1",
     "pettingzoo>=1.24.0",
+    "mpe2>=0.1",
     "numpy>=1.21.0",
     "gymnasium>=0.29.0", 
 ]
@@ -45,11 +46,14 @@ viz = [
     "seaborn>=0.12.0",
 ]
 rl-baselines = [
-    "stable-baselines3>=2.0.0",
+    "agilerl>=2.0.0",
     "torch>=2.0.0",
 ]
+aquarium = [
+    "marl-aquarium>=0.1.10",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines]",
+    "deap-pettingzoo[dev,viz,rl-baselines,aquarium]",
 ]
 
 [tool.setuptools]
@@ -63,6 +67,9 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 addopts = [
     "--verbose",
     "--cov=deap_pettingzoo",

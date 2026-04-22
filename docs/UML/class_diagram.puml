@@ -205,25 +205,168 @@ package "deap_pettingzoo.utils" {
 }
 
 package "deap_pettingzoo.baselines" {
-    class RLPolicyWrapper {
-        - model: BaseAlgorithm
-        - policy_type: str
+    enum BudgetMode {
+        ENV_STEPS
+        EVAL_EPISODES
+        WALL_CLOCK
+    }
+    
+    interface PolicyProtocol {
+        + {abstract} get_action(observation) -> action
+        + {abstract} reset() -> None
+    }
+    
+    class TrainingConfig {
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + algorithm_params: dict
+        + output_dir: Path
+        + render: bool
         --
-        + __init__(model_path: str)
-        + get_action(observation) -> action
+        + __post_init__() -> None
+    }
+    
+    class TrainingResult {
+        + algorithm: str
+        + policy: PolicyProtocol
+        + metrics: dict
+        + metadata: dict
+        + seed: int
+        + training_time: float
+    }
+    
+    class EvalResult {
+        + mean_reward: float
+        + std_reward: float
+        + min_reward: float
+        + max_reward: float
+        + num_episodes: int
+        + episode_rewards: List[float]
+        + episode_lengths: List[int]
+        --
+        + to_dict() -> dict
+    }
+    
+    class ComparisonConfig {
+        + algorithms: List[str]
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + eval_episodes: int
+        + algorithm_configs: dict
+        + output_dir: Path
+        --
+        + __post_init__() -> None
+    }
+    
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+    }
+    
+    abstract class BaselineEvaluator {
+        + {abstract} evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+    }
+    
+    class EATrainer {
+        - toolbox_builder: DEAPToolboxBuilder
+        - genome_class: type
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + get_capabilities() -> dict
+        - _translate_budget(config: TrainingConfig) -> dict
+        - _wrap_genome_as_policy(genome) -> PolicyProtocol
+    }
+    
+    abstract class AgileRLTrainer {
+        # ALGORITHM_NAME: str
+        # ALGORITHM_IMPORT: tuple[str, str]
+        # ON_POLICY: bool
+        # DEFAULT_PARAMS: dict
+        --
+        + train(config: TrainingConfig) -> TrainingResult
+        + supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        # _import_algorithm() -> type
+        # _build_agent(cls, obs_spaces, act_spaces, agent_ids, kwargs)
+        # _run_off_policy(env, agent, ...) -> dict
+        # _run_on_policy(env, agent, ...) -> dict
+    }
+
+    class MADDPGTrainer {
+        # ALGORITHM_NAME = "maddpg"
+        # ON_POLICY = False
+    }
+    class MATD3Trainer {
+        # ALGORITHM_NAME = "matd3"
+        # ON_POLICY = False
+    }
+    class IPPOTrainer {
+        # ALGORITHM_NAME = "ippo"
+        # ON_POLICY = True
+    }
+    class MAPPOTrainer {
+        # ALGORITHM_NAME = "mappo"
+        # ON_POLICY = True
+        + _build_agent(...) : enables shared critic
+    }
+
+    class AgileRLPolicyWrapper {
+        - _agent: agilerl.EvolvableAlgorithm
+        - _agent_ids: list[str]
+        - _call_index: int
+        --
+        + get_action(obs: np.ndarray) -> Any
         + reset() -> None
     }
-    
-    class BaselineComparison {
-        - evaluator: BaseEvaluator
+
+    class UnifiedEvaluator {
+        - env_cache: dict
         --
-        + __init__(evaluator: BaseEvaluator)
-        + compare(ea_policy, rl_policy, num_runs: int) -> dict
-        + statistical_test(results1, results2) -> dict
+        + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+        - _run_episode(policy, env, seed: int) -> tuple
+        - _aggregate_results(episode_data: List) -> EvalResult
     }
     
-    BasePolicy <|.. RLPolicyWrapper : implements
-    BaselineComparison --> BaseEvaluator : uses
+    class ComparisonRunner {
+        - trainer_registry: dict
+        - evaluator: UnifiedEvaluator
+        --
+        + compare_baselines(config: ComparisonConfig) -> dict
+        - _run_algorithm(algorithm: str, config: TrainingConfig) -> List[TrainingResult]
+        - _evaluate_policies(results: List[TrainingResult], eval_config) -> dict
+        - _save_results(comparison_data: dict, output_dir: Path)
+    }
+
+    ' Relationships
+    TrainingConfig --> BudgetMode : uses
+    ComparisonConfig --> BudgetMode : uses
+    TrainingResult --> PolicyProtocol : contains
+
+    BaselineTrainer <|-- EATrainer
+    BaselineTrainer <|-- AgileRLTrainer
+    AgileRLTrainer <|-- MADDPGTrainer
+    AgileRLTrainer <|-- MATD3Trainer
+    AgileRLTrainer <|-- IPPOTrainer
+    IPPOTrainer <|-- MAPPOTrainer
+    BaselineEvaluator <|-- UnifiedEvaluator
+
+    EATrainer --> DEAPToolboxBuilder : uses
+    EATrainer --> FixedTopologyGenome : creates
+    AgileRLTrainer --> AgileRLPolicyWrapper : produces
+    AgileRLPolicyWrapper ..|> PolicyProtocol : implements
+    
+    ComparisonRunner --> BaselineTrainer : uses
+    ComparisonRunner --> UnifiedEvaluator : uses
+    ComparisonRunner --> ComparisonConfig : uses
+    
+    BasePolicy ..|> PolicyProtocol : implements
+    FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
 }
 
 ' Key relationships

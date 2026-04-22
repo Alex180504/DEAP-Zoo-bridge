@@ -1,0 +1,125 @@
+@startuml sequence_baseline_comparison
+!theme plain
+
+title Baseline Comparison Workflow (EA vs AgileRL)
+
+actor User
+participant "ComparisonRunner" as Runner
+participant "EATrainer" as EA
+participant "AgileRLTrainer\n(MADDPG/MATD3/IPPO/MAPPO)" as AgileRL
+participant "UnifiedEvaluator" as Evaluator
+database "Results" as Results
+
+User -> Runner: compare_baselines(config)
+activate Runner
+
+note right of Runner
+  config specifies:
+  - algorithms: ['ea', 'maddpg', 'ippo', ...]
+  - budget_mode: ENV_STEPS
+  - budget_value: 100000
+  - num_seeds: 3
+  - eval_episodes: 100
+end note
+
+== Training Phase ==
+
+loop for each algorithm in config.algorithms
+    Runner -> Runner: get_trainer(algorithm)
+
+    alt algorithm == 'ea'
+        Runner -> EA: train(training_config)
+        activate EA
+
+        EA -> EA: _translate_budget()
+        note right: Convert env_steps\nto generations
+
+        EA -> EA: create_toolbox()
+        EA -> EA: initialize_population()
+
+        loop for each seed
+            EA -> EA: run_evolution(seed)
+            EA -> EA: _wrap_genome_as_policy()
+        end
+
+        EA --> Runner: TrainingResult(policy, metrics)
+        deactivate EA
+
+    else algorithm in {'maddpg','matd3','ippo','mappo'}
+        Runner -> AgileRL: train(training_config)
+        activate AgileRL
+
+        AgileRL -> AgileRL: _import_algorithm()
+        note right: Lazy ``import agilerl`` so\nthe optional extra is only\nrequired at train() time.
+
+        AgileRL -> AgileRL: build_parallel_env(env_name)
+        AgileRL -> AgileRL: extract_space_metadata(env)
+        AgileRL -> AgileRL: _build_agent(obs_spaces, act_spaces, agent_ids)
+
+        alt off-policy (MADDPG, MATD3)
+            loop for each env step (until budget)
+                AgileRL -> AgileRL: agent.get_action(obs, info)
+                AgileRL -> AgileRL: env.step(actions)
+                AgileRL -> AgileRL: memory.save_to_memory(...)
+                opt step >= learning_delay
+                    AgileRL -> AgileRL: agent.learn(memory.sample(batch_size))
+                end
+            end
+        else on-policy (IPPO, MAPPO)
+            loop for each rollout window
+                AgileRL -> AgileRL: collect_rollouts(agent, env, n_steps)
+                AgileRL -> AgileRL: agent.learn()
+            end
+        end
+
+        AgileRL -> AgileRL: AgileRLPolicyWrapper(agent, agent_ids)
+        AgileRL --> Runner: TrainingResult(policy, metrics)
+        deactivate AgileRL
+    end
+end
+
+== Evaluation Phase ==
+
+loop for each algorithm
+    loop for each trained policy (seed)
+        Runner -> Evaluator: evaluate(policy, env_name, eval_episodes)
+        activate Evaluator
+
+        loop for eval_episodes times
+            Evaluator -> Evaluator: _run_episode(policy, seed)
+            note right: Reset env, run to\ncompletion, collect reward
+        end
+
+        Evaluator -> Evaluator: _aggregate_results()
+        Evaluator --> Runner: EvalResult(mean, std, min, max)
+        deactivate Evaluator
+    end
+end
+
+== Results Aggregation ==
+
+Runner -> Runner: _aggregate_across_seeds()
+note right
+  Compute statistics:
+  - Mean/std across seeds
+  - Best policy per algorithm
+  - Training curves comparison
+end note
+
+Runner -> Results: save_comparison_results()
+activate Results
+Results --> Runner: output_path
+deactivate Results
+
+Runner --> User: comparison_dict
+deactivate Runner
+
+note right of User
+  Results contain:
+  - Per-algorithm statistics
+  - Per-seed detailed metrics
+  - Training curves (EA fitness, RL rewards)
+  - Best policies for each algorithm
+end note
+
+@enduml
