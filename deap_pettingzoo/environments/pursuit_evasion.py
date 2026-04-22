@@ -1,39 +1,43 @@
-"""Pursuit-evasion environment wrapper with partial observability.
+"""Pursuit-evasion environment wrapper with native MPE2 partial observability.
 
-Specialises :class:`PettingZooWrapper` for the research methodology 
+Specialises :class:`PettingZooWrapper` for the research methodology:
 
-* 10-vs-10 cooperative predator-prey (``simple_tag_v3``)
-* Equal-ability pursuers and evaders (same ``max_speed`` and ``accel``)
-* Partial observability — each agent observes only its K-nearest pursuers /
-  evaders and K-nearest landmarks; non-visible entity slots are zero-padded
-  so the observation vector retains a fixed size suitable for a static NN
-  input layer
-* Exponential boundary penalty applied to per-agent rewards, pushing agents
-  back inside the operational region ``|x|, |y| <= threshold``
+* Cooperative predator-prey (``mpe2.simple_tag_v3``)
+* Equal-ability pursuers and evaders (same ``max_speed`` and ``accel``), opt-out
+* K-nearest partial observability provided natively by MPE2
+  (``num_agent_neighbors`` / ``num_landmark_neighbors``): each agent sees only
+  the K nearest other agents and L nearest landmarks; non-visible slots are
+  zero-padded by the environment so the observation vector has a fixed size.
+* Optional prey-speed curriculum (``curriculum=True``) with three stages
+  (50 / 75 / 100 % of full prey speed).  Advanced via
+  :meth:`advance_curriculum` / :meth:`set_curriculum_stage`; takes effect on
+  the next ``reset``.
+* Optional early termination when every good agent is simultaneously caught
+  (``terminate_on_success=True``).
+* Exponential boundary penalty applied to per-agent rewards.
 
-The layout of the underlying ``simple_tag_v3`` observation vector (used to
-locate neighbour slots for masking) is, for *any* agent::
+Observation layout (from MPE2)::
 
-    [ self_vel (2) |
-      self_pos (2) |
-      landmarks_rel (2 * num_landmarks) |
-      other_rel     (2 * (num_adversaries + num_good - 1)) |
-      good_vel      (2 * M) ]
+    [ self_vel (2) | self_pos (2) | landmark_rel (2*L) |
+      other_rel (2*K) | good_vel (2*K) ]             # PO enabled
+    [ self_vel (2) | self_pos (2) | landmark_rel (2*num_obstacles) |
+      other_rel (2*(A+G-1)) | good_vel (2*Gvel) ]    # full observability
 
-where ``M = num_good`` for an adversary's observation and ``M = num_good - 1``
-for a good agent's observation (each good agent excludes its own velocity).
-Within ``other_rel``, :mod:`pettingzoo.mpe.simple_tag_v3` orders entries as
-adversaries first then good agents (skipping self), which we rely on for
-type-aware masking and APF evader visibility reasoning.
+Under full observability ``other_rel`` orders adversaries before good
+agents (self excluded) and ``Gvel = num_good`` for adversary observers,
+``num_good - 1`` for good observers.  Under partial observability the
+``other_rel`` block is K-nearest-regardless-of-type and agent types are
+not recoverable from the observation vector alone.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from pettingzoo.mpe import simple_tag_v3
+from mpe2 import simple_tag_v3
 
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 
@@ -52,13 +56,25 @@ class PursuitEvasionConfig:
         num_good: Number of evaders (``agent_*`` agents).
         num_obstacles: Number of static landmarks.
         max_cycles: Maximum environment steps per episode.
-        equal_max_speed: Maximum velocity applied to every agent.
-        equal_accel: Acceleration limit applied to every agent.
-        num_agent_neighbors: Maximum number of other agents visible to each
-            agent (the closest ones are retained; the rest are zero-padded).
-            ``None`` disables agent masking.
-        num_landmark_neighbors: Maximum number of landmarks visible to each
-            agent. ``None`` disables landmark masking.
+        equal_ability: If True (default), every world agent's ``max_speed``
+            and ``accel`` are overwritten after each reset with
+            ``equal_max_speed`` / ``equal_accel`` to enforce a symmetric
+            pursuer/evader ability setting.  Disable when running a speed
+            curriculum so stage-dependent prey speeds survive :meth:`reset`.
+        equal_max_speed: Maximum velocity applied to every agent
+            (only used when ``equal_ability`` is True).
+        equal_accel: Acceleration limit applied to every agent
+            (only used when ``equal_ability`` is True).
+        num_agent_neighbors: K-nearest agents each agent observes; ``None``
+            disables agent masking (full observability).  Must be a
+            positive integer when set.
+        num_landmark_neighbors: K-nearest landmarks each agent observes;
+            ``None`` disables landmark masking.  Must be a positive
+            integer when set.
+        curriculum: Enable MPE2's prey-speed curriculum (stages 0/1/2 =
+            50/75/100 % of full prey speed).
+        terminate_on_success: Terminate the episode as soon as every good
+            agent is simultaneously caught.
         boundary_threshold: Absolute coordinate threshold beyond which the
             boundary penalty activates (per axis).
         boundary_scale: Multiplicative coefficient on the exponential
@@ -71,10 +87,13 @@ class PursuitEvasionConfig:
     num_good: int = 10
     num_obstacles: int = 3
     max_cycles: int = 200
+    equal_ability: bool = True
     equal_max_speed: float = 1.0
     equal_accel: float = 3.0
     num_agent_neighbors: Optional[int] = 5
     num_landmark_neighbors: Optional[int] = 3
+    curriculum: bool = False
+    terminate_on_success: bool = False
     boundary_threshold: float = 0.9
     boundary_scale: float = 1.0
     boundary_sharpness: float = 2.0
@@ -87,81 +106,99 @@ class PursuitEvasionConfig:
 
 @dataclass
 class ObsLayout:
-    """Slice metadata for a single agent's observation vector.
-
-    All slices index a 1-D ``np.ndarray`` representing one agent's raw
-    observation.  Used for both masking (in the wrapper) and parsing (in
-    downstream policies such as :class:`APFEvaderPolicy`).
+    """Slice metadata for a single agent's MPE2 observation vector.
 
     Attributes:
         self_vel: Slice for the agent's own velocity (length 2).
         self_pos: Slice for the agent's own position (length 2).
-        landmark_rel: Slice covering all landmark relative positions.
-        adversary_rel: Slice covering rel-positions of adversary agents
-            (empty for adversary-self observations beyond the first A-1).
-        good_rel: Slice covering rel-positions of good agents.
-        good_vel: Slice covering velocity entries of good agents.
+        landmark_rel: Slice covering visible landmark relative positions.
+        other_rel: Slice covering visible other-agent relative positions.
+            Under full observability, adversaries are listed before good
+            agents and the :attr:`adversary_rel` / :attr:`good_rel`
+            sub-slices carve out each group; under K-nearest PO the
+            ordering is mixed-by-distance and ``adversary_rel`` equals
+            ``other_rel`` while ``good_rel`` is empty (all visible
+            agents are treated uniformly by downstream policies).
+        adversary_rel: Sub-slice of ``other_rel`` that is guaranteed to
+            contain adversary positions.  Equal to ``other_rel`` under PO.
+        good_rel: Sub-slice of ``other_rel`` that is guaranteed to contain
+            good-agent positions (empty under PO).
+        good_vel: Slice covering good-agent velocity entries.
         is_adversary: True iff this layout describes an adversary.
+        num_landmarks: Number of landmark slots in ``landmark_rel``.
+        num_others: Number of other-agent slots in ``other_rel``.
+        num_adv_in_other: Number of adversary slots at the start of
+            ``other_rel`` (== ``num_others`` under PO).
+        num_good_in_other: Number of good-agent slots in ``other_rel``
+            (0 under PO).
+        num_good_vel: Number of good-agent velocity slots.
+        partial_obs: True iff the environment was constructed with
+            K-nearest agent masking.
     """
 
     self_vel: slice
     self_pos: slice
     landmark_rel: slice
+    other_rel: slice
     adversary_rel: slice
     good_rel: slice
     good_vel: slice
     is_adversary: bool
-
-    # Derived counts (for convenience)
     num_landmarks: int
+    num_others: int
     num_adv_in_other: int
     num_good_in_other: int
     num_good_vel: int
+    partial_obs: bool
 
 
 def _compute_layout(
     agent_name: str,
     num_adversaries: int,
     num_good: int,
-    num_landmarks: int,
+    num_landmarks_visible: int,
+    num_others_visible: int,
+    num_good_vel_visible: int,
+    partial_obs: bool,
 ) -> ObsLayout:
-    """Compute the observation layout for one agent.
-
-    See module docstring for the canonical layout.  This function returns
-    slices that partition the raw observation exactly.
-    """
     is_adv = agent_name.startswith("adversary")
-
-    # Counts of "other agents" entries (self is excluded)
-    if is_adv:
-        n_adv_in_other = num_adversaries - 1
-        n_good_in_other = num_good
-        n_good_vel = num_good            # includes all good agents
-    else:
-        n_adv_in_other = num_adversaries
-        n_good_in_other = num_good - 1
-        n_good_vel = num_good - 1        # excludes self
 
     i = 0
     self_vel = slice(i, i + 2); i += 2
     self_pos = slice(i, i + 2); i += 2
-    landmark_rel = slice(i, i + 2 * num_landmarks); i += 2 * num_landmarks
-    adversary_rel = slice(i, i + 2 * n_adv_in_other); i += 2 * n_adv_in_other
-    good_rel = slice(i, i + 2 * n_good_in_other); i += 2 * n_good_in_other
-    good_vel = slice(i, i + 2 * n_good_vel); i += 2 * n_good_vel
+    landmark_rel = slice(i, i + 2 * num_landmarks_visible)
+    i += 2 * num_landmarks_visible
+    other_rel = slice(i, i + 2 * num_others_visible)
+
+    if partial_obs:
+        adv_rel = other_rel
+        good_rel = slice(other_rel.stop, other_rel.stop)  # empty
+        n_adv_in_other = num_others_visible
+        n_good_in_other = 0
+    else:
+        n_adv_in_other = num_adversaries - 1 if is_adv else num_adversaries
+        n_good_in_other = num_good if is_adv else num_good - 1
+        adv_rel = slice(i, i + 2 * n_adv_in_other)
+        good_rel = slice(i + 2 * n_adv_in_other, other_rel.stop)
+
+    i = other_rel.stop
+    good_vel = slice(i, i + 2 * num_good_vel_visible)
 
     return ObsLayout(
         self_vel=self_vel,
         self_pos=self_pos,
         landmark_rel=landmark_rel,
-        adversary_rel=adversary_rel,
+        other_rel=other_rel,
+        adversary_rel=adv_rel,
         good_rel=good_rel,
         good_vel=good_vel,
         is_adversary=is_adv,
-        num_landmarks=num_landmarks,
+        num_landmarks=num_landmarks_visible,
+        num_others=num_others_visible,
         num_adv_in_other=n_adv_in_other,
         num_good_in_other=n_good_in_other,
-        num_good_vel=n_good_vel,
+        num_good_vel=num_good_vel_visible,
+        partial_obs=partial_obs,
     )
 
 
@@ -171,19 +208,22 @@ def _compute_layout(
 
 
 class PursuitEvasionEnv(PettingZooWrapper):
-    """``simple_tag_v3`` specialised for equal-ability predator-prey research.
+    """``mpe2.simple_tag_v3`` specialised for equal-ability predator-prey research.
 
-    Differs from :class:`PettingZooWrapper` in three ways:
+    Differs from :class:`PettingZooWrapper` in:
 
-    1. **Equal-ability**: after each ``reset`` the underlying world's
-       ``max_speed`` and ``accel`` are overwritten for every agent to the
-       values in :class:`PursuitEvasionConfig`.
-    2. **Partial observability**: observations returned by ``reset`` and
-       ``step`` have their neighbour slots sorted by Euclidean distance and
-       zero-padded beyond the configured visibility thresholds.
-    3. **Boundary penalty**: per-agent rewards returned by ``step`` are
-       reduced by an exponential penalty function of the agent's position
-       magnitude.
+    1. **Partial observability** — forwards ``num_agent_neighbors`` and
+       ``num_landmark_neighbors`` to MPE2, which handles K-nearest
+       selection and zero-padding natively.
+    2. **Equal-ability** — after each ``reset`` the world's ``max_speed``
+       and ``accel`` are overwritten for every agent (opt-out via
+       ``equal_ability=False`` — required when using ``curriculum=True``).
+    3. **Curriculum** — forwards ``curriculum`` / ``terminate_on_success``
+       and exposes :meth:`advance_curriculum`,
+       :meth:`set_curriculum_stage`, and :attr:`curriculum_stage`
+       pass-throughs.
+    4. **Boundary penalty** — per-agent rewards are reduced by an
+       exponential penalty function of the agent's position magnitude.
 
     All other wrapper features (action conversion, reward tracking, etc.)
     are inherited unchanged.
@@ -202,8 +242,15 @@ class PursuitEvasionEnv(PettingZooWrapper):
         """
         self.pe_config = config or PursuitEvasionConfig()
 
-        # Bypass the parent's SUPPORTED_ENVS check because we are constructing
-        # the parallel_env directly with custom kwargs.
+        if self.pe_config.curriculum and self.pe_config.equal_ability:
+            warnings.warn(
+                "PursuitEvasionConfig has curriculum=True and equal_ability=True; "
+                "equal-ability will overwrite the curriculum-scheduled prey speeds "
+                "after every reset, nullifying the curriculum. "
+                "Set equal_ability=False to let the curriculum take effect.",
+                stacklevel=2,
+            )
+
         self.env_name = "simple_tag_v3"
         self.env_config: Dict[str, Any] = {}
         self.render_mode = render_mode
@@ -214,6 +261,10 @@ class PursuitEvasionEnv(PettingZooWrapper):
             num_obstacles=self.pe_config.num_obstacles,
             max_cycles=self.pe_config.max_cycles,
             continuous_actions=False,
+            num_agent_neighbors=self.pe_config.num_agent_neighbors,
+            num_landmark_neighbors=self.pe_config.num_landmark_neighbors,
+            curriculum=self.pe_config.curriculum,
+            terminate_on_success=self.pe_config.terminate_on_success,
             render_mode=render_mode,
         )
         self.possible_agents = list(self.env.possible_agents)
@@ -221,15 +272,37 @@ class PursuitEvasionEnv(PettingZooWrapper):
         self.cumulative_rewards: Dict[str, float] = {}
 
         # Pre-compute per-agent observation layouts (static across episodes).
-        self._layouts: Dict[str, ObsLayout] = {
-            name: _compute_layout(
-                name,
-                self.pe_config.num_adversaries,
-                self.pe_config.num_good,
-                self.pe_config.num_obstacles,
+        partial_obs_agents = self.pe_config.num_agent_neighbors is not None
+        partial_obs_land = self.pe_config.num_landmark_neighbors is not None
+        num_land_vis = (
+            self.pe_config.num_landmark_neighbors
+            if partial_obs_land
+            else self.pe_config.num_obstacles
+        )
+        self._layouts: Dict[str, ObsLayout] = {}
+        for name in self.possible_agents:
+            is_adv = name.startswith("adversary")
+            if partial_obs_agents:
+                num_others = self.pe_config.num_agent_neighbors
+                num_good_vel = self.pe_config.num_agent_neighbors
+            else:
+                num_others = (
+                    self.pe_config.num_adversaries + self.pe_config.num_good - 1
+                )
+                num_good_vel = (
+                    self.pe_config.num_good
+                    if is_adv
+                    else self.pe_config.num_good - 1
+                )
+            self._layouts[name] = _compute_layout(
+                agent_name=name,
+                num_adversaries=self.pe_config.num_adversaries,
+                num_good=self.pe_config.num_good,
+                num_landmarks_visible=num_land_vis,
+                num_others_visible=num_others,
+                num_good_vel_visible=num_good_vel,
+                partial_obs=partial_obs_agents,
             )
-            for name in self.possible_agents
-        }
 
     # ------------------------------------------------------------------
     # Public introspection
@@ -250,6 +323,23 @@ class PursuitEvasionEnv(PettingZooWrapper):
         return self._layouts[agent]
 
     # ------------------------------------------------------------------
+    # Curriculum pass-throughs
+    # ------------------------------------------------------------------
+
+    @property
+    def curriculum_stage(self) -> int:
+        """Current curriculum stage on the underlying MPE2 env."""
+        return self.env.unwrapped.curriculum_stage
+
+    def advance_curriculum(self) -> None:
+        """Advance to the next curriculum stage (effective on next reset)."""
+        self.env.unwrapped.advance_curriculum()
+
+    def set_curriculum_stage(self, stage: int) -> None:
+        """Jump to a specific curriculum stage (effective on next reset)."""
+        self.env.unwrapped.set_curriculum_stage(stage)
+
+    # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
 
@@ -258,13 +348,14 @@ class PursuitEvasionEnv(PettingZooWrapper):
         seed: Optional[int] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, np.ndarray]:
-        """Reset the environment, enforce equal-ability, and mask observations."""
+        """Reset the environment and (optionally) enforce equal ability."""
         observations, _ = self.env.reset(seed=seed, options=options)
-        self._apply_equal_ability()
+        if self.pe_config.equal_ability:
+            self._apply_equal_ability()
 
         self.episode_length = 0
         self.cumulative_rewards = {agent: 0.0 for agent in observations}
-        return {agent: self._mask_observation(agent, obs) for agent, obs in observations.items()}
+        return observations
 
     def step(
         self,
@@ -276,37 +367,26 @@ class PursuitEvasionEnv(PettingZooWrapper):
         Dict[str, bool],
         Dict[str, Any],
     ]:
-        """Step the environment, apply boundary penalty, and mask observations."""
+        """Step the environment and apply boundary penalty to rewards."""
         observations, rewards, terminations, truncations, infos = super().step(actions)
 
-        # Apply exponential boundary penalty to each surviving agent.
         for agent in list(rewards.keys()):
+            if agent not in observations:
+                continue
             layout = self._layouts.get(agent)
-            if layout is None or agent not in observations:
+            if layout is None:
                 continue
-            raw_obs = self._raw_observations_cache.get(agent)
-            if raw_obs is None:
-                continue
-            self_pos = raw_obs[layout.self_pos]
+            self_pos = observations[agent][layout.self_pos]
             penalty = self._boundary_penalty(self_pos)
             rewards[agent] -= penalty
-            # Keep cumulative_rewards consistent with the modified reward.
             if agent in self.cumulative_rewards:
                 self.cumulative_rewards[agent] -= penalty
 
-        # Mask observations before returning (also refresh raw cache for next step).
-        masked = {agent: self._mask_observation(agent, obs) for agent, obs in observations.items()}
-        return masked, rewards, terminations, truncations, infos
+        return observations, rewards, terminations, truncations, infos
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    # We need the RAW (pre-mask) observation when computing the boundary
-    # penalty, because masking zeroes ``self_pos`` only if it is inside a
-    # masked slot — it never is for self_pos, but keeping a cache also lets
-    # policies (e.g. APF) recover exact self-position when desired.
-    _raw_observations_cache: Dict[str, np.ndarray] = {}
 
     def _apply_equal_ability(self) -> None:
         """Overwrite every world-agent's ``max_speed`` and ``accel``."""
@@ -316,126 +396,33 @@ class PursuitEvasionEnv(PettingZooWrapper):
             a.accel = self.pe_config.equal_accel
 
     def _get_world(self):
-        """Recover the underlying MPE world (traverses the parallel wrapper)."""
+        """Recover the underlying MPE world.
+
+        Walks common attribute paths — ``unwrapped``, ``aec_env``, and
+        ``env`` chains — until a ``world`` attribute is found.  MPE2's
+        parallel wrapper exposes it directly via ``.unwrapped.world``.
+        """
+        candidates = []
         env = self.env
-        if hasattr(env, "aec_env"):
-            inner = env.aec_env
-            if hasattr(inner, "world"):
-                return inner.world
-        raise RuntimeError("Could not locate MPE world on env; PettingZoo API changed?")
+        candidates.append(env)
+        for attr in ("aec_env", "unwrapped", "env"):
+            sub = getattr(env, attr, None)
+            if sub is not None:
+                candidates.append(sub)
+                deeper = getattr(sub, "unwrapped", None)
+                if deeper is not None:
+                    candidates.append(deeper)
+        for cand in candidates:
+            if hasattr(cand, "world"):
+                return cand.world
+        raise RuntimeError("Could not locate MPE world on env; API changed?")
 
     def _boundary_penalty(self, self_pos: np.ndarray) -> float:
         """Exponential boundary penalty ``sum_axis scale*(exp(k*excess)-1)``.
 
         Zero when ``|x| <= threshold`` on both axes; grows exponentially
-        outside the region.  Matches the methodology's
-        ``exponentially scaling negative reward boundary function B(x)``.
+        outside the region.
         """
         cfg = self.pe_config
         excess = np.maximum(0.0, np.abs(self_pos) - cfg.boundary_threshold)
         return float(cfg.boundary_scale * np.sum(np.expm1(cfg.boundary_sharpness * excess)))
-
-    def _mask_observation(self, agent: str, obs: np.ndarray) -> np.ndarray:
-        """Zero-pad neighbour slots beyond the visibility budget.
-
-        Stores the pre-mask observation in ``_raw_observations_cache`` for
-        this agent so the boundary penalty can read its ``self_pos``
-        without having to re-derive it.
-        """
-        self._raw_observations_cache[agent] = obs.copy()
-
-        layout = self._layouts[agent]
-        masked = obs.copy()
-        cfg = self.pe_config
-
-        # Landmark visibility
-        if cfg.num_landmark_neighbors is not None and layout.num_landmarks > 0:
-            landmark_rel = masked[layout.landmark_rel].reshape(layout.num_landmarks, 2)
-            keep = _select_k_nearest_indices(landmark_rel, cfg.num_landmark_neighbors)
-            _apply_mask_inplace(landmark_rel, keep)
-            masked[layout.landmark_rel] = landmark_rel.reshape(-1)
-
-        # Agent visibility (applied jointly to adversary_rel, good_rel, and
-        # the subset of good_vel that corresponds to visible good agents).
-        if cfg.num_agent_neighbors is not None:
-            total_others = layout.num_adv_in_other + layout.num_good_in_other
-            if total_others > 0:
-                adv_rel = masked[layout.adversary_rel].reshape(layout.num_adv_in_other, 2) \
-                    if layout.num_adv_in_other > 0 else np.zeros((0, 2), dtype=masked.dtype)
-                good_rel = masked[layout.good_rel].reshape(layout.num_good_in_other, 2) \
-                    if layout.num_good_in_other > 0 else np.zeros((0, 2), dtype=masked.dtype)
-
-                all_rel = np.concatenate([adv_rel, good_rel], axis=0)
-                keep_idx = _select_k_nearest_indices(all_rel, cfg.num_agent_neighbors)
-
-                # Split kept indices back into adv vs good slots.
-                keep_mask = np.zeros(total_others, dtype=bool)
-                keep_mask[keep_idx] = True
-                adv_keep = keep_mask[: layout.num_adv_in_other]
-                good_keep = keep_mask[layout.num_adv_in_other:]
-
-                adv_rel[~adv_keep] = 0.0
-                good_rel[~good_keep] = 0.0
-                if layout.num_adv_in_other > 0:
-                    masked[layout.adversary_rel] = adv_rel.reshape(-1)
-                if layout.num_good_in_other > 0:
-                    masked[layout.good_rel] = good_rel.reshape(-1)
-
-                # Mask the trailing good_vel block for any good agent whose
-                # relative position was masked out.  (Good velocities are the
-                # only per-other velocity block present in simple_tag.)
-                if layout.num_good_vel > 0:
-                    good_vel = masked[layout.good_vel].reshape(layout.num_good_vel, 2)
-                    # Layout guarantees good_vel corresponds 1:1 to the
-                    # ``good_rel`` block for a good-agent observer and to a
-                    # slightly larger set for an adversary observer.
-                    if layout.is_adversary:
-                        # For adversaries: good_vel has num_good entries,
-                        # good_rel also has num_good entries (since good_rel
-                        # subsumes the entire good side when observer is
-                        # adversary).  They align 1:1.
-                        vel_keep = good_keep
-                    else:
-                        # For good observers: good_vel and good_rel both have
-                        # num_good - 1 entries, aligned 1:1.
-                        vel_keep = good_keep
-                    good_vel[~vel_keep] = 0.0
-                    masked[layout.good_vel] = good_vel.reshape(-1)
-
-        return masked
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _select_k_nearest_indices(rel_positions: np.ndarray, k: int) -> np.ndarray:
-    """Indices of the k nearest non-zero rows in ``rel_positions`` (by L2 norm).
-
-    Treats rows with norm below a tiny epsilon as "already masked / absent"
-    and excludes them from selection (rather than treating them as the
-    nearest).  Returns an ``np.ndarray`` of int indices, possibly shorter
-    than ``k`` when fewer valid entries exist.
-    """
-    if rel_positions.shape[0] == 0 or k <= 0:
-        return np.array([], dtype=int)
-
-    norms = np.linalg.norm(rel_positions, axis=1)
-    eps = 1e-8
-    valid = norms > eps
-    valid_idx = np.where(valid)[0]
-    if valid_idx.size == 0:
-        return valid_idx
-    # Sort the valid ones by ascending distance.
-    order = np.argsort(norms[valid_idx])
-    return valid_idx[order][:k]
-
-
-def _apply_mask_inplace(rel_positions: np.ndarray, keep_indices: np.ndarray) -> None:
-    """Zero every row not in ``keep_indices`` (in-place)."""
-    if rel_positions.shape[0] == 0:
-        return
-    mask = np.ones(rel_positions.shape[0], dtype=bool)
-    mask[keep_indices] = False
-    rel_positions[mask] = 0.0
