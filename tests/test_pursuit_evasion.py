@@ -93,6 +93,76 @@ class TestPursuitEvasionEnv:
         assert pen_edge > 0.0
         assert pen_far > pen_edge
 
+    def test_full_obs_mode_layout_splits_adversary_and_good(self):
+        """Without K-nearest masking the layout exposes type-separated slices."""
+        cfg = PursuitEvasionConfig(
+            num_adversaries=2, num_good=2, num_obstacles=2, max_cycles=5,
+            num_agent_neighbors=None, num_landmark_neighbors=None,
+        )
+        env = PursuitEvasionEnv(config=cfg)
+        env.reset(seed=0)
+        lay = env.get_layout(env.adversary_agents[0])
+        assert not lay.partial_obs
+        assert lay.num_adv_in_other == 1      # num_adversaries - 1
+        assert lay.num_good_in_other == 2     # num_good
+        # adversary_rel + good_rel must partition other_rel.
+        assert lay.adversary_rel.start == lay.other_rel.start
+        assert lay.good_rel.stop == lay.other_rel.stop
+        assert lay.adversary_rel.stop == lay.good_rel.start
+
+    def test_curriculum_advance_changes_prey_speed(self):
+        cfg = PursuitEvasionConfig(
+            num_adversaries=2, num_good=2, num_obstacles=2, max_cycles=5,
+            equal_ability=False, curriculum=True,
+            num_agent_neighbors=2, num_landmark_neighbors=2,
+        )
+        env = PursuitEvasionEnv(config=cfg)
+        env.reset(seed=0)
+        assert env.curriculum_stage == 0
+        speeds_stage0 = [a.max_speed for a in env._get_world().agents if not a.adversary]
+        env.advance_curriculum()
+        env.reset(seed=0)
+        assert env.curriculum_stage == 1
+        speeds_stage1 = [a.max_speed for a in env._get_world().agents if not a.adversary]
+        # Prey get faster as curriculum advances (50% -> 75% of full speed).
+        assert speeds_stage1[0] > speeds_stage0[0]
+
+    def test_curriculum_with_equal_ability_emits_warning(self):
+        import warnings
+        cfg = PursuitEvasionConfig(
+            num_adversaries=2, num_good=2, num_obstacles=2, max_cycles=5,
+            equal_ability=True, curriculum=True,
+            num_agent_neighbors=2, num_landmark_neighbors=2,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            PursuitEvasionEnv(config=cfg)
+        assert any("equal_ability" in str(w.message) for w in caught)
+
+    def test_set_curriculum_stage_clamped(self):
+        cfg = PursuitEvasionConfig(
+            num_adversaries=2, num_good=2, num_obstacles=2, max_cycles=5,
+            equal_ability=False, curriculum=True,
+            num_agent_neighbors=2, num_landmark_neighbors=2,
+        )
+        env = PursuitEvasionEnv(config=cfg)
+        env.set_curriculum_stage(2)
+        env.reset(seed=0)
+        assert env.curriculum_stage == 2
+
+    def test_terminate_on_success_flag_reaches_env(self):
+        """When enabled, the underlying scenario has terminate_on_success=True."""
+        cfg = PursuitEvasionConfig(
+            num_adversaries=2, num_good=2, num_obstacles=2, max_cycles=5,
+            terminate_on_success=True,
+            num_agent_neighbors=2, num_landmark_neighbors=2,
+        )
+        env = PursuitEvasionEnv(config=cfg)
+        env.reset(seed=0)
+        # The scenario lives on env.env.unwrapped.scenario.
+        scenario = env.env.unwrapped.scenario
+        assert getattr(scenario, "terminate_on_success", False) is True
+
 
 # ---------------------------------------------------------------------------
 # APFEvaderPolicy
