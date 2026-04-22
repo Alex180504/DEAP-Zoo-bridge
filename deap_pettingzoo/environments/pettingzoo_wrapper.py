@@ -2,6 +2,13 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 from mpe2 import simple_tag_v3, simple_adversary_v3, simple_spread_v3
 
+# Optional: marl-aquarium is a third-party PettingZoo-compatible env.
+# Import lazily so the core package does not hard-depend on it.
+try:  # pragma: no cover - presence depends on optional extra
+    from marl_aquarium import aquarium_v0 as _aquarium_v0
+except ImportError:  # pragma: no cover
+    _aquarium_v0 = None
+
 
 class PettingZooWrapper:
     """
@@ -28,6 +35,8 @@ class PettingZooWrapper:
         'simple_adversary_v3': simple_adversary_v3,
         'simple_spread_v3': simple_spread_v3,
     }
+    if _aquarium_v0 is not None:
+        SUPPORTED_ENVS['aquarium_v0'] = _aquarium_v0
     
     def __init__(
         self,
@@ -226,9 +235,21 @@ class PettingZooWrapper:
             return None
     
     def close(self) -> None:
-        """Close environment and cleanup resources."""
-        if hasattr(self.env, 'close'):
-            self.env.close()
+        """Close environment and cleanup resources.
+
+        Some third-party PettingZoo envs (notably ``marl-aquarium``'s
+        ``aquarium_v0``) call ``sys.exit()`` from their ``close()`` method,
+        which would otherwise kill the whole Python process. We catch
+        ``SystemExit`` (and defensively ``Exception``) so closing is safe.
+        """
+        if self.env is not None and hasattr(self.env, 'close'):
+            try:
+                self.env.close()
+            except SystemExit:
+                # aquarium_v0.close() calls sys.exit(); ignore.
+                pass
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
         self.env = None
     
     def __repr__(self) -> str:

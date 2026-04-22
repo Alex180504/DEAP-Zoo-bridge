@@ -88,7 +88,9 @@ class AgileRLTrainer(BaselineTrainer):
         seed = int(params.pop("seed", 0))
         self._seed_everything(seed)
 
-        env = build_parallel_env(config.env_name)
+        env = build_parallel_env(
+            config.env_name, env_config=config.env_config or None
+        )
         obs_spaces, act_spaces, agent_ids = extract_space_metadata(env)
 
         # Split params: constructor vs. loop knobs.
@@ -117,7 +119,14 @@ class AgileRLTrainer(BaselineTrainer):
                 env, agent, agent_ids, budget_steps, params, seed
             )
         training_time = time.time() - start
-        env.close()
+        try:
+            env.close()
+        except SystemExit:
+            # Some third-party envs (e.g. marl-aquarium) call sys.exit()
+            # from close(); suppress to keep the process alive.
+            pass
+        except Exception:  # pragma: no cover
+            pass
 
         policy = AgileRLPolicyWrapper(agent, agent_ids, self.ALGORITHM_NAME)
         return TrainingResult(

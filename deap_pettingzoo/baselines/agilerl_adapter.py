@@ -17,6 +17,13 @@ from mpe2 import (
     simple_tag_v3,
 )
 
+# Optional: marl-aquarium (pip install marl-aquarium). Imported lazily so
+# users without the extra can still use MPE2 environments.
+try:  # pragma: no cover - presence depends on optional extra
+    from marl_aquarium import aquarium_v0 as _aquarium_v0
+except ImportError:  # pragma: no cover
+    _aquarium_v0 = None
+
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 
 
@@ -25,6 +32,19 @@ SUPPORTED_PARALLEL_ENVS = {
     "simple_tag_v3": simple_tag_v3,
     "simple_adversary_v3": simple_adversary_v3,
     "simple_spread_v3": simple_spread_v3,
+}
+if _aquarium_v0 is not None:
+    SUPPORTED_PARALLEL_ENVS["aquarium_v0"] = _aquarium_v0
+
+
+# Per-env default episode length, used when translating
+# BudgetMode.EVAL_EPISODES into env steps. MPE family defaults to
+# ``max_cycles=25``; marl-aquarium defaults to ``max_time_steps=3000``.
+DEFAULT_EPISODE_LEN = {
+    "simple_tag_v3": 25,
+    "simple_adversary_v3": 25,
+    "simple_spread_v3": 25,
+    "aquarium_v0": 3000,
 }
 
 
@@ -77,13 +97,14 @@ def translate_budget_to_env_steps(
     """Translate a :class:`TrainingConfig` budget to an env-step count.
 
     Supports :class:`BudgetMode.ENV_STEPS` directly and
-    :class:`BudgetMode.EVAL_EPISODES` by multiplying with
-    ``default_episode_len``.
+    :class:`BudgetMode.EVAL_EPISODES` by multiplying with an env-specific
+    default episode length (see :data:`DEFAULT_EPISODE_LEN`), falling
+    back to ``default_episode_len`` for unknown envs.
 
     Args:
         config: Training configuration.
-        default_episode_len: Assumed episode length for the
-            ``EVAL_EPISODES`` mode (MPE default is 25).
+        default_episode_len: Fallback episode length for environments not
+            listed in :data:`DEFAULT_EPISODE_LEN` (MPE default is 25).
 
     Returns:
         Integer number of environment steps.
@@ -96,7 +117,8 @@ def translate_budget_to_env_steps(
     if mode == BudgetMode.ENV_STEPS:
         return int(config.budget_value)
     if mode == BudgetMode.EVAL_EPISODES:
-        return int(config.budget_value) * default_episode_len
+        ep_len = DEFAULT_EPISODE_LEN.get(config.env_name, default_episode_len)
+        return int(config.budget_value) * int(ep_len)
     raise ValueError(
         f"Cannot translate budget mode {mode} to env steps; "
         "wall-clock training must use a timer-based stop condition."

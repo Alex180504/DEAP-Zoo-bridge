@@ -124,7 +124,7 @@ class EATrainer(BaselineTrainer):
         max_steps_per_episode = ea_params['max_steps_per_episode']
         
         # Setup environment and evaluator
-        env = PettingZooWrapper(config.env_name)
+        env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
         sample_obs = env.reset(seed=0)
         agent_id = env.possible_agents[0]
         

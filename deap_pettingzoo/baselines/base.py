@@ -30,6 +30,9 @@ class TrainingConfig:
         budget_value: Budget amount in units specified by budget_mode.
         num_seeds: Number of independent training runs with different seeds.
         algorithm_params: Algorithm-specific hyperparameters.
+        env_config: Optional kwargs forwarded to the underlying
+            ``parallel_env(...)`` constructor (e.g. ``max_cycles`` for
+            MPE2, ``max_time_steps``/``prey_count`` for aquarium_v0).
         output_dir: Directory for saving checkpoints and logs.
         render: Whether to render episodes during training.
     """
@@ -38,6 +41,7 @@ class TrainingConfig:
     budget_value: int
     num_seeds: int = 1
     algorithm_params: Dict[str, Any] = field(default_factory=dict)
+    env_config: Dict[str, Any] = field(default_factory=dict)
     output_dir: Optional[Path] = None
     render: bool = False
     
