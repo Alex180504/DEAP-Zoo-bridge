@@ -223,7 +223,13 @@ def compare_baselines(
 
 # Auto-register built-in trainers
 def _register_builtins():
-    """Register built-in trainers."""
+    """Register built-in trainers.
+
+    Importing the AgileRL trainer module does NOT require AgileRL to be
+    installed — the ``import agilerl`` call is deferred until ``train()``
+    is invoked.  That means we can always register the class; only calling
+    ``train()`` without the ``[rl-baselines]`` extra will raise ImportError.
+    """
     try:
         from deap_pettingzoo.baselines.ea_trainer import EATrainer
         register_trainer('ea', EATrainer)
@@ -231,8 +237,16 @@ def _register_builtins():
         pass
 
     try:
-        from deap_pettingzoo.baselines.maddpg_trainer import MADDPGTrainer
+        from deap_pettingzoo.baselines.agilerl_trainer import (
+            MADDPGTrainer,
+            MATD3Trainer,
+            IPPOTrainer,
+            MAPPOTrainer,
+        )
         register_trainer('maddpg', MADDPGTrainer)
+        register_trainer('matd3', MATD3Trainer)
+        register_trainer('ippo', IPPOTrainer)
+        register_trainer('mappo', MAPPOTrainer)
     except ImportError:
         pass
 

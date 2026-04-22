@@ -45,7 +45,7 @@ viz = [
     "seaborn>=0.12.0",
 ]
 rl-baselines = [
-    "stable-baselines3>=2.0.0",
+    "agilerl>=2.0.0",
     "torch>=2.0.0",
 ]
 all = [
