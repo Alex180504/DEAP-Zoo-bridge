@@ -493,3 +493,130 @@ class MAPPOTrainer(IPPOTrainer):
                 agent_ids=agent_ids,
                 **ctor_kwargs,
             )
+
+
+class GroupedIPPOTrainer(IPPOTrainer):
+    """IPPO with AgileRL's prefix-based agent grouping.
+
+    AgileRL 2.6+ exposes a grouping API on :class:`agilerl.algorithms.IPPO`:
+    agents whose IDs share a common prefix (split on the **final** ``_``
+    before any trailing digit block) share one actor/critic network. Classic
+    PettingZoo naming — ``adversary_0``, ``adversary_1``, ``agent_0`` — is
+    already compatible; agents in a group **must** have identical
+    observation and action spaces.
+
+    This subclass validates the grouping **up-front** and fails loudly
+    when the environment's agents cannot be sensibly grouped (mixed
+    prefixes with no structure, or same-prefix agents with mismatched
+    spaces). No silent fallback to per-agent networks.
+
+    Notes:
+        * Grouping reduces parameter count and typically speeds training
+          when roles are symmetric (e.g. predator–prey pursuit).
+        * Supply ``algorithm_params={"agent_ids": [...]}`` to override
+          AgileRL's default grouping behaviour; otherwise the env's own
+          ``possible_agents`` is used.
+    """
+
+    ALGORITHM_NAME = "ippo-grouped"
+    ON_POLICY = True
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            "discrete_action": True,
+            "continuous_action": True,
+            "needs_global_state": False,
+            "on_policy": True,
+        }
+
+    @staticmethod
+    def _group_prefix(agent_id: str) -> str:
+        """Return everything before the final ``_`` in ``agent_id``.
+
+        Mirrors AgileRL's own grouping convention. Agents without an
+        underscore are treated as singleton groups (prefix = full id).
+        """
+        if "_" not in agent_id:
+            return agent_id
+        return agent_id.rsplit("_", 1)[0]
+
+    @classmethod
+    def _validate_grouping(
+        cls,
+        agent_ids: List[str],
+        obs_spaces,
+        act_spaces,
+    ) -> Dict[str, List[str]]:
+        """Group ``agent_ids`` by prefix; fail loudly on inconsistencies.
+
+        Raises:
+            ValueError: If the environment yields only singleton groups
+                (grouping has no effect — user probably wants plain
+                ``IPPOTrainer``), or if any group contains agents with
+                mismatched observation or action spaces.
+
+        Returns:
+            ``{prefix: [agent_id, ...]}`` mapping, preserving insertion
+            order of the original ``agent_ids`` list.
+        """
+        groups: Dict[str, List[str]] = {}
+        for aid in agent_ids:
+            groups.setdefault(cls._group_prefix(aid), []).append(aid)
+
+        # Refuse to run when grouping is a no-op: every agent is its
+        # own group. That means the user gained nothing over IPPO and
+        # almost certainly intended a different env or trainer.
+        if all(len(members) == 1 for members in groups.values()):
+            raise ValueError(
+                f"GroupedIPPOTrainer: agent_ids={agent_ids!r} yield only "
+                "singleton groups. Use IPPOTrainer instead, or rename the "
+                "environment's agents so multiple share a prefix "
+                "(e.g. 'adversary_0', 'adversary_1')."
+            )
+
+        # Spaces within a group must be identical.
+        def _space_key(sp):
+            return repr(sp)
+
+        for prefix, members in groups.items():
+            if len(members) < 2:
+                continue
+            ref_aid = members[0]
+            ref_obs = obs_spaces[ref_aid]
+            ref_act = act_spaces[ref_aid]
+            for aid in members[1:]:
+                if _space_key(obs_spaces[aid]) != _space_key(ref_obs):
+                    raise ValueError(
+                        "GroupedIPPOTrainer: agents in group "
+                        f"{prefix!r} have mismatched observation spaces. "
+                        f"{ref_aid}: {ref_obs!r}; {aid}: {obs_spaces[aid]!r}."
+                    )
+                if _space_key(act_spaces[aid]) != _space_key(ref_act):
+                    raise ValueError(
+                        "GroupedIPPOTrainer: agents in group "
+                        f"{prefix!r} have mismatched action spaces. "
+                        f"{ref_aid}: {ref_act!r}; {aid}: {act_spaces[aid]!r}."
+                    )
+        return groups
+
+    def _build_agent(
+        self,
+        alg_cls,
+        obs_spaces,
+        act_spaces,
+        agent_ids: List[str],
+        ctor_kwargs: Dict[str, Any],
+    ):
+        """Validate grouping then delegate to AgileRL's IPPO constructor.
+
+        AgileRL's IPPO detects grouping from ``agent_ids`` internally —
+        no extra kwarg required — so all we do here is the pre-flight
+        consistency check.
+        """
+        self._validate_grouping(agent_ids, obs_spaces, act_spaces)
+        return alg_cls(
+            observation_spaces=obs_spaces,
+            action_spaces=act_spaces,
+            agent_ids=agent_ids,
+            **ctor_kwargs,
+        )
