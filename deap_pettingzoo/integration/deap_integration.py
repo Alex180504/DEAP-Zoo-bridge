@@ -110,6 +110,17 @@ def evaluate_individual(
     return evaluator.evaluate(individual, **kwargs)
 
 
+SUPPORTED_SELECTION_METHODS = (
+    "tournament", "roulette", "best", "random",
+)
+SUPPORTED_CROSSOVER_METHODS = (
+    "blend", "one_point", "two_point", "uniform", "sbx", "es_blend",
+)
+SUPPORTED_MUTATION_METHODS = (
+    "gaussian", "polynomial_bounded",
+)
+
+
 def create_toolbox(
     genome_config: Dict[str, Any],
     evaluator: BaseEvaluator,
@@ -119,7 +130,7 @@ def create_toolbox(
 ) -> base.Toolbox:
     """
     Create and configure DEAP toolbox with all genetic operators.
-    
+
     Args:
         genome_config: Configuration for genome creation
             - layer_sizes: List[int] - Network architecture
@@ -128,48 +139,65 @@ def create_toolbox(
             - random_seed: int (optional) - Seed for reproducibility
         evaluator: Evaluator for fitness calculation
         selection_config: Selection operator configuration
-            - tournament_size: int (default: 3)
+            - method: str (default: 'tournament') - one of
+              ``'tournament'``, ``'roulette'``, ``'best'``, ``'random'``
+            - tournament_size: int (default: 3, only for 'tournament')
         crossover_config: Crossover operator configuration
-            - alpha: float (default: 0.5) - Blend crossover alpha
+            - method: str (default: 'blend') - one of
+              ``'blend'``, ``'one_point'``, ``'two_point'``, ``'uniform'``,
+              ``'sbx'`` (simulated-binary-bounded), ``'es_blend'``
+            - alpha: float (default: 0.5) - blend/BLX-α parameter
+            - indpb: float (default: 0.5) - per-gene swap prob for 'uniform'
+            - eta: float (default: 15.0) - SBX distribution index
         mutation_config: Mutation operator configuration
+            - method: str (default: 'gaussian') - one of
+              ``'gaussian'``, ``'polynomial_bounded'``
             - mu: float (default: 0.0) - Gaussian mean
             - sigma: float (default: 0.2) - Gaussian std
             - indpb: float (default: 0.1) - Independent gene probability
-            
+            - eta: float (default: 15.0) - polynomial-bounded distribution index
+
     Returns:
         Configured DEAP toolbox
-        
+
     Example:
         >>> toolbox = create_toolbox(
         ...     genome_config={'layer_sizes': [10, 64, 4]},
-        ...     evaluator=evaluator
+        ...     evaluator=evaluator,
+        ...     selection_config={'method': 'roulette'},
+        ...     crossover_config={'method': 'sbx', 'eta': 20.0},
+        ...     mutation_config={'method': 'polynomial_bounded', 'eta': 20.0},
         ... )
         >>> pop = toolbox.population(n=100)
         >>> fitnesses = [toolbox.evaluate(ind) for ind in pop]
+
+    Notes:
+        * Omitting any ``method`` key preserves the historical defaults
+          (``tournament`` / ``blend`` / ``gaussian``), so existing call
+          sites remain unchanged.
+        * ``'sbx'`` and ``'polynomial_bounded'`` use
+          ``genome_config['weight_range']`` as per-gene bounds.
+        * Integer/binary/permutation operators are intentionally not
+          dispatched here — they require a non-continuous genome and are
+          tracked as future work.
     """
     # Setup default configs
     selection_config = selection_config or {}
     crossover_config = crossover_config or {}
     mutation_config = mutation_config or {}
-    
+
     # Extract config values
     layer_sizes = genome_config['layer_sizes']
     activation = genome_config.get('activation', 'tanh')
     weight_range = genome_config.get('weight_range', (-1.0, 1.0))
     base_seed = genome_config.get('random_seed', None)
-    
-    tournament_size = selection_config.get('tournament_size', 3)
-    alpha = crossover_config.get('alpha', 0.5)
-    mu = mutation_config.get('mu', 0.0)
-    sigma = mutation_config.get('sigma', 0.2)
-    indpb = mutation_config.get('indpb', 0.1)
-    
+
     # Create toolbox
     toolbox = base.Toolbox()
-    
+
     # Counter for unique seeds
     seed_counter = {'count': 0}
-    
+
     def make_individual():
         """Create individual with unique seed."""
         if base_seed is not None:
@@ -177,30 +205,181 @@ def create_toolbox(
             seed_counter['count'] += 1
         else:
             seed = None
-        
+
         return create_deap_individual(
             layer_sizes=layer_sizes,
             activation=activation,
             weight_range=weight_range,
             random_seed=seed
         )
-    
+
     # Register individual and population
     toolbox.register("individual", make_individual)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    
+
     # Register evaluation
     toolbox.register("evaluate", evaluate_individual, evaluator=evaluator)
-    
-    # Register genetic operators
-    toolbox.register("mate", crossover_blend, alpha=alpha)
-    toolbox.register("mutate", mutate_gaussian, mu=mu, sigma=sigma, indpb=indpb)
-    toolbox.register("select", tools.selTournament, tournsize=tournament_size)
-    
+
+    # Dispatch genetic operators
+    _register_selection(toolbox, selection_config)
+    _register_crossover(toolbox, crossover_config, weight_range)
+    _register_mutation(toolbox, mutation_config, weight_range)
+
     # Register clone for deep copying
     toolbox.register("clone", clone_individual)
-    
+
     return toolbox
+
+
+def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
+    """Register ``toolbox.select`` based on ``cfg['method']``.
+
+    Selection operators only read ``individual.fitness`` so they work on
+    the existing ``creator.Individual`` (plain object) without adapters.
+    """
+    method = cfg.get("method", "tournament")
+    if method == "tournament":
+        toolbox.register(
+            "select",
+            tools.selTournament,
+            tournsize=cfg.get("tournament_size", 3),
+        )
+    elif method == "roulette":
+        toolbox.register("select", tools.selRoulette)
+    elif method == "best":
+        toolbox.register("select", tools.selBest)
+    elif method == "random":
+        toolbox.register("select", tools.selRandom)
+    else:
+        raise ValueError(
+            f"Unknown selection method {method!r}. "
+            f"Supported: {SUPPORTED_SELECTION_METHODS}"
+        )
+
+
+def _register_crossover(
+    toolbox: base.Toolbox,
+    cfg: Dict[str, Any],
+    weight_range: tuple,
+) -> None:
+    """Register ``toolbox.mate`` based on ``cfg['method']``.
+
+    Non-blend operators delegate to DEAP built-ins via
+    :func:`_cx_on_weights`, which extracts each parent's flat weight
+    vector into a list, lets DEAP mutate it in place, then writes the
+    result back through :meth:`FixedTopologyGenome.set_weights`.
+    """
+    method = cfg.get("method", "blend")
+    if method == "blend":
+        toolbox.register("mate", crossover_blend, alpha=cfg.get("alpha", 0.5))
+        return
+    if method == "one_point":
+        toolbox.register("mate", _cx_on_weights, tool=tools.cxOnePoint)
+        return
+    if method == "two_point":
+        toolbox.register("mate", _cx_on_weights, tool=tools.cxTwoPoint)
+        return
+    if method == "uniform":
+        toolbox.register(
+            "mate",
+            _cx_on_weights,
+            tool=tools.cxUniform,
+            indpb=cfg.get("indpb", 0.5),
+        )
+        return
+    if method == "sbx":
+        low, up = float(weight_range[0]), float(weight_range[1])
+        toolbox.register(
+            "mate",
+            _cx_on_weights,
+            tool=tools.cxSimulatedBinaryBounded,
+            eta=cfg.get("eta", 15.0),
+            low=low,
+            up=up,
+        )
+        return
+    if method == "es_blend":
+        toolbox.register(
+            "mate",
+            _cx_on_weights,
+            tool=tools.cxBlend,
+            alpha=cfg.get("alpha", 0.5),
+        )
+        return
+    raise ValueError(
+        f"Unknown crossover method {method!r}. "
+        f"Supported: {SUPPORTED_CROSSOVER_METHODS}"
+    )
+
+
+def _register_mutation(
+    toolbox: base.Toolbox,
+    cfg: Dict[str, Any],
+    weight_range: tuple,
+) -> None:
+    """Register ``toolbox.mutate`` based on ``cfg['method']``.
+
+    Non-gaussian operators delegate to DEAP built-ins via
+    :func:`_mut_on_weights`.
+    """
+    method = cfg.get("method", "gaussian")
+    if method == "gaussian":
+        toolbox.register(
+            "mutate",
+            mutate_gaussian,
+            mu=cfg.get("mu", 0.0),
+            sigma=cfg.get("sigma", 0.2),
+            indpb=cfg.get("indpb", 0.1),
+        )
+        return
+    if method == "polynomial_bounded":
+        low, up = float(weight_range[0]), float(weight_range[1])
+        toolbox.register(
+            "mutate",
+            _mut_on_weights,
+            tool=tools.mutPolynomialBounded,
+            eta=cfg.get("eta", 15.0),
+            low=low,
+            up=up,
+            indpb=cfg.get("indpb", 0.1),
+        )
+        return
+    # TODO: ``tools.mutESLogNormal`` requires individuals to carry a
+    # per-gene strategy vector (ES self-adaptation). Supporting it would
+    # need a new genome variant; deferred.
+    raise ValueError(
+        f"Unknown mutation method {method!r}. "
+        f"Supported: {SUPPORTED_MUTATION_METHODS}"
+    )
+
+
+def _cx_on_weights(ind1: Any, ind2: Any, tool, **kwargs) -> tuple:
+    """Adapter that runs a DEAP sequence crossover on genome weights.
+
+    The project's ``creator.Individual`` is a plain object (not a list),
+    so DEAP's built-in crossovers (``cxOnePoint``, ``cxUniform`` …) can't
+    operate on it directly. This helper extracts the flat weight vector
+    into a plain list, defers to ``tool(list1, list2, **kwargs)``, then
+    writes the mutated lists back through
+    :meth:`FixedTopologyGenome.set_weights`.
+    """
+    w1 = ind1.genome.get_weights().tolist()
+    w2 = ind2.genome.get_weights().tolist()
+    tool(w1, w2, **kwargs)
+    ind1.genome.set_weights(np.asarray(w1, dtype=np.float64))
+    ind2.genome.set_weights(np.asarray(w2, dtype=np.float64))
+    return ind1, ind2
+
+
+def _mut_on_weights(individual: Any, tool, **kwargs) -> tuple:
+    """Adapter that runs a DEAP sequence mutation on genome weights.
+
+    Mirrors :func:`_cx_on_weights` for single-parent mutation operators.
+    """
+    weights = individual.genome.get_weights().tolist()
+    tool(weights, **kwargs)
+    individual.genome.set_weights(np.asarray(weights, dtype=np.float64))
+    return (individual,)
 
 
 def crossover_blend(ind1: Any, ind2: Any, alpha: float = 0.5) -> tuple:
