@@ -11,7 +11,7 @@ Provides helpers to:
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from pettingzoo.mpe import (
+from mpe2 import (
     simple_adversary_v3,
     simple_spread_v3,
     simple_tag_v3,
