@@ -6,6 +6,7 @@ policies from any training algorithm (EA, MARL, etc.).
 """
 
 from typing import Optional, Dict, Any, List, Tuple
+import json
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -58,7 +59,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         """
         # Build a hashable cache key that includes env_config and render_mode
         render_mode = 'human' if render else None
-        config_key = tuple(sorted(env_config.items())) if env_config else None
+        config_key = json.dumps(env_config, sort_keys=True) if env_config else None
         cache_key = (env_name, config_key, render_mode)
 
         # Get or create environment
