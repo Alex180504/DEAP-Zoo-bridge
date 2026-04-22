@@ -1,0 +1,80 @@
+@startuml sequence_agilerl_training
+!theme plain
+
+title AgileRL Training Workflow (in-process)
+
+actor Caller
+participant "AgileRLTrainer\n(concrete subclass)" as Trainer
+participant "agilerl_adapter" as Adapter
+participant "PettingZoo\nParallelEnv" as Env
+participant "agilerl.algorithms.*\n(MADDPG/MATD3/IPPO)" as Agent
+participant "MultiAgentReplayBuffer\n(off-policy only)" as Memory
+participant "AgileRLPolicyWrapper" as Wrapper
+
+Caller -> Trainer: train(TrainingConfig)
+activate Trainer
+
+== Setup ==
+
+Trainer -> Trainer: _import_algorithm()
+note right: Lazy ``importlib.import_module``;\nraises ImportError with install\nhint if extras missing.
+
+Trainer -> Adapter: build_parallel_env(env_name)
+activate Adapter
+Adapter -> Env **: parallel_env(**env_config)
+Adapter --> Trainer: env
+deactivate Adapter
+
+Trainer -> Adapter: extract_space_metadata(env)
+Adapter --> Trainer: (obs_spaces, act_spaces, agent_ids)
+
+Trainer -> Trainer: _seed_everything(seed)
+
+Trainer -> Agent **: AlgCls(observation_spaces, action_spaces, agent_ids, device, ...)
+
+alt off-policy (MADDPG/MATD3)
+    Trainer -> Memory **: MultiAgentReplayBuffer(memory_size, agent_ids)
+end
+
+Trainer -> Trainer: _budget_to_steps(config)
+note right: ENV_STEPS → as-is\nEVAL_EPISODES × 25\nWALL_CLOCK → huge cap
+
+== Rollout loop ==
+
+Trainer -> Env: reset(seed)
+Env --> Trainer: (obs, info)
+
+loop for step in [0, budget_steps)
+    Trainer -> Agent: get_action(obs, infos=info)
+    Agent --> Trainer: (actions, raw_actions)
+
+    Trainer -> Env: step(actions)
+    Env --> Trainer: (next_obs, reward, term, trunc, info)
+
+    alt off-policy
+        Trainer -> Memory: save_to_memory(obs, raw_actions, reward, next_obs, term)
+        opt step ≥ learning_delay AND len(memory) ≥ batch_size
+            Trainer -> Memory: sample(batch_size)
+            Memory --> Trainer: experiences
+            Trainer -> Agent: learn(experiences)
+        end
+    else on-policy (every rollout_steps steps)
+        Trainer -> Agent: collect_rollouts(agent, env, n_steps)
+        Trainer -> Agent: learn()
+    end
+
+    alt episode done
+        Trainer -> Trainer: record_episode_reward()
+        Trainer -> Env: reset()
+    end
+end
+
+== Wrap-up ==
+
+Trainer -> Wrapper **: AgileRLPolicyWrapper(agent, agent_ids, ALGORITHM_NAME)
+note right: Rotates through agent_ids so the\nunified PolicyProtocol.get_action(obs)\ncan route per-agent without an id arg.
+
+Trainer --> Caller: TrainingResult(algorithm, policy, metrics, metadata, seed, training_time)
+deactivate Trainer
+
+@enduml
