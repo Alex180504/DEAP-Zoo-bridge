@@ -190,3 +190,80 @@ def make_cma_stats() -> tools.Statistics:
     stats.register("min", np.min)
     stats.register("max", np.max)
     return stats
+
+
+def setup_cma_one_plus_lambda_strategy(
+    genome_config: Dict[str, Any],
+    sigma0: float = 0.3,
+    population_size: Optional[int] = None,
+    parent: Optional[np.ndarray] = None,
+) -> Tuple[cma.StrategyOnePlusLambda, int]:
+    """Build a :class:`deap.cma.StrategyOnePlusLambda`.
+
+    The (1+λ)-CMA-ES variant keeps a single parent between generations
+    and samples ``lambda_`` offspring around it. It is typically more
+    sample-efficient than the default (μ/μ, λ) strategy for unimodal
+    objectives, at the price of weaker exploration.
+
+    Args:
+        genome_config: Dict with ``layer_sizes`` (required); optional
+            ``activation`` / ``weight_range`` mirror
+            :func:`setup_cma_strategy`.
+        sigma0: Initial step size.
+        population_size: Override ``lambda_``. Defaults to the DEAP
+            builtin ``4 + int(3 * log(N))``.
+        parent: Initial parent (shape ``(N,)``). Zero vector by default.
+
+    Returns:
+        ``(strategy, dimension)``. The strategy exposes ``.generate`` and
+        ``.update`` with the same signatures as :class:`cma.Strategy`,
+        so it plugs into :func:`register_cma_toolbox` unchanged.
+
+    Raises:
+        ValueError: If ``layer_sizes`` is missing or ``parent`` has the
+            wrong shape.
+    """
+    if "layer_sizes" not in genome_config:
+        raise ValueError("genome_config must contain 'layer_sizes'")
+
+    probe = FixedTopologyGenome(
+        layer_sizes=genome_config["layer_sizes"],
+        activation=genome_config.get("activation", "tanh"),
+        weight_range=genome_config.get("weight_range", (-1.0, 1.0)),
+        random_seed=0,
+    )
+    dimension = probe.get_weight_count()
+
+    if parent is None:
+        parent = np.zeros(dimension, dtype=np.float64)
+    else:
+        parent = np.asarray(parent, dtype=np.float64)
+        if parent.shape != (dimension,):
+            raise ValueError(
+                f"parent has shape {parent.shape}, expected ({dimension},)"
+            )
+
+    kwargs: Dict[str, Any] = {}
+    if population_size is not None:
+        kwargs["lambda_"] = int(population_size)
+
+    # DEAP's StrategyOnePlusLambda expects ``parent`` to be an
+    # Individual whose ``.fitness`` attribute is already populated — the
+    # first call to :meth:`update` does ``self.parent.fitness <= ind.fitness``.
+    # We wrap the raw vector as a CMAIndividual and seed its fitness with
+    # ``-inf`` so the first generation's offspring are all counted as
+    # "improvements" (the canonical DEAP pattern is to evaluate the
+    # parent up-front, but callers only have access to the evaluator via
+    # the trainer; deferring that to the trainer would leak state).
+    _setup_cma_creators()
+    parent_ind = creator.CMAIndividual(parent.tolist())
+    probe.set_weights(parent)
+    parent_ind.genome = probe
+    parent_ind.fitness.values = (float("-inf"),)
+
+    strategy = cma.StrategyOnePlusLambda(
+        parent=parent_ind,
+        sigma=float(sigma0),
+        **kwargs,
+    )
+    return strategy, dimension
