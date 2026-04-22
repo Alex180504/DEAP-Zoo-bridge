@@ -192,6 +192,26 @@ class AgileRLTrainer(BaselineTrainer):
             **ctor_kwargs,
         )
 
+    @staticmethod
+    def _unwrap_actions_for_env(actions: Dict[str, Any]) -> Dict[str, Any]:
+        """Strip a leading vectorization dim of size 1 from each action.
+
+        AgileRL always returns batched actions (shape ``(1, ...)`` for a
+        single non-vectorized env). PettingZoo's parallel API expects
+        unbatched actions (a scalar for ``Discrete`` spaces, a 1-D array
+        for ``Box`` spaces), so we squeeze the leading dim per-agent.
+        """
+        unwrapped: Dict[str, Any] = {}
+        for agent_id, act in actions.items():
+            arr = np.asarray(act)
+            if arr.ndim > 0 and arr.shape[0] == 1:
+                arr = arr[0]
+                # Discrete actions should be Python ints for PettingZoo.
+                if arr.shape == ():
+                    arr = arr.item()
+            unwrapped[agent_id] = arr
+        return unwrapped
+
     # --- Training loops ---------------------------------------------------
 
     def _run_off_policy(
@@ -228,7 +248,8 @@ class AgileRLTrainer(BaselineTrainer):
             actions, raw_actions = (
                 action_result if isinstance(action_result, tuple) else (action_result, action_result)
             )
-            next_obs, reward, termination, truncation, info = env.step(actions)
+            env_actions = self._unwrap_actions_for_env(actions)
+            next_obs, reward, termination, truncation, info = env.step(env_actions)
 
             memory.save_to_memory(
                 obs, raw_actions, reward, next_obs, termination
@@ -336,8 +357,9 @@ class AgileRLTrainer(BaselineTrainer):
                     if isinstance(action_result, tuple)
                     else action_result
                 )
+                env_actions = self._unwrap_actions_for_env(actions)
                 next_obs, reward, termination, truncation, info = env.step(
-                    actions
+                    env_actions
                 )
                 ep_reward += float(sum(reward.values()))
                 done = any(termination.values()) or any(truncation.values())
