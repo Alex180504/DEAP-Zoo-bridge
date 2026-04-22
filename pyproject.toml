@@ -49,8 +49,11 @@ rl-baselines = [
     "agilerl>=2.0.0",
     "torch>=2.0.0",
 ]
+aquarium = [
+    "marl-aquarium>=0.1.10",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines]",
+    "deap-pettingzoo[dev,viz,rl-baselines,aquarium]",
 ]
 
 [tool.setuptools]

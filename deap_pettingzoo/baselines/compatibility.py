@@ -193,7 +193,9 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
     # Global state: PettingZoo parallel envs expose .state() when centralised
     has_global_state = callable(getattr(env, 'state', None))
 
-    env.close()
+    # Use the wrapper's close() which guards against SystemExit raised by
+    # some third-party envs (e.g. marl-aquarium's aquarium_v0).
+    wrapper.close()
 
     return EnvironmentInfo(
         env_name=env_name,
