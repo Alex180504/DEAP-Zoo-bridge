@@ -1,4 +1,4 @@
-﻿"""Environment wrappers and utilities for PettingZoo."""
+"""Environment wrappers and utilities for PettingZoo."""
 
 from .pettingzoo_wrapper import PettingZooWrapper
 from .pursuit_evasion import (

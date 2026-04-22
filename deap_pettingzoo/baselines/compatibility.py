@@ -17,7 +17,7 @@ Typical usage::
     )
 
     env_info = inspect_environment('simple_spread_v3')
-    result = validate_compatibility(trainer, env_info, algorithm_name='ea')
+    result = validate_compatibility(trainer, env_info.env_name, algorithm_name='ea')
     result.raise_if_incompatible()
 
     matrix = build_compatibility_matrix(

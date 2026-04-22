@@ -87,23 +87,26 @@ class TestSingleEpisodeEvaluator:
             env_name='simple_spread_v3',
             env_config={'max_cycles': 25}
         )
-        local_obs = local_wrapper.reset(seed=42)
-        local_agent = list(local_obs.keys())[0]
-        local_obs_dim = len(local_obs[local_agent])
-        local_action_dim = local_wrapper.action_space(local_agent).n
+        try:
+            local_obs = local_wrapper.reset(seed=42)
+            local_agent = list(local_obs.keys())[0]
+            local_obs_dim = len(local_obs[local_agent])
+            local_action_dim = local_wrapper.action_space(local_agent).n
 
-        local_genome = FixedTopologyGenome(
-            layer_sizes=[local_obs_dim, 16, local_action_dim],
-            random_seed=42
-        )
-        local_individual = MockIndividual(local_genome)
-        evaluator = SingleEpisodeEvaluator(env_wrapper=local_wrapper)
+            local_genome = FixedTopologyGenome(
+                layer_sizes=[local_obs_dim, 16, local_action_dim],
+                random_seed=42
+            )
+            local_individual = MockIndividual(local_genome)
+            evaluator = SingleEpisodeEvaluator(env_wrapper=local_wrapper)
 
-        fitness1 = evaluator.evaluate(local_individual, seed=42)
-        fitness2 = evaluator.evaluate(local_individual, seed=42)
+            fitness1 = evaluator.evaluate(local_individual, seed=42)
+            fitness2 = evaluator.evaluate(local_individual, seed=42)
 
-        # Same seed should produce identical results
-        assert fitness1 == fitness2
+            # Same seed should produce identical results
+            assert fitness1 == fitness2
+        finally:
+            local_wrapper.close()
     
     def test_max_steps_limits_episode(self, wrapper, individual):
         """Test max_steps parameter limits episode length."""
