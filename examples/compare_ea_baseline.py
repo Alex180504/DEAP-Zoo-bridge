@@ -4,8 +4,11 @@ Example: Compare EA vs MADDPG on simple_spread_v3
 This script demonstrates the full baseline comparison API:
 - Pre-flight compatibility check via the extensibility module
 - EA (Evolutionary Algorithm via DEAP) training
-- MADDPG (Multi-Agent DDPG via cleanMARL) training — skipped gracefully
-  when cleanMARL is not installed, so the script always runs end-to-end
+- MADDPG (Multi-Agent DDPG via AgileRL) training — requires the
+  optional ``rl-baselines`` extra
+  (``pip install 'deap-pettingzoo[rl-baselines]'``); AgileRL is imported
+  lazily inside :meth:`MADDPGTrainer.train`, so the script runs
+  end-to-end regardless of whether the extra is installed.
 - Side-by-side reward statistics and a compatibility matrix
 """
 
@@ -93,13 +96,19 @@ def main():
                 },
             },
             'maddpg': {
+                # MADDPGTrainer.__init__ takes (device, verbose). Algorithm
+                # hyperparameters go under 'algorithm_params' and are
+                # forwarded to AgileRL's MADDPG(...) constructor.
                 'trainer_params': {
-                    'hidden_dim': 64,
-                    'learning_rate': 3e-4,
-                    'batch_size': 128,
+                    'device': 'cpu',
                 },
                 'algorithm_params': {
-                    'max_steps_per_episode': 200,
+                    'seed': 0,
+                    'batch_size': 128,
+                    'memory_size': 10_000,
+                    'learning_delay': 500,
+                    'lr_actor': 3e-4,
+                    'lr_critic': 3e-4,
                 },
             },
         },
