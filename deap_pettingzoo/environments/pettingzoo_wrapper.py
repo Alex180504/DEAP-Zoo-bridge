@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
-from pettingzoo.mpe import simple_tag_v3, simple_adversary_v3, simple_spread_v3
+from mpe2 import simple_tag_v3, simple_adversary_v3, simple_spread_v3
 
 
 class PettingZooWrapper:

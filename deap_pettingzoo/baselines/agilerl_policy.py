@@ -74,11 +74,11 @@ class AgileRLPolicyWrapper:
         actions = result[0] if isinstance(result, tuple) else result
         action = np.asarray(actions[agent_id])
 
-        # Strip a leading vectorization dimension of size 1, if present.
-        if action.ndim > 0 and action.shape[0] == 1:
+        # Strip leading vectorization dims of size 1.
+        while action.ndim > 0 and action.shape[0] == 1:
             action = action[0]
-            if action.shape == ():
-                return action.item()
+        if action.shape == ():
+            return action.item()
         return action
 
     def reset(self) -> None:
@@ -93,20 +93,40 @@ class AgileRLPolicyWrapper:
         agent whose observation has not yet been seen this episode.
 
         Required because AgileRL's multi-agent algorithms expect every
-        agent to be keyed in the input dict. Placeholders only matter for
-        decentralized-actor algorithms in the warm-up phase before the
-        first full rotation completes; thereafter every slot holds the
-        most recent real observation for that agent.
+        agent they were constructed with to be keyed in the input dict
+        — not just the subset this wrapper dispatches for. Placeholders
+        only matter for decentralized-actor algorithms in the warm-up
+        phase before the first full rotation completes; thereafter
+        every slot holds the most recent real observation for that
+        agent.
         """
         full: Dict[str, np.ndarray] = {}
         fallback_shape = next(iter(self._obs_cache.values())).shape
         fallback_dtype = next(iter(self._obs_cache.values())).dtype
-        for aid in self._agent_ids:
+        # Use the underlying algorithm's full agent roster so subsets
+        # (e.g. evaders-only wrappers) still satisfy MADDPG/MATD3's
+        # "every actor keyed" precondition.
+        for aid in self._full_agent_roster():
             if aid in self._obs_cache:
                 full[aid] = self._obs_cache[aid]
             else:
                 full[aid] = self._zero_obs_for(aid, fallback_shape, fallback_dtype)
         return full
+
+    def _full_agent_roster(self) -> list:
+        """Best-effort list of every agent the underlying algorithm
+        expects in its input dict. Falls back to this wrapper's own
+        agent_ids if nothing else is exposed.
+        """
+        roster = getattr(self._agent, "agent_ids", None)
+        if isinstance(roster, (list, tuple)):
+            return list(roster)
+        spaces = getattr(self._agent, "observation_spaces", None) or getattr(
+            self._agent, "possible_observation_spaces", None
+        )
+        if isinstance(spaces, dict):
+            return list(spaces.keys())
+        return list(self._agent_ids)
 
     def _zero_obs_for(
         self, agent_id: str, fallback_shape, fallback_dtype
@@ -114,14 +134,23 @@ class AgileRLPolicyWrapper:
         """Best-effort zero observation for ``agent_id``.
 
         Uses the wrapped algorithm's declared observation spaces when
-        available; otherwise falls back to a zero array of the same
-        shape/dtype as an already-observed agent.
+        available (dict in older AgileRL, list aligned with ``agent_ids``
+        in >=2.6); otherwise falls back to the shape/dtype of an
+        already-observed agent.
         """
         spaces = getattr(self._agent, "observation_spaces", None) or getattr(
             self._agent, "possible_observation_spaces", None
         )
-        if spaces is not None and agent_id in spaces:
+        space = None
+        if isinstance(spaces, dict) and agent_id in spaces:
             space = spaces[agent_id]
+        elif isinstance(spaces, (list, tuple)):
+            roster = getattr(self._agent, "agent_ids", None)
+            if roster is not None and agent_id in list(roster):
+                idx = list(roster).index(agent_id)
+                if idx < len(spaces):
+                    space = spaces[idx]
+        if space is not None:
             shape = getattr(space, "shape", fallback_shape) or fallback_shape
             dtype = getattr(space, "dtype", fallback_dtype) or fallback_dtype
             return np.zeros(shape, dtype=dtype)
