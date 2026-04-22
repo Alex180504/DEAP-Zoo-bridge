@@ -11,6 +11,7 @@ from .deap_integration import (
 )
 from .cma_integration import (
     setup_cma_strategy,
+    setup_cma_one_plus_lambda_strategy,
     make_cma_ind_init,
     register_cma_toolbox,
     make_cma_stats,
@@ -25,6 +26,7 @@ __all__ = [
     'mutate_gaussian',
     'clone_individual',
     'setup_cma_strategy',
+    'setup_cma_one_plus_lambda_strategy',
     'make_cma_ind_init',
     'register_cma_toolbox',
     'make_cma_stats',

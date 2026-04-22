@@ -28,6 +28,7 @@ from deap_pettingzoo.integration.cma_integration import (
     make_cma_ind_init,
     make_cma_stats,
     register_cma_toolbox,
+    setup_cma_one_plus_lambda_strategy,
     setup_cma_strategy,
 )
 
@@ -48,6 +49,7 @@ class CMAESTrainer(BaselineTrainer):
         sigma0: float = 0.3,
         activation: str = "tanh",
         weight_range: tuple = (-1.0, 1.0),
+        variant: str = "mu_mu_lambda",
     ):
         """Initialise the CMA-ES trainer.
 
@@ -63,12 +65,24 @@ class CMAESTrainer(BaselineTrainer):
             weight_range: Probed bounds used when materialising genomes
                 from sampled vectors (CMA itself is unbounded — this
                 only affects the genome's bookkeeping).
+            variant: CMA-ES flavour. ``"mu_mu_lambda"`` (default) uses
+                :class:`deap.cma.Strategy` — the standard (μ/μ_w, λ)
+                rank-μ update. ``"one_plus_lambda"`` uses
+                :class:`deap.cma.StrategyOnePlusLambda` — a single-parent
+                elitist variant that is typically more sample-efficient
+                on unimodal objectives.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
         self.sigma0 = sigma0
         self.activation = activation
         self.weight_range = weight_range
+        if variant not in {"mu_mu_lambda", "one_plus_lambda"}:
+            raise ValueError(
+                f"Unknown CMA-ES variant {variant!r}. "
+                "Expected 'mu_mu_lambda' or 'one_plus_lambda'."
+            )
+        self.variant = variant
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train CMA-ES with the given configuration.
@@ -116,11 +130,7 @@ class CMAESTrainer(BaselineTrainer):
             "weight_range": self.weight_range,
         }
 
-        strategy, dimension = setup_cma_strategy(
-            genome_config=genome_config,
-            sigma0=self.sigma0,
-            population_size=self.population_size,
-        )
+        strategy, dimension = self._build_strategy(genome_config)
         ind_init = make_cma_ind_init(genome_config)
         toolbox = register_cma_toolbox(strategy, ind_init, evaluator)
 
@@ -173,6 +183,7 @@ class CMAESTrainer(BaselineTrainer):
                     "sigma0": self.sigma0,
                     "activation": self.activation,
                     "weight_range": list(self.weight_range),
+                    "variant": self.variant,
                 },
             },
             training_time=training_time,
@@ -221,3 +232,20 @@ class CMAESTrainer(BaselineTrainer):
             "num_generations": int(num_generations),
             "max_steps_per_episode": int(max_steps_per_episode),
         }
+    def _build_strategy(self, genome_config: Dict[str, Any]):
+        """Dispatch to the CMA-ES flavour selected by ``self.variant``."""
+        if self.variant == "mu_mu_lambda":
+            return setup_cma_strategy(
+                genome_config=genome_config,
+                sigma0=self.sigma0,
+                population_size=self.population_size,
+            )
+        if self.variant == "one_plus_lambda":
+            return setup_cma_one_plus_lambda_strategy(
+                genome_config=genome_config,
+                sigma0=self.sigma0,
+                population_size=self.population_size,
+            )
+        raise ValueError(  # pragma: no cover — guarded in __init__.
+            f"Unknown CMA-ES variant {self.variant!r}"
+        )
