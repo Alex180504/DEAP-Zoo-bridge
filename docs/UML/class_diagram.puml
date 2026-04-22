@@ -283,17 +283,48 @@ package "deap_pettingzoo.baselines" {
         - _wrap_genome_as_policy(genome) -> PolicyProtocol
     }
     
-    class MADDPGTrainer {
-        - cleanmarl_path: str
+    abstract class AgileRLTrainer {
+        # ALGORITHM_NAME: str
+        # ALGORITHM_IMPORT: tuple[str, str]
+        # ON_POLICY: bool
+        # DEFAULT_PARAMS: dict
         --
         + train(config: TrainingConfig) -> TrainingResult
         + supports_budget_mode(mode: BudgetMode) -> bool
-        + get_capabilities() -> dict
-        - _launch_subprocess(config: TrainingConfig) -> subprocess.Popen
-        - _monitor_training(process) -> dict
-        - _load_checkpoint(checkpoint_path: str) -> PolicyProtocol
+        + {abstract} get_capabilities() -> dict
+        # _import_algorithm() -> type
+        # _build_agent(cls, obs_spaces, act_spaces, agent_ids, kwargs)
+        # _run_off_policy(env, agent, ...) -> dict
+        # _run_on_policy(env, agent, ...) -> dict
     }
-    
+
+    class MADDPGTrainer {
+        # ALGORITHM_NAME = "maddpg"
+        # ON_POLICY = False
+    }
+    class MATD3Trainer {
+        # ALGORITHM_NAME = "matd3"
+        # ON_POLICY = False
+    }
+    class IPPOTrainer {
+        # ALGORITHM_NAME = "ippo"
+        # ON_POLICY = True
+    }
+    class MAPPOTrainer {
+        # ALGORITHM_NAME = "mappo"
+        # ON_POLICY = True
+        + _build_agent(...) : enables shared critic
+    }
+
+    class AgileRLPolicyWrapper {
+        - _agent: agilerl.EvolvableAlgorithm
+        - _agent_ids: list[str]
+        - _call_index: int
+        --
+        + get_action(obs: np.ndarray) -> Any
+        + reset() -> None
+    }
+
     class UnifiedEvaluator {
         - env_cache: dict
         --
@@ -311,25 +342,24 @@ package "deap_pettingzoo.baselines" {
         - _evaluate_policies(results: List[TrainingResult], eval_config) -> dict
         - _save_results(comparison_data: dict, output_dir: Path)
     }
-    
-    class CleanMARLAdapter {
-        + {static} adapt_observation(obs) -> np.ndarray
-        + {static} adapt_action(action, action_space) -> Any
-        + {static} create_env_config(env_name: str) -> dict
-    }
-    
+
     ' Relationships
     TrainingConfig --> BudgetMode : uses
     ComparisonConfig --> BudgetMode : uses
     TrainingResult --> PolicyProtocol : contains
-    
+
     BaselineTrainer <|-- EATrainer
-    BaselineTrainer <|-- MADDPGTrainer
+    BaselineTrainer <|-- AgileRLTrainer
+    AgileRLTrainer <|-- MADDPGTrainer
+    AgileRLTrainer <|-- MATD3Trainer
+    AgileRLTrainer <|-- IPPOTrainer
+    IPPOTrainer <|-- MAPPOTrainer
     BaselineEvaluator <|-- UnifiedEvaluator
-    
+
     EATrainer --> DEAPToolboxBuilder : uses
     EATrainer --> FixedTopologyGenome : creates
-    MADDPGTrainer --> CleanMARLAdapter : uses
+    AgileRLTrainer --> AgileRLPolicyWrapper : produces
+    AgileRLPolicyWrapper ..|> PolicyProtocol : implements
     
     ComparisonRunner --> BaselineTrainer : uses
     ComparisonRunner --> UnifiedEvaluator : uses
