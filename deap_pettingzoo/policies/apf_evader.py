@@ -30,7 +30,7 @@ from deap_pettingzoo.environments.pursuit_evasion import ObsLayout
 
 
 # Direction vectors for the five MPE discrete actions.
-# Index order follows ``pettingzoo.mpe.simple_tag_v3``:
+# Index order follows ``mpe2.simple_tag_v3``:
 #   0 = no-op, 1 = left (-x), 2 = right (+x), 3 = down (-y), 4 = up (+y)
 _ACTION_DIRECTIONS = np.array(
     [

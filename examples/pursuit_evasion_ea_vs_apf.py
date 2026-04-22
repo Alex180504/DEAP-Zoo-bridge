@@ -3,7 +3,7 @@
 Implements the baseline methodology described in the project's research
 protocol:
 
-* 10-vs-10 pursuit-evasion in ``simple_tag_v3`` (PettingZoo MPE)
+* 10-vs-10 pursuit-evasion in ``simple_tag_v3`` (MPE2)
 * Equal-ability pursuers and evaders (same ``max_speed``/``accel``)
 * Partial observability (K-nearest agents + K-nearest landmarks,
   zero-padded)
