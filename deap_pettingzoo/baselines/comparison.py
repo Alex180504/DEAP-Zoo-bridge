@@ -248,11 +248,13 @@ def _register_builtins():
             MATD3Trainer,
             IPPOTrainer,
             MAPPOTrainer,
+            GroupedIPPOTrainer,
         )
         register_trainer('maddpg', MADDPGTrainer)
         register_trainer('matd3', MATD3Trainer)
         register_trainer('ippo', IPPOTrainer)
         register_trainer('mappo', MAPPOTrainer)
+        register_trainer('ippo-grouped', GroupedIPPOTrainer)
     except ImportError:
         pass
 
