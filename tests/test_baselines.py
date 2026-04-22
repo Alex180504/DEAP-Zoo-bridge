@@ -18,7 +18,9 @@ from deap_pettingzoo.baselines import (
     ComparisonConfig,
     EATrainer,
     MADDPGTrainer,
-    MADDPGPolicyWrapper,
+    MATD3Trainer,
+    IPPOTrainer,
+    MAPPOTrainer,
     UnifiedEvaluator,
     compare_baselines,
     register_trainer,
@@ -219,10 +221,12 @@ class TestTrainerRegistry:
         trainer = get_trainer('ea')
         assert isinstance(trainer, EATrainer)
     
-    def test_get_builtin_maddpg_trainer(self):
-        """Test getting built-in MADDPG trainer."""
-        trainer = get_trainer('maddpg')
-        assert isinstance(trainer, MADDPGTrainer)
+    def test_get_builtin_agilerl_trainers(self):
+        """Test getting AgileRL-backed trainers by short name."""
+        assert isinstance(get_trainer('maddpg'), MADDPGTrainer)
+        assert isinstance(get_trainer('matd3'), MATD3Trainer)
+        assert isinstance(get_trainer('ippo'), IPPOTrainer)
+        assert isinstance(get_trainer('mappo'), MAPPOTrainer)
     
     def test_get_unknown_trainer(self):
         """Test getting unknown trainer raises error."""
@@ -291,221 +295,6 @@ class TestComparisonWorkflow:
             # Check results file was created
             results_file = Path(tmpdir) / 'results' / 'comparison_results.json'
             assert results_file.exists()
-
-
-class TestMADDPGTrainer:
-    """Tests for the MADDPG trainer (non-slow, no cleanMARL required)."""
-
-    def test_maddpg_trainer_initialization(self):
-        """Test MADDPGTrainer can be instantiated with defaults."""
-        trainer = MADDPGTrainer()
-        assert trainer.hidden_dim == 256
-        assert trainer.learning_rate == 3e-4
-        assert trainer.device == 'cpu'
-
-    def test_maddpg_trainer_custom_params(self):
-        """Test MADDPGTrainer accepts custom hyperparameters."""
-        trainer = MADDPGTrainer(
-            hidden_dim=128,
-            learning_rate=1e-3,
-            batch_size=64,
-            tau=0.01,
-            gamma=0.95,
-        )
-        assert trainer.hidden_dim == 128
-        assert trainer.learning_rate == 1e-3
-        assert trainer.batch_size == 64
-
-    def test_maddpg_budget_support(self):
-        """Test MADDPG supports ENV_STEPS and WALL_CLOCK."""
-        trainer = MADDPGTrainer()
-        assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is True
-        assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is False
-
-    def test_maddpg_capabilities(self):
-        """Test MADDPG capabilities metadata."""
-        trainer = MADDPGTrainer()
-        caps = trainer.get_capabilities()
-        assert caps['continuous_action'] is True
-        assert caps['discrete_action'] is False
-        assert caps['needs_global_state'] is False
-        assert caps['on_policy'] is False
-
-    def test_maddpg_budget_translation_env_steps(self):
-        """Test ENV_STEPS budget maps directly to total_timesteps."""
-        trainer = MADDPGTrainer()
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=500_000,
-        )
-        assert trainer._translate_budget(config) == 500_000
-
-    def test_maddpg_budget_translation_wall_clock(self):
-        """Test WALL_CLOCK budget uses default_timesteps from params."""
-        trainer = MADDPGTrainer()
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.WALL_CLOCK,
-            budget_value=3600,
-            algorithm_params={'default_timesteps': 2_000_000},
-        )
-        assert trainer._translate_budget(config) == 2_000_000
-
-    def test_maddpg_unsupported_budget_raises(self):
-        """Test unsupported budget mode raises ValueError."""
-        trainer = MADDPGTrainer()
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.EVAL_EPISODES,
-            budget_value=100,
-        )
-        with pytest.raises(ValueError, match="does not support budget mode"):
-            trainer._translate_budget(config)
-
-    def test_maddpg_no_script_raises_import_error(self):
-        """Test that training without cleanMARL installed raises ImportError."""
-        trainer = MADDPGTrainer(cleanmarl_script=None)
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=10_000,
-        )
-        # Patch cleanrl import to simulate it not being installed
-        with patch.dict('sys.modules', {'cleanrl': None}):
-            with pytest.raises(ImportError, match="cleanMARL MADDPG script not found"):
-                trainer._resolve_script(config)
-
-    def test_maddpg_explicit_script_path_used(self):
-        """Test that explicit cleanmarl_script path is returned as-is."""
-        trainer = MADDPGTrainer(cleanmarl_script='/path/to/maddpg.py')
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=10_000,
-        )
-        assert trainer._resolve_script(config) == '/path/to/maddpg.py'
-
-    def test_maddpg_config_script_override(self):
-        """Test algorithm_params cleanmarl_script overrides auto-discovery."""
-        trainer = MADDPGTrainer()
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=10_000,
-            algorithm_params={'cleanmarl_script': '/custom/maddpg.py'},
-        )
-        assert trainer._resolve_script(config) == '/custom/maddpg.py'
-
-    def test_maddpg_command_building(self, tmp_path):
-        """Test subprocess command is built with correct arguments."""
-        trainer = MADDPGTrainer(
-            learning_rate=1e-3,
-            batch_size=128,
-            exploration_noise=0.2,
-        )
-        config = TrainingConfig(
-            env_name='simple_spread_v3',
-            budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=100_000,
-            algorithm_params={'seed': 42},
-        )
-        cmd = trainer._build_command(
-            script='/path/to/maddpg.py',
-            config=config,
-            total_timesteps=100_000,
-            run_dir=tmp_path,
-        )
-        assert '/path/to/maddpg.py' in cmd
-        assert '--env-id' in cmd
-        assert 'simple_spread_v3' in cmd
-        assert '--total-timesteps' in cmd
-        assert '100000' in cmd
-        assert '--seed' in cmd
-        assert '42' in cmd
-        assert '--save-model' in cmd
-        assert '--learning-rate' in cmd
-        assert '0.001' in cmd
-
-    def test_maddpg_progress_parsing_json(self):
-        """Test JSON-format stdout line parsing."""
-        trainer = MADDPGTrainer()
-        metrics: dict = {'episode_rewards': [], 'global_steps': []}
-        trainer._parse_progress_line(
-            '{"global_step": 1000, "episodic_return": -12.5}', metrics
-        )
-        assert metrics['episode_rewards'] == [-12.5]
-        assert metrics['global_steps'] == [1000]
-
-    def test_maddpg_progress_parsing_kv(self):
-        """Test key=value format stdout line parsing."""
-        trainer = MADDPGTrainer()
-        metrics: dict = {'episode_rewards': [], 'global_steps': []}
-        trainer._parse_progress_line(
-            'global_step=2000, episodic_return=-8.3', metrics
-        )
-        assert metrics['episode_rewards'] == [-8.3]
-        assert metrics['global_steps'] == [2000]
-
-    def test_maddpg_progress_parsing_ignores_unrelated(self):
-        """Test that unrelated lines leave metrics unchanged."""
-        trainer = MADDPGTrainer()
-        metrics: dict = {'episode_rewards': [], 'global_steps': []}
-        trainer._parse_progress_line('Setting up environment...', metrics)
-        assert metrics['episode_rewards'] == []
-
-    def test_maddpg_subprocess_failure_raises(self, tmp_path):
-        """Test that a non-zero subprocess exit raises RuntimeError."""
-        trainer = MADDPGTrainer()
-        cmd = [sys.executable, '-c', 'import sys; sys.exit(1)']
-        with pytest.raises(RuntimeError, match="cleanMARL exited with code"):
-            trainer._run_subprocess(cmd)
-
-    def test_maddpg_policy_wrapper_missing_torch(self, tmp_path):
-        """Test MADDPGPolicyWrapper raises ImportError when torch unavailable."""
-        with patch.dict('sys.modules', {'torch': None}):
-            with pytest.raises(ImportError, match="PyTorch is required"):
-                MADDPGPolicyWrapper(
-                    checkpoint_dir=tmp_path,
-                    obs_dim=18,
-                    act_dim=5,
-                )
-
-    def test_maddpg_policy_wrapper_missing_checkpoint(self, tmp_path):
-        """Test MADDPGPolicyWrapper raises FileNotFoundError when no checkpoint."""
-        pytest.importorskip('torch')
-        with pytest.raises(FileNotFoundError, match="No actor checkpoint found"):
-            MADDPGPolicyWrapper(
-                checkpoint_dir=tmp_path,
-                obs_dim=18,
-                act_dim=5,
-            )
-
-    @pytest.mark.skipif(
-        not __import__('importlib').util.find_spec('torch'),
-        reason="torch not installed"
-    )
-    def test_maddpg_policy_wrapper_loads_and_acts(self, tmp_path):
-        """Test MADDPGPolicyWrapper loads a saved checkpoint and returns actions."""
-        import torch
-        from deap_pettingzoo.baselines.maddpg_trainer import _build_cleanmarl_actor
-
-        obs_dim, act_dim = 18, 5
-        actor = _build_cleanmarl_actor(obs_dim, act_dim, hidden_dim=64)
-        torch.save(actor.state_dict(), tmp_path / 'actor.pt')
-
-        wrapper = MADDPGPolicyWrapper(
-            checkpoint_dir=tmp_path,
-            obs_dim=obs_dim,
-            act_dim=act_dim,
-            hidden_dim=64,
-        )
-        obs = np.zeros(obs_dim, dtype=np.float32)
-        action = wrapper.get_action(obs)
-        assert action.shape == (act_dim,)
-
-        wrapper.reset()  # should be no-op, not raise
 
 
 # ===========================================================================
@@ -775,12 +564,13 @@ class TestValidateCompatibility:
         assert isinstance(result, CompatibilityResult)
         assert result.compatible is True
 
-    def test_maddpg_incompatible_with_discrete_env(self):
-        # simple_spread_v3 is Discrete; MADDPG requires continuous actions
+    def test_maddpg_compatible_with_discrete_env(self):
+        # AgileRL's MADDPG supports discrete actions via Gumbel-Softmax
+        # (simple_spread_v3 uses Discrete(5)), and continuous via standard
+        # policy gradients. Both modes are supported.
         trainer = MADDPGTrainer()
         result = validate_compatibility(trainer, 'simple_spread_v3', 'maddpg')
-        assert result.compatible is False
-        assert any('discrete' in i.lower() for i in result.issues)
+        assert result.compatible is True
 
     def test_unsupported_env_raises(self):
         trainer = EATrainer()
@@ -838,14 +628,15 @@ class TestBuildCompatibilityMatrix:
         assert 'simple_spread_v3' in matrix['ea']
         assert 'simple_tag_v3' in matrix['ea']
 
-    def test_ea_compatible_maddpg_incompatible_with_discrete_env(self):
-        # EA handles Discrete; MADDPG (continuous-only) does not
+    def test_ea_and_maddpg_both_compatible_with_discrete_env(self):
+        # AgileRL's MADDPG supports discrete actions (Gumbel-Softmax),
+        # as does EA. Both should be compatible with simple_spread_v3.
         matrix = build_compatibility_matrix(
             algorithms=['ea', 'maddpg'],
             env_names=['simple_spread_v3'],
         )
         assert matrix['ea']['simple_spread_v3'].compatible is True
-        assert matrix['maddpg']['simple_spread_v3'].compatible is False
+        assert matrix['maddpg']['simple_spread_v3'].compatible is True
 
 
 class TestGetCompatibleAlgorithms:
@@ -859,10 +650,11 @@ class TestGetCompatibleAlgorithms:
         algos = get_compatible_algorithms('simple_spread_v3')
         assert 'ea' in algos
 
-    def test_maddpg_not_in_compatible_list_for_discrete_env(self):
-        # MADDPG is continuous-only; discrete envs should exclude it
+    def test_maddpg_in_compatible_list_for_discrete_env(self):
+        # AgileRL's MADDPG supports discrete via Gumbel-Softmax, so it
+        # should be compatible with simple_spread_v3's Discrete(5) action space.
         algos = get_compatible_algorithms('simple_spread_v3')
-        assert 'maddpg' not in algos
+        assert 'maddpg' in algos
 
     def test_sorted_output(self):
         algos = get_compatible_algorithms('simple_spread_v3')
