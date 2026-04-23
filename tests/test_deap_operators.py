@@ -11,7 +11,7 @@ from deap_pettingzoo.integration import create_toolbox, setup_deap_creators
 def evaluator():
     setup_deap_creators()
     wrapper = PettingZooWrapper(
-        env_name="simple_tag_v3",
+        env_name="simple_spread_v3",
         env_config={"max_cycles": 10},
     )
     ev = SingleEpisodeEvaluator(

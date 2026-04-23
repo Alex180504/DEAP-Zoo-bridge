@@ -44,9 +44,9 @@ class TestSingleEpisodeEvaluator:
     
     @pytest.fixture
     def wrapper(self):
-        """Create environment wrapper."""
+        """Create environment wrapper (homogeneous-obs MPE env)."""
         return PettingZooWrapper(
-            env_name='simple_tag_v3',
+            env_name='simple_spread_v3',
             env_config={'max_cycles': 25}
         )
     
@@ -127,15 +127,40 @@ class TestSingleEpisodeEvaluator:
                 aggregation_method='invalid_method'
             )
 
+    def test_heterogeneous_obs_raises_value_error(self):
+        """Evaluator rejects envs with role-dependent observation sizes."""
+        pytest.importorskip("mpe2")
+        hetero = PettingZooWrapper(
+            env_name='simple_tag_v3',
+            env_config={'max_cycles': 25}
+        )
+        try:
+            obs = hetero.reset(seed=0)
+            agent = next(iter(obs))
+            obs_dim = len(obs[agent])
+            action_dim = hetero.action_space(agent).n
+            genome = FixedTopologyGenome(
+                layer_sizes=[obs_dim, 16, action_dim],
+                random_seed=0,
+            )
+            ind = MockIndividual(genome)
+            evaluator = SingleEpisodeEvaluator(env_wrapper=hetero)
+            with pytest.raises(
+                (ValueError, RuntimeError), match="homogeneous observation"
+            ):
+                evaluator.evaluate(ind, seed=0)
+        finally:
+            hetero.close()
+
 
 class TestMultiEpisodeEvaluator:
     """Test multi-episode evaluation."""
     
     @pytest.fixture
     def wrapper(self):
-        """Create environment wrapper."""
+        """Create environment wrapper (homogeneous-obs MPE env)."""
         return PettingZooWrapper(
-            env_name='simple_tag_v3',
+            env_name='simple_spread_v3',
             env_config={'max_cycles': 25}
         )
     
@@ -266,7 +291,7 @@ class TestEvaluatorIntegration:
     def test_evaluator_with_deap_workflow(self):
         """Test evaluator works in DEAP-style workflow."""
         wrapper = PettingZooWrapper(
-            env_name='simple_tag_v3',
+            env_name='simple_spread_v3',
             env_config={'max_cycles': 25}
         )
         

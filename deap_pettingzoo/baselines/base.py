@@ -33,6 +33,13 @@ class TrainingConfig:
         env_config: Optional kwargs forwarded to the underlying
             ``parallel_env(...)`` constructor (e.g. ``max_cycles`` for
             MPE2, ``max_time_steps``/``prey_count`` for aquarium_v0).
+        continuous: Ergonomic shortcut. When ``True``, merges
+            ``{"continuous_actions": True}`` into ``env_config`` at
+            construction time (MPE2 reads this kwarg to switch between
+            the ``Discrete`` and ``Box`` action variants). If the caller
+            has also set ``env_config["continuous_actions"]`` explicitly
+            and it disagrees with ``continuous``, a ``ValueError`` is
+            raised rather than silently preferring one.
         output_dir: Directory for saving checkpoints and logs.
         render: Whether to render episodes during training.
     """
@@ -42,9 +49,10 @@ class TrainingConfig:
     num_seeds: int = 1
     algorithm_params: Dict[str, Any] = field(default_factory=dict)
     env_config: Dict[str, Any] = field(default_factory=dict)
+    continuous: bool = False
     output_dir: Optional[Path] = None
     render: bool = False
-    
+
     def __post_init__(self):
         """Validate configuration."""
         if self.budget_value <= 0:
@@ -55,6 +63,20 @@ class TrainingConfig:
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
+        # Resolve the ``continuous`` shortcut against any explicit
+        # ``env_config["continuous_actions"]`` the caller supplied.
+        existing = self.env_config.get("continuous_actions")
+        if self.continuous:
+            if existing is False:
+                raise ValueError(
+                    "TrainingConfig: continuous=True conflicts with "
+                    "env_config['continuous_actions']=False. Pick one."
+                )
+            self.env_config["continuous_actions"] = True
+        elif existing is True:
+            # Keep env_config authoritative but reflect it on the flag
+            # so downstream introspection stays consistent.
+            self.continuous = True
 
 
 class PolicyProtocol(Protocol):
@@ -63,9 +85,23 @@ class PolicyProtocol(Protocol):
     Both EA genomes (with FeedforwardNeuralPolicy wrapper) and RL networks
     should satisfy this interface.
     """
-    
-    def get_action(self, observation: np.ndarray) -> Any:
-        """Get action for the given observation."""
+
+    def get_action(
+        self,
+        observation: np.ndarray,
+        *,
+        action_mask: Optional[np.ndarray] = None,
+    ) -> Any:
+        """Get action for the given observation.
+
+        Args:
+            observation: Environment observation vector.
+            action_mask: Optional legal-action mask surfaced by
+                turn-based AEC adapters (populated from
+                ``infos[agent]["action_mask"]``). Implementations that
+                do not support masking should accept and ignore this
+                keyword.
+        """
         ...
     
     def reset(self) -> None:
@@ -207,6 +243,10 @@ class BaselineTrainer(ABC):
             - 'continuous_action': bool (supports continuous action spaces)
             - 'needs_global_state': bool (requires centralized state)
             - 'on_policy': bool (on-policy vs off-policy)
+            - 'supports_turn_based': bool (default True; set False for
+              algorithms like MADDPG/MATD3 whose buffer / critic
+              structure assumes simultaneous-step execution and thus
+              cannot train on turn-based AEC adapters).
         """
         pass
 

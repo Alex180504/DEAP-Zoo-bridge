@@ -38,7 +38,43 @@ from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 from deap_pettingzoo.evaluators.base_evaluator import BaseEvaluator
 
 
-LearnerPolicyFactory = Callable[[Any, str], "PolicyLike"]
+LearnerPolicyFactory = Callable[[Any, str, Any], "PolicyLike"]
+
+
+def _invoke_get_action(
+    policy: Any,
+    observation: np.ndarray,
+    action_mask: Optional[np.ndarray],
+    *,
+    deterministic: Optional[bool] = None,
+) -> Any:
+    """Call ``policy.get_action`` tolerantly across protocol variants.
+
+    Heterogeneous policy set (learner EA/RL policies + scripted / rule-
+    based opponents) all have slightly different ``get_action``
+    signatures. This helper forwards ``action_mask`` and ``deterministic``
+    opportunistically and falls back when the policy doesn't accept
+    those kwargs.
+    """
+    kwargs: Dict[str, Any] = {}
+    if action_mask is not None:
+        kwargs["action_mask"] = action_mask
+    if deterministic is not None:
+        kwargs["deterministic"] = deterministic
+    try:
+        return policy.get_action(observation, **kwargs)
+    except TypeError:
+        # Strip kwargs the policy doesn't accept and retry.
+        if "action_mask" in kwargs:
+            kwargs.pop("action_mask")
+            try:
+                return policy.get_action(observation, **kwargs)
+            except TypeError:
+                pass
+        if "deterministic" in kwargs:
+            kwargs.pop("deterministic")
+            return policy.get_action(observation, **kwargs)
+        return policy.get_action(observation)
 
 
 class PolicyLike:  # structural type; actual classes only need get_action/reset
@@ -76,7 +112,8 @@ class MixedPolicyEvaluator(BaseEvaluator):
 
     * **Learner group** — agents whose name starts with any prefix in
       ``learner_agent_prefixes``.  Each is driven by a fresh policy built
-      from the individual's genome via ``learner_factory(genome, agent_id)``.
+      the individual's genome via
+      ``learner_factory(genome, agent_id, action_space)``.
     * **Scripted group** — everyone else.  Each is driven by the
       pre-built :class:`PolicyProtocol` instance found in
       ``scripted_policies[agent_id]``.  If the dict is missing any
@@ -98,8 +135,12 @@ class MixedPolicyEvaluator(BaseEvaluator):
             learner_agent_prefixes: Agent-name prefixes whose agents are
                 driven by the learning side (e.g. ``['adversary']`` to
                 train pursuers).
-            learner_factory: Callable ``(genome, agent_id) -> policy``
-                returning a fresh policy instance for each learner agent.
+            learner_factory: Callable
+                ``(genome, agent_id, action_space) -> policy`` returning a
+                fresh policy instance for each learner agent.  The
+                ``action_space`` argument was added in the continuous-action
+                support drop and is *required* — factories that previously
+                took only ``(genome, agent_id)`` must be updated.
             scripted_policies: Mapping from agent_id to a pre-built
                 policy for every non-learner agent.
             max_steps: Hard cap on environment steps per episode.
@@ -169,7 +210,10 @@ class MixedPolicyEvaluator(BaseEvaluator):
 
         # Build fresh learner policies for this episode.
         learner_policies: Dict[str, PolicyLike] = {
-            agent: self.learner_factory(genome, agent) for agent in self.learner_agents
+            agent: self.learner_factory(
+                genome, agent, self.env_wrapper.action_space(agent)
+            )
+            for agent in self.learner_agents
         }
         # Reset all policies (no-op for stateless ones; skip if not implemented).
         for p in learner_policies.values():
@@ -184,12 +228,18 @@ class MixedPolicyEvaluator(BaseEvaluator):
         steps = 0
 
         while steps < self.max_steps and observations:
+            infos = getattr(self.env_wrapper, "last_infos", {}) or {}
             actions: Dict[str, Any] = {}
             for agent, obs in observations.items():
+                mask = infos.get(agent, {}).get("action_mask")
                 if agent in learner_policies:
-                    actions[agent] = learner_policies[agent].get_action(obs, deterministic=True)
+                    actions[agent] = _invoke_get_action(
+                        learner_policies[agent], obs, mask, deterministic=True
+                    )
                 elif agent in self.scripted_policies:
-                    actions[agent] = self.scripted_policies[agent].get_action(obs)
+                    actions[agent] = _invoke_get_action(
+                        self.scripted_policies[agent], obs, mask
+                    )
                 # else: agent terminated — no action required
 
             observations, rewards, terms, truncs, _ = self.env_wrapper.step(actions)
