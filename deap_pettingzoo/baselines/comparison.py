@@ -237,16 +237,24 @@ def _register_builtins():
         pass
 
     try:
+        from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
+        register_trainer('cma-es', CMAESTrainer)
+    except ImportError:
+        pass
+
+    try:
         from deap_pettingzoo.baselines.agilerl_trainer import (
             MADDPGTrainer,
             MATD3Trainer,
             IPPOTrainer,
             MAPPOTrainer,
+            GroupedIPPOTrainer,
         )
         register_trainer('maddpg', MADDPGTrainer)
         register_trainer('matd3', MATD3Trainer)
         register_trainer('ippo', IPPOTrainer)
         register_trainer('mappo', MAPPOTrainer)
+        register_trainer('ippo-grouped', GroupedIPPOTrainer)
     except ImportError:
         pass
 

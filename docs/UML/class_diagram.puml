@@ -6,202 +6,183 @@ skinparam groupInheritance 2
 title DEAP-PettingZoo Bridge - Class Diagram
 
 package "deap_pettingzoo.genomes" {
-    abstract class GenomeBase {
-        + weights: np.ndarray
-        + architecture: dict
-        + validate() -> bool
-        + to_dict() -> dict
-        + from_dict(data: dict) -> GenomeBase
-        + clone() -> GenomeBase
-    }
-    
     class FixedTopologyGenome {
         + layer_sizes: List[int]
         + activation: str
         + input_size: int
         + output_size: int
         + hidden_layers: List[int]
+        + weight_range: tuple[float, float]
         --
-        + __init__(architecture: dict)
+        + __init__(layer_sizes, activation, weight_range: tuple[float, float], random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
-        + set_weights(weights: np.ndarray)
         + get_weights() -> np.ndarray
+        + set_weights(weights: np.ndarray)
+        + validate() -> bool
+        + clone() -> FixedTopologyGenome
+        + to_dict() -> dict
+        + {static} from_dict(data: dict) -> FixedTopologyGenome
         + mutate(mutation_rate: float, mutation_std: float)
     }
-    
-    GenomeBase <|-- FixedTopologyGenome
 }
 
 package "deap_pettingzoo.policies" {
-    abstract class BasePolicy {
-        + {abstract} get_action(observation) -> action
-        + {abstract} reset() -> None
-        + seed(seed: int) -> None
-    }
-    
     class FeedforwardNeuralPolicy {
         - genome: FixedTopologyGenome
         - layers: List[np.ndarray]
         - biases: List[np.ndarray]
         - activation_fn: callable
-        - action_space: gymnasium.Space
-        - observation_space: gymnasium.Space
         --
-        + __init__(genome: GenomeBase, env_spec: dict)
-        + get_action(observation: np.ndarray) -> action
+        + __init__(genome, env_spec)
+        + get_action(observation) -> action
         + reset() -> None
         + forward(x: np.ndarray) -> np.ndarray
-        - _apply_activation(x: np.ndarray) -> np.ndarray
-        - _process_observation(obs) -> np.ndarray
-        - _process_output(output: np.ndarray) -> action
     }
-    
-    BasePolicy <|-- FeedforwardNeuralPolicy
+
+    class APFConfig <<dataclass>> {
+        + k_pursuer: float
+        + k_landmark: float
+        + k_boundary: float
+        + boundary_threshold: float
+        + no_op_threshold: float
+        + softening: float
+    }
+
+    class APFEvaderPolicy {
+        - config: APFConfig
+        - action_space
+        --
+        + __init__(action_space, config=None)
+        + get_action(observation) -> action
+        + reset() -> None
+    }
+
     FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+    APFEvaderPolicy --> APFConfig : uses
 }
 
 package "deap_pettingzoo.environments" {
     class PettingZooWrapper {
-        - env: AECEnv | ParallelEnv
-        - agent_ids: List[str]
-        - observation_spaces: dict
-        - action_spaces: dict
-        - current_seed: int
+        - env
+        + agents: List[str]
+        + num_agents: int
         --
-        + __init__(env_name: str, **kwargs)
-        + reset(seed: Optional[int]) -> observations
-        + step(actions: dict) -> tuple
-        + get_agent_ids() -> List[str]
-        + get_observation_space(agent_id: str) -> Space
-        + get_action_space(agent_id: str) -> Space
+        + __init__(env_name, **kwargs)
+        + reset(seed) -> observations
+        + step(actions) -> tuple
+        + observation_space(agent: str) -> Space
+        + action_space(agent: str) -> Space
+        + render() -> np.ndarray
         + close() -> None
-        + render() -> None
     }
-    
-    class SeedManager {
-        - base_seed: int
-        - episode_seeds: List[int]
-        - rng: np.random.Generator
+
+    class PursuitEvasionConfig <<dataclass>> {
+        + num_adversaries: int
+        + num_good: int
+        + num_obstacles: int
+        + max_cycles: int
+        + equal_ability: bool
+        + equal_max_speed: float
+        + equal_accel: float
+        + num_agent_neighbors: Optional[int]
+        + num_landmark_neighbors: Optional[int]
+        + boundary_threshold: float
+        + boundary_scale: float
+        + boundary_sharpness: float
+    }
+
+    class ObsLayout <<dataclass>> {
+        + describes observation vector slicing
+    }
+
+    class PursuitEvasionEnv {
+        + config: PursuitEvasionConfig
+        + obs_layout: ObsLayout
         --
-        + __init__(base_seed: int)
-        + get_episode_seed(episode_num: int) -> int
-        + get_evaluation_seeds(num_episodes: int) -> List[int]
-        + reset(seed: int) -> None
+        + __init__(config=None, **kwargs)
+        + reset(seed) -> observations
+        + step(actions) -> tuple
     }
-    
-    PettingZooWrapper --> SeedManager : uses
+
+    PursuitEvasionEnv --|> PettingZooWrapper
+    PursuitEvasionEnv --> PursuitEvasionConfig : uses
+    PursuitEvasionEnv --> ObsLayout : uses
 }
 
 package "deap_pettingzoo.evaluators" {
     abstract class BaseEvaluator {
-        + env_wrapper: PettingZooWrapper
         + {abstract} evaluate(individual) -> fitness
     }
-    
+
     class SingleEpisodeEvaluator {
+        - env_wrapper: PettingZooWrapper
         - max_steps: int
-        - fitness_aggregation: str
-        - seed: Optional[int]
-        --
-        + __init__(env_wrapper: PettingZooWrapper, config: dict)
-        + evaluate(individual) -> float
-        - _create_policies(individual) -> dict
-        - _run_episode(policies: dict, seed: int) -> dict
-        - _calculate_fitness(rewards: dict) -> float
-    }
-    
-    class MultiEpisodeEvaluator {
-        - num_episodes: int
-        - single_evaluator: SingleEpisodeEvaluator
-        - seed_manager: SeedManager
         - aggregation_method: str
+        - team_mapping: Dict[str, str]
         --
-        + __init__(env_wrapper: PettingZooWrapper, config: dict)
+        + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        - _create_policies(genome, observations) -> dict
+        - _aggregate_fitness(rewards: dict) -> float
+        - _aggregate_team_fitness(rewards: dict) -> float
+    }
+
+    class MultiEpisodeEvaluator {
+        - single_evaluator: SingleEpisodeEvaluator
+        - num_episodes: int
+        - aggregation: str
+        - base_seed: int
+        --
+        + __init__(env_wrapper, genome_config, num_episodes, aggregation, base_seed, ...)
         + evaluate(individual) -> tuple
-        - _aggregate_fitness(fitnesses: List[float]) -> tuple
-        - _calculate_statistics(fitnesses: List[float]) -> dict
+        + evaluate_with_stats(individual) -> tuple[mean, std, min, max]
     }
-    
-    class ParallelEvaluator {
-        - multi_evaluator: MultiEpisodeEvaluator
-        - num_workers: int
-        - pool: multiprocessing.Pool
+
+    class MixedPolicyEvalResult <<dataclass>> {
+        + rewards: dict
+        + episode_length: int
+        + captured: bool
+    }
+
+    class MixedPolicyEvaluator {
+        - env_wrapper: PettingZooWrapper
+        - max_steps: int
         --
-        + __init__(env_wrapper: PettingZooWrapper, config: dict)
-        + evaluate_population(population: List) -> List[tuple]
-        - _evaluate_worker(individual) -> tuple
-        + close() -> None
+        + __init__(env_wrapper, max_steps, ...)
+        + evaluate(policies: dict, seed=None) -> MixedPolicyEvalResult
     }
-    
+
     BaseEvaluator <|-- SingleEpisodeEvaluator
     BaseEvaluator <|-- MultiEpisodeEvaluator
-    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : uses
-    ParallelEvaluator --> MultiEpisodeEvaluator : uses
-    
+    BaseEvaluator <|-- MixedPolicyEvaluator
+    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
     SingleEpisodeEvaluator --> PettingZooWrapper : uses
-    MultiEpisodeEvaluator --> SeedManager : uses
+    SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
+    MixedPolicyEvaluator ..> MixedPolicyEvalResult : returns
 }
 
 package "deap_pettingzoo.integration" {
-    class DEAPToolboxBuilder {
-        + evaluator: BaseEvaluator
-        + genome_config: dict
-        --
-        + {static} create_toolbox(config: dict) -> deap.base.Toolbox
-        + {static} create_individual(genome_class, config: dict)
-        + {static} setup_operators(toolbox, config: dict)
-        + {static} register_evaluation(toolbox, evaluator)
+    class "deap_integration (module)" as deap_integration_mod <<module>> {
+        + setup_deap_creators() -> None
+        + create_deap_individual(genome_config) -> Individual
+        + evaluate_individual(individual, evaluator) -> tuple
+        + create_toolbox(genome_config, evaluator, **kwargs) -> Toolbox
+        + crossover_blend(ind1, ind2, alpha) -> tuple
+        + mutate_gaussian(individual, mu, sigma, indpb) -> tuple
+        + clone_individual(individual) -> Individual
     }
-    
-    class EvolutionRunner {
-        - toolbox: deap.base.Toolbox
-        - population: List
-        - stats: deap.tools.Statistics
-        - halloffame: deap.tools.HallOfFame
-        - logger: Logger
-        --
-        + __init__(toolbox: Toolbox, config: dict)
-        + run(num_generations: int) -> tuple
-        + resume(checkpoint_path: str) -> tuple
-        - _run_generation() -> None
-        - _save_checkpoint(generation: int) -> None
-        + get_best_individual() -> Individual
-    }
-    
-    DEAPToolboxBuilder --> BaseEvaluator : uses
-    EvolutionRunner --> DEAPToolboxBuilder : uses
-}
 
-package "deap_pettingzoo.utils" {
-    class Logger {
-        - log_dir: Path
-        - stats: List[dict]
-        --
-        + __init__(log_dir: str)
-        + log_generation(gen: int, stats: dict)
-        + log_evaluation(individual, fitness: float)
-        + save_to_csv() -> None
-        + save_to_json() -> None
+    class "cma_integration (module)" as cma_integration_mod <<module>> {
+        + setup_cma_strategy(genome_config, sigma0, population_size, centroid) -> (Strategy, dim)
+        + make_cma_ind_init(genome_config) -> callable
+        + register_cma_toolbox(strategy, ind_init, evaluator) -> Toolbox
+        + make_cma_stats() -> tools.Statistics
+        - _setup_cma_creators() -> None
     }
-    
-    class Visualizer {
-        + {static} plot_fitness_evolution(stats: List[dict], output_path: str)
-        + {static} plot_diversity(population: List, output_path: str)
-        + {static} render_policy(policy: BasePolicy, env, output_path: str)
-    }
-    
-    class Checkpointer {
-        - checkpoint_dir: Path
-        --
-        + __init__(checkpoint_dir: str)
-        + save(population, generation, stats, filename: str)
-        + load(filename: str) -> dict
-        + list_checkpoints() -> List[str]
-    }
-    
-    EvolutionRunner --> Logger : uses
-    EvolutionRunner --> Checkpointer : uses
+
+    deap_integration_mod ..> FixedTopologyGenome : wraps
+    cma_integration_mod ..> FixedTopologyGenome : wraps
 }
 
 package "deap_pettingzoo.baselines" {
@@ -210,13 +191,13 @@ package "deap_pettingzoo.baselines" {
         EVAL_EPISODES
         WALL_CLOCK
     }
-    
-    interface PolicyProtocol {
-        + {abstract} get_action(observation) -> action
-        + {abstract} reset() -> None
+
+    interface PolicyProtocol <<Protocol>> {
+        + get_action(observation) -> action
+        + reset() -> None
     }
-    
-    class TrainingConfig {
+
+    class TrainingConfig <<dataclass>> {
         + env_name: str
         + budget_mode: BudgetMode
         + budget_value: int
@@ -224,11 +205,9 @@ package "deap_pettingzoo.baselines" {
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
-        --
-        + __post_init__() -> None
     }
-    
-    class TrainingResult {
+
+    class TrainingResult <<dataclass>> {
         + algorithm: str
         + policy: PolicyProtocol
         + metrics: dict
@@ -236,8 +215,8 @@ package "deap_pettingzoo.baselines" {
         + seed: int
         + training_time: float
     }
-    
-    class EvalResult {
+
+    class EvalResult <<dataclass>> {
         + mean_reward: float
         + std_reward: float
         + min_reward: float
@@ -245,11 +224,10 @@ package "deap_pettingzoo.baselines" {
         + num_episodes: int
         + episode_rewards: List[float]
         + episode_lengths: List[int]
-        --
         + to_dict() -> dict
     }
-    
-    class ComparisonConfig {
+
+    class ComparisonConfig <<dataclass>> {
         + algorithms: List[str]
         + env_name: str
         + budget_mode: BudgetMode
@@ -258,42 +236,75 @@ package "deap_pettingzoo.baselines" {
         + eval_episodes: int
         + algorithm_configs: dict
         + output_dir: Path
-        --
-        + __post_init__() -> None
     }
-    
+
     abstract class BaselineTrainer {
         + {abstract} train(config: TrainingConfig) -> TrainingResult
         + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
         + {abstract} get_capabilities() -> dict
     }
-    
+
     abstract class BaselineEvaluator {
         + {abstract} evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
     }
-    
-    class EATrainer {
-        - toolbox_builder: DEAPToolboxBuilder
-        - genome_class: type
+
+    class GenomePolicyWrapper {
+        - genome: FixedTopologyGenome
+        - env_name: str
+        - _policies: dict
         --
-        + train(config: TrainingConfig) -> TrainingResult
-        + supports_budget_mode(mode: BudgetMode) -> bool
-        + get_capabilities() -> dict
-        - _translate_budget(config: TrainingConfig) -> dict
-        - _wrap_genome_as_policy(genome) -> PolicyProtocol
+        + __init__(genome, env_name)
+        + get_action(observation) -> action
+        + reset() -> None
+        + genome() -> FixedTopologyGenome
     }
-    
+
+    class EATrainer {
+        - hidden_size: int
+        - population_size: int
+        - mutation_rate: float
+        - crossover_rate: float
+        - strategy: str  ' simple | mu_plus_lambda | mu_comma_lambda
+        - mu: int
+        - lambda_: int
+        - selection_method: str
+        - crossover_method: str
+        - mutation_method: str
+        --
+        + __init__(hidden_size, population_size, ..., strategy, mu, lambda_, selection_method, crossover_method, mutation_method, selection_params, crossover_params, mutation_params)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _run_simple(...) -> None
+        - _translate_budget(config) -> dict
+    }
+
+    class CMAESTrainer {
+        - hidden_size: int
+        - population_size: int
+        - sigma0: float
+        - activation: str
+        - variant: str  ' mu_mu_lambda | one_plus_lambda
+        --
+        + __init__(hidden_size, population_size, sigma0, activation, weight_range, variant)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _build_strategy(genome_config) -> (Strategy, int)
+        - _translate_budget(config) -> dict
+    }
+
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str
         # ALGORITHM_IMPORT: tuple[str, str]
         # ON_POLICY: bool
         # DEFAULT_PARAMS: dict
         --
-        + train(config: TrainingConfig) -> TrainingResult
-        + supports_budget_mode(mode: BudgetMode) -> bool
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
         + {abstract} get_capabilities() -> dict
         # _import_algorithm() -> type
-        # _build_agent(cls, obs_spaces, act_spaces, agent_ids, kwargs)
+        # _build_agent(obs_spaces, act_spaces, agent_ids, kwargs)
         # _run_off_policy(env, agent, ...) -> dict
         # _run_on_policy(env, agent, ...) -> dict
     }
@@ -313,7 +324,13 @@ package "deap_pettingzoo.baselines" {
     class MAPPOTrainer {
         # ALGORITHM_NAME = "mappo"
         # ON_POLICY = True
-        + _build_agent(...) : enables shared critic
+    }
+    class GroupedIPPOTrainer {
+        # ALGORITHM_NAME = "ippo-grouped"
+        # ON_POLICY = True
+        --
+        + {static} _group_prefix(agent_id) -> str
+        + {static} _validate_grouping(agent_ids, obs, act) -> dict
     }
 
     class AgileRLPolicyWrapper {
@@ -321,26 +338,27 @@ package "deap_pettingzoo.baselines" {
         - _agent_ids: list[str]
         - _call_index: int
         --
-        + get_action(obs: np.ndarray) -> Any
+        + get_action(obs) -> Any
         + reset() -> None
     }
 
     class UnifiedEvaluator {
+        - max_steps: int
         - env_cache: dict
         --
+        + __init__(max_steps)
         + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
-        - _run_episode(policy, env, seed: int) -> tuple
-        - _aggregate_results(episode_data: List) -> EvalResult
+        - _run_episode(policy, env, seed) -> tuple
+        + close()
     }
-    
-    class ComparisonRunner {
-        - trainer_registry: dict
-        - evaluator: UnifiedEvaluator
+
+    class "comparison (module)" as comparison_mod <<module>> {
+        - _TRAINER_REGISTRY: dict[str, type]
         --
+        + register_trainer(name, trainer_class) -> None
+        + get_trainer(name, **kwargs) -> BaselineTrainer
         + compare_baselines(config: ComparisonConfig) -> dict
-        - _run_algorithm(algorithm: str, config: TrainingConfig) -> List[TrainingResult]
-        - _evaluate_policies(results: List[TrainingResult], eval_config) -> dict
-        - _save_results(comparison_data: dict, output_dir: Path)
+        - _register_builtins() -> None
     }
 
     ' Relationships
@@ -349,46 +367,62 @@ package "deap_pettingzoo.baselines" {
     TrainingResult --> PolicyProtocol : contains
 
     BaselineTrainer <|-- EATrainer
+    BaselineTrainer <|-- CMAESTrainer
     BaselineTrainer <|-- AgileRLTrainer
     AgileRLTrainer <|-- MADDPGTrainer
     AgileRLTrainer <|-- MATD3Trainer
     AgileRLTrainer <|-- IPPOTrainer
     IPPOTrainer <|-- MAPPOTrainer
+    IPPOTrainer <|-- GroupedIPPOTrainer
     BaselineEvaluator <|-- UnifiedEvaluator
 
-    EATrainer --> DEAPToolboxBuilder : uses
-    EATrainer --> FixedTopologyGenome : creates
+    EATrainer ..> deap_integration_mod : uses
+    EATrainer ..> GenomePolicyWrapper : produces
+    CMAESTrainer ..> cma_integration_mod : uses
+    CMAESTrainer ..> GenomePolicyWrapper : produces
+    GenomePolicyWrapper --> FixedTopologyGenome : wraps
+    GenomePolicyWrapper ..|> PolicyProtocol : implements
+
     AgileRLTrainer --> AgileRLPolicyWrapper : produces
     AgileRLPolicyWrapper ..|> PolicyProtocol : implements
-    
-    ComparisonRunner --> BaselineTrainer : uses
-    ComparisonRunner --> UnifiedEvaluator : uses
-    ComparisonRunner --> ComparisonConfig : uses
-    
-    BasePolicy ..|> PolicyProtocol : implements
+
+    comparison_mod ..> BaselineTrainer : registry
+    comparison_mod --> UnifiedEvaluator : uses
+    comparison_mod --> ComparisonConfig : consumes
+
     FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
+    APFEvaderPolicy ..|> PolicyProtocol : implements
 }
 
-' Key relationships
-FeedforwardNeuralPolicy ..> PettingZooWrapper : interacts with
-SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
-EvolutionRunner ..> Logger : logs to
+' Cross-package interaction notes
+SingleEpisodeEvaluator ..> FixedTopologyGenome : evaluates
+MixedPolicyEvaluator ..> PolicyProtocol : runs
 
 note bottom of FixedTopologyGenome
   Genome is a flat vector of weights
-  for a fixed network architecture
+  for a fixed MLP architecture.
 end note
 
-note bottom of FeedforwardNeuralPolicy
-  Converts genome weights into
-  neural network layers and
-  produces actions from observations
+note bottom of CMAESTrainer
+  Wraps deap.cma.Strategy. Uses a
+  custom CMAIndividual (list subclass
+  with a .genome attribute) so that
+  numpy.array(pop) inside strategy.update
+  works while preserving evaluator
+  contract.
 end note
 
-note bottom of MultiEpisodeEvaluator
-  Runs multiple episodes with
-  different seeds for robust
-  fitness estimation
+note bottom of GenomePolicyWrapper
+  Shared adapter used by both EATrainer
+  and CMAESTrainer to expose a trained
+  genome as a PolicyProtocol for
+  UnifiedEvaluator.
+end note
+
+note bottom of MixedPolicyEvaluator
+  Evaluates heterogeneous per-agent
+  policies (e.g. EA pursuers vs. APF
+  evaders) in one episode.
 end note
 
 @enduml
