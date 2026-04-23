@@ -1,0 +1,101 @@
+@startuml sequence_self_play_turn_based
+!theme plain
+
+title Turn-based Self-Play via api='aec_masked' + SelfPlayEvaluator
+
+actor User
+participant "register_env" as Reg
+participant "build_env" as Build
+participant "MaskedSimultaneousAdapter" as Adapter
+participant "SuperSuit wrappers\n(optional)" as SSuit
+participant "PettingZooWrapper" as Wrap
+participant "SelfPlayEvaluator" as Eval
+participant "FeedforwardNeuralPolicy\n(shared weights)" as Policy
+participant "MaskedDiscreteHead" as Head
+participant "AEC env\n(e.g. tictactoe_v3)" as Env
+
+== 1. Registration ==
+
+User -> Reg : register_env(name,\n  tictactoe_v3,\n  api="aec_masked",\n  wrappers=(...))
+Reg --> User : EnvSpec(api=aec_masked,\n  wrappers=tuple)
+
+note right of Reg
+  EnvSpec.wrappers is an ordered
+  tuple of (env -> env) callables.
+  Each entry must be callable;
+  non-callables raise TypeError.
+end note
+
+== 2. Build ==
+
+User -> Wrap : PettingZooWrapper(name)
+Wrap -> Build : build_env(name)
+Build -> Env : factory(render_mode=None, **cfg)
+Env --> Build : AECEnv\n(is_parallelizable=False)
+Build -> Adapter : wrap raw AEC env
+Adapter --> Build : parallel-shaped adapter
+
+loop for each wrapper in spec.wrappers
+    Build -> SSuit : wrapper(env)
+    SSuit --> Build : wrapped env
+end
+
+Build --> Wrap : final env
+Wrap --> User : wrapper
+
+== 3. Evaluation ==
+
+User -> Eval : SelfPlayEvaluator(wrapper,\n  aggregation="first_agent",\n  masked=True,\n  flatten_obs=True)
+User -> Eval : evaluate(individual, seed)
+
+Eval -> Wrap : reset(seed)
+Wrap -> Adapter : reset(seed)
+Adapter -> Env : reset(seed)
+Env --> Adapter : (observation, info)
+Adapter --> Wrap : {agent: obs for every\n  active agent}\n+ infos[agent]["action_mask"]
+Wrap --> Eval : observations, infos
+
+Eval -> Policy : build one shared policy\nper possible_agent\n(same genome, masked head)
+Policy -> Head : make_head(action_space, masked=True)
+Head --> Policy : MaskedDiscreteHead
+
+loop until done or steps >= max_steps
+    loop for each agent in observations
+        Eval -> Policy : get_action(obs,\n  action_mask=\n    infos[agent]["action_mask"])
+        Policy -> Policy : forward(obs) -> logits
+        Policy -> Head : decode(logits, action_mask)
+        note right of Head
+          Illegal logits set to -inf
+          before argmax; guarantees a
+          legal move every step.
+        end note
+        Head --> Policy : int action
+        Policy --> Eval : action
+    end
+    Eval -> Wrap : step(actions)
+    Wrap -> Adapter : step(actions)
+    note right of Adapter
+      Only the current player's
+      action actually executes in the
+      underlying AEC env; the other
+      agents' actions are ignored.
+    end note
+    Adapter -> Env : step(current_player_action)
+    Env --> Adapter : next obs, reward,\n  term, trunc, info
+    Adapter --> Wrap : parallel-shaped dicts
+    Wrap --> Eval : obs, rewards, dones,\n  truncated, infos
+
+    Eval -> Eval : accumulate per-agent\n  cumulative rewards
+end
+
+Eval -> Eval : _aggregate(cum_rewards)
+note right of Eval
+  aggregation \u2208 {
+    sum, mean,
+    first_agent,   // zero-sum
+    team_mapping   // co-op / teams
+  }
+end note
+Eval --> User : (fitness,)
+
+@enduml
