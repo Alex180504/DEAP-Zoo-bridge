@@ -33,13 +33,39 @@ package "deap_pettingzoo.policies" {
         - layers: List[np.ndarray]
         - biases: List[np.ndarray]
         - activation_fn: callable
+        - head: Optional[ActionHead]
         --
-        + __init__(genome, env_spec)
-        + get_action(observation) -> action
+        + __init__(genome, action_space=None, head=None)
+        + get_action(observation, deterministic=True) -> action
         + reset() -> None
         + forward(x: np.ndarray) -> np.ndarray
     }
 
+    abstract class ActionHead {
+        + {abstract} decode(raw_output) -> Any
+        + {abstract} output_size: int
+    }
+
+    class DiscreteHead {
+        + n: int
+        + decode(raw) -> int  (argmax)
+    }
+
+    class BoxHead {
+        + low, high: np.ndarray
+        + decode(raw) -> np.ndarray  (tanh → rescale)
+    }
+
+    class "make_head(space)" as make_head <<factory>>
+
+    DiscreteHead --|> ActionHead
+    BoxHead --|> ActionHead
+    make_head ..> ActionHead : constructs
+    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+    FeedforwardNeuralPolicy --> ActionHead : optional head
+}
+
+package "deap_pettingzoo.contrib.pursuit_evasion (APF)" {
     class APFConfig <<dataclass>> {
         + k_pursuer: float
         + k_landmark: float
@@ -51,32 +77,63 @@ package "deap_pettingzoo.policies" {
 
     class APFEvaderPolicy {
         - config: APFConfig
-        - action_space
+        - layout: ObsLayout
         --
-        + __init__(action_space, config=None)
+        + __init__(layout, config=None)
         + get_action(observation) -> action
         + reset() -> None
     }
 
-    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
     APFEvaderPolicy --> APFConfig : uses
 }
 
 package "deap_pettingzoo.environments" {
     class PettingZooWrapper {
         - env
+        + env_name: str
+        + env_spec: EnvSpec
+        + default_episode_len: int
         + agents: List[str]
         + num_agents: int
         --
-        + __init__(env_name, **kwargs)
-        + reset(seed) -> observations
+        + __init__(env_name, env_config=None, render_mode=None)
+        + reset(seed, options) -> observations
         + step(actions) -> tuple
         + observation_space(agent: str) -> Space
         + action_space(agent: str) -> Space
         + render() -> np.ndarray
         + close() -> None
+        + {static} supported_envs() -> List[str]
     }
 
+    class EnvSpec <<dataclass>> {
+        + name: str
+        + factory: Any
+        + default_episode_len: int
+        + continuous_default: bool
+        + notes: str
+        + tags: frozenset
+    }
+
+    class registry <<module>> {
+        + {static} register_env(name, factory, **meta) -> EnvSpec
+        + {static} unregister_env(name): None
+        + {static} get_env_spec(name) -> EnvSpec
+        + {static} is_registered(name) -> bool
+        + {static} list_envs(tag=None) -> List[str]
+        + {static} build_env(name, env_config, render_mode)
+    }
+
+    class builtin <<module>> {
+        auto-registers MPE2 envs\n+ aquarium_v0 (if installed)
+    }
+
+    PettingZooWrapper ..> registry : resolves env_name
+    registry "1" *-- "*" EnvSpec
+    builtin ..> registry : register_env
+}
+
+package "deap_pettingzoo.contrib.pursuit_evasion" {
     class PursuitEvasionConfig <<dataclass>> {
         + num_adversaries: int
         + num_good: int
