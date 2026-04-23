@@ -97,6 +97,7 @@ def _make_individual(env: PettingZooWrapper, hidden: int = 8):
 
 @pytest.mark.parametrize("env_name", CONTINUOUS_ENVS)
 def test_box_head_wired_in_single_episode_evaluator(env_name):
+    _maybe_skip_heterogeneous(env_name)
     env = PettingZooWrapper(env_name, env_config={"continuous_actions": True})
     try:
         ind = _make_individual(env)
@@ -132,24 +133,32 @@ def test_box_head_wired_in_single_episode_evaluator(env_name):
 
 
 def _maybe_skip_heterogeneous(env_name: str) -> None:
-    """Skip the trainer test if the env has role-dependent action spaces.
+    """Skip the trainer test if the env has role-dependent spaces.
 
     ``simple_tag_v3`` may publish different Box bounds for adversaries
     and good agents; the EA/CMA-ES trainers require a single shared
-    space.  In that case :func:`_resolve_shared_action_space` raises
-    ``ValueError`` and we skip — that error path is covered explicitly
+    space. Likewise, observation sizes may differ across roles, which
+    :class:`SingleEpisodeEvaluator` rejects outright (no more
+    weight-transfer branch — see ``docs/known_issues.md``). In either
+    case we skip — the action-space error path is covered explicitly
     by ``test_rejects_heterogeneous_spaces`` below.
     """
     env = PettingZooWrapper(env_name, env_config={"continuous_actions": True})
     try:
         agents = list(env.possible_agents)
-        ref = env.action_space(agents[0])
+        ref_action = env.action_space(agents[0])
         for a in agents[1:]:
-            if env.action_space(a) != ref:
+            if env.action_space(a) != ref_action:
                 pytest.skip(
                     f"{env_name}: heterogeneous action spaces "
                     f"(agent {a!r} differs from {agents[0]!r})"
                 )
+        obs = env.reset(seed=0)
+        sizes = {a: len(o) for a, o in obs.items()}
+        if len(set(sizes.values())) > 1:
+            pytest.skip(
+                f"{env_name}: heterogeneous observation sizes {sizes}"
+            )
     finally:
         env.close()
 
