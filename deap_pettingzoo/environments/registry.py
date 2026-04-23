@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 
 # A ``factory`` is either:
@@ -95,6 +95,14 @@ class EnvSpec:
     notes: str = ""
     tags: frozenset = field(default_factory=frozenset)
     api: EnvApi = "parallel"
+    #: Ordered tuple of callables applied to the constructed env after
+    #: api coercion (turn-based adapter / ``aec_to_parallel`` / identity).
+    #: Each callable takes the current env and returns a wrapped env,
+    #: matching the :mod:`supersuit` wrapper signature. The chain runs
+    #: left-to-right. Default is an empty tuple (no wrapping). See the
+    #: README "Env transforms via SuperSuit" section for the canonical
+    #: ordering of the common MPE wrappers.
+    wrappers: Tuple[Callable[[Any], Any], ...] = ()
 
 
 #: Fallback episode length when an :class:`EnvSpec` does not specify one.
@@ -113,6 +121,7 @@ def register_env(
     notes: str = "",
     tags: Optional[set] = None,
     api: EnvApi = "parallel",
+    wrappers: Sequence[Callable[[Any], Any]] = (),
     overwrite: bool = False,
 ) -> EnvSpec:
     """Register a PettingZoo environment.
@@ -132,6 +141,12 @@ def register_env(
             (default), ``'aec'`` (converted via ``aec_to_parallel`` at
             build time; requires simultaneous-step semantics), or
             ``'auto'`` (inspect constructed env and convert if needed).
+        wrappers: Optional ordered sequence of callables applied to the
+            constructed env after api coercion. Typical use is composing
+            :mod:`supersuit` wrappers (``pad_observations_v0``,
+            ``pad_action_space_v0``, ``agent_indicator_v0``,
+            ``normalize_obs_v0``, ``black_death_v3``, ...). Each entry
+            must be callable; they run left-to-right.
         overwrite: If ``False`` (default), re-registering an existing name
             raises :class:`ValueError`.  Set ``True`` to replace.
 
@@ -163,6 +178,13 @@ def register_env(
             f"Factory for '{name}' must be callable or expose a callable "
             "'parallel_env', 'env', or 'raw_env' attribute."
         )
+    wrapper_tuple = tuple(wrappers)
+    for idx, w in enumerate(wrapper_tuple):
+        if not callable(w):
+            raise TypeError(
+                f"wrappers[{idx}] for env '{name}' is not callable: "
+                f"got {w!r} (type {type(w).__name__})."
+            )
     spec = EnvSpec(
         name=name,
         factory=factory,
@@ -171,6 +193,7 @@ def register_env(
         notes=notes,
         tags=frozenset(tags or ()),
         api=api,
+        wrappers=wrapper_tuple,
     )
     _REGISTRY[name] = spec
     return spec
@@ -432,18 +455,23 @@ def build_env(
                 "exposes no callable parallel_env and isn't callable."
             )
         _reject_if_aec(env, name, declared="parallel")
-        return env
-
-    if spec.api in ("aec_masked", "aec_sequential"):
+    elif spec.api in ("aec_masked", "aec_sequential"):
         # Turn-based AEC — wrap in our own adapter, skip aec_to_parallel
         # and the simultaneity guard entirely.
         raw = _instantiate_factory(factory, render_mode, kwargs, preferred="env")
-        return _coerce_turn_based(raw, name, mode=spec.api)
+        env = _coerce_turn_based(raw, name, mode=spec.api)
+    else:
+        # AEC or auto: construct then convert if needed.
+        preferred = "env" if spec.api == "aec" else "parallel_env"
+        raw = _instantiate_factory(factory, render_mode, kwargs, preferred=preferred)
+        env = _coerce_to_parallel(raw, name, declared=spec.api)
 
-    # AEC or auto: construct then convert if needed.
-    preferred = "env" if spec.api == "aec" else "parallel_env"
-    raw = _instantiate_factory(factory, render_mode, kwargs, preferred=preferred)
-    return _coerce_to_parallel(raw, name, declared=spec.api)
+    # Apply the user's wrapper chain left-to-right. Wrappers run after
+    # api coercion so they always see the parallel-shaped env the rest
+    # of the stack expects.
+    for wrapper in spec.wrappers:
+        env = wrapper(env)
+    return env
 
 
 def clear_registry() -> None:
