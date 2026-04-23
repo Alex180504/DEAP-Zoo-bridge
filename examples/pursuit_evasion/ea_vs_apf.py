@@ -36,7 +36,7 @@ from typing import Any, Dict
 import numpy as np
 from deap import tools
 
-from deap_pettingzoo.environments import PursuitEvasionEnv, PursuitEvasionConfig
+from deap_pettingzoo.contrib.pursuit_evasion import PursuitEvasionEnv, PursuitEvasionConfig
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.policies import (
     APFEvaderPolicy,

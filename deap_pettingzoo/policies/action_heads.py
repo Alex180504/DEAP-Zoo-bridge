@@ -1,0 +1,181 @@
+"""Action heads for :class:`FeedforwardNeuralPolicy`.
+
+An *action head* converts the raw output of a feedforward network into a
+value that is valid for a given :mod:`gymnasium.spaces` action space.
+
+Two heads are provided:
+
+- :class:`DiscreteHead` — argmax over ``n`` logits, returns a Python ``int``.
+- :class:`BoxHead` — tanh-squash raw output to ``[-1, 1]`` then rescale to
+  ``[low, high]``, returns a ``np.float32`` array.
+
+:class:`MultiDiscrete`, :class:`Tuple`, and :class:`Dict` action spaces are
+explicitly **not supported** for EA-driven policies.  :func:`make_head`
+raises :class:`NotImplementedError` with a message pointing callers at the
+AgileRL trainers, which handle those spaces natively.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Union
+
+import numpy as np
+
+
+class ActionHead:
+    """Base action-head protocol."""
+
+    def decode(self, raw_output: np.ndarray) -> Any:  # pragma: no cover - abstract
+        """Convert raw network output to an env-valid action."""
+        raise NotImplementedError
+
+    @property
+    def output_size(self) -> int:  # pragma: no cover - abstract
+        """Number of network output units required by this head."""
+        raise NotImplementedError
+
+
+class DiscreteHead(ActionHead):
+    """Argmax over ``n`` logits.
+
+    Args:
+        n: Number of discrete actions (size of the output vector).
+
+    Returns Python ``int`` in ``[0, n)`` from :meth:`decode`.
+    """
+
+    def __init__(self, n: int) -> None:
+        if n < 1:
+            raise ValueError(f"DiscreteHead requires n >= 1, got {n}")
+        self.n = int(n)
+
+    @property
+    def output_size(self) -> int:
+        return self.n
+
+    def decode(self, raw_output: np.ndarray) -> int:
+        arr = np.asarray(raw_output).ravel()
+        if arr.size != self.n:
+            raise ValueError(
+                f"DiscreteHead expected output of size {self.n}, "
+                f"got size {arr.size}"
+            )
+        return int(np.argmax(arr))
+
+
+class BoxHead(ActionHead):
+    """Tanh-squashed, rescaled Box action.
+
+    The raw output is passed through ``tanh`` to produce values in
+    ``[-1, 1]`` and then linearly rescaled to ``[low, high]`` element-wise.
+    ``low``/``high`` may be scalar or array-like with matching shape.
+
+    Args:
+        low: Lower action bound.
+        high: Upper action bound.
+        shape: Action shape; inferred from ``low``/``high`` when possible.
+
+    Raises:
+        ValueError: If ``low``/``high`` contain non-finite values and no
+            explicit ``shape`` is provided, or if the inferred shape is
+            not 1-D.
+    """
+
+    def __init__(
+        self,
+        low: Union[float, np.ndarray],
+        high: Union[float, np.ndarray],
+        shape: tuple = None,
+    ) -> None:
+        low_arr = np.asarray(low, dtype=np.float32)
+        high_arr = np.asarray(high, dtype=np.float32)
+        if shape is None:
+            if low_arr.ndim == 0 and high_arr.ndim == 0:
+                raise ValueError(
+                    "BoxHead needs an explicit shape when low/high are scalars."
+                )
+            shape = low_arr.shape if low_arr.ndim > 0 else high_arr.shape
+        if len(shape) != 1:
+            raise ValueError(
+                f"BoxHead only supports 1-D action shapes, got {shape}."
+            )
+        self._shape = tuple(int(s) for s in shape)
+        self._low = np.broadcast_to(low_arr, self._shape).astype(np.float32).copy()
+        self._high = np.broadcast_to(high_arr, self._shape).astype(np.float32).copy()
+        # Replace non-finite bounds with a sensible default (-1/+1) so
+        # unbounded Box spaces still produce finite actions.
+        self._low = np.where(np.isfinite(self._low), self._low, -1.0).astype(np.float32)
+        self._high = np.where(np.isfinite(self._high), self._high, 1.0).astype(np.float32)
+
+    @property
+    def output_size(self) -> int:
+        return int(self._shape[0])
+
+    @property
+    def shape(self) -> tuple:
+        return self._shape
+
+    def decode(self, raw_output: np.ndarray) -> np.ndarray:
+        arr = np.asarray(raw_output, dtype=np.float32).ravel()
+        if arr.size != self.output_size:
+            raise ValueError(
+                f"BoxHead expected output of size {self.output_size}, "
+                f"got size {arr.size}"
+            )
+        squashed = np.tanh(arr)
+        # Affine rescale from [-1, 1] to [low, high].
+        scale = (self._high - self._low) / 2.0
+        bias = (self._high + self._low) / 2.0
+        return (squashed * scale + bias).astype(np.float32)
+
+
+def make_head(action_space: Any) -> ActionHead:
+    """Construct the :class:`ActionHead` appropriate for ``action_space``.
+
+    Args:
+        action_space: A :class:`gymnasium.spaces.Space` instance.
+
+    Returns:
+        :class:`DiscreteHead` for :class:`Discrete`, :class:`BoxHead` for
+        :class:`Box`.
+
+    Raises:
+        NotImplementedError: For :class:`MultiDiscrete`, :class:`Tuple`,
+            :class:`Dict`, and any other unsupported space type.  The
+            message points callers at the AgileRL trainers.
+        TypeError: If ``action_space`` is ``None``.
+    """
+    if action_space is None:
+        raise TypeError("make_head requires a gymnasium Space, got None.")
+
+    # Use duck-typing so we don't force a hard gymnasium import here.
+    if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
+        return DiscreteHead(int(action_space.n))
+    if hasattr(action_space, "nvec"):
+        raise NotImplementedError(
+            "MultiDiscrete action spaces are not supported by "
+            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
+            "(MADDPG / MATD3 / IPPO / MAPPO) for envs with communication "
+            "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
+        )
+    if hasattr(action_space, "low") and hasattr(action_space, "high") and hasattr(
+        action_space, "shape"
+    ):
+        return BoxHead(action_space.low, action_space.high, shape=action_space.shape)
+    if hasattr(action_space, "spaces"):
+        raise NotImplementedError(
+            "Tuple/Dict action spaces are not supported by "
+            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers."
+        )
+    raise NotImplementedError(
+        f"Unsupported action space type: {type(action_space).__name__}. "
+        "Use one of the AgileRL trainers for this environment."
+    )
+
+
+__all__ = [
+    "ActionHead",
+    "DiscreteHead",
+    "BoxHead",
+    "make_head",
+]
