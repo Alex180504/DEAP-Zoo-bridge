@@ -38,7 +38,7 @@ from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 from deap_pettingzoo.evaluators.base_evaluator import BaseEvaluator
 
 
-LearnerPolicyFactory = Callable[[Any, str], "PolicyLike"]
+LearnerPolicyFactory = Callable[[Any, str, Any], "PolicyLike"]
 
 
 class PolicyLike:  # structural type; actual classes only need get_action/reset
@@ -76,7 +76,8 @@ class MixedPolicyEvaluator(BaseEvaluator):
 
     * **Learner group** — agents whose name starts with any prefix in
       ``learner_agent_prefixes``.  Each is driven by a fresh policy built
-      from the individual's genome via ``learner_factory(genome, agent_id)``.
+      the individual's genome via
+      ``learner_factory(genome, agent_id, action_space)``.
     * **Scripted group** — everyone else.  Each is driven by the
       pre-built :class:`PolicyProtocol` instance found in
       ``scripted_policies[agent_id]``.  If the dict is missing any
@@ -98,8 +99,12 @@ class MixedPolicyEvaluator(BaseEvaluator):
             learner_agent_prefixes: Agent-name prefixes whose agents are
                 driven by the learning side (e.g. ``['adversary']`` to
                 train pursuers).
-            learner_factory: Callable ``(genome, agent_id) -> policy``
-                returning a fresh policy instance for each learner agent.
+            learner_factory: Callable
+                ``(genome, agent_id, action_space) -> policy`` returning a
+                fresh policy instance for each learner agent.  The
+                ``action_space`` argument was added in the continuous-action
+                support drop and is *required* — factories that previously
+                took only ``(genome, agent_id)`` must be updated.
             scripted_policies: Mapping from agent_id to a pre-built
                 policy for every non-learner agent.
             max_steps: Hard cap on environment steps per episode.
@@ -169,7 +174,10 @@ class MixedPolicyEvaluator(BaseEvaluator):
 
         # Build fresh learner policies for this episode.
         learner_policies: Dict[str, PolicyLike] = {
-            agent: self.learner_factory(genome, agent) for agent in self.learner_agents
+            agent: self.learner_factory(
+                genome, agent, self.env_wrapper.action_space(agent)
+            )
+            for agent in self.learner_agents
         }
         # Reset all policies (no-op for stateless ones; skip if not implemented).
         for p in learner_policies.values():

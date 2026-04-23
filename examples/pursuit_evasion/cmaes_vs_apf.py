@@ -89,8 +89,8 @@ def build_scripted_evaders(env: PursuitEvasionEnv) -> Dict[str, APFEvaderPolicy]
 
 
 def make_learner_factory(env: PursuitEvasionEnv, hidden_size: int):
-    def _factory(genome: FixedTopologyGenome, agent_id: str):
-        return FeedforwardNeuralPolicy(genome)
+    def _factory(genome: FixedTopologyGenome, agent_id: str, action_space):
+        return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
     return _factory
 

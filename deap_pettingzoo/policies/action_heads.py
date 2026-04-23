@@ -129,6 +129,58 @@ class BoxHead(ActionHead):
         return (squashed * scale + bias).astype(np.float32)
 
 
+def required_output_size(action_space: Any) -> int:
+    """Return the number of network output units required for ``action_space``.
+
+    Mirrors :func:`make_head`'s space support: :class:`Discrete` needs
+    ``n`` outputs, :class:`Box` needs ``prod(shape)`` outputs (1-D only
+    in practice).  Unsupported spaces raise :class:`NotImplementedError`
+    with the same message pattern used by :func:`make_head`.
+
+    Args:
+        action_space: A :class:`gymnasium.spaces.Space` instance.
+
+    Returns:
+        Required number of output units.
+
+    Raises:
+        NotImplementedError: For :class:`MultiDiscrete`, :class:`Tuple`,
+            :class:`Dict`, and any other unsupported space type.
+        TypeError: If ``action_space`` is ``None``.
+    """
+    if action_space is None:
+        raise TypeError("required_output_size requires a gymnasium Space, got None.")
+
+    if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
+        return int(action_space.n)
+    if hasattr(action_space, "nvec"):
+        raise NotImplementedError(
+            "MultiDiscrete action spaces are not supported by "
+            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
+            "(MADDPG / MATD3 / IPPO / MAPPO) for envs with communication "
+            "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
+        )
+    if hasattr(action_space, "shape") and hasattr(action_space, "low"):
+        shape = action_space.shape
+        if shape is None or len(shape) == 0:
+            raise ValueError(
+                f"Box action space must have a non-empty shape, got {shape!r}."
+            )
+        size = 1
+        for dim in shape:
+            size *= int(dim)
+        return size
+    if hasattr(action_space, "spaces"):
+        raise NotImplementedError(
+            "Tuple/Dict action spaces are not supported by "
+            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers."
+        )
+    raise NotImplementedError(
+        f"Unsupported action space type: {type(action_space).__name__}. "
+        "Use one of the AgileRL trainers for this environment."
+    )
+
+
 def make_head(action_space: Any) -> ActionHead:
     """Construct the :class:`ActionHead` appropriate for ``action_space``.
 
@@ -178,4 +230,5 @@ __all__ = [
     "DiscreteHead",
     "BoxHead",
     "make_head",
+    "required_output_size",
 ]

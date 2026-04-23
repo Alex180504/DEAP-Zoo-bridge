@@ -21,7 +21,10 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
 )
-from deap_pettingzoo.baselines.ea_trainer import GenomePolicyWrapper
+from deap_pettingzoo.baselines.ea_trainer import (
+    GenomePolicyWrapper,
+    _resolve_shared_action_space,
+)
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.cma_integration import (
@@ -31,6 +34,7 @@ from deap_pettingzoo.integration.cma_integration import (
     setup_cma_one_plus_lambda_strategy,
     setup_cma_strategy,
 )
+from deap_pettingzoo.policies.action_heads import required_output_size
 
 
 class CMAESTrainer(BaselineTrainer):
@@ -106,11 +110,8 @@ class CMAESTrainer(BaselineTrainer):
         agent_id = env.possible_agents[0]
 
         input_size = len(sample_obs[agent_id])
-        action_space = env.action_space(agent_id)
-        if hasattr(action_space, "n"):  # Discrete
-            output_size = action_space.n
-        else:  # Box
-            output_size = action_space.shape[0]
+        action_space = _resolve_shared_action_space(env)
+        output_size = required_output_size(action_space)
 
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
@@ -163,7 +164,7 @@ class CMAESTrainer(BaselineTrainer):
 
         best_individual = hof[0]
         best_genome = best_individual.genome
-        policy = GenomePolicyWrapper(best_genome, config.env_name)
+        policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
 
         return TrainingResult(
             algorithm="cma-es",

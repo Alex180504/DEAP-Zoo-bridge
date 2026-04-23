@@ -7,7 +7,13 @@ release.  New code should import from the contrib subpackage.
 """
 
 from .feedforward_neural import FeedforwardNeuralPolicy
-from .action_heads import ActionHead, BoxHead, DiscreteHead, make_head
+from .action_heads import (
+    ActionHead,
+    BoxHead,
+    DiscreteHead,
+    make_head,
+    required_output_size,
+)
 
 __all__ = [
     'FeedforwardNeuralPolicy',
@@ -15,6 +21,7 @@ __all__ = [
     'BoxHead',
     'DiscreteHead',
     'make_head',
+    'required_output_size',
 ]
 
 
