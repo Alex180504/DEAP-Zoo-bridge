@@ -52,8 +52,14 @@ rl-baselines = [
 aquarium = [
     "marl-aquarium>=0.1.10",
 ]
+supersuit = [
+    "supersuit>=3.9",
+]
+shimmy = [
+    "shimmy[openspiel]>=2.0",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines,aquarium]",
+    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy]"
 ]
 
 [tool.setuptools]
@@ -93,3 +99,5 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
+
+
