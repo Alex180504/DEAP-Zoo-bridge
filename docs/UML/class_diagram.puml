@@ -14,7 +14,7 @@ package "deap_pettingzoo.genomes" {
         + hidden_layers: List[int]
         + weight_range: tuple[float, float]
         --
-        + __init__(layer_sizes, activation, weight_range, seed)
+        + __init__(layer_sizes, activation, weight_range: tuple[float, float], random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
         + get_weights() -> np.ndarray
@@ -41,10 +41,12 @@ package "deap_pettingzoo.policies" {
     }
 
     class APFConfig <<dataclass>> {
-        + k_att: float
-        + k_rep: float
-        + d0: float
-        + max_speed: float
+        + k_pursuer: float
+        + k_landmark: float
+        + k_boundary: float
+        + boundary_threshold: float
+        + no_op_threshold: float
+        + softening: float
     }
 
     class APFEvaderPolicy {
@@ -76,11 +78,18 @@ package "deap_pettingzoo.environments" {
     }
 
     class PursuitEvasionConfig <<dataclass>> {
-        + n_pursuers: int
-        + n_evaders: int
-        + world_size: float
-        + max_steps: int
-        + capture_radius: float
+        + num_adversaries: int
+        + num_good: int
+        + num_obstacles: int
+        + max_cycles: int
+        + equal_ability: bool
+        + equal_max_speed: float
+        + equal_accel: float
+        + num_agent_neighbors: Optional[int]
+        + num_landmark_neighbors: Optional[int]
+        + boundary_threshold: float
+        + boundary_scale: float
+        + boundary_sharpness: float
     }
 
     class ObsLayout <<dataclass>> {
@@ -109,12 +118,12 @@ package "deap_pettingzoo.evaluators" {
     class SingleEpisodeEvaluator {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
-        - fitness_aggregation: str
-        - team_mode: str
+        - aggregation_method: str
+        - team_mapping: Dict[str, str]
         --
-        + __init__(env_wrapper, genome_config, max_steps, fitness_aggregation, team_mode, seed)
-        + evaluate(individual, seed=None) -> float
-        - _create_policies(individual) -> dict
+        + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        - _create_policies(genome, observations) -> dict
         - _aggregate_fitness(rewards: dict) -> float
         - _aggregate_team_fitness(rewards: dict) -> float
     }
