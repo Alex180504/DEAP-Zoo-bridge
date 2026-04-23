@@ -24,7 +24,7 @@ activate Env
 Env --> Trainer : env
 deactivate Env
 
-Trainer -> Eval : SingleEpisodeEvaluator(env, genome_config, ...)
+Trainer -> Eval : SingleEpisodeEvaluator(env_wrapper, max_steps, aggregation_method)
 activate Eval
 Eval --> Trainer : evaluator
 deactivate Eval
