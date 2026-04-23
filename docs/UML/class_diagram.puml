@@ -57,6 +57,7 @@ package "deap_pettingzoo.policies" {
     }
 
     class "make_head(space)" as make_head <<factory>>
+    class "required_output_size(space)" as required_output_size <<helper>>
 
     DiscreteHead --|> ActionHead
     BoxHead --|> ActionHead
