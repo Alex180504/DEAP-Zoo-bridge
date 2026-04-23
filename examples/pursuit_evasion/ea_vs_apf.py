@@ -116,10 +116,10 @@ def make_learner_factory(env: PursuitEvasionEnv, hidden_size: int):
     observation size (they are structurally identical), a single
     :class:`FeedforwardNeuralPolicy` instance per agent is sufficient.
     """
-    def _factory(genome: FixedTopologyGenome, agent_id: str):
+    def _factory(genome: FixedTopologyGenome, agent_id: str, action_space):
         # One policy instance per agent (they wrap the *same* genome,
         # which is fine because FeedforwardNeuralPolicy is stateless).
-        return FeedforwardNeuralPolicy(genome)
+        return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
     return _factory
 
