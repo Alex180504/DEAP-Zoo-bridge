@@ -24,6 +24,7 @@ from .registry import (
     register_env,
     unregister_env,
 )
+from .turn_based import MaskedSimultaneousAdapter, SequentialTurnAdapter
 
 __all__ = [
     'PettingZooWrapper',
@@ -34,6 +35,8 @@ __all__ = [
     'is_registered',
     'list_envs',
     'build_env',
+    'MaskedSimultaneousAdapter',
+    'SequentialTurnAdapter',
 ]
 
 

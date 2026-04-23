@@ -25,6 +25,10 @@ import numpy as np
 class ActionHead:
     """Base action-head protocol."""
 
+    #: Whether :meth:`decode` accepts an ``action_mask`` keyword. Defaults
+    #: to ``False``; :class:`MaskedDiscreteHead` overrides to ``True``.
+    supports_mask: bool = False
+
     def decode(self, raw_output: np.ndarray) -> Any:  # pragma: no cover - abstract
         """Convert raw network output to an env-valid action."""
         raise NotImplementedError
@@ -61,6 +65,50 @@ class DiscreteHead(ActionHead):
                 f"got size {arr.size}"
             )
         return int(np.argmax(arr))
+
+
+class MaskedDiscreteHead(DiscreteHead):
+    """Mask-aware variant of :class:`DiscreteHead` for turn-based games.
+
+    :meth:`decode` accepts an optional ``action_mask`` of length ``n``
+    where ``0`` marks an illegal action; the corresponding logits are
+    set to ``-inf`` before :func:`numpy.argmax` so that only legal
+    actions can be selected. When ``action_mask`` is ``None`` the head
+    behaves identically to :class:`DiscreteHead`.
+
+    If the mask is entirely zero (no legal action — e.g. a "waiting"
+    agent on the other side of a turn-based board under the masked
+    adapter), :meth:`decode` returns ``0`` by convention; the adapter
+    discards the action anyway.
+    """
+
+    supports_mask = True
+
+    def decode(  # type: ignore[override]
+        self,
+        raw_output: np.ndarray,
+        action_mask: "np.ndarray | None" = None,
+    ) -> int:
+        arr = np.asarray(raw_output, dtype=np.float64).ravel()
+        if arr.size != self.n:
+            raise ValueError(
+                f"MaskedDiscreteHead expected output of size {self.n}, "
+                f"got size {arr.size}"
+            )
+        if action_mask is None:
+            return int(np.argmax(arr))
+        mask = np.asarray(action_mask).ravel()
+        if mask.size != self.n:
+            raise ValueError(
+                f"MaskedDiscreteHead expected action_mask of size {self.n}, "
+                f"got size {mask.size}"
+            )
+        if not np.any(mask):
+            # Nothing legal (waiting-turn agent); return 0 — adapter will
+            # discard this action anyway.
+            return 0
+        masked = np.where(mask.astype(bool), arr, -np.inf)
+        return int(np.argmax(masked))
 
 
 class BoxHead(ActionHead):
@@ -181,14 +229,19 @@ def required_output_size(action_space: Any) -> int:
     )
 
 
-def make_head(action_space: Any) -> ActionHead:
+def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
     """Construct the :class:`ActionHead` appropriate for ``action_space``.
 
     Args:
         action_space: A :class:`gymnasium.spaces.Space` instance.
+        masked: If ``True`` and ``action_space`` is :class:`Discrete`,
+            return a :class:`MaskedDiscreteHead` instead of the default
+            :class:`DiscreteHead` so the caller can supply an
+            ``action_mask`` to :meth:`ActionHead.decode`.
 
     Returns:
-        :class:`DiscreteHead` for :class:`Discrete`, :class:`BoxHead` for
+        :class:`DiscreteHead` (or :class:`MaskedDiscreteHead` when
+        ``masked=True``) for :class:`Discrete`, :class:`BoxHead` for
         :class:`Box`.
 
     Raises:
@@ -202,7 +255,8 @@ def make_head(action_space: Any) -> ActionHead:
 
     # Use duck-typing so we don't force a hard gymnasium import here.
     if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
-        return DiscreteHead(int(action_space.n))
+        cls = MaskedDiscreteHead if masked else DiscreteHead
+        return cls(int(action_space.n))
     if hasattr(action_space, "nvec"):
         raise NotImplementedError(
             "MultiDiscrete action spaces are not supported by "
@@ -228,6 +282,7 @@ def make_head(action_space: Any) -> ActionHead:
 __all__ = [
     "ActionHead",
     "DiscreteHead",
+    "MaskedDiscreteHead",
     "BoxHead",
     "make_head",
     "required_output_size",

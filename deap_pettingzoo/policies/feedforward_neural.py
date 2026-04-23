@@ -33,6 +33,7 @@ class FeedforwardNeuralPolicy:
         genome: FixedTopologyGenome,
         action_space: Optional[Any] = None,
         head: Optional[ActionHead] = None,
+        masked: bool = False,
     ) -> None:
         """
         Initialize policy from genome.
@@ -44,6 +45,10 @@ class FeedforwardNeuralPolicy:
                 :meth:`get_action`.
             head: Optional explicit :class:`ActionHead` override (takes
                 precedence over ``action_space``).
+            masked: If ``True`` and ``action_space`` is ``Discrete``,
+                construct a :class:`MaskedDiscreteHead` so that
+                :meth:`get_action` can accept an ``action_mask`` kwarg.
+                Ignored when ``head`` is supplied explicitly.
 
         Raises:
             NotImplementedError: If ``action_space`` is :class:`MultiDiscrete`,
@@ -64,7 +69,7 @@ class FeedforwardNeuralPolicy:
         if head is not None:
             self.head: Optional[ActionHead] = head
         elif action_space is not None:
-            self.head = make_head(action_space)
+            self.head = make_head(action_space, masked=masked)
         else:
             self.head = None
     
@@ -160,7 +165,9 @@ class FeedforwardNeuralPolicy:
     def get_action(
         self,
         observation: np.ndarray,
-        deterministic: bool = True
+        deterministic: bool = True,
+        *,
+        action_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Get action for observation.
@@ -175,6 +182,11 @@ class FeedforwardNeuralPolicy:
             observation: Input observation vector.
             deterministic: If False, add Gaussian noise for exploration
                 before decoding.
+            action_mask: Optional legal-action mask. Forwarded to the
+                head's ``decode`` when the head declares
+                ``supports_mask=True`` (i.e.
+                :class:`MaskedDiscreteHead`); silently ignored
+                otherwise for backward compatibility.
 
         Returns:
             Decoded action.  Type depends on the configured head:
@@ -192,6 +204,8 @@ class FeedforwardNeuralPolicy:
             action = action + noise
 
         if self.head is not None:
+            if action_mask is not None and getattr(self.head, "supports_mask", False):
+                return self.head.decode(action, action_mask=action_mask)
             return self.head.decode(action)
         return action
 
