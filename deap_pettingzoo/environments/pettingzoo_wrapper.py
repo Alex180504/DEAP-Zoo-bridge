@@ -1,23 +1,44 @@
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
-from mpe2 import simple_tag_v3, simple_adversary_v3, simple_spread_v3
 
-# Optional: marl-aquarium is a third-party PettingZoo-compatible env.
-# Import lazily so the core package does not hard-depend on it.
-try:  # pragma: no cover - presence depends on optional extra
-    from marl_aquarium import aquarium_v0 as _aquarium_v0
-except ImportError:  # pragma: no cover
-    _aquarium_v0 = None
+from .registry import (
+    DEFAULT_EPISODE_LEN_FALLBACK,
+    build_env,
+    get_env_spec,
+    is_registered,
+    list_envs,
+)
+
+
+class _SupportedEnvsDescriptor:
+    """Descriptor backing ``PettingZooWrapper.SUPPORTED_ENVS``.
+
+    Returns a fresh dict view over the live env registry on each access,
+    so callers see envs registered after class definition.  Retained as a
+    backwards-compat surface — new code should use
+    :func:`deap_pettingzoo.environments.registry.list_envs` instead.
+    """
+
+    def __get__(self, obj, objtype=None):
+        from .registry import _REGISTRY  # noqa: WPS437 - private but stable
+
+        return {name: spec.factory for name, spec in _REGISTRY.items()}
 
 
 class PettingZooWrapper:
     """
     Wrapper for PettingZoo environments compatible with DEAP.
-    
+
     Provides a unified interface for PettingZoo multi-agent environments,
     handling agent coordination, observation/action space management,
     and episode tracking.
-    
+
+    Any environment registered via
+    :func:`deap_pettingzoo.environments.registry.register_env` can be
+    wrapped by name. MPE2 environments and ``marl-aquarium``'s
+    ``aquarium_v0`` are auto-registered on package import if the
+    corresponding packages are installed.
+
     Attributes:
         env_name: Name of the PettingZoo environment
         env: The wrapped PettingZoo environment
@@ -28,63 +49,77 @@ class PettingZooWrapper:
         episode_length: Current episode step count
         cumulative_rewards: Dict of cumulative rewards per agent
     """
-    
-    # Supported MPE environments
-    SUPPORTED_ENVS = {
-        'simple_tag_v3': simple_tag_v3,
-        'simple_adversary_v3': simple_adversary_v3,
-        'simple_spread_v3': simple_spread_v3,
-    }
-    if _aquarium_v0 is not None:
-        SUPPORTED_ENVS['aquarium_v0'] = _aquarium_v0
-    
+
+    #: Backwards-compat view of the env registry; prefer
+    #: :func:`deap_pettingzoo.environments.registry.list_envs`.
+    SUPPORTED_ENVS = _SupportedEnvsDescriptor()
+
+    @classmethod
+    def supported_envs(cls) -> List[str]:
+        """Return the sorted list of currently-registered environment names."""
+        return list_envs()
+
     def __init__(
         self,
         env_name: str,
         env_config: Optional[Dict[str, Any]] = None,
-        render_mode: Optional[str] = None
+        render_mode: Optional[str] = None,
     ) -> None:
         """
         Initialize environment wrapper.
-        
+
         Args:
-            env_name: Name of PettingZoo environment ('simple_tag_v3', etc.)
-            env_config: Optional configuration dict for environment
-            render_mode: Rendering mode ('human', 'rgb_array', None)
-            
+            env_name: Registered PettingZoo environment name.
+            env_config: Optional configuration dict for environment.
+            render_mode: Rendering mode ('human', 'rgb_array', None).
+
         Raises:
-            ValueError: If environment name is not supported
-            
+            ValueError: If ``env_name`` is not registered. See
+                :func:`deap_pettingzoo.environments.registry.register_env`
+                for how to register third-party envs.
+
         Example:
             >>> wrapper = PettingZooWrapper(
             ...     env_name='simple_tag_v3',
             ...     env_config={'max_cycles': 25}
             ... )
         """
-        if env_name not in self.SUPPORTED_ENVS:
-            raise ValueError(
-                f"Unsupported environment '{env_name}'. "
-                f"Supported: {list(self.SUPPORTED_ENVS.keys())}"
-            )
-        
+        if not is_registered(env_name):
+            # get_env_spec raises a descriptive ValueError listing known
+            # names and recovery suggestions; delegate to it.
+            get_env_spec(env_name)
+
         self.env_name = env_name
         self.env_config = env_config or {}
         self.render_mode = render_mode
-        
-        # Create environment
-        env_class = self.SUPPORTED_ENVS[env_name]
-        self.env = env_class.parallel_env(
+
+        # Build environment via the registered factory.
+        self.env = build_env(
+            env_name,
+            env_config=self.env_config,
             render_mode=render_mode,
-            **self.env_config
         )
-        
+
         # Store agent information
         self.possible_agents = self.env.possible_agents
-        
+
         # Episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {}
-    
+
+    @property
+    def env_spec(self):
+        """Return the :class:`EnvSpec` describing this environment."""
+        return get_env_spec(self.env_name)
+
+    @property
+    def default_episode_len(self) -> int:
+        """Fallback episode length used for budget translation."""
+        try:
+            return self.env_spec.default_episode_len
+        except ValueError:  # pragma: no cover - registry mutated post-init
+            return DEFAULT_EPISODE_LEN_FALLBACK
+
     @property
     def agents(self) -> List[str]:
         """Get list of currently active agents."""
