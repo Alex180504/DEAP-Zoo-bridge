@@ -7,12 +7,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from deap_pettingzoo.environments import (
+from deap_pettingzoo.contrib.pursuit_evasion import (
     PursuitEvasionEnv,
     PursuitEvasionConfig,
     ObsLayout,
+    APFEvaderPolicy,
+    APFConfig,
 )
-from deap_pettingzoo.policies import APFEvaderPolicy, APFConfig, FeedforwardNeuralPolicy
+from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import setup_deap_creators
