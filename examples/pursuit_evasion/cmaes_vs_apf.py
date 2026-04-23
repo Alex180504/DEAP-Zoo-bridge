@@ -1,30 +1,11 @@
-"""EA pursuers vs APF evaders — honours-project prototype experiment.
+"""CMA-ES pursuers vs APF evaders — CMA-ES counterpart to ea_vs_apf.
 
-Implements the baseline methodology described in the project's research
-protocol:
-
-* 10-vs-10 pursuit-evasion in ``simple_tag_v3`` (MPE2)
-* Equal-ability pursuers and evaders (same ``max_speed``/``accel``)
-* Partial observability (K-nearest agents + K-nearest landmarks,
-  zero-padded)
-* Exponential boundary penalty on agent rewards
-* Scripted APF evaders (deterministic, non-learning) so the pursuers train
-  against a *stationary* target — isolating algorithmic efficiency from
-  opponent-policy non-stationarity
-* Pursuers evolved via DEAP using the deap-bridge framework's evaluator
-  abstractions
-
-This script showcases the deap-bridge API end-to-end:
-
-* :class:`~deap_pettingzoo.environments.PursuitEvasionEnv` — env wrapper
-* :class:`~deap_pettingzoo.policies.APFEvaderPolicy` — scripted policy
-  satisfying :class:`PolicyProtocol`
-* :class:`~deap_pettingzoo.policies.FeedforwardNeuralPolicy` — NN policy
-  from evolved genomes
-* :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator` — heterogeneous
-  per-agent policy routing
-* :mod:`~deap_pettingzoo.integration.deap_integration` — DEAP toolbox
-  construction with the bridge's genome/crossover/mutation operators
+Mirrors :mod:`examples.pursuit_evasion_ea_vs_apf` but drives the pursuer
+search with :class:`deap.cma.Strategy` via the bridge's
+:mod:`~deap_pettingzoo.integration.cma_integration` helpers, keeping all
+other components (MPE2 ``simple_tag_v3``, APF evaders,
+:class:`MixedPolicyEvaluator`) identical. This lets the two scripts be
+used as apples-to-apples evolutionary-search baselines.
 """
 
 from __future__ import annotations
@@ -34,20 +15,22 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
-from deap import tools
+from deap import creator, tools
 
-from deap_pettingzoo.environments import PursuitEvasionEnv, PursuitEvasionConfig
+from deap_pettingzoo.contrib.pursuit_evasion import PursuitEvasionConfig, PursuitEvasionEnv
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
-from deap_pettingzoo.policies import (
-    APFEvaderPolicy,
-    APFConfig,
-    FeedforwardNeuralPolicy,
-)
 from deap_pettingzoo.genomes import FixedTopologyGenome
-from deap_pettingzoo.integration.deap_integration import (
+from deap_pettingzoo.integration import (
+    make_cma_ind_init,
+    make_cma_stats,
+    register_cma_toolbox,
+    setup_cma_strategy,
     setup_deap_creators,
-    create_toolbox,
-    clone_individual,
+)
+from deap_pettingzoo.policies import (
+    APFConfig,
+    APFEvaderPolicy,
+    FeedforwardNeuralPolicy,
 )
 
 
@@ -55,14 +38,13 @@ from deap_pettingzoo.integration.deap_integration import (
 # Experiment config
 # ---------------------------------------------------------------------------
 
-POPULATION_SIZE = 24
+POPULATION_SIZE = 24        # CMA lambda_
 NUM_GENERATIONS = 15
 MAX_STEPS_PER_EPISODE = 150
 HIDDEN_SIZE = 48
+SIGMA0 = 0.3
 SEED = 0
 
-# Scenario — scaled down from 10v10 for a reasonable prototype runtime.
-# Change ``num_good`` / ``num_adversaries`` to 10 for the full methodology.
 ENV_CONFIG = PursuitEvasionConfig(
     num_adversaries=4,
     num_good=4,
@@ -90,12 +72,10 @@ def _section(title: str) -> None:
 
 
 def build_env() -> PursuitEvasionEnv:
-    """Build the pursuit-evasion environment for this experiment."""
     return PursuitEvasionEnv(config=ENV_CONFIG)
 
 
 def build_scripted_evaders(env: PursuitEvasionEnv) -> Dict[str, APFEvaderPolicy]:
-    """Instantiate one APF policy per evader (``agent_*``)."""
     apf_cfg = APFConfig(
         k_pursuer=1.0,
         k_landmark=0.3,
@@ -109,37 +89,21 @@ def build_scripted_evaders(env: PursuitEvasionEnv) -> Dict[str, APFEvaderPolicy]
 
 
 def make_learner_factory(env: PursuitEvasionEnv, hidden_size: int):
-    """Return a factory that turns a genome into a per-agent NN policy.
-
-    All pursuers share the same evolved genome — this is classic
-    homogeneous-team neuroevolution.  Because every pursuer sees the same
-    observation size (they are structurally identical), a single
-    :class:`FeedforwardNeuralPolicy` instance per agent is sufficient.
-    """
-    def _factory(genome: FixedTopologyGenome, agent_id: str):
-        # One policy instance per agent (they wrap the *same* genome,
-        # which is fine because FeedforwardNeuralPolicy is stateless).
-        return FeedforwardNeuralPolicy(genome)
+    def _factory(genome: FixedTopologyGenome, agent_id: str, action_space):
+        return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
     return _factory
 
 
 # ---------------------------------------------------------------------------
-# DEAP evolution loop
+# CMA-ES evolution loop
 # ---------------------------------------------------------------------------
 
 
 def run_evolution() -> Dict[str, Any]:
-    """Evolve NN pursuers against scripted APF evaders.
-
-    Returns a dict containing the best genome, the per-generation fitness
-    history, and bookkeeping metadata.  Kept separate from ``main`` so
-    callers (or tests) can invoke it directly.
-    """
     env = build_env()
     scripted_evaders = build_scripted_evaders(env)
 
-    # Pursuer observation/action sizing
     pursuer_id = env.adversary_agents[0]
     sample_obs = env.reset(seed=SEED)
     input_size = sample_obs[pursuer_id].shape[0]
@@ -147,7 +111,6 @@ def run_evolution() -> Dict[str, Any]:
     output_size = act_space.n if hasattr(act_space, "n") else act_space.shape[0]
     print(f"  Pursuer NN:  in={input_size}  hidden={HIDDEN_SIZE}  out={output_size}")
 
-    # Mixed evaluator — EA learners control 'adversary_*', APF drives the rest.
     evaluator = MixedPolicyEvaluator(
         env_wrapper=env,
         learner_agent_prefixes=["adversary"],
@@ -156,67 +119,39 @@ def run_evolution() -> Dict[str, Any]:
         max_steps=MAX_STEPS_PER_EPISODE,
     )
 
-    # DEAP toolbox built from the bridge's integration helpers.
+    # CMA-ES toolbox built from the bridge's integration helpers.
     setup_deap_creators()
+    np.random.seed(SEED)
+
     genome_config = {
         "layer_sizes": [input_size, HIDDEN_SIZE, output_size],
         "activation": "tanh",
         "weight_range": (-1.0, 1.0),
-        "random_seed": SEED,
     }
-    toolbox = create_toolbox(
+    strategy, dimension = setup_cma_strategy(
         genome_config=genome_config,
-        evaluator=evaluator,
-        selection_config={"tournament_size": 3},
-        crossover_config={"alpha": 0.5},
-        mutation_config={"sigma": 0.2, "indpb": 0.1},
+        sigma0=SIGMA0,
+        population_size=POPULATION_SIZE,
     )
-    toolbox.register("clone", clone_individual)
+    ind_init = make_cma_ind_init(genome_config)
+    toolbox = register_cma_toolbox(strategy, ind_init, evaluator)
 
-    # Initial population
-    rng = np.random.default_rng(SEED)
-    population = toolbox.population(n=POPULATION_SIZE)
+    stats = make_cma_stats()
     hof = tools.HallOfFame(1)
-
-    stats = tools.Statistics(lambda ind: ind.fitness.values)
-    stats.register("avg", np.mean)
-    stats.register("std", np.std)
-    stats.register("min", np.min)
-    stats.register("max", np.max)
-
     fitness_history = []
 
-    # Evaluate gen 0
-    for ind, fit in zip(population, map(toolbox.evaluate, population)):
-        ind.fitness.values = fit
-    hof.update(population)
-    rec = stats.compile(population)
-    fitness_history.append({"gen": 0, **rec})
-    print(f"  Gen  0 | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}")
+    print(f"  Search dim : {dimension}  |  sigma0={SIGMA0}  |  lambda={strategy.lambda_}")
 
-    # Evolution loop
-    for gen in range(1, NUM_GENERATIONS + 1):
-        offspring = list(map(toolbox.clone, toolbox.select(population, len(population))))
-
-        # Crossover
-        for c1, c2 in zip(offspring[::2], offspring[1::2]):
-            if rng.random() < 0.7:
-                toolbox.mate(c1, c2)
-                del c1.fitness.values
-                del c2.fitness.values
-
-        # Mutation
-        for m in offspring:
-            if rng.random() < 0.3:
-                toolbox.mutate(m)
-                del m.fitness.values
-
-        # Re-evaluate invalid individuals
-        invalid = [ind for ind in offspring if not ind.fitness.valid]
-        for ind, fit in zip(invalid, map(toolbox.evaluate, invalid)):
+    # Mirror examples/pursuit_evasion_ea_vs_apf.py, which evaluates gen 0
+    # then performs ``NUM_GENERATIONS`` update cycles. CMA's first call to
+    # ``toolbox.generate()`` IS gen 0, so we run exactly ``NUM_GENERATIONS``
+    # iterations to keep the two scripts apples-to-apples.
+    for gen in range(NUM_GENERATIONS):
+        population = toolbox.generate()
+        for ind, fit in zip(population, map(toolbox.evaluate, population)):
             ind.fitness.values = fit
 
-        population[:] = offspring
+        toolbox.update(population)
         hof.update(population)
 
         rec = stats.compile(population)
@@ -224,11 +159,11 @@ def run_evolution() -> Dict[str, Any]:
         print(f"  Gen {gen:>2} | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}")
 
     env.close()
-
     return {
         "best_genome": hof[0].genome,
         "best_fitness": hof[0].fitness.values[0],
         "history": fitness_history,
+        "dimension": dimension,
     }
 
 
@@ -238,19 +173,10 @@ def run_evolution() -> Dict[str, Any]:
 
 
 def evaluate_best(best_genome: FixedTopologyGenome, n_episodes: int = 20) -> Dict[str, float]:
-    """Evaluate the evolved genome across ``n_episodes`` fresh seeds.
-
-    Returns mean/std/min/max of the pursuer-team fitness and of the scripted
-    evader team's total reward, plus a measured capture rate based on
-    negative evader reward spikes (MPE signals +10 pursuer reward per
-    capture; we infer captures from the evader-side reward signal).
-    """
     env = build_env()
     scripted_evaders = build_scripted_evaders(env)
 
-    # Wrap the genome as a DEAP individual so the evaluator can consume it.
     setup_deap_creators()
-    from deap import creator
     individual = creator.Individual()
     individual.genome = best_genome
 
@@ -286,7 +212,7 @@ def evaluate_best(best_genome: FixedTopologyGenome, n_episodes: int = 20) -> Dic
 
 
 def main() -> None:
-    _section("Pursuit-Evasion Prototype: EA Pursuers vs APF Evaders")
+    _section("Pursuit-Evasion Prototype: CMA-ES Pursuers vs APF Evaders")
 
     print(f"  Scenario   : {ENV_CONFIG.num_adversaries} pursuers vs "
           f"{ENV_CONFIG.num_good} evaders, {ENV_CONFIG.num_obstacles} obstacles")
@@ -312,7 +238,7 @@ def main() -> None:
     print(f"  APF evader reward   : {eval_stats['evader_mean']:+.2f} "
           f"± {eval_stats['evader_std']:.2f}")
 
-    out_dir = Path("results/pursuit_evasion_ea_vs_apf")
+    out_dir = Path("results/pursuit_evasion_cmaes_vs_apf")
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
         out_dir / "fitness_history.npz",

@@ -25,39 +25,95 @@ from deap_pettingzoo.integration.deap_integration import (
     create_toolbox,
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
+from deap_pettingzoo.policies.action_heads import required_output_size
+
+
+def _resolve_shared_action_space(env: PettingZooWrapper) -> Any:
+    """Return the single shared action space across ``env.possible_agents``.
+
+    deap-bridge's EA/CMA-ES stack is built around homogeneous-team
+    neuroevolution: every agent is driven by the same genome, so the
+    action decoding has to be identical across agents.  This helper
+    enforces that contract.
+
+    Args:
+        env: Environment wrapper.
+
+    Returns:
+        The shared :class:`gymnasium.spaces.Space` instance (the
+        space object belonging to the first agent; all others compare
+        equal via :meth:`gymnasium.spaces.Space.__eq__`).
+
+    Raises:
+        ValueError: If any agent's action space differs from the first
+            agent's.  The error message lists the divergent agents so
+            callers can see which env needs a per-role (e.g.
+            :class:`MixedPolicyEvaluator`) or AgileRL trainer setup
+            instead.
+    """
+    agents = list(env.possible_agents)
+    reference = env.action_space(agents[0])
+    divergent = [a for a in agents[1:] if env.action_space(a) != reference]
+    if divergent:
+        raise ValueError(
+            "EA/CMA-ES trainers require a single shared action space across "
+            "all agents (homogeneous-team neuroevolution). "
+            f"Agents diverging from {agents[0]!r}'s space: {divergent}. "
+            "Use MixedPolicyEvaluator (with per-role policies) or an "
+            "AgileRL trainer for heterogeneous-action envs."
+        )
+    return reference
 
 
 class GenomePolicyWrapper:
     """Wraps a genome to satisfy PolicyProtocol.
-    
+
     Converts genome evaluation calls into the policy interface
     expected by UnifiedEvaluator. For homogeneous multi-agent
     environments, all agents use the same policy.
+
+    When ``action_space`` is supplied, the inner
+    :class:`FeedforwardNeuralPolicy` attaches a matching
+    :class:`~deap_pettingzoo.policies.action_heads.ActionHead`, so
+    :meth:`get_action` returns a value that is valid for the env's
+    action space (``int`` for Discrete, ``np.ndarray`` for Box).
     """
-    
-    def __init__(self, genome, env_name: str):
+
+    def __init__(self, genome, env_name: str, action_space: Optional[Any] = None):
         """Initialize policy wrapper.
-        
+
         Args:
             genome: FixedTopologyGenome instance.
             env_name: Environment name (stored for reference).
+            action_space: Optional shared action space; when supplied,
+                the inner :class:`FeedforwardNeuralPolicy` decodes raw
+                network output into an env-valid action.
         """
         self._genome = genome
         self._env_name = env_name
-        
+        self._action_space = action_space
+
         # Create single policy for all agents (homogeneous)
-        self._policy = FeedforwardNeuralPolicy(genome)
+        self._policy = FeedforwardNeuralPolicy(genome, action_space=action_space)
     
-    def get_action(self, observation: np.ndarray) -> Any:
+    def get_action(
+        self,
+        observation: np.ndarray,
+        *,
+        action_mask: Optional[np.ndarray] = None,
+    ) -> Any:
         """Get action for observation.
-        
+
         Args:
             observation: Environment observation.
-            
+            action_mask: Optional legal-action mask forwarded to the
+                underlying :class:`FeedforwardNeuralPolicy` (used by
+                turn-based AEC adapters).
+
         Returns:
             Action for the given observation.
         """
-        return self._policy.get_action(observation)
+        return self._policy.get_action(observation, action_mask=action_mask)
     
     def reset(self) -> None:
         """Reset policy state (no-op for stateless feedforward policies)."""
@@ -188,13 +244,10 @@ class EATrainer(BaselineTrainer):
         env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
         sample_obs = env.reset(seed=0)
         agent_id = env.possible_agents[0]
-        
+
         input_size = len(sample_obs[agent_id])
-        action_space = env.action_space(agent_id)
-        if hasattr(action_space, 'n'):  # Discrete
-            output_size = action_space.n
-        else:  # Box (continuous)
-            output_size = action_space.shape[0]
+        action_space = _resolve_shared_action_space(env)
+        output_size = required_output_size(action_space)
         
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
@@ -337,7 +390,7 @@ class EATrainer(BaselineTrainer):
         best_genome = best_individual.genome
         
         # Wrap genome as policy
-        policy = GenomePolicyWrapper(best_genome, config.env_name)
+        policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
         
         # Create result
         return TrainingResult(
@@ -393,6 +446,7 @@ class EATrainer(BaselineTrainer):
             'continuous_action': True,
             'needs_global_state': False,
             'on_policy': False,  # EA is not on/off-policy (different paradigm)
+            'supports_turn_based': True,
         }
     
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:

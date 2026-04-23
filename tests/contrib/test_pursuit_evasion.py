@@ -7,12 +7,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from deap_pettingzoo.environments import (
+from deap_pettingzoo.contrib.pursuit_evasion import (
     PursuitEvasionEnv,
     PursuitEvasionConfig,
     ObsLayout,
+    APFEvaderPolicy,
+    APFConfig,
 )
-from deap_pettingzoo.policies import APFEvaderPolicy, APFConfig, FeedforwardNeuralPolicy
+from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import setup_deap_creators
@@ -253,8 +255,8 @@ class TestMixedPolicyEvaluator:
             for name in env.good_agents
         }
 
-        def _factory(genome, agent_id):
-            return FeedforwardNeuralPolicy(genome)
+        def _factory(genome, agent_id, action_space):
+            return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
         return MixedPolicyEvaluator(
             env_wrapper=env,
@@ -293,8 +295,8 @@ class TestMixedPolicyEvaluator:
     def test_raises_on_missing_scripted_policy(self):
         env = PursuitEvasionEnv(config=SMALL_CFG)
 
-        def _factory(genome, agent_id):
-            return FeedforwardNeuralPolicy(genome)
+        def _factory(genome, agent_id, action_space):
+            return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
         with pytest.raises(ValueError, match="missing entries"):
             MixedPolicyEvaluator(
@@ -312,8 +314,8 @@ class TestMixedPolicyEvaluator:
             for name in env.possible_agents
         }
 
-        def _factory(genome, agent_id):
-            return FeedforwardNeuralPolicy(genome)
+        def _factory(genome, agent_id, action_space):
+            return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
         with pytest.raises(ValueError, match="No agents matched"):
             MixedPolicyEvaluator(

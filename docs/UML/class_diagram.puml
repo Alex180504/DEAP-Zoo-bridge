@@ -33,13 +33,47 @@ package "deap_pettingzoo.policies" {
         - layers: List[np.ndarray]
         - biases: List[np.ndarray]
         - activation_fn: callable
+        - head: Optional[ActionHead]
         --
-        + __init__(genome, env_spec)
-        + get_action(observation) -> action
+        + __init__(genome, action_space=None, head=None)
+        + get_action(observation, deterministic=True) -> action
         + reset() -> None
         + forward(x: np.ndarray) -> np.ndarray
     }
 
+    abstract class ActionHead {
+        + {abstract} decode(raw_output) -> Any
+        + {abstract} output_size: int
+    }
+
+    class DiscreteHead {
+        + n: int
+        + decode(raw) -> int  (argmax)
+    }
+
+    class MaskedDiscreteHead {
+        + n: int
+        + decode(raw, action_mask=None) -> int
+        -- mask illegal logits to -inf before argmax --
+    }
+
+    class BoxHead {
+        + low, high: np.ndarray
+        + decode(raw) -> np.ndarray  (tanh → rescale)
+    }
+
+    class "make_head(space, masked=False)" as make_head <<factory>>
+    class "required_output_size(space)" as required_output_size <<helper>>
+
+    DiscreteHead --|> ActionHead
+    MaskedDiscreteHead --|> DiscreteHead
+    BoxHead --|> ActionHead
+    make_head ..> ActionHead : constructs
+    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+    FeedforwardNeuralPolicy --> ActionHead : optional head
+}
+
+package "deap_pettingzoo.contrib.pursuit_evasion (APF)" {
     class APFConfig <<dataclass>> {
         + k_pursuer: float
         + k_landmark: float
@@ -51,32 +85,95 @@ package "deap_pettingzoo.policies" {
 
     class APFEvaderPolicy {
         - config: APFConfig
-        - action_space
+        - layout: ObsLayout
         --
-        + __init__(action_space, config=None)
+        + __init__(layout, config=None)
         + get_action(observation) -> action
         + reset() -> None
     }
 
-    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
     APFEvaderPolicy --> APFConfig : uses
 }
 
 package "deap_pettingzoo.environments" {
     class PettingZooWrapper {
         - env
+        + env_name: str
+        + env_spec: EnvSpec
+        + default_episode_len: int
         + agents: List[str]
         + num_agents: int
         --
-        + __init__(env_name, **kwargs)
-        + reset(seed) -> observations
+        + __init__(env_name, env_config=None, render_mode=None)
+        + reset(seed, options) -> observations
         + step(actions) -> tuple
         + observation_space(agent: str) -> Space
         + action_space(agent: str) -> Space
         + render() -> np.ndarray
         + close() -> None
+        + {static} supported_envs() -> List[str]
     }
 
+    class EnvSpec <<dataclass>> {
+        + name: str
+        + factory: Any
+        + default_episode_len: int
+        + continuous_default: bool
+        + notes: str
+        + tags: frozenset
+        + api: EnvApi
+        + wrappers: Tuple[Callable, ...]
+        -- api \u2208 {parallel, aec, auto,\n     aec_masked, aec_sequential} --
+    }
+
+    class registry <<module>> {
+        + {static} register_env(name, factory, *, api="parallel", wrappers=(), **meta) -> EnvSpec
+        + {static} unregister_env(name): None
+        + {static} get_env_spec(name) -> EnvSpec
+        + {static} is_registered(name) -> bool
+        + {static} list_envs(tag=None, api=None) -> List[str]
+        + {static} build_env(name, env_config, render_mode)
+        -- build_env applies wrappers\n   left-to-right after api coercion --
+    }
+
+    class builtin <<module>> {
+        auto-registers MPE2 envs\n+ aquarium_v0 (if installed)
+    }
+
+    abstract class TurnBasedAdapter {
+        + possible_agents: List[str]
+        + metadata: dict
+        + reset(seed) -> observations
+        + step(actions) -> tuple
+    }
+
+    class MaskedSimultaneousAdapter {
+        parallel-shaped facade over AEC;\nevery active agent appears each step;\nonly current player's action executes;\ninfos[agent]["action_mask"] threaded.
+    }
+
+    class SequentialTurnAdapter {
+        single-agent-per-step dicts;\npreserves true turn semantics.
+    }
+
+    TurnBasedAdapter <|-- MaskedSimultaneousAdapter
+    TurnBasedAdapter <|-- SequentialTurnAdapter
+
+    PettingZooWrapper ..> registry : resolves env_name
+    registry "1" *-- "*" EnvSpec
+    builtin ..> registry : register_env
+    registry ..> TurnBasedAdapter : wraps on\napi=aec_masked\n/ aec_sequential
+}
+
+package "deap_pettingzoo.contrib.openspiel" {
+    class openspiel <<module>> {
+        + {static} register_openspiel_game(name, *, game_name, api="aec_masked",\n         default_episode_len=50, wrappers=(), **reg_kwargs) -> EnvSpec
+        -- thin Shimmy bridge to OpenSpiel\n   turn-based board / card games --
+    }
+
+    openspiel ..> registry : register_env
+}
+
+package "deap_pettingzoo.contrib.pursuit_evasion" {
     class PursuitEvasionConfig <<dataclass>> {
         + num_adversaries: int
         + num_good: int
@@ -88,6 +185,21 @@ package "deap_pettingzoo.environments" {
         + num_agent_neighbors: Optional[int]
         + num_landmark_neighbors: Optional[int]
         + boundary_threshold: float
+        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
+    }
+
+    class SelfPlayEvaluator {
+        - env_wrapper: PettingZooWrapper
+        - max_steps: int
+        - aggregation: str
+        - team_mapping: Dict[str, str]
+        - team: Optional[str]
+        - masked: bool
+        - flatten_obs: bool
+        --
+        + __init__(env_wrapper, max_steps, aggregation, team_mapping, team, masked, flatten_obs)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        -- one shared-weights policy plays\n   every role in a turn-based env;\n   aggregation ∈ {sum, mean,\n     first_agent, team_mapping} --
         + boundary_scale: float
         + boundary_sharpness: float
     }
@@ -118,14 +230,32 @@ package "deap_pettingzoo.evaluators" {
     class SingleEpisodeEvaluator {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
-        - aggregation_method: str
-        - team_mapping: Dict[str, str]
-        --
+    BaseEvaluator <|-- SelfPlayEvaluator
+    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
+    SingleEpisodeEvaluator --> PettingZooWrapper : uses
+    SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
+    SelfPlayEvaluator --> PettingZooWrapper : uses
+    SelfPlayEvaluator ..> FeedforwardNeuralPolicy : creates (masked head)
         + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
         + evaluate(individual, seed=None) -> Tuple[float]
         - _create_policies(genome, observations) -> dict
         - _aggregate_fitness(rewards: dict) -> float
         - _aggregate_team_fitness(rewards: dict) -> float
+        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
+    }
+
+    class SelfPlayEvaluator {
+        - env_wrapper: PettingZooWrapper
+        - max_steps: int
+        - aggregation: str
+        - team_mapping: Dict[str, str]
+        - team: Optional[str]
+        - masked: bool
+        - flatten_obs: bool
+        --
+        + __init__(env_wrapper, max_steps, aggregation, team_mapping, team, masked, flatten_obs)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        -- one shared-weights policy plays\n   every role in a turn-based env;\n   aggregation ∈ {sum, mean,\n     first_agent, team_mapping} --
     }
 
     class MultiEpisodeEvaluator {
@@ -156,9 +286,12 @@ package "deap_pettingzoo.evaluators" {
     BaseEvaluator <|-- SingleEpisodeEvaluator
     BaseEvaluator <|-- MultiEpisodeEvaluator
     BaseEvaluator <|-- MixedPolicyEvaluator
+    BaseEvaluator <|-- SelfPlayEvaluator
     MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
     SingleEpisodeEvaluator --> PettingZooWrapper : uses
     SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
+    SelfPlayEvaluator --> PettingZooWrapper : uses
+    SelfPlayEvaluator ..> FeedforwardNeuralPolicy : creates (masked head)
     MixedPolicyEvaluator ..> MixedPolicyEvalResult : returns
 }
 
@@ -423,6 +556,30 @@ note bottom of MixedPolicyEvaluator
   Evaluates heterogeneous per-agent
   policies (e.g. EA pursuers vs. APF
   evaders) in one episode.
+end note
+
+note bottom of SelfPlayEvaluator
+  Canonical EA evaluator for
+  strictly turn-based AEC games
+  (api='aec_masked' / 'aec_sequential').
+  Installs a MaskedDiscreteHead so
+  infos[agent]["action_mask"] is honoured.
+end note
+
+note bottom of registry
+  EnvSpec.wrappers is an ordered chain
+  of plain (env -> env) callables applied
+  after api coercion. Typical use is
+  composing supersuit transforms
+  (pad_observations_v0, pad_action_space_v0,
+  agent_indicator_v0, ...).
+end note
+
+note bottom of openspiel
+  Opt-in; nothing registered on import.
+  Requires `pip install deap-pettingzoo[shimmy]`.
+  Wraps shimmy.OpenSpielCompatibilityV0
+  for OpenSpiel turn-based games.
 end note
 
 @enduml

@@ -136,9 +136,16 @@ class UnifiedEvaluator(BaselineEvaluator):
                 break
 
             # Get actions for active agents only
+            infos = getattr(env, "last_infos", {}) or {}
             actions = {}
             for agent in observations:
-                actions[agent] = policy.get_action(observations[agent])
+                mask = infos.get(agent, {}).get("action_mask")
+                try:
+                    actions[agent] = policy.get_action(
+                        observations[agent], action_mask=mask
+                    )
+                except TypeError:
+                    actions[agent] = policy.get_action(observations[agent])
             
             # Step environment
             observations, rewards, terminations, truncations, _ = env.step(actions)

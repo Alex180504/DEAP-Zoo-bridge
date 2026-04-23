@@ -13,7 +13,7 @@ from deap_pettingzoo.integration import (
 
 def _tiny_config(seed: int = 0) -> TrainingConfig:
     return TrainingConfig(
-        env_name="simple_tag_v3",
+        env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,
         num_seeds=1,

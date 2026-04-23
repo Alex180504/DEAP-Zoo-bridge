@@ -125,10 +125,13 @@ class TestEATrainerAquarium:
         try:
             obs = wrapper.reset(seed=1)
             agent = wrapper.possible_agents[0]
-            action_vec = result.policy.get_action(obs[agent])
-            # FeedforwardNeuralPolicy returns raw logits; wrapper.step
-            # converts via argmax, but we check shape here.
-            assert np.asarray(action_vec).shape[-1] == 16
+            action = result.policy.get_action(obs[agent])
+            # GenomePolicyWrapper now attaches a DiscreteHead, so
+            # get_action returns a valid discrete action (int in
+            # [0, n)) rather than raw logits.
+            n = wrapper.action_space(agent).n
+            assert isinstance(action, int)
+            assert 0 <= action < n
         finally:
             wrapper.close()
 

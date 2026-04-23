@@ -92,9 +92,9 @@ class TestToolboxCreation:
     
     @pytest.fixture
     def wrapper(self):
-        """Create test environment wrapper."""
+        """Create test environment wrapper (homogeneous obs)."""
         return PettingZooWrapper(
-            env_name='simple_tag_v3',
+            env_name='simple_spread_v3',
             env_config={'max_cycles': 25}
         )
     
@@ -204,7 +204,7 @@ class TestEvaluationIntegration:
     
     def test_evaluate_individual_function(self):
         """Test standalone evaluate_individual function returns valid fitness."""
-        wrapper = PettingZooWrapper('simple_tag_v3', env_config={'max_cycles': 25})
+        wrapper = PettingZooWrapper('simple_spread_v3', env_config={'max_cycles': 25})
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
@@ -218,7 +218,7 @@ class TestEvaluationIntegration:
         
         setup_deap_creators()
         
-        genome = FixedTopologyGenome([14, 16, 5], random_seed=42)
+        genome = FixedTopologyGenome([18, 16, 5], random_seed=42)
         individual = creator.Individual()
         individual.genome = genome
         
@@ -242,7 +242,7 @@ class TestSimpleEvolutionWorkflow:
         
         setup_deap_creators()
         
-        wrapper = PettingZooWrapper('simple_tag_v3', env_config={'max_cycles': 25})
+        wrapper = PettingZooWrapper('simple_spread_v3', env_config={'max_cycles': 25})
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=wrapper,
             max_steps=25,
@@ -250,7 +250,7 @@ class TestSimpleEvolutionWorkflow:
         )
         
         toolbox = create_toolbox(
-            genome_config={'layer_sizes': [14, 16, 5], 'random_seed': 42},
+            genome_config={'layer_sizes': [18, 16, 5], 'random_seed': 42},
             evaluator=evaluator,
             selection_config={'tournament_size': 3}
         )

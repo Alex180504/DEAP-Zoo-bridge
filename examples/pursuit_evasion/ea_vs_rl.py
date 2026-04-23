@@ -143,8 +143,8 @@ def build_env() -> PettingZooWrapper:
     return PettingZooWrapper(env_name=ENV_NAME, env_config=ENV_CONFIG)
 
 
-def _learner_factory(genome: FixedTopologyGenome, agent_id: str):
-    return FeedforwardNeuralPolicy(genome)
+def _learner_factory(genome: FixedTopologyGenome, agent_id: str, action_space):
+    return FeedforwardNeuralPolicy(genome, action_space=action_space)
 
 
 def run_evolution(maddpg_evaders: AgileRLPolicyWrapper) -> Dict[str, Any]:
