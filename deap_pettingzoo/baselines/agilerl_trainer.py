@@ -531,14 +531,20 @@ class GroupedIPPOTrainer(IPPOTrainer):
 
     @staticmethod
     def _group_prefix(agent_id: str) -> str:
-        """Return everything before the final ``_`` in ``agent_id``.
+        """Return the prefix before a trailing numeric suffix in ``agent_id``.
 
-        Mirrors AgileRL's own grouping convention. Agents without an
-        underscore are treated as singleton groups (prefix = full id).
+        Mirrors AgileRL's grouping convention for ids like ``agent_0`` and
+        ``agent_1``. Agents without an underscore, or whose final underscore
+        is not followed by only digits, are treated as singleton groups
+        (prefix = full id) so non-indexed names like ``team_blue`` /
+        ``team_red`` are not collapsed into a single ``team`` group.
         """
         if "_" not in agent_id:
             return agent_id
-        return agent_id.rsplit("_", 1)[0]
+        prefix, suffix = agent_id.rsplit("_", 1)
+        if suffix.isdigit():
+            return prefix
+        return agent_id
 
     @classmethod
     def _validate_grouping(

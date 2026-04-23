@@ -54,6 +54,23 @@ def test_selection_method_dispatch(evaluator, genome_config, method):
         assert hasattr(ind, "genome")
 
 
+def test_roulette_rejects_negative_fitness(evaluator, genome_config):
+    """``roulette`` must fail loudly when any fitness is < 0 (selRoulette
+    is mathematically undefined for negative weights, and PettingZoo
+    evaluators routinely return negative episode rewards)."""
+    toolbox = create_toolbox(
+        genome_config=genome_config,
+        evaluator=evaluator,
+        selection_config={"method": "roulette"},
+    )
+    pop = toolbox.population(n=4)
+    for ind in pop:
+        ind.fitness.values = (0.5,)
+    pop[1].fitness.values = (-3.2,)
+    with pytest.raises(ValueError, match="non-negative fitness"):
+        toolbox.select(pop, k=2)
+
+
 @pytest.mark.parametrize(
     "method,params",
     [

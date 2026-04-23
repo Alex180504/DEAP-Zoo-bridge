@@ -245,7 +245,26 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
             tournsize=cfg.get("tournament_size", 3),
         )
     elif method == "roulette":
-        toolbox.register("select", tools.selRoulette)
+        # ``tools.selRoulette`` samples proportionally to fitness values and
+        # is mathematically only defined for non-negative fitnesses. Several
+        # PettingZoo evaluators in this project return summed episode
+        # rewards that can be negative, which silently produces invalid
+        # sampling (or a ZeroDivisionError) inside DEAP. Wrap the operator
+        # so a bad fitness sign fails loudly at selection time with an
+        # actionable message instead of corrupting the run.
+        def _safe_roulette(individuals, k):
+            for ind in individuals:
+                fit = ind.fitness.values[0]
+                if fit < 0:
+                    raise ValueError(
+                        "selRoulette requires non-negative fitness values, "
+                        f"got {fit!r}. Either switch selection_method to "
+                        "'tournament'/'best'/'random', or shift/rescale your "
+                        "evaluator output so all fitnesses are >= 0."
+                    )
+            return tools.selRoulette(individuals, k)
+
+        toolbox.register("select", _safe_roulette)
     elif method == "best":
         toolbox.register("select", tools.selBest)
     elif method == "random":
