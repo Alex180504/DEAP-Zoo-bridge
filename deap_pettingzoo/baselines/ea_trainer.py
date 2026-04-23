@@ -287,38 +287,43 @@ class EATrainer(BaselineTrainer):
                 num_generations, rng,
             )
         elif self.strategy == "mu_plus_lambda":
-            algorithms.eaMuPlusLambda(
+            _, logbook = algorithms.eaMuPlusLambda(
                 population, toolbox,
                 mu=self.mu, lambda_=self.lambda_,
                 cxpb=self.crossover_rate, mutpb=self.mutation_rate,
                 ngen=num_generations,
                 stats=stats, halloffame=hof, verbose=False,
             )
-            # Rebuild fitness_history from hof/population for this driver.
-            record = stats.compile(population)
-            fitness_history.append({
-                'generation': num_generations,
-                'mean': record['avg'],
-                'std': record['std'],
-                'min': record['min'],
-                'max': record['max'],
-            })
+            for record in logbook:
+                gen = record['gen']
+                if gen == 0:
+                    continue  # already recorded from initial evaluation
+                fitness_history.append({
+                    'generation': gen,
+                    'mean': record['avg'],
+                    'std': record['std'],
+                    'min': record['min'],
+                    'max': record['max'],
+                })
         elif self.strategy == "mu_comma_lambda":
-            algorithms.eaMuCommaLambda(
+            _, logbook = algorithms.eaMuCommaLambda(
                 population, toolbox,
                 mu=self.mu, lambda_=self.lambda_,
                 cxpb=self.crossover_rate, mutpb=self.mutation_rate,
                 ngen=num_generations,
                 stats=stats, halloffame=hof, verbose=False,
             )
-            record = stats.compile(population)
-            fitness_history.append({
-                'generation': num_generations,
-                'mean': record['avg'],
-                'std': record['std'],
-                'min': record['min'],
-                'max': record['max'],
-            })
+            for record in logbook:
+                gen = record['gen']
+                if gen == 0:
+                    continue  # already recorded from initial evaluation
+                fitness_history.append({
+                    'generation': gen,
+                    'mean': record['avg'],
+                    'std': record['std'],
+                    'min': record['min'],
+                    'max': record['max'],
+                })
         else:  # pragma: no cover — guarded in __init__.
             raise ValueError(f"Unknown strategy {self.strategy!r}")
 

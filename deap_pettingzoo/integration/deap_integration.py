@@ -258,9 +258,9 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
                 if fit < 0:
                     raise ValueError(
                         "selRoulette requires non-negative fitness values, "
-                        f"got {fit!r}. Either switch selection_method to "
-                        "'tournament'/'best'/'random', or shift/rescale your "
-                        "evaluator output so all fitnesses are >= 0."
+                        f"got {fit!r}. Either set selection_config['method'] "
+                        "to 'tournament'/'best'/'random', or shift/rescale "
+                        "your evaluator output so all fitnesses are >= 0."
                     )
             return tools.selRoulette(individuals, k)
 
