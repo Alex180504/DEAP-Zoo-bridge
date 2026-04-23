@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import numpy as np
-from deap import tools
+from deap import algorithms, tools
 
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
@@ -85,18 +85,58 @@ class EATrainer(BaselineTrainer):
         mutation_indpb: float = 0.1,
         crossover_rate: float = 0.7,
         mutation_rate: float = 0.3,
+        strategy: str = "simple",
+        mu: Optional[int] = None,
+        lambda_: Optional[int] = None,
+        selection_method: str = "tournament",
+        crossover_method: str = "blend",
+        mutation_method: str = "gaussian",
+        selection_params: Optional[Dict[str, Any]] = None,
+        crossover_params: Optional[Dict[str, Any]] = None,
+        mutation_params: Optional[Dict[str, Any]] = None,
     ):
         """Initialize EA trainer.
-        
+
         Args:
             hidden_size: Hidden layer size for neural network.
             population_size: Number of individuals in population.
-            tournament_size: Tournament selection size.
-            crossover_alpha: Blend crossover alpha parameter.
-            mutation_sigma: Gaussian mutation standard deviation.
+            tournament_size: Tournament selection size (ignored unless
+                ``selection_method == 'tournament'``).
+            crossover_alpha: Blend crossover alpha parameter (used only
+                when ``crossover_method in {'blend', 'es_blend'}``).
+            mutation_sigma: Gaussian mutation standard deviation (used
+                only when ``mutation_method == 'gaussian'``).
             mutation_indpb: Independent mutation probability per weight.
-            crossover_rate: Probability of applying crossover.
-            mutation_rate: Probability of applying mutation.
+            crossover_rate: Probability of applying crossover per pair
+                in the ``"simple"`` strategy (DEAP's own ``cxpb`` for the
+                ``eaMu*Lambda`` strategies).
+            mutation_rate: Probability of applying mutation per child
+                (``mutpb`` for the ``eaMu*Lambda`` strategies).
+            strategy: Evolutionary driver. One of ``"simple"`` (current
+                in-house generational loop), ``"mu_plus_lambda"``
+                (:func:`deap.algorithms.eaMuPlusLambda`) or
+                ``"mu_comma_lambda"``
+                (:func:`deap.algorithms.eaMuCommaLambda`).
+            mu: Parents kept between generations in the
+                ``mu_*_lambda`` strategies. Defaults to
+                ``population_size``.
+            lambda_: Offspring produced per generation in the
+                ``mu_*_lambda`` strategies. Defaults to
+                ``population_size``.
+            selection_method: ``create_toolbox`` selection method —
+                one of ``'tournament'``, ``'roulette'``, ``'best'``,
+                ``'random'``.
+            crossover_method: ``create_toolbox`` crossover method —
+                one of ``'blend'``, ``'one_point'``, ``'two_point'``,
+                ``'uniform'``, ``'sbx'``, ``'es_blend'``.
+            mutation_method: ``create_toolbox`` mutation method —
+                one of ``'gaussian'``, ``'polynomial_bounded'``.
+            selection_params: Extra kwargs merged into the selection
+                config (e.g. ``{'tournament_size': 5}``).
+            crossover_params: Extra kwargs merged into the crossover
+                config (e.g. ``{'eta': 20.0}`` for SBX).
+            mutation_params: Extra kwargs merged into the mutation
+                config.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -106,6 +146,27 @@ class EATrainer(BaselineTrainer):
         self.mutation_indpb = mutation_indpb
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
+
+        if strategy not in {"simple", "mu_plus_lambda", "mu_comma_lambda"}:
+            raise ValueError(
+                f"Unknown EA strategy {strategy!r}. "
+                "Expected 'simple', 'mu_plus_lambda' or 'mu_comma_lambda'."
+            )
+        self.strategy = strategy
+        self.mu = mu if mu is not None else population_size
+        self.lambda_ = lambda_ if lambda_ is not None else population_size
+        if strategy == "mu_comma_lambda" and self.lambda_ < self.mu:
+            raise ValueError(
+                f"mu_comma_lambda requires lambda_ >= mu; "
+                f"got mu={self.mu}, lambda_={self.lambda_}."
+            )
+
+        self.selection_method = selection_method
+        self.crossover_method = crossover_method
+        self.mutation_method = mutation_method
+        self.selection_params = dict(selection_params or {})
+        self.crossover_params = dict(crossover_params or {})
+        self.mutation_params = dict(mutation_params or {})
     
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train EA with the given configuration.
@@ -153,16 +214,33 @@ class EATrainer(BaselineTrainer):
             'random_seed': seed if seed is not None else (config.num_seeds if config.num_seeds == 1 else None),
         }
         
+        # Build operator configs (method + per-method params).
+        selection_config: Dict[str, Any] = {
+            "method": self.selection_method,
+            "tournament_size": self.tournament_size,
+        }
+        selection_config.update(self.selection_params)
+
+        crossover_config: Dict[str, Any] = {
+            "method": self.crossover_method,
+            "alpha": self.crossover_alpha,
+        }
+        crossover_config.update(self.crossover_params)
+
+        mutation_config: Dict[str, Any] = {
+            "method": self.mutation_method,
+            "sigma": self.mutation_sigma,
+            "indpb": self.mutation_indpb,
+        }
+        mutation_config.update(self.mutation_params)
+
         # Create toolbox
         toolbox = create_toolbox(
             genome_config=genome_config,
             evaluator=evaluator,
-            selection_config={'tournament_size': self.tournament_size},
-            crossover_config={'alpha': self.crossover_alpha},
-            mutation_config={
-                'sigma': self.mutation_sigma,
-                'indpb': self.mutation_indpb,
-            }
+            selection_config=selection_config,
+            crossover_config=crossover_config,
+            mutation_config=mutation_config,
         )
         
         # Override clone to use our clone_individual
@@ -201,46 +279,54 @@ class EATrainer(BaselineTrainer):
             'min': record['min'],
             'max': record['max'],
         })
-        
-        # Evolution loop
-        for gen in range(1, num_generations + 1):
-            # Select next generation
-            offspring = toolbox.select(population, len(population))
-            offspring = list(map(toolbox.clone, offspring))
-            
-            # Apply crossover
-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
-                if rng.random() < self.crossover_rate:
-                    toolbox.mate(child1, child2)
-                    del child1.fitness.values
-                    del child2.fitness.values
-            
-            # Apply mutation
-            for mutant in offspring:
-                if rng.random() < self.mutation_rate:
-                    toolbox.mutate(mutant)
-                    del mutant.fitness.values
-            
-            # Evaluate individuals with invalid fitness
-            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-            fitnesses = list(map(toolbox.evaluate, invalid_ind))
-            for ind, fit in zip(invalid_ind, fitnesses):
-                ind.fitness.values = fit
-            
-            # Replace population
-            population[:] = offspring
-            hof.update(population)
-            
-            # Record statistics
-            record = stats.compile(population)
-            fitness_history.append({
-                'generation': gen,
-                'mean': record['avg'],
-                'std': record['std'],
-                'min': record['min'],
-                'max': record['max'],
-            })
-        
+
+        # Evolution loop — strategy-dependent.
+        if self.strategy == "simple":
+            self._run_simple(
+                population, toolbox, stats, hof, fitness_history,
+                num_generations, rng,
+            )
+        elif self.strategy == "mu_plus_lambda":
+            _, logbook = algorithms.eaMuPlusLambda(
+                population, toolbox,
+                mu=self.mu, lambda_=self.lambda_,
+                cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                ngen=num_generations,
+                stats=stats, halloffame=hof, verbose=False,
+            )
+            for record in logbook:
+                gen = record['gen']
+                if gen == 0:
+                    continue  # already recorded from initial evaluation
+                fitness_history.append({
+                    'generation': gen,
+                    'mean': record['avg'],
+                    'std': record['std'],
+                    'min': record['min'],
+                    'max': record['max'],
+                })
+        elif self.strategy == "mu_comma_lambda":
+            _, logbook = algorithms.eaMuCommaLambda(
+                population, toolbox,
+                mu=self.mu, lambda_=self.lambda_,
+                cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                ngen=num_generations,
+                stats=stats, halloffame=hof, verbose=False,
+            )
+            for record in logbook:
+                gen = record['gen']
+                if gen == 0:
+                    continue  # already recorded from initial evaluation
+                fitness_history.append({
+                    'generation': gen,
+                    'mean': record['avg'],
+                    'std': record['std'],
+                    'min': record['min'],
+                    'max': record['max'],
+                })
+        else:  # pragma: no cover — guarded in __init__.
+            raise ValueError(f"Unknown strategy {self.strategy!r}")
+
         # Clean up
         env.close()
         
@@ -274,6 +360,12 @@ class EATrainer(BaselineTrainer):
                     'mutation_indpb': self.mutation_indpb,
                     'crossover_rate': self.crossover_rate,
                     'mutation_rate': self.mutation_rate,
+                    'strategy': self.strategy,
+                    'mu': self.mu,
+                    'lambda_': self.lambda_,
+                    'selection_method': self.selection_method,
+                    'crossover_method': self.crossover_method,
+                    'mutation_method': self.mutation_method,
                 },
             },
             training_time=training_time,
@@ -335,3 +427,52 @@ class EATrainer(BaselineTrainer):
             'num_generations': num_generations,
             'max_steps_per_episode': max_steps_per_episode,
         }
+
+    def _run_simple(
+        self,
+        population,
+        toolbox,
+        stats,
+        hof,
+        fitness_history,
+        num_generations: int,
+        rng,
+    ) -> None:
+        """In-house ``eaSimple``-style generational loop.
+
+        Preserves the historical behaviour of :class:`EATrainer`:
+        per-pair crossover probability ``self.crossover_rate`` and
+        per-individual mutation probability ``self.mutation_rate``,
+        with full replacement.
+        """
+        for gen in range(1, num_generations + 1):
+            offspring = toolbox.select(population, len(population))
+            offspring = list(map(toolbox.clone, offspring))
+
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if rng.random() < self.crossover_rate:
+                    toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            for mutant in offspring:
+                if rng.random() < self.mutation_rate:
+                    toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = list(map(toolbox.evaluate, invalid_ind))
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            population[:] = offspring
+            hof.update(population)
+
+            record = stats.compile(population)
+            fitness_history.append({
+                'generation': gen,
+                'mean': record['avg'],
+                'std': record['std'],
+                'min': record['min'],
+                'max': record['max'],
+            })
