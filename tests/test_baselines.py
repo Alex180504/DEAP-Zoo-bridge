@@ -426,7 +426,10 @@ class TestInspectEnvironment:
         for env_name in PettingZooWrapper.SUPPORTED_ENVS:
             info = inspect_environment(env_name)
             assert info.env_name == env_name
-            assert info.num_agents >= 2
+            # simple_v3 is PettingZoo's single-agent sanity env; all other
+            # registered envs are multi-agent.
+            min_agents = 1 if env_name == 'simple_v3' else 2
+            assert info.num_agents >= min_agents
 
 
 class TestCheckCompatibility:
