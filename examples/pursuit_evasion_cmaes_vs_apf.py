@@ -142,7 +142,11 @@ def run_evolution() -> Dict[str, Any]:
 
     print(f"  Search dim : {dimension}  |  sigma0={SIGMA0}  |  lambda={strategy.lambda_}")
 
-    for gen in range(NUM_GENERATIONS + 1):
+    # Mirror examples/pursuit_evasion_ea_vs_apf.py, which evaluates gen 0
+    # then performs ``NUM_GENERATIONS`` update cycles. CMA's first call to
+    # ``toolbox.generate()`` IS gen 0, so we run exactly ``NUM_GENERATIONS``
+    # iterations to keep the two scripts apples-to-apples.
+    for gen in range(NUM_GENERATIONS):
         population = toolbox.generate()
         for ind, fit in zip(population, map(toolbox.evaluate, population)):
             ind.fitness.values = fit

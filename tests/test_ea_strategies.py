@@ -62,7 +62,12 @@ def test_method_kwargs_propagate_to_metadata():
         hidden_size=8,
         population_size=4,
         strategy="simple",
-        selection_method="roulette",
+        # ``roulette`` would explode here because the pursuit-evasion
+        # evaluator returns negative episode rewards (see the safe-guard
+        # in ``_register_selection``); use ``tournament`` since this test
+        # only checks that operator method kwargs round-trip into the
+        # result metadata.
+        selection_method="tournament",
         crossover_method="sbx",
         mutation_method="polynomial_bounded",
         crossover_params={"eta": 10.0},
@@ -70,6 +75,6 @@ def test_method_kwargs_propagate_to_metadata():
     )
     result = trainer.train(_tiny_config(seed=1))
     meta = result.metadata["ea_config"]
-    assert meta["selection_method"] == "roulette"
+    assert meta["selection_method"] == "tournament"
     assert meta["crossover_method"] == "sbx"
     assert meta["mutation_method"] == "polynomial_bounded"

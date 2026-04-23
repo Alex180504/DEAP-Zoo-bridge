@@ -21,6 +21,10 @@ def test_group_prefix_strips_trailing_index():
     assert GroupedIPPOTrainer._group_prefix("agent_12") == "agent"
     # Agents without an underscore become singleton groups.
     assert GroupedIPPOTrainer._group_prefix("predator") == "predator"
+    # Non-numeric suffixes must NOT be stripped — ``team_blue`` and
+    # ``team_red`` are different singleton groups, not one ``team`` group.
+    assert GroupedIPPOTrainer._group_prefix("team_blue") == "team_blue"
+    assert GroupedIPPOTrainer._group_prefix("agent_alpha") == "agent_alpha"
 
 
 def test_validation_rejects_all_singletons():
