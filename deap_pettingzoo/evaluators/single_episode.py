@@ -4,6 +4,7 @@ import numpy as np
 from .base_evaluator import BaseEvaluator
 from ..environments import PettingZooWrapper
 from ..policies import FeedforwardNeuralPolicy
+from ..policies.action_heads import required_output_size
 from ..genomes import FixedTopologyGenome
 
 
@@ -144,7 +145,10 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         if len(unique_sizes) == 1:
             # All agents have same obs size - share genome
             for agent in observations.keys():
-                policies[agent] = FeedforwardNeuralPolicy(genome)
+                action_space = self.env_wrapper.action_space(agent)
+                policies[agent] = FeedforwardNeuralPolicy(
+                    genome, action_space=action_space
+                )
         else:
             # Different obs sizes - create per-agent genomes with weight transfer
             evolved_weights = genome.get_weights()
@@ -152,7 +156,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             for agent, obs in observations.items():
                 obs_dim = len(obs)
                 action_space = self.env_wrapper.action_space(agent)
-                action_dim = action_space.n if hasattr(action_space, 'n') else action_space.shape[0]
+                action_dim = required_output_size(action_space)
                 
                 # Create agent-specific genome with same architecture pattern
                 agent_genome = FixedTopologyGenome(
@@ -169,7 +173,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 )
                 
                 agent_genome.set_weights(transferred_weights)
-                policies[agent] = FeedforwardNeuralPolicy(agent_genome)
+                policies[agent] = FeedforwardNeuralPolicy(
+                    agent_genome, action_space=action_space
+                )
         
         return policies
     
