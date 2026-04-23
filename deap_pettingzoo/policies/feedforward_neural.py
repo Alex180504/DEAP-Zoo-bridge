@@ -168,7 +168,7 @@ class FeedforwardNeuralPolicy:
         deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    ) -> Any:
         """
         Get action for observation.
 
