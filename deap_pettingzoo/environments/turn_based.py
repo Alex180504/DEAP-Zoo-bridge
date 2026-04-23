@@ -166,21 +166,40 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
                 f"provided for current player {current!r}; got keys "
                 f"{sorted(actions.keys())}."
             )
+        pre_step_agents = list(self.agents)
         action = self._coerce_action(actions[current])
         self.aec_env.step(action)
-        # AEC envs accumulate into ``rewards`` dict per-step.
-        rewards = {a: float(self.aec_env.rewards.get(a, 0.0)) for a in self.agents}
-        terminations = {a: bool(self.aec_env.terminations.get(a, False)) for a in self.agents}
-        truncations = {a: bool(self.aec_env.truncations.get(a, False)) for a in self.agents}
-        # Now advance our view of active agents.
+        # Refresh our view of active agents after the AEC step, but build all
+        # returned dicts from a single stable key set spanning both pre/post
+        # step agent lists so the payload stays key-aligned.
         self.agents = list(self.aec_env.agents)
-        obs_dict, infos = self._snapshot_obs()
-        # Preserve terminal entries for agents that *just* terminated.
-        for a in list(rewards.keys()):
-            if terminations[a] or truncations[a]:
-                # Keep them in the return dicts one last time even if the
-                # AEC env has already dropped them from ``.agents``.
-                continue
+        post_step_agents = list(self.agents)
+        # Preserve insertion order: pre-step agents first, then any newly
+        # added agents from post-step (rare but possible).
+        return_agents = list(dict.fromkeys(pre_step_agents + post_step_agents))
+
+        # AEC envs accumulate into ``rewards`` dict per-step.
+        rewards = {a: float(self.aec_env.rewards.get(a, 0.0)) for a in return_agents}
+        terminations = {
+            a: bool(self.aec_env.terminations.get(a, False)) for a in return_agents
+        }
+        truncations = {
+            a: bool(self.aec_env.truncations.get(a, False)) for a in return_agents
+        }
+
+        post_obs_dict, post_infos = self._snapshot_obs()
+        obs_dict: Dict[str, np.ndarray] = {}
+        infos: Dict[str, Dict[str, Any]] = {}
+        for agent in return_agents:
+            if agent in post_obs_dict:
+                obs_dict[agent] = post_obs_dict[agent]
+                infos[agent] = post_infos.get(agent, {})
+            else:
+                # Keep agents that just terminated/truncated in the return
+                # payload one last time even if the AEC env has already
+                # dropped them from ``.agents``.
+                obs_dict[agent] = np.asarray([])
+                infos[agent] = {}
         return obs_dict, rewards, terminations, truncations, infos
 
     def _snapshot(self):

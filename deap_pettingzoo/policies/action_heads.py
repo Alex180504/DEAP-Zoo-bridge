@@ -118,6 +118,10 @@ class BoxHead(ActionHead):
     ``[-1, 1]`` and then linearly rescaled to ``[low, high]`` element-wise.
     ``low``/``high`` may be scalar or array-like with matching shape.
 
+    Arbitrary action shapes are supported: the network is expected to
+    produce ``prod(shape)`` output units; :meth:`decode` reshapes the
+    decoded flat vector back to ``shape`` before returning.
+
     Args:
         low: Lower action bound.
         high: Upper action bound.
@@ -125,8 +129,7 @@ class BoxHead(ActionHead):
 
     Raises:
         ValueError: If ``low``/``high`` contain non-finite values and no
-            explicit ``shape`` is provided, or if the inferred shape is
-            not 1-D.
+            explicit ``shape`` is provided, or if ``shape`` is empty.
     """
 
     def __init__(
@@ -143,9 +146,9 @@ class BoxHead(ActionHead):
                     "BoxHead needs an explicit shape when low/high are scalars."
                 )
             shape = low_arr.shape if low_arr.ndim > 0 else high_arr.shape
-        if len(shape) != 1:
+        if len(shape) == 0:
             raise ValueError(
-                f"BoxHead only supports 1-D action shapes, got {shape}."
+                f"BoxHead requires a non-empty action shape, got {shape}."
             )
         self._shape = tuple(int(s) for s in shape)
         self._low = np.broadcast_to(low_arr, self._shape).astype(np.float32).copy()
@@ -154,10 +157,13 @@ class BoxHead(ActionHead):
         # unbounded Box spaces still produce finite actions.
         self._low = np.where(np.isfinite(self._low), self._low, -1.0).astype(np.float32)
         self._high = np.where(np.isfinite(self._high), self._high, 1.0).astype(np.float32)
+        self._flat_low = self._low.ravel()
+        self._flat_high = self._high.ravel()
 
     @property
     def output_size(self) -> int:
-        return int(self._shape[0])
+        """Number of network output units required: ``prod(shape)``."""
+        return int(np.prod(self._shape))
 
     @property
     def shape(self) -> tuple:
@@ -172,9 +178,10 @@ class BoxHead(ActionHead):
             )
         squashed = np.tanh(arr)
         # Affine rescale from [-1, 1] to [low, high].
-        scale = (self._high - self._low) / 2.0
-        bias = (self._high + self._low) / 2.0
-        return (squashed * scale + bias).astype(np.float32)
+        scale = (self._flat_high - self._flat_low) / 2.0
+        bias = (self._flat_high + self._flat_low) / 2.0
+        decoded = (squashed * scale + bias).astype(np.float32)
+        return decoded.reshape(self._shape)
 
 
 def required_output_size(action_space: Any) -> int:

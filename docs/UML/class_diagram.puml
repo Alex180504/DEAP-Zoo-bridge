@@ -66,13 +66,6 @@ package "deap_pettingzoo.policies" {
     class "required_output_size(space)" as required_output_size <<helper>>
 
     DiscreteHead --|> ActionHead
-    MaskedDiscreteHead --|> Discretendarray  (tanh → rescale)
-    }
-
-    class "make_head(space, masked=False)" as make_head <<factory>>
-    class "required_output_size(space)" as required_output_size <<helper>>
-
-    DiscreteHead --|> ActionHead
     MaskedDiscreteHead --|> DiscreteHead
     BoxHead --|> ActionHead
     make_head ..> ActionHead : constructs
