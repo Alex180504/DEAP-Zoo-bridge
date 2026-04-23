@@ -114,14 +114,15 @@ package "deap_pettingzoo.environments" {
         + continuous_default: bool
         + notes: str
         + tags: frozenset
+        + api: EnvApi  // "parallel" | "aec" | "auto"
     }
 
     class registry <<module>> {
-        + {static} register_env(name, factory, **meta) -> EnvSpec
+        + {static} register_env(name, factory, *, api="parallel", **meta) -> EnvSpec
         + {static} unregister_env(name): None
         + {static} get_env_spec(name) -> EnvSpec
         + {static} is_registered(name) -> bool
-        + {static} list_envs(tag=None) -> List[str]
+        + {static} list_envs(tag=None, api=None) -> List[str]
         + {static} build_env(name, env_config, render_mode)
     }
 
