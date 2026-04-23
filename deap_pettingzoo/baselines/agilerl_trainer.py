@@ -513,9 +513,8 @@ class GroupedIPPOTrainer(IPPOTrainer):
     Notes:
         * Grouping reduces parameter count and typically speeds training
           when roles are symmetric (e.g. predator–prey pursuit).
-        * Supply ``algorithm_params={"agent_ids": [...]}`` to override
-          AgileRL's default grouping behaviour; otherwise the env's own
-          ``possible_agents`` is used.
+        * Grouping is derived from the environment's ``possible_agents``
+          naming, following AgileRL's default behaviour.
     """
 
     ALGORITHM_NAME = "ippo-grouped"
@@ -619,7 +618,21 @@ class GroupedIPPOTrainer(IPPOTrainer):
         no extra kwarg required — so all we do here is the pre-flight
         consistency check.
         """
-        self._validate_grouping(agent_ids, obs_spaces, act_spaces)
+        validation_obs_spaces = (
+            dict(zip(agent_ids, obs_spaces))
+            if isinstance(obs_spaces, (list, tuple))
+            else obs_spaces
+        )
+        validation_act_spaces = (
+            dict(zip(agent_ids, act_spaces))
+            if isinstance(act_spaces, (list, tuple))
+            else act_spaces
+        )
+        self._validate_grouping(
+            agent_ids,
+            validation_obs_spaces,
+            validation_act_spaces,
+        )
         return alg_cls(
             observation_spaces=obs_spaces,
             action_spaces=act_spaces,
