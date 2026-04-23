@@ -41,10 +41,24 @@ EnvFactory = Any
 #: Declared API of a registered env. ``'parallel'`` keeps the legacy
 #: fast path; ``'aec'`` routes the factory output through
 #: :func:`pettingzoo.utils.conversions.aec_to_parallel` at build time
-#: (requires simultaneous-step semantics); ``'auto'`` inspects the
+#: (requires simultaneous-step semantics, i.e.
+#: ``metadata['is_parallelizable'] = True``); ``'auto'`` inspects the
 #: constructed env against PettingZoo base classes and converts as
-#: needed.
-EnvApi = Literal["parallel", "aec", "auto"]
+#: needed; ``'aec_masked'`` and ``'aec_sequential'`` wrap **strictly
+#: turn-based** AEC envs via adapters in
+#: :mod:`deap_pettingzoo.environments.turn_based` — ``aec_masked``
+#: presents a parallel-shaped facade where every agent appears each
+#: step with only the current player's action executed (EA-friendly;
+#: wastes N−1 inferences/step but needs no evaluator changes);
+#: ``aec_sequential`` returns single-agent dicts per step, preserving
+#: true turn semantics for future TD-learning / AlphaZero-style use.
+EnvApi = Literal[
+    "parallel",
+    "aec",
+    "auto",
+    "aec_masked",
+    "aec_sequential",
+]
 
 
 @dataclass
@@ -130,10 +144,11 @@ def register_env(
         TypeError: If ``factory`` is not callable and exposes none of
             ``parallel_env`` / ``env`` / ``raw_env``.
     """
-    if api not in ("parallel", "aec", "auto"):
+    if api not in ("parallel", "aec", "auto", "aec_masked", "aec_sequential"):
         raise ValueError(
             f"Unsupported api={api!r} for env '{name}'. "
-            "Expected 'parallel', 'aec', or 'auto'."
+            "Expected 'parallel', 'aec', 'auto', 'aec_masked', or "
+            "'aec_sequential'."
         )
     if not overwrite and name in _REGISTRY:
         raise ValueError(
@@ -310,13 +325,50 @@ def _coerce_to_parallel(env, name: str, *, declared: str):
     if isinstance(env, ParallelEnv):
         return env
     if isinstance(env, AECEnv):
-        converted = aec_to_parallel(env)
+        try:
+            converted = aec_to_parallel(env)
+        except AssertionError as exc:
+            raise TypeError(
+                f"Env '{name}' is an AECEnv without "
+                "metadata['is_parallelizable']=True, so aec_to_parallel "
+                "refused it. For strictly turn-based games register with "
+                "api='aec_masked' (EA-friendly parallel-shaped facade) "
+                "or api='aec_sequential' (single-agent-per-step, true "
+                "turn semantics) instead of api='aec'."
+            ) from exc
         return _attach_simultaneity_guard(converted, name)
     raise TypeError(
         f"Env '{name}' factory returned {type(env).__name__}, which is "
         "neither ParallelEnv nor AECEnv. Check the factory signature "
         f"and the api={declared!r} registration."
     )
+
+
+def _coerce_turn_based(env, name: str, *, mode: str):
+    """Wrap a turn-based AEC env in the appropriate adapter.
+
+    ``mode='aec_masked'`` → :class:`MaskedSimultaneousAdapter`;
+    ``mode='aec_sequential'`` → :class:`SequentialTurnAdapter`.
+    Both are imported lazily from
+    :mod:`deap_pettingzoo.environments.turn_based`.
+    """
+    _, AECEnv, _ = _pettingzoo_bases()
+    if not isinstance(env, AECEnv):
+        raise TypeError(
+            f"Env '{name}' declared api={mode!r} but factory returned "
+            f"{type(env).__name__}, not an AECEnv. Turn-based adapters "
+            "only wrap AEC envs."
+        )
+    from deap_pettingzoo.environments.turn_based import (
+        MaskedSimultaneousAdapter,
+        SequentialTurnAdapter,
+    )
+
+    if mode == "aec_masked":
+        return MaskedSimultaneousAdapter(env, env_name=name)
+    if mode == "aec_sequential":
+        return SequentialTurnAdapter(env, env_name=name)
+    raise ValueError(f"Unknown turn-based mode {mode!r} for env '{name}'.")
 
 
 def _reject_if_aec(env, name: str, *, declared: str) -> None:
@@ -381,6 +433,12 @@ def build_env(
             )
         _reject_if_aec(env, name, declared="parallel")
         return env
+
+    if spec.api in ("aec_masked", "aec_sequential"):
+        # Turn-based AEC — wrap in our own adapter, skip aec_to_parallel
+        # and the simultaneity guard entirely.
+        raw = _instantiate_factory(factory, render_mode, kwargs, preferred="env")
+        return _coerce_turn_based(raw, name, mode=spec.api)
 
     # AEC or auto: construct then convert if needed.
     preferred = "env" if spec.api == "aec" else "parallel_env"

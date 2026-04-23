@@ -80,7 +80,27 @@ class AgileRLTrainer(BaselineTrainer):
         Raises:
             ImportError: If the optional ``rl-baselines`` extra is not
                 installed.
+            ValueError: If the target environment is a turn-based AEC
+                game (``api='aec_masked'`` / ``'aec_sequential'``) and
+                this algorithm does not support turn-based training
+                (e.g. MADDPG / MATD3).
         """
+        # Fast-fail on turn-based envs for algos that cannot handle them.
+        if not self.get_capabilities().get("supports_turn_based", True):
+            try:
+                from deap_pettingzoo.environments.registry import get_env_spec
+                spec_api = get_env_spec(config.env_name).api
+            except Exception:  # pragma: no cover - registry lookup fallback
+                spec_api = None
+            if spec_api in ("aec_masked", "aec_sequential"):
+                raise ValueError(
+                    f"Algorithm '{self.ALGORITHM_NAME}' cannot train on "
+                    f"turn-based AEC env '{config.env_name}' "
+                    f"(api={spec_api!r}). The replay buffer / critic "
+                    "structure assumes simultaneous-step execution. "
+                    "Use EA, CMA-ES, IPPO, or MAPPO for turn-based games."
+                )
+
         alg_cls = self._import_algorithm()
 
         params = dict(self.DEFAULT_PARAMS)
@@ -410,6 +430,9 @@ class MADDPGTrainer(AgileRLTrainer):
             "continuous_action": True,
             "needs_global_state": False,
             "on_policy": False,
+            # MADDPG's centralized-critic replay buffer assumes every
+            # agent acts every step — turn-based AEC is incompatible.
+            "supports_turn_based": False,
         }
 
 
@@ -426,6 +449,8 @@ class MATD3Trainer(AgileRLTrainer):
             "continuous_action": True,
             "needs_global_state": False,
             "on_policy": False,
+            # Same centralized-critic simultaneity assumption as MADDPG.
+            "supports_turn_based": False,
         }
 
 
@@ -442,6 +467,7 @@ class IPPOTrainer(AgileRLTrainer):
             "continuous_action": True,
             "needs_global_state": False,
             "on_policy": True,
+            "supports_turn_based": True,
         }
 
 
@@ -464,6 +490,7 @@ class MAPPOTrainer(IPPOTrainer):
             "continuous_action": True,
             "needs_global_state": True,
             "on_policy": True,
+            "supports_turn_based": True,
         }
 
     def _build_agent(
@@ -526,6 +553,7 @@ class GroupedIPPOTrainer(IPPOTrainer):
             "continuous_action": True,
             "needs_global_state": False,
             "on_policy": True,
+            "supports_turn_based": True,
         }
 
     @staticmethod

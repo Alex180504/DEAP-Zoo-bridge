@@ -201,6 +201,7 @@ class CMAESTrainer(BaselineTrainer):
             "continuous_action": True,
             "needs_global_state": False,
             "on_policy": False,
+            "supports_turn_based": True,
         }
 
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:

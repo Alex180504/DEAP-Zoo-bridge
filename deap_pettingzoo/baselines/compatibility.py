@@ -70,6 +70,10 @@ class EnvironmentInfo:
     act_dim: Optional[int]
     action_low: Optional[np.ndarray]
     action_high: Optional[np.ndarray]
+    #: Whether the env is a strictly turn-based AEC wrapped via
+    #: :class:`MaskedSimultaneousAdapter` or
+    #: :class:`SequentialTurnAdapter`. Used to gate MADDPG/MATD3.
+    is_turn_based: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -85,6 +89,7 @@ class EnvironmentInfo:
             'act_dim': self.act_dim,
             'action_low': self.action_low.tolist() if self.action_low is not None else None,
             'action_high': self.action_high.tolist() if self.action_high is not None else None,
+            'is_turn_based': self.is_turn_based,
             'extra': self.extra,
         }
 
@@ -193,6 +198,17 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
     # Global state: PettingZoo parallel envs expose .state() when centralised
     has_global_state = callable(getattr(env, 'state', None))
 
+    # Turn-based detection — consult the registry spec.
+    is_turn_based = False
+    try:
+        from deap_pettingzoo.environments.registry import get_env_spec
+        is_turn_based = get_env_spec(env_name).api in (
+            "aec_masked",
+            "aec_sequential",
+        )
+    except ValueError:  # pragma: no cover - env_name always registered here
+        pass
+
     # Use the wrapper's close() which guards against SystemExit raised by
     # some third-party envs (e.g. marl-aquarium's aquarium_v0).
     wrapper.close()
@@ -208,6 +224,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
         act_dim=act_dims.pop() if len(act_dims) == 1 else None,
         action_low=first_action_low,
         action_high=first_action_high,
+        is_turn_based=is_turn_based,
     )
 
 
@@ -259,6 +276,17 @@ def check_compatibility(
         issues.append(
             "Algorithm requires a centralised global state, but the environment "
             "does not expose a state() method."
+        )
+
+    # Turn-based carve-out: algos that assume simultaneous execution
+    # (replay buffer / centralized critic keyed by all-agents-per-step)
+    # cannot train on turn-based AEC adapters.
+    if env_info.is_turn_based and not caps.get('supports_turn_based', True):
+        issues.append(
+            "Environment is a turn-based AEC game (api='aec_masked' or "
+            "'aec_sequential'), but the algorithm's replay buffer / critic "
+            "structure assumes simultaneous-step execution. Use EA, CMA-ES, "
+            "IPPO, or MAPPO for turn-based games."
         )
 
     # --- Warnings -----------------------------------------------------------

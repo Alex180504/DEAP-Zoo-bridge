@@ -92,10 +92,14 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         try:
             while not done and steps < self.max_steps:
                 # Get actions from policies
+                infos = getattr(self.env_wrapper, "last_infos", {}) or {}
                 actions = {}
                 for agent, obs in observations.items():
                     if agent in policies:
-                        actions[agent] = policies[agent].get_action(obs, deterministic=True)
+                        mask = infos.get(agent, {}).get("action_mask")
+                        actions[agent] = policies[agent].get_action(
+                            obs, deterministic=True, action_mask=mask
+                        )
                 
                 # Step environment
                 observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)

@@ -96,16 +96,24 @@ class GenomePolicyWrapper:
         # Create single policy for all agents (homogeneous)
         self._policy = FeedforwardNeuralPolicy(genome, action_space=action_space)
     
-    def get_action(self, observation: np.ndarray) -> Any:
+    def get_action(
+        self,
+        observation: np.ndarray,
+        *,
+        action_mask: Optional[np.ndarray] = None,
+    ) -> Any:
         """Get action for observation.
-        
+
         Args:
             observation: Environment observation.
-            
+            action_mask: Optional legal-action mask forwarded to the
+                underlying :class:`FeedforwardNeuralPolicy` (used by
+                turn-based AEC adapters).
+
         Returns:
             Action for the given observation.
         """
-        return self._policy.get_action(observation)
+        return self._policy.get_action(observation, action_mask=action_mask)
     
     def reset(self) -> None:
         """Reset policy state (no-op for stateless feedforward policies)."""
@@ -438,6 +446,7 @@ class EATrainer(BaselineTrainer):
             'continuous_action': True,
             'needs_global_state': False,
             'on_policy': False,  # EA is not on/off-policy (different paradigm)
+            'supports_turn_based': True,
         }
     
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:

@@ -85,9 +85,23 @@ class PolicyProtocol(Protocol):
     Both EA genomes (with FeedforwardNeuralPolicy wrapper) and RL networks
     should satisfy this interface.
     """
-    
-    def get_action(self, observation: np.ndarray) -> Any:
-        """Get action for the given observation."""
+
+    def get_action(
+        self,
+        observation: np.ndarray,
+        *,
+        action_mask: Optional[np.ndarray] = None,
+    ) -> Any:
+        """Get action for the given observation.
+
+        Args:
+            observation: Environment observation vector.
+            action_mask: Optional legal-action mask surfaced by
+                turn-based AEC adapters (populated from
+                ``infos[agent]["action_mask"]``). Implementations that
+                do not support masking should accept and ignore this
+                keyword.
+        """
         ...
     
     def reset(self) -> None:
@@ -229,6 +243,10 @@ class BaselineTrainer(ABC):
             - 'continuous_action': bool (supports continuous action spaces)
             - 'needs_global_state': bool (requires centralized state)
             - 'on_policy': bool (on-policy vs off-policy)
+            - 'supports_turn_based': bool (default True; set False for
+              algorithms like MADDPG/MATD3 whose buffer / critic
+              structure assumes simultaneous-step execution and thus
+              cannot train on turn-based AEC adapters).
         """
         pass
 

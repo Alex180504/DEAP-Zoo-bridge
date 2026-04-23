@@ -106,6 +106,12 @@ class PettingZooWrapper:
         # Episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {}
+        #: Most recent infos dict returned by the underlying env's
+        #: ``reset``/``step``. Evaluators read
+        #: ``last_infos[agent].get("action_mask")`` to forward legal-action
+        #: masks to mask-aware policies (see
+        #: :class:`~deap_pettingzoo.policies.action_heads.MaskedDiscreteHead`).
+        self.last_infos: Dict[str, Dict[str, Any]] = {}
 
     @property
     def env_spec(self):
@@ -180,6 +186,7 @@ class PettingZooWrapper:
         # Reset episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {agent: 0.0 for agent in observations.keys()}
+        self.last_infos = dict(infos) if infos is not None else {}
         
         return observations
     
@@ -251,6 +258,7 @@ class PettingZooWrapper:
                 self.cumulative_rewards[agent] += reward
             else:
                 self.cumulative_rewards[agent] = reward
+        self.last_infos = dict(infos) if infos is not None else {}
         
         return observations, rewards, terminations, truncations, infos
     
