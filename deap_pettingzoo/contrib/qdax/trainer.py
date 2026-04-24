@@ -210,6 +210,18 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
                 "without the jax_parallel adapter (numpy scoring path)."
             )
         # Raw JAX env for fast scoring.
+        if getattr(spec, "wrappers", None):
+            warnings.warn(
+                f"Env {config.env_name!r} is registered with wrappers, but "
+                "the QDax JAX fast path constructs the env directly from "
+                "spec.factory(...) and does not apply EnvSpec.wrappers. "
+                "Fast-path scoring may therefore use a different "
+                "observation/action interface than wrapper-based trainers. "
+                "Use the numpy scoring path if wrapper application is "
+                "required.",
+                UserWarning,
+                stacklevel=2,
+            )
         raw_jax_env = spec.factory(**(config.env_config or {}))
         scoring_fn = make_jax_scoring_function(
             raw_jax_env,

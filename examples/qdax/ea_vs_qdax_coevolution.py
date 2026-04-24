@@ -83,10 +83,8 @@ def main() -> None:
 
     config = TrainingConfig(
         env_name=args.env,
-        algorithm="coevolution",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=generations * pop,
-        seed=args.seed,
         algorithm_params={"coevolution": coev_cfg},
     )
 

@@ -148,8 +148,10 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
             agent: dict(infos.get(agent, {})) for agent in self.agents
         }
         if global_done or all(terminations.values()):
-            # Match PettingZoo contract: after termination, ``agents`` empties.
+            # Match PettingZoo contract: after termination, ``agents`` empties,
+            # so observations/infos should also be empty.
             self.agents = []
+            return {}, rewards_np, terminations, truncations, {}
         return obs_np, rewards_np, terminations, truncations, infos_np
 
     def render(self):
