@@ -643,8 +643,6 @@ class CMAESSideState(SideState):
             np.random.set_state(self._np_state)
 
         self.toolbox.update(self.population)
-        # Pre-sample next generation's population so current_pool() is
-        # populated even before evaluation begins.
         next_population = self.toolbox.generate()
 
         if global_state_before is not None:
@@ -657,6 +655,8 @@ class CMAESSideState(SideState):
         best = float(max(fitnesses))
         self.best_fitness = float(self.hof[0].fitness.values[0])
 
+        # Pre-sample next generation's population so current_pool() is
+        # populated even before evaluation begins.
         self.population = next_population
 
         stats = GenerationStats(
