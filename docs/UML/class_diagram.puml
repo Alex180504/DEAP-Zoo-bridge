@@ -662,8 +662,17 @@ package "deap_pettingzoo.baselines.coevolution" {
   interface "OpponentPool <<Protocol>>" as OpponentPool {
     +sample_opponent(rng): PolicyProtocol
     +sample_opponents(rng, k): List[PolicyProtocol]
+    +snapshot_opponents(rng, k): List[OpponentSnapshot]
     +update(population_like)
     +__len__(): int
+  }
+
+  class "OpponentSnapshot <<dataclass>>" as OpponentSnapshot {
+    +kind: str
+    +payload: dict
+    .. kinds ..
+    feedforward / frozen /
+    frozen_registered / qdax_flax
   }
 
   class PopulationPool {
@@ -769,6 +778,8 @@ package "deap_pettingzoo.baselines.coevolution" {
     +reporting_side: Optional[str]
     +max_steps_per_episode: int
     +seed: Optional[int]
+    +num_workers: int = 1
+    +parallel_backend: str = "process"
   }
 
   class CoEvolutionEvaluator {
