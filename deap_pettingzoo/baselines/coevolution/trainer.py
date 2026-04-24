@@ -5,9 +5,13 @@ handles three modes via one config-driven entry point:
 
 * ``"competitive_2pop"`` — two (or more) sides whose rewards are
   typically zero-sum or strongly opposed (e.g. pursuers vs evaders).
-* ``"self_play_hof"`` — a single learner side whose opponents come
-  exclusively from its own Hall-of-Fame (canonical self-play with
-  archive).
+* ``"self_play_hof"`` — league-style self-play: every evolving side
+  owns its own Hall-of-Fame, and when sampled *as an opponent* by
+  another side, draws exclusively from that archive. Requires at
+  least two sides with disjoint ``role_prefixes`` (in
+  asymmetric-topology envs this is the natural generalisation of
+  classical self-play, since a single HoF cannot span mismatched
+  policy topologies).
 * ``"cooperative"`` — N sides rewarded jointly; each side "opposes" no
   one but the partition lets us run heterogeneous optimisers on
   different agent groups (e.g. EA on ``agent_*``, CMA on
@@ -59,9 +63,12 @@ class CoEvolutionConfig:
     Attributes:
         mode: High-level variant — one of :data:`VALID_MODES`.
         sides: Ordered list of :class:`Side` declarations. In
-            ``self_play_hof`` mode this must have exactly one entry
-            (the learner side itself); the trainer builds an implicit
-            HoF-backed opponent pool from the side's own snapshots.
+            ``self_play_hof`` mode this must have at least two sides
+            with disjoint ``role_prefixes``; every evolving side must
+            provide its own :class:`HallOfFame`, and the trainer
+            forces each side's opponents (as seen from other sides)
+            to be drawn purely from that archive
+            (``use_archive_in_opponent_pool=True``, ``archive_mix=1.0``).
             In ``cooperative`` mode all sides share the same reward
             sign and are jointly optimised.
         schedule: ``"synchronous"`` or ``"alternating"``.
@@ -202,16 +209,29 @@ class CoEvolutionTrainer(BaselineTrainer):
             config.env_name, env_config=config.env_config or None
         )
 
-        states: Dict[str, SideState] = {
-            s.name: make_side_state(s) for s in coev_cfg.sides
-        }
-        for state in states.values():
-            state.initialise(env)
-
-        # Seed RNGs.
+        # Seed RNGs *before* any side-state initialisation so that
+        # side.initialise()'s randomness (CMA's np.random.seed, weight
+        # sampling, etc.) is reproducible under coev_cfg.seed and does
+        # not depend on side-iteration order.
         if coev_cfg.seed is not None:
             np.random.seed(int(coev_cfg.seed))
         self._rng = np.random.default_rng(coev_cfg.seed)
+
+        states: Dict[str, SideState] = {
+            s.name: make_side_state(s) for s in coev_cfg.sides
+        }
+        # Give every side its own deterministic child RNG, and isolate
+        # initialise() from the global NumPy RNG so one side's seeding
+        # calls (notably CMA) do not leak into the next side.
+        for state in states.values():
+            side_rng = np.random.default_rng(
+                self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
+            )
+            previous_np_state = np.random.get_state()
+            try:
+                state.initialise(env, rng=side_rng)
+            finally:
+                np.random.set_state(previous_np_state)
 
         # Bootstrap: evaluate each evolving side's initial population
         # against the *initial* state of the other sides so fitnesses
@@ -355,6 +375,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         learner_name: str,
         coev_cfg: CoEvolutionConfig,
+        pool_snapshot: Optional[Dict[str, Any]] = None,
     ) -> List[Tuple[str, Tuple[str, ...], Any]]:
         """Build the ``opponent_sides`` list for a given learner.
 
@@ -364,12 +385,24 @@ class CoEvolutionTrainer(BaselineTrainer):
         pools are composed (self_play_hof forces
         ``use_archive_in_opponent_pool=True`` on every side in
         :meth:`CoEvolutionConfig.__post_init__`).
+
+        When ``pool_snapshot`` is provided (non-empty dict), opponent
+        pools are read from it instead of calling
+        :meth:`SideState.current_pool` live. This preserves the
+        "synchronous" schedule's contract: every side in a generation
+        evaluates against opponents drawn from pools as they were at
+        the *start* of the generation, not from pools that earlier
+        sides in the loop have already advanced.
         """
         opp: List[Tuple[str, Tuple[str, ...], Any]] = []
         for name, state in states.items():
             if name == learner_name:
                 continue
-            opp.append((name, state.side.role_prefixes, state.current_pool()))
+            if pool_snapshot is not None and name in pool_snapshot:
+                pool = pool_snapshot[name]
+            else:
+                pool = state.current_pool()
+            opp.append((name, state.side.role_prefixes, pool))
         return opp
 
     def _bootstrap_populations(
@@ -396,9 +429,11 @@ class CoEvolutionTrainer(BaselineTrainer):
         learner_state: SideState,
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
+        pool_snapshot: Optional[Dict[str, Any]] = None,
     ) -> CoEvolutionEvaluator:
         opp_sides = self._collect_opponent_sides(
-            states, learner_state.side.name, coev_cfg
+            states, learner_state.side.name, coev_cfg,
+            pool_snapshot=pool_snapshot,
         )
         # Fallback for self-play bootstrap: if learner's own pool would
         # be drawn from an empty archive, use pure current-gen pool to
@@ -441,10 +476,23 @@ class CoEvolutionTrainer(BaselineTrainer):
         coev_cfg: CoEvolutionConfig,
         history: Dict[str, List[GenerationStats]],
     ) -> None:
+        # Snapshot every side's opponent pool at the *start* of the
+        # generation. The synchronous schedule's contract is that all
+        # evolving sides advance one generation simultaneously against
+        # a frozen view of every other side's state. Reading
+        # ``state.current_pool()`` live inside the per-side loop would
+        # break that contract — earlier sides would have already
+        # mutated their populations/HoFs by the time later sides are
+        # evaluated.
+        pool_snapshot: Dict[str, Any] = {
+            name: state.current_pool() for name, state in states.items()
+        }
         for name, state in states.items():
             if state.side.optimizer == "frozen":
                 continue
-            evaluator = self._build_evaluator(env, state, states, coev_cfg)
+            evaluator = self._build_evaluator(
+                env, state, states, coev_cfg, pool_snapshot=pool_snapshot
+            )
             stats = state.step_generation(lambda _s, _ev=evaluator: _ev)
             history[name].append(stats)
             if (
