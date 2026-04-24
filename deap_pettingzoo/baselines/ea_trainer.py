@@ -21,11 +21,15 @@ from deap_pettingzoo.baselines.base import (
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.deap_integration import (
-    setup_deap_creators,
+    _EvalWorkerSpec,
     create_toolbox,
+    evaluate_population_parallel,
+    make_parallel_evaluate_map,
+    setup_deap_creators,
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.policies.action_heads import required_output_size
+from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
 def _resolve_shared_action_space(env: PettingZooWrapper) -> Any:
@@ -150,6 +154,8 @@ class EATrainer(BaselineTrainer):
         selection_params: Optional[Dict[str, Any]] = None,
         crossover_params: Optional[Dict[str, Any]] = None,
         mutation_params: Optional[Dict[str, Any]] = None,
+        num_workers: int = 1,
+        parallel_backend: str = "process",
     ):
         """Initialize EA trainer.
 
@@ -223,6 +229,26 @@ class EATrainer(BaselineTrainer):
         self.selection_params = dict(selection_params or {})
         self.crossover_params = dict(crossover_params or {})
         self.mutation_params = dict(mutation_params or {})
+
+        # Parallel evaluation defaults (overridable via
+        # ``TrainingConfig.algorithm_params``). See
+        # :mod:`deap_pettingzoo.utils.parallel` for semantics; we only
+        # validate the range here. Windows ``spawn`` adds ~1-3s per
+        # worker to the first evaluation — amortised over the whole
+        # run, but noticeable for tiny populations.
+        if num_workers < 0:
+            raise ValueError(
+                f"num_workers must be >= 0 (or 1 for serial), got {num_workers}."
+            )
+        from deap_pettingzoo.utils.parallel import SUPPORTED_BACKENDS
+
+        if parallel_backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"Unknown parallel_backend {parallel_backend!r}. "
+                f"Expected one of {SUPPORTED_BACKENDS}."
+            )
+        self.num_workers = int(num_workers)
+        self.parallel_backend = str(parallel_backend)
     
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train EA with the given configuration.
@@ -317,68 +343,130 @@ class EATrainer(BaselineTrainer):
         
         # Track metrics
         fitness_history = []
-        
-        # Evaluate initial population
-        fitnesses = list(map(toolbox.evaluate, population))
-        for ind, fit in zip(population, fitnesses):
-            ind.fitness.values = fit
-        
-        hof.update(population)
-        record = stats.compile(population)
-        fitness_history.append({
-            'generation': 0,
-            'mean': record['avg'],
-            'std': record['std'],
-            'min': record['min'],
-            'max': record['max'],
-        })
 
-        # Evolution loop — strategy-dependent.
-        if self.strategy == "simple":
-            self._run_simple(
-                population, toolbox, stats, hof, fitness_history,
-                num_generations, rng,
-            )
-        elif self.strategy == "mu_plus_lambda":
-            _, logbook = algorithms.eaMuPlusLambda(
-                population, toolbox,
-                mu=self.mu, lambda_=self.lambda_,
-                cxpb=self.crossover_rate, mutpb=self.mutation_rate,
-                ngen=num_generations,
-                stats=stats, halloffame=hof, verbose=False,
-            )
-            for record in logbook:
-                gen = record['gen']
-                if gen == 0:
-                    continue  # already recorded from initial evaluation
-                fitness_history.append({
-                    'generation': gen,
-                    'mean': record['avg'],
-                    'std': record['std'],
-                    'min': record['min'],
-                    'max': record['max'],
-                })
-        elif self.strategy == "mu_comma_lambda":
-            _, logbook = algorithms.eaMuCommaLambda(
-                population, toolbox,
-                mu=self.mu, lambda_=self.lambda_,
-                cxpb=self.crossover_rate, mutpb=self.mutation_rate,
-                ngen=num_generations,
-                stats=stats, halloffame=hof, verbose=False,
-            )
-            for record in logbook:
-                gen = record['gen']
-                if gen == 0:
-                    continue  # already recorded from initial evaluation
-                fitness_history.append({
-                    'generation': gen,
-                    'mean': record['avg'],
-                    'std': record['std'],
-                    'min': record['min'],
-                    'max': record['max'],
-                })
-        else:  # pragma: no cover — guarded in __init__.
-            raise ValueError(f"Unknown strategy {self.strategy!r}")
+        # --- Parallel evaluation setup ----------------------------------
+        # ``algorithm_params["num_workers"]`` overrides the constructor
+        # default. ``resolve_num_workers`` normalises 0/None to 1 and
+        # caps at ``os.cpu_count()``.
+        requested = config.algorithm_params.get("num_workers", self.num_workers)
+        effective_workers = resolve_num_workers(requested)
+        backend = config.algorithm_params.get(
+            "parallel_backend", self.parallel_backend
+        )
+        worker_spec = _EvalWorkerSpec(
+            env_name=config.env_name,
+            env_config=dict(config.env_config) if config.env_config else None,
+            max_steps=max_steps_per_episode,
+            aggregation_method="sum",
+            team_mapping=None,
+        )
+
+        with make_executor(
+            effective_workers, backend=backend
+        ) as executor:
+            # Register toolbox.map so DEAP's built-in eaMu*Lambda
+            # algorithms dispatch through the pool.
+            if effective_workers > 1:
+                toolbox.register(
+                    "map",
+                    make_parallel_evaluate_map(executor, worker_spec),
+                )
+
+            # Deterministic per-individual evaluation seeds when a
+            # base seed is provided — makes serial and parallel runs
+            # produce identical fitness arrays. Applied on the
+            # in-house ``simple`` loop only; the ``eaMu*Lambda`` paths
+            # go through DEAP's own ``toolbox.map`` with non-seeded
+            # evaluation (matches prior behaviour).
+            base_eval_seed = config.algorithm_params.get("seed")
+            _eval_counter = [0]
+
+            def _next_seeds(n: int):
+                if base_eval_seed is None:
+                    return [None] * n
+                lo = int(base_eval_seed) + _eval_counter[0]
+                _eval_counter[0] += n
+                return list(range(lo, lo + n))
+
+            def _eval_population(inds):
+                """Serial or parallel evaluation based on workers."""
+                inds = list(inds)
+                seeds = _next_seeds(len(inds))
+                if effective_workers > 1:
+                    return evaluate_population_parallel(
+                        inds,
+                        executor=executor,
+                        spec=worker_spec,
+                        eval_seeds=seeds,
+                    )
+                return [
+                    evaluator.evaluate(ind, seed=s)
+                    for ind, s in zip(inds, seeds)
+                ]
+
+            # Evaluate initial population
+            fitnesses = _eval_population(population)
+            for ind, fit in zip(population, fitnesses):
+                ind.fitness.values = fit
+
+            hof.update(population)
+            record = stats.compile(population)
+            fitness_history.append({
+                'generation': 0,
+                'mean': record['avg'],
+                'std': record['std'],
+                'min': record['min'],
+                'max': record['max'],
+            })
+
+            # Evolution loop — strategy-dependent.
+            if self.strategy == "simple":
+                self._run_simple(
+                    population, toolbox, stats, hof, fitness_history,
+                    num_generations, rng,
+                    eval_population=_eval_population,
+                )
+            elif self.strategy == "mu_plus_lambda":
+                _, logbook = algorithms.eaMuPlusLambda(
+                    population, toolbox,
+                    mu=self.mu, lambda_=self.lambda_,
+                    cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                    ngen=num_generations,
+                    stats=stats, halloffame=hof, verbose=False,
+                )
+                for record in logbook:
+                    gen = record['gen']
+                    if gen == 0:
+                        continue  # already recorded from initial evaluation
+                    fitness_history.append({
+                        'generation': gen,
+                        'mean': record['avg'],
+                        'std': record['std'],
+                        'min': record['min'],
+                        'max': record['max'],
+                    })
+            elif self.strategy == "mu_comma_lambda":
+                _, logbook = algorithms.eaMuCommaLambda(
+                    population, toolbox,
+                    mu=self.mu, lambda_=self.lambda_,
+                    cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                    ngen=num_generations,
+                    stats=stats, halloffame=hof, verbose=False,
+                )
+                for record in logbook:
+                    gen = record['gen']
+                    if gen == 0:
+                        continue  # already recorded from initial evaluation
+                    fitness_history.append({
+                        'generation': gen,
+                        'mean': record['avg'],
+                        'std': record['std'],
+                        'min': record['min'],
+                        'max': record['max'],
+                    })
+            else:  # pragma: no cover — guarded in __init__.
+                raise ValueError(f"Unknown strategy {self.strategy!r}")
+        # --- End parallel evaluation scope ------------------------------
 
         # Clean up
         env.close()
@@ -420,6 +508,8 @@ class EATrainer(BaselineTrainer):
                     'crossover_method': self.crossover_method,
                     'mutation_method': self.mutation_method,
                 },
+                'num_workers': effective_workers,
+                'parallel_backend': backend,
             },
             training_time=training_time,
         )
@@ -491,6 +581,8 @@ class EATrainer(BaselineTrainer):
         fitness_history,
         num_generations: int,
         rng,
+        *,
+        eval_population,
     ) -> None:
         """In-house ``eaSimple``-style generational loop.
 
@@ -498,6 +590,11 @@ class EATrainer(BaselineTrainer):
         per-pair crossover probability ``self.crossover_rate`` and
         per-individual mutation probability ``self.mutation_rate``,
         with full replacement.
+
+        Args:
+            eval_population: Callable ``(inds) -> [fitness_tuple, ...]``
+                that runs serial or parallel evaluation depending on
+                the configured worker count.
         """
         for gen in range(1, num_generations + 1):
             offspring = toolbox.select(population, len(population))
@@ -515,7 +612,7 @@ class EATrainer(BaselineTrainer):
                     del mutant.fitness.values
 
             invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-            fitnesses = list(map(toolbox.evaluate, invalid_ind))
+            fitnesses = eval_population(invalid_ind)
             for ind, fit in zip(invalid_ind, fitnesses):
                 ind.fitness.values = fit
 
