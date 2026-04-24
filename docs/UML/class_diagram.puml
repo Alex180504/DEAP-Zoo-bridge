@@ -622,7 +622,7 @@ package "deap_pettingzoo.contrib.qdax" {
 
     class "scoring <<module>>" as qdax_scoring {
         + make_jax_scoring_function(jax_env, module, *, episode_length,\n         descriptor_fn, action_type, agents=None,\n         extract_state_fn=None) -> Callable
-        + make_numpy_scoring_function(env_name, module, *, layer_sizes,\n         episode_length, descriptor_fn, env_config=None,\n         action_type="discrete") -> Callable
+        + make_numpy_scoring_function(env_name, *, layer_sizes,\n         episode_length, descriptor_fn, env_config=None,\n         action_type="discrete", activation="tanh",\n         num_workers=1, parallel_backend="process") -> Callable
         -- both return QDax contract:\n   (genotypes, key) -> (fitness, descriptor, extra_scores) --
     }
 

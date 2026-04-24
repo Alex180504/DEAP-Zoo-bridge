@@ -66,7 +66,6 @@ def _make_fn(setup, *, num_workers: int):
     layer_sizes, module, descriptor_fn = setup
     return make_numpy_scoring_function(
         _ENV,
-        module,
         layer_sizes=layer_sizes,
         episode_length=10,
         descriptor_fn=descriptor_fn,
