@@ -119,6 +119,22 @@ class CoEvolutionConfig:
         if len(set(names)) != len(names):
             raise ValueError(f"Duplicate side names in {names!r}.")
 
+        for i, side in enumerate(self.sides):
+            for other_side in self.sides[i + 1 :]:
+                for prefix in side.role_prefixes:
+                    for other_prefix in other_side.role_prefixes:
+                        if prefix.startswith(other_prefix) or other_prefix.startswith(
+                            prefix
+                        ):
+                            raise ValueError(
+                                "Overlapping role_prefixes across sides are not "
+                                "allowed: "
+                                f"{side.name!r} prefix {prefix!r} conflicts with "
+                                f"{other_side.name!r} prefix {other_prefix!r}. "
+                                "Prefixes must be disjoint so agent assignment "
+                                "based on startswith is unambiguous."
+                            )
+
         if self.mode == "self_play_hof":
             # "Self-play with HoF" = each side maintains its own
             # archive of past champions, and when that side is sampled
@@ -228,10 +244,15 @@ class CoEvolutionTrainer(BaselineTrainer):
                 self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
             )
             previous_np_state = np.random.get_state()
-            try:
-                state.initialise(env, rng=side_rng)
-            finally:
-                np.random.set_state(previous_np_state)
+            state.initialise(env, rng=side_rng)
+            # Save the global numpy state *after* this side's seeding so
+            # its CMA generate/update (and EA operators) can continue from
+            # the same seeded stream in subsequent step_generation calls.
+            # This must happen before restoring the old global state so that
+            # the side-specific seed is preserved for future generations.
+            if hasattr(state, "_np_state"):
+                state._np_state = np.random.get_state()
+            np.random.set_state(previous_np_state)
 
         # Bootstrap: evaluate each evolving side's initial population
         # against the *initial* state of the other sides so fitnesses

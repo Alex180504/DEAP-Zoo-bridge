@@ -307,6 +307,11 @@ class EASideState(SideState):
         #: operations in :meth:`step_generation` so one side's RNG draws
         #: never influence another side's evolution.
         self._rng: np.random.Generator = np.random.default_rng()
+        #: Per-side global numpy RNG state. The trainer saves the post-init
+        #: global state here so that EA operators (crossover_blend,
+        #: mutate_gaussian) which rely on ``np.random.*`` continue from the
+        #: side-specific seeded stream and do not interfere with other sides.
+        self._np_state: Optional[Any] = None
 
     def initialise(
         self,
@@ -410,6 +415,18 @@ class EASideState(SideState):
         # replacement — matches EATrainer's "simple" strategy. All
         # stochastic decisions use the per-side Generator so one
         # side's RNG draws do not influence another side.
+        #
+        # Genetic operators (crossover_blend, mutate_gaussian) call
+        # np.random.* (global RNG). To keep each side's operators on its
+        # own seeded stream and independent of other sides, we save the
+        # current global state, switch to this side's stored stream, run
+        # all operators, then save the resulting state and restore the
+        # original global state.
+        global_state_before: Optional[Any] = None
+        if self._np_state is not None:
+            global_state_before = np.random.get_state()
+            np.random.set_state(self._np_state)
+
         offspring = [self.toolbox.clone(ind) for ind in self.population]
         for i in range(1, len(offspring), 2):
             if self._rng.random() < self.crossover_rate:
@@ -420,6 +437,10 @@ class EASideState(SideState):
             if self._rng.random() < self.mutation_rate:
                 self.toolbox.mutate(ind)
                 del ind.fitness.values
+
+        if self._np_state is not None:
+            self._np_state = np.random.get_state()
+            np.random.set_state(global_state_before)
 
         # Evaluate invalid individuals.
         for ind in offspring:
@@ -519,6 +540,11 @@ class CMAESSideState(SideState):
         self._policy_factory: Optional[PolicyFactory] = None
         self._action_space: Any = None
         self._ind_init = None
+        #: Per-side global numpy RNG state. Saved after seeding in
+        #: :meth:`initialise` by the trainer so that CMA generate/update
+        #: calls (which use ``np.random.*`` internally) continue from the
+        #: side-specific seeded stream without interfering with other sides.
+        self._np_state: Optional[Any] = None
 
     def initialise(
         self,
@@ -609,11 +635,31 @@ class CMAESSideState(SideState):
             if not ind.fitness.valid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
+        # DEAP's CMA strategy calls np.random.* (global RNG) during
+        # toolbox.update() and toolbox.generate(). To keep this side's
+        # CMA on its own seeded stream and independent of other sides,
+        # save/set/restore the global numpy state around these calls.
+        global_state_before: Optional[Any] = None
+        if self._np_state is not None:
+            global_state_before = np.random.get_state()
+            np.random.set_state(self._np_state)
+
         self.toolbox.update(self.population)
+        # Pre-sample next generation's population so current_pool() is
+        # populated even before evaluation begins.
+        next_population = self.toolbox.generate()
+
+        if self._np_state is not None:
+            self._np_state = np.random.get_state()
+            np.random.set_state(global_state_before)
+
+        # Collect stats from the *evaluated* population before swapping.
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
         self.best_fitness = float(self.hof[0].fitness.values[0])
+
+        self.population = next_population
 
         stats = GenerationStats(
             generation=self.generation,
@@ -625,9 +671,6 @@ class CMAESSideState(SideState):
             best_fitness=self.best_fitness,
         )
         self.history.append(stats)
-        # Pre-sample next generation's population so current_pool() is
-        # populated even before evaluation begins.
-        self.population = self.toolbox.generate()
         return stats
 
     def current_pool(self) -> OpponentPool:
