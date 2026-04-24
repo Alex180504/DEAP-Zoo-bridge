@@ -50,6 +50,8 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "descriptor_kwargs": {},
     "seed": 0,
     "save_repertoire": True,
+    "num_workers": 1,
+    "parallel_backend": "process",
 }
 
 _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
@@ -66,6 +68,8 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "descriptor_kwargs": {},
     "seed": 0,
     "save_repertoire": True,
+    "num_workers": 1,
+    "parallel_backend": "process",
 }
 
 
@@ -167,8 +171,20 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
         params["descriptor"], env, params.get("descriptor_kwargs", {})
     )
 
+    num_workers = int(params.get("num_workers", 1))
+    parallel_backend = str(params.get("parallel_backend", "process"))
+
     spec = get_env_spec(config.env_name)
     if spec.api == "jax_parallel":
+        if num_workers > 1:
+            raise ValueError(
+                "algorithm_params['num_workers'] > 1 is not supported on "
+                "the JAX fast path (env.api='jax_parallel'). The fast "
+                "path already batches the whole population through a "
+                "single jax.vmap; use 'batch_size' to scale instead. "
+                "To use process-pool parallelism, register the env "
+                "without the jax_parallel adapter (numpy scoring path)."
+            )
         # Raw JAX env for fast scoring.
         raw_jax_env = spec.factory(**(config.env_config or {}))
         scoring_fn = make_jax_scoring_function(
@@ -194,6 +210,9 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             descriptor_fn=descriptor_fn,
             env_config=config.env_config,
             action_type="discrete" if not config.continuous else "continuous",
+            activation=str(params["activation"]),
+            num_workers=num_workers,
+            parallel_backend=parallel_backend,
         )
 
     init_params = init_flax_mlp_params(
@@ -314,21 +333,27 @@ class MAPElitesTrainer(BaselineTrainer):
             metrics_function=metrics_fn,
         )
 
-        key, sub = jax.random.split(key)
-        repertoire, emitter_state, init_metrics = map_elites.init(
-            init_genotypes, centroids, sub
-        )
-
-        num_iters = _budget_to_iterations(config, params)
-        history: list = [init_metrics]
-        start = time.time()
-        for _ in range(num_iters):
+        try:
             key, sub = jax.random.split(key)
-            repertoire, emitter_state, metrics = map_elites.update(
-                repertoire, emitter_state, sub
+            repertoire, emitter_state, init_metrics = map_elites.init(
+                init_genotypes, centroids, sub
             )
-            history.append(metrics)
-        elapsed = time.time() - start
+
+            num_iters = _budget_to_iterations(config, params)
+            history: list = [init_metrics]
+            start = time.time()
+            for _ in range(num_iters):
+                key, sub = jax.random.split(key)
+                repertoire, emitter_state, metrics = map_elites.update(
+                    repertoire, emitter_state, sub
+                )
+                history.append(metrics)
+            elapsed = time.time() - start
+        finally:
+            # Tear down the scoring function's worker pool, if any.
+            closer = getattr(scoring_fn, "close", None)
+            if closer is not None:
+                closer()
 
         champion_policy, champion_fitness = _extract_champion(
             repertoire, module, layer_sizes
@@ -339,6 +364,8 @@ class MAPElitesTrainer(BaselineTrainer):
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
+            "num_workers": int(params.get("num_workers", 1)),
+            "parallel_backend": str(params.get("parallel_backend", "process")),
         }
         if params.get("save_repertoire") and config.output_dir is not None:
             path = _save_repertoire(repertoire, Path(config.output_dir))
@@ -449,21 +476,26 @@ class CMAMETrainer(BaselineTrainer):
         key, sub = jax.random.split(key)
         init_genotypes = 0.01 * jax.random.normal(sub, (batch_size, genotype_dim))
 
-        key, sub = jax.random.split(key)
-        repertoire, emitter_state, init_metrics = map_elites.init(
-            init_genotypes, centroids, sub
-        )
-
-        num_iters = _budget_to_iterations(config, params)
-        history = [init_metrics]
-        start = time.time()
-        for _ in range(num_iters):
+        try:
             key, sub = jax.random.split(key)
-            repertoire, emitter_state, metrics = map_elites.update(
-                repertoire, emitter_state, sub
+            repertoire, emitter_state, init_metrics = map_elites.init(
+                init_genotypes, centroids, sub
             )
-            history.append(metrics)
-        elapsed = time.time() - start
+
+            num_iters = _budget_to_iterations(config, params)
+            history = [init_metrics]
+            start = time.time()
+            for _ in range(num_iters):
+                key, sub = jax.random.split(key)
+                repertoire, emitter_state, metrics = map_elites.update(
+                    repertoire, emitter_state, sub
+                )
+                history.append(metrics)
+            elapsed = time.time() - start
+        finally:
+            closer = getattr(scoring_fn, "close", None)
+            if closer is not None:
+                closer()
 
         # Champion extraction: repertoire genotypes are flat arrays here.
         fitnesses = np.asarray(repertoire.fitnesses)
@@ -482,6 +514,8 @@ class CMAMETrainer(BaselineTrainer):
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
             "genotype_dim": genotype_dim,
+            "num_workers": int(params.get("num_workers", 1)),
+            "parallel_backend": str(params.get("parallel_backend", "process")),
         }
         if params.get("save_repertoire") and config.output_dir is not None:
             path = _save_repertoire(repertoire, Path(config.output_dir))

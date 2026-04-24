@@ -69,8 +69,14 @@ qdax = [
     "deap-pettingzoo[jax,jaxmarl]",
     "qdax>=0.4.0",
 ]
+scoop = [
+    "scoop>=0.7,<1.0",
+]
+dask = [
+    "dask[distributed]>=2024.1",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax]"
+    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask]"
 ]
 
 [tool.setuptools]

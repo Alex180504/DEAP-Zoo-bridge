@@ -34,7 +34,12 @@ from deap_pettingzoo.integration.cma_integration import (
     setup_cma_one_plus_lambda_strategy,
     setup_cma_strategy,
 )
+from deap_pettingzoo.integration.deap_integration import (
+    _EvalWorkerSpec,
+    evaluate_population_parallel,
+)
 from deap_pettingzoo.policies.action_heads import required_output_size
+from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
 class CMAESTrainer(BaselineTrainer):
@@ -54,6 +59,8 @@ class CMAESTrainer(BaselineTrainer):
         activation: str = "tanh",
         weight_range: tuple = (-1.0, 1.0),
         variant: str = "mu_mu_lambda",
+        num_workers: int = 1,
+        parallel_backend: str = "process",
     ):
         """Initialise the CMA-ES trainer.
 
@@ -87,6 +94,20 @@ class CMAESTrainer(BaselineTrainer):
                 "Expected 'mu_mu_lambda' or 'one_plus_lambda'."
             )
         self.variant = variant
+
+        if num_workers < 0:
+            raise ValueError(
+                f"num_workers must be >= 0 (or 1 for serial), got {num_workers}."
+            )
+        from deap_pettingzoo.utils.parallel import SUPPORTED_BACKENDS
+
+        if parallel_backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"Unknown parallel_backend {parallel_backend!r}. "
+                f"Expected one of {SUPPORTED_BACKENDS}."
+            )
+        self.num_workers = int(num_workers)
+        self.parallel_backend = str(parallel_backend)
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train CMA-ES with the given configuration.
@@ -140,24 +161,64 @@ class CMAESTrainer(BaselineTrainer):
 
         fitness_history = []
 
-        for gen in range(num_generations):
-            population = toolbox.generate()
-            for ind, fit in zip(population, map(toolbox.evaluate, population)):
-                ind.fitness.values = fit
+        # --- Parallel evaluation setup --------------------------------
+        requested = config.algorithm_params.get("num_workers", self.num_workers)
+        effective_workers = resolve_num_workers(requested)
+        backend = config.algorithm_params.get(
+            "parallel_backend", self.parallel_backend
+        )
+        worker_spec = _EvalWorkerSpec(
+            env_name=config.env_name,
+            env_config=dict(config.env_config) if config.env_config else None,
+            max_steps=max_steps_per_episode,
+            aggregation_method="sum",
+            team_mapping=None,
+        )
 
-            toolbox.update(population)
-            hof.update(population)
+        with make_executor(
+            effective_workers, backend=backend
+        ) as executor:
+            base_eval_seed = config.algorithm_params.get("seed")
+            _eval_counter = [0]
 
-            record = stats.compile(population)
-            fitness_history.append(
-                {
-                    "generation": gen,
-                    "mean": record["avg"],
-                    "std": record["std"],
-                    "min": record["min"],
-                    "max": record["max"],
-                }
-            )
+            def _next_seeds(n: int):
+                if base_eval_seed is None:
+                    return [None] * n
+                lo = int(base_eval_seed) + _eval_counter[0]
+                _eval_counter[0] += n
+                return list(range(lo, lo + n))
+
+            for gen in range(num_generations):
+                population = toolbox.generate()
+                seeds = _next_seeds(len(population))
+                if effective_workers > 1:
+                    fitnesses = evaluate_population_parallel(
+                        population,
+                        executor=executor,
+                        spec=worker_spec,
+                        eval_seeds=seeds,
+                    )
+                else:
+                    fitnesses = [
+                        evaluator.evaluate(ind, seed=s)
+                        for ind, s in zip(population, seeds)
+                    ]
+                for ind, fit in zip(population, fitnesses):
+                    ind.fitness.values = fit
+
+                toolbox.update(population)
+                hof.update(population)
+
+                record = stats.compile(population)
+                fitness_history.append(
+                    {
+                        "generation": gen,
+                        "mean": record["avg"],
+                        "std": record["std"],
+                        "min": record["min"],
+                        "max": record["max"],
+                    }
+                )
 
         env.close()
         training_time = time.time() - start_time
@@ -186,6 +247,8 @@ class CMAESTrainer(BaselineTrainer):
                     "weight_range": list(self.weight_range),
                     "variant": self.variant,
                 },
+                "num_workers": effective_workers,
+                "parallel_backend": backend,
             },
             training_time=training_time,
         )

@@ -7,9 +7,11 @@ and the PettingZoo evaluation system. It handles:
 - Toolbox configuration
 - Genetic operator registration
 - Fitness evaluation integration
+- Process-pool parallel evaluation (top-level worker helpers)
 """
 
-from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from deap import base, creator, tools
 import numpy as np
 
@@ -501,3 +503,212 @@ def clone_individual(individual: Any) -> Any:
         cloned.fitness.values = individual.fitness.values
     
     return cloned
+
+
+# --------------------------------------------------------------------------
+# Process-pool parallel evaluation plumbing
+# --------------------------------------------------------------------------
+
+@dataclass
+class _GenomePayload:
+    """Picklable payload shipped to worker processes.
+
+    Carries just enough to rebuild a :class:`FixedTopologyGenome` on
+    the worker side; the live evaluator is *not* pickled.
+
+    Attributes:
+        weights: Flat numpy weight vector (``genome.get_weights()``).
+        layer_sizes: Network topology.
+        activation: Activation function name.
+        weight_range: ``(lo, hi)`` tuple (kept for genome
+            round-tripping; evaluation is unaffected).
+        seed: Optional per-individual seed forwarded to
+            ``evaluator.evaluate(..., seed=seed)``.
+    """
+
+    weights: np.ndarray
+    layer_sizes: Tuple[int, ...]
+    activation: str
+    weight_range: Tuple[float, float]
+    seed: Optional[int] = None
+
+
+@dataclass
+class _EvalWorkerSpec:
+    """Picklable spec for initialising a worker-side evaluator.
+
+    Mirrors the constructor signature of
+    :class:`deap_pettingzoo.evaluators.SingleEpisodeEvaluator`; we ship
+    the env *name* (plus ``env_config``) rather than a live env so
+    nothing JIT-compiled or holding sockets crosses the boundary.
+    """
+
+    env_name: str
+    env_config: Optional[Dict[str, Any]]
+    max_steps: int
+    aggregation_method: str
+    team_mapping: Optional[Dict[str, str]] = None
+
+
+# Module-global cache populated lazily on each worker. Using a lazy
+# init pattern (instead of ``ProcessPoolExecutor(initializer=...)``)
+# keeps a single code path for the process backend, SCOOP, and Dask —
+# only the process backend supports ``initializer``.
+_WORKER_CACHE: Dict[str, Any] = {}
+
+
+def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
+    """Return a worker-local ``SingleEpisodeEvaluator``, building once."""
+    cached_spec = _WORKER_CACHE.get("spec")
+    evaluator = _WORKER_CACHE.get("evaluator")
+    if evaluator is not None and cached_spec == spec:
+        return evaluator
+
+    # First call on this worker, or spec changed (should not happen in
+    # a well-formed train() call but is safe to rebuild on mismatch).
+    from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
+
+    env = PettingZooWrapper(
+        spec.env_name, env_config=spec.env_config or None
+    )
+    evaluator = SingleEpisodeEvaluator(
+        env_wrapper=env,
+        max_steps=spec.max_steps,
+        aggregation_method=spec.aggregation_method,
+        team_mapping=spec.team_mapping or {},
+    )
+    _WORKER_CACHE["spec"] = spec
+    _WORKER_CACHE["evaluator"] = evaluator
+    _WORKER_CACHE["env"] = env  # keep ref so env is not GC'd
+    return evaluator
+
+
+class _LightweightIndividual:
+    """Minimal ``evaluator.evaluate`` input shaped like a DEAP individual.
+
+    The evaluator contract only requires ``.genome``; constructing a
+    real ``creator.Individual`` on the worker would force DEAP's
+    ``creator`` side-effects into each subprocess unnecessarily.
+    """
+
+    __slots__ = ("genome",)
+
+    def __init__(self, genome: FixedTopologyGenome) -> None:
+        self.genome = genome
+
+
+def _worker_evaluate(
+    payload_and_spec: Tuple[_GenomePayload, _EvalWorkerSpec],
+) -> tuple:
+    """Top-level worker callable.
+
+    Args:
+        payload_and_spec: ``(_GenomePayload, _EvalWorkerSpec)`` tuple.
+            We pack both so every call carries enough context to
+            rebuild the evaluator — necessary because SCOOP / Dask do
+            not give us an init hook.
+
+    Returns:
+        Fitness tuple from the evaluator, ready for
+        ``individual.fitness.values``.
+    """
+    payload, spec = payload_and_spec
+    evaluator = _ensure_worker_evaluator(spec)
+
+    genome = FixedTopologyGenome(
+        layer_sizes=list(payload.layer_sizes),
+        activation=payload.activation,
+        weight_range=tuple(payload.weight_range),
+        random_seed=None,
+    )
+    genome.set_weights(np.asarray(payload.weights, dtype=float))
+    ind = _LightweightIndividual(genome)
+    return evaluator.evaluate(ind, seed=payload.seed)
+
+
+def _individual_to_payload(
+    individual: Any,
+    *,
+    seed: Optional[int] = None,
+) -> _GenomePayload:
+    """Serialise a DEAP individual (or CMA individual) into a payload.
+
+    Handles both ``creator.Individual`` (``.genome`` with full metadata)
+    and the CMA-ES individual (list subclass that *also* exposes
+    ``.genome``) uniformly.
+    """
+    genome = individual.genome
+    return _GenomePayload(
+        weights=np.asarray(genome.get_weights(), dtype=float).copy(),
+        layer_sizes=tuple(genome.layer_sizes),
+        activation=str(genome.activation),
+        weight_range=tuple(getattr(genome, "_weight_range", (-1.0, 1.0))),
+        seed=seed,
+    )
+
+
+def make_parallel_evaluate_map(
+    executor: Any,
+    spec: _EvalWorkerSpec,
+) -> Any:
+    """Build a ``map``-shaped callable for parallel fitness evaluation.
+
+    The returned callable has the signature
+    ``pmap(evaluate_fn, individuals) -> list`` — compatible with
+    ``toolbox.register("map", pmap)`` so that DEAP's built-in
+    algorithms (:func:`deap.algorithms.eaMuPlusLambda`,
+    :func:`deap.algorithms.eaMuCommaLambda`) dispatch evaluations
+    through the pool. The ``evaluate_fn`` argument is intentionally
+    ignored: the worker rebuilds the evaluator from ``spec`` so the
+    driver-side ``toolbox.evaluate`` closure (which holds a live
+    :class:`PettingZooWrapper`) is never shipped.
+
+    For the in-house ``_run_simple`` loop the same object is usable
+    as a one-arg helper via
+    :func:`evaluate_population_parallel`.
+    """
+    def _pmap(_evaluate_ignored, individuals: Iterable[Any]):
+        inds = list(individuals)
+        payloads = [
+            (_individual_to_payload(ind), spec) for ind in inds
+        ]
+        return list(executor.map(_worker_evaluate, payloads))
+
+    return _pmap
+
+
+def evaluate_population_parallel(
+    individuals: Iterable[Any],
+    *,
+    executor: Any,
+    spec: _EvalWorkerSpec,
+    eval_seeds: Optional[Iterable[Optional[int]]] = None,
+) -> List[tuple]:
+    """Evaluate a population via ``executor`` using worker rebuilds.
+
+    Thin helper for call sites that do not go through
+    ``toolbox.map`` (e.g. the in-house generational loop in
+    :class:`EATrainer`).
+
+    Args:
+        eval_seeds: Optional iterable of per-individual seeds forwarded
+            as the evaluator's ``seed=`` kwarg. Used by tests and the
+            ``algorithm_params["deterministic_eval"]`` opt-in to make
+            serial and parallel runs produce identical fitness values.
+    """
+    inds = list(individuals)
+    if eval_seeds is None:
+        seeds: List[Optional[int]] = [None] * len(inds)
+    else:
+        seeds = list(eval_seeds)
+        if len(seeds) != len(inds):
+            raise ValueError(
+                f"eval_seeds length {len(seeds)} != population {len(inds)}"
+            )
+    payloads = [
+        (_individual_to_payload(ind, seed=s), spec)
+        for ind, s in zip(inds, seeds)
+    ]
+    return list(executor.map(_worker_evaluate, payloads))
+
