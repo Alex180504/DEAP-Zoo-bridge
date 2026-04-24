@@ -10,11 +10,12 @@ Contract mirrors :func:`make_jax_scoring_function` so QDax trainers
 can dispatch between the two implementations on
 ``env_spec.api == "jax_parallel"``.
 
-Because this scoring function runs a Python loop per individual
-inside a ``jax.jit`` boundary, it is wrapped with
-:func:`jax.pure_callback` via a :func:`jax.experimental.host_callback`-
-style escape hatch: the outer QDax loop still receives JAX arrays but
-the per-individual rollout is plain numpy.
+This scoring path performs the per-individual rollout in a plain
+Python loop using numpy/PettingZoo operations, then converts the
+collected results back to JAX arrays for the caller. It is therefore
+intended for validation/debugging and general environment reuse, not
+as a ``jax.jit``-compatible or ``jax.pure_callback``-wrapped execution
+path.
 
 Process-pool parallelism
 ------------------------
@@ -90,27 +91,40 @@ def _extract_positions_velocities_np(obs_dict, agents):
 def _ensure_worker_context(spec: _RolloutSpec):
     """Build & cache per-worker env + module on first call.
 
-    The cache signature deliberately omits ``descriptor_fn`` identity:
-    when a spec is shipped across the process boundary the descriptor
-    object is reconstructed (new ``id``) on every task, which would
-    invalidate the cache on every call and rebuild the env / Flax
-    module each time. Instead we key on stable structural fields and
-    update ``descriptor_fn`` in place — within one
-    :func:`make_numpy_scoring_function` instance the spec is constant,
-    so this is correct.
+    The cache is keyed on stable structural fields that fully identify
+    the rollout context: ``env_name``, ``env_config``, ``layer_sizes``,
+    ``activation``, ``action_type``, and the *type* of the
+    ``descriptor_fn`` / ``extract_state_fn`` callables. We do not use
+    the object ``id()`` for callable fields because pickling/unpickling
+    across the process boundary produces a new object with a different
+    ``id`` on every task — which would invalidate the cache every call.
+    Instead we refresh the callable handles in-place when the signature
+    matches, so the cached env + module are reused across tasks while
+    the callable references are kept up-to-date.
     """
     cached_sig = _NUMPY_WORKER_CACHE.get("sig")
+    _env_cfg = spec.env_config or {}
+    _env_cfg_frozen = tuple(sorted(_env_cfg.items()))
+    _extract_key = (
+        type(spec.extract_state_fn).__qualname__
+        if spec.extract_state_fn is not None
+        else None
+    )
     sig = (
         spec.env_name,
+        _env_cfg_frozen,
         type(spec.descriptor_fn).__qualname__,
         tuple(spec.layer_sizes),
         spec.activation,
         spec.action_type,
+        _extract_key,
     )
     if cached_sig == sig:
-        # Refresh the descriptor_fn handle so the cached one matches
-        # the freshly-unpickled spec on each task.
+        # Refresh callable handles so the cached ones match the
+        # freshly-unpickled spec on each task.
         _NUMPY_WORKER_CACHE["descriptor_fn"] = spec.descriptor_fn
+        if spec.extract_state_fn is not None:
+            _NUMPY_WORKER_CACHE["extract"] = spec.extract_state_fn
         return _NUMPY_WORKER_CACHE
 
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
