@@ -244,7 +244,11 @@ class CoEvolutionTrainer(BaselineTrainer):
                 self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
             )
             previous_np_state = np.random.get_state()
-            state.initialise(env, rng=side_rng)
+            try:
+                state.initialise(env, rng=side_rng)
+            except Exception:
+                np.random.set_state(previous_np_state)
+                raise
             # Save the global numpy state *after* this side's seeding so
             # its CMA generate/update (and EA operators) can continue from
             # the same seeded stream in subsequent step_generation calls.
