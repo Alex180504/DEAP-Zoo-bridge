@@ -123,7 +123,7 @@ package "deap_pettingzoo.environments" {
         + tags: frozenset
         + api: EnvApi
         + wrappers: Tuple[Callable, ...]
-        -- api \u2208 {parallel, aec, auto,\n     aec_masked, aec_sequential} --
+        -- api \u2208 {parallel, aec, auto,\n     aec_masked, aec_sequential,\n     jax_parallel} --
     }
 
     class registry <<module>> {
@@ -158,10 +158,34 @@ package "deap_pettingzoo.environments" {
     TurnBasedAdapter <|-- MaskedSimultaneousAdapter
     TurnBasedAdapter <|-- SequentialTurnAdapter
 
+    interface "JaxEnvProtocol <<Protocol>>" as JaxEnvProtocol {
+        + agents: List[str]
+        + reset(key) -> (obs, state)
+        + step(key, state, actions) -> (obs, state, rew, done, info)
+        + observation_space(agent): Space
+        + action_space(agent): Space
+    }
+
+    class JaxEnvToPettingZooAdapter {
+        per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
+    }
+
+    JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
+
     PettingZooWrapper ..> registry : resolves env_name
     registry "1" *-- "*" EnvSpec
     builtin ..> registry : register_env
     registry ..> TurnBasedAdapter : wraps on\napi=aec_masked\n/ aec_sequential
+    registry ..> JaxEnvToPettingZooAdapter : wraps on\napi=jax_parallel
+}
+
+package "deap_pettingzoo.contrib.jaxmarl" {
+    class jaxmarl <<module>> {
+        + {static} register_jaxmarl_env(name, env_id, *,\n         default_episode_len=25, tags=None,\n         **jaxmarl_kwargs) -> EnvSpec
+        -- opt-in; lazy-imports jaxmarl.make;\n   registers with api="jax_parallel" --
+    }
+
+    jaxmarl ..> registry : register_env
 }
 
 package "deap_pettingzoo.contrib.openspiel" {
@@ -582,6 +606,57 @@ note bottom of openspiel
   for OpenSpiel turn-based games.
 end note
 
+package "deap_pettingzoo.contrib.qdax" {
+    class FlaxPolicyAdapter {
+        - module
+        - params
+        - masked: bool
+        + get_action(obs, action_mask=None) -> Any
+    }
+
+    class "descriptors <<module>>" as qdax_descriptors {
+        + formation_spread_and_mean_distance(num_pursuers, num_evaders)
+        + with_capture_efficiency(num_pursuers, num_evaders, capture_radius)
+        -- each returns a callable with\n   output_shape / min_bd / max_bd --
+    }
+
+    class "scoring <<module>>" as qdax_scoring {
+        + make_jax_scoring_function(jax_env, module, *, episode_length,\n         descriptor_fn, action_type, agents=None,\n         extract_state_fn=None) -> Callable
+        + make_numpy_scoring_function(env_name, module, *, layer_sizes,\n         episode_length, descriptor_fn, env_config=None,\n         action_type="discrete") -> Callable
+        -- both return QDax contract:\n   (genotypes, key) -> (fitness, descriptor, extra_scores) --
+    }
+
+    class MAPElitesTrainer {
+        + algorithm = "map_elites"
+        + train(config): TrainingResult
+        -- dispatches to jax scoring\n   when env.api == "jax_parallel",\n   numpy fallback otherwise --
+    }
+
+    class CMAMETrainer {
+        + algorithm = "cma_me"
+        + train(config): TrainingResult
+        -- CMAImprovementEmitter +\n   CMAPoolEmitter over a\n   euclidean/CVT centroid grid --
+    }
+
+    FlaxPolicyAdapter ..|> PolicyProtocol : implements
+    MAPElitesTrainer --|> BaselineTrainer
+    CMAMETrainer     --|> BaselineTrainer
+    MAPElitesTrainer ..> qdax_scoring : uses
+    CMAMETrainer     ..> qdax_scoring : uses
+    MAPElitesTrainer ..> qdax_descriptors : resolves by name
+    CMAMETrainer     ..> qdax_descriptors : resolves by name
+    MAPElitesTrainer ..> FlaxPolicyAdapter : produces best
+    CMAMETrainer     ..> FlaxPolicyAdapter : produces best
+}
+
+note bottom of MAPElitesTrainer
+  Opt-in; requires `pip install deap-pettingzoo[qdax]`.
+  Takes fast jit+vmap path only when the
+  env is registered with api="jax_parallel";
+  otherwise rolls out through a numpy boundary
+  and warns the user.
+end note
+
 package "deap_pettingzoo.baselines.coevolution" {
 
   interface "OpponentPool <<Protocol>>" as OpponentPool {
@@ -664,6 +739,24 @@ package "deap_pettingzoo.baselines.coevolution" {
   class EASideState
   class CMAESSideState
   class FrozenSideState
+
+  class QDaxRepertoirePool {
+    - repertoire
+    - policy_factory: Callable
+    - mode: "uniform" | "fitness"
+    - temperature: float
+    + sample_opponent(rng)
+    + update(repertoire)
+  }
+
+  class QDaxSideState {
+    -- runs one QDax iteration\n   per co-evolution generation.\n   Experimental: placeholder descriptor.
+    + current_pool(): QDaxRepertoirePool
+    + best_policy(): FlaxPolicyAdapter
+  }
+
+  QDaxRepertoirePool ..|> OpponentPool
+  QDaxSideState      --|> SideState
 
   class "CoEvolutionConfig <<dataclass>>" as CoEvolutionConfig {
     +mode: str
