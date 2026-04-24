@@ -7,20 +7,18 @@ name = "deap-pettingzoo"
 version = "0.1.0"
 description = "A bridge library enabling DEAP evolutionary algorithms to work with PettingZoo multi-agent environments"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = {file = "LICENSE.txt"}
 authors = [
     {name = "Alex"},
 ]
-keywords = ["evolutionary-algorithms", "multi-agent", "reinforcement-learning", "DEAP", "PettingZoo", "swarm-robotics"]
+keywords = ["evolutionary-algorithms", "multi-agent", "reinforcement-learning", "DEAP", "PettingZoo", "swarm-robotics", "quality-diversity"]
 classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -58,8 +56,27 @@ supersuit = [
 shimmy = [
     "shimmy[openspiel]>=2.0",
 ]
+jax = [
+    "jax>=0.4.0,<0.4.37",
+    "jaxlib>=0.4.0,<0.4.37",
+    "flax>=0.7.0",
+]
+jaxmarl = [
+    "deap-pettingzoo[jax]",
+    "jaxmarl>=0.0.4",
+]
+qdax = [
+    "deap-pettingzoo[jax,jaxmarl]",
+    "qdax>=0.4.0",
+]
+scoop = [
+    "scoop>=0.7,<1.0",
+]
+dask = [
+    "dask[distributed]>=2024.1",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy]"
+    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask]"
 ]
 
 [tool.setuptools]
@@ -85,7 +102,7 @@ addopts = [
 
 [tool.black]
 line-length = 88
-target-version = ["py38", "py39", "py310", "py311"]
+target-version = ["py311", "py312"]
 include = '\.pyi?$'
 
 [tool.isort]
@@ -94,7 +111,7 @@ line_length = 88
 multi_line_output = 3
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

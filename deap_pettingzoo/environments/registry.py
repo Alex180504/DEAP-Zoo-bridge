@@ -52,12 +52,19 @@ EnvFactory = Any
 #: wastes N−1 inferences/step but needs no evaluator changes);
 #: ``aec_sequential`` returns single-agent dicts per step, preserving
 #: true turn semantics for future TD-learning / AlphaZero-style use.
+#: ``jax_parallel`` routes a JAX-native env (e.g. JaxMARL) through
+#: :class:`~deap_pettingzoo.environments.jax_parallel.JaxEnvToPettingZooAdapter`,
+#: giving a numpy-facing parallel facade at the cost of a per-step
+#: JAX↔numpy boundary.  The underlying env is *not* ``jit``’d — QDax
+#: integrations that need the fast JAX path go through
+#: :mod:`deap_pettingzoo.contrib.qdax.scoring_jax` directly instead.
 EnvApi = Literal[
     "parallel",
     "aec",
     "auto",
     "aec_masked",
     "aec_sequential",
+    "jax_parallel",
 ]
 
 
@@ -159,11 +166,18 @@ def register_env(
         TypeError: If ``factory`` is not callable and exposes none of
             ``parallel_env`` / ``env`` / ``raw_env``.
     """
-    if api not in ("parallel", "aec", "auto", "aec_masked", "aec_sequential"):
+    if api not in (
+        "parallel",
+        "aec",
+        "auto",
+        "aec_masked",
+        "aec_sequential",
+        "jax_parallel",
+    ):
         raise ValueError(
             f"Unsupported api={api!r} for env '{name}'. "
-            "Expected 'parallel', 'aec', 'auto', 'aec_masked', or "
-            "'aec_sequential'."
+            "Expected 'parallel', 'aec', 'auto', 'aec_masked', "
+            "'aec_sequential', or 'jax_parallel'."
         )
     if not overwrite and name in _REGISTRY:
         raise ValueError(
@@ -460,6 +474,24 @@ def build_env(
         # and the simultaneity guard entirely.
         raw = _instantiate_factory(factory, render_mode, kwargs, preferred="env")
         env = _coerce_turn_based(raw, name, mode=spec.api)
+    elif spec.api == "jax_parallel":
+        # JAX-native env — build raw JaxMARL-style env then wrap in the
+        # numpy-boundary adapter.  Import lazily so the core registry
+        # does not pull JAX into its dependency closure.
+        if callable(factory):
+            raw = factory(**kwargs)
+        else:
+            raise TypeError(
+                f"Env '{name}' registered with api='jax_parallel' but "
+                "factory is not callable. Pass a callable that returns "
+                "a JaxMARL-style env (reset(key), step(key, state, "
+                "actions))."
+            )
+        from deap_pettingzoo.environments.jax_parallel import (
+            JaxEnvToPettingZooAdapter,
+        )
+
+        env = JaxEnvToPettingZooAdapter(raw, env_name=name, render_mode=render_mode)
     else:
         # AEC or auto: construct then convert if needed.
         preferred = "env" if spec.api == "aec" else "parallel_env"

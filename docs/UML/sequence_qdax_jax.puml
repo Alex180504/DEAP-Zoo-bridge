@@ -1,0 +1,114 @@
+@startuml sequence_qdax_jax
+!theme plain
+title Sequence Diagram: MAP-Elites Training over a JaxMARL Env (fast path)
+
+actor "User" as User
+participant "MAPElitesTrainer" as Trainer
+participant "registry" as Registry
+participant "contrib.jaxmarl\nregister_jaxmarl_env" as JaxMARLMod
+participant "JaxEnvProtocol\n(JaxMARL env)" as JaxEnv
+participant "JaxEnvToPettingZoo\nAdapter" as Adapter
+participant "scoring\nmake_jax_scoring_function" as Scoring
+participant "Flax MLP\nmodule + params" as Flax
+participant "qdax.MAPElites" as QDax
+participant "MapElites\nRepertoire" as Repertoire
+participant "FlaxPolicy\nAdapter" as Policy
+
+== Registration (user, once) ==
+
+User -> JaxMARLMod : register_jaxmarl_env(\n  "jaxmarl_simple_tag",\n  "MPE_simple_tag_v3",\n  default_episode_len=25, ...)
+activate JaxMARLMod
+JaxMARLMod -> Registry : register_env(name, factory,\n  api="jax_parallel", tags=...)
+JaxMARLMod --> User : EnvSpec
+deactivate JaxMARLMod
+
+== Training ==
+
+User -> Trainer : train(TrainingConfig(\n  env_name="jaxmarl_simple_tag",\n  algorithm_params={"descriptor": "pursuit_evasion_2d",\n                    "grid_shape": (20,20), ...}))
+activate Trainer
+
+Trainer -> Registry : get_env_spec(env_name)
+Registry --> Trainer : spec (api == "jax_parallel")
+
+Trainer -> Registry : build_env(env_name)
+Registry -> JaxEnv : factory()
+activate JaxEnv
+JaxEnv --> Registry : raw JAX env
+Registry -> Adapter : JaxEnvToPettingZooAdapter(jax_env)
+Adapter --> Registry : PettingZoo facade
+Registry --> Trainer : wrapper
+
+note right of Trainer
+  Fast path chosen because
+  spec.api == "jax_parallel":
+  unwrap the adapter to get the
+  raw JaxEnvProtocol back.
+end note
+
+Trainer -> Flax : make_flax_mlp(layer_sizes, activation)
+Flax --> Trainer : module
+Trainer -> Flax : init_flax_mlp_params(module, ...)
+Flax --> Trainer : init params pytree
+
+Trainer -> Scoring : make_jax_scoring_function(\n  jax_env, module,\n  episode_length, descriptor_fn,\n  action_type)
+activate Scoring
+Scoring -> Scoring : jit(vmap(rollout))
+Scoring --> Trainer : scoring_fn(genotypes, key)
+deactivate Scoring
+
+Trainer -> QDax : MAPElites(scoring_fn, emitter, metrics_fn)
+activate QDax
+
+Trainer -> QDax : init(init_genotypes, centroids, key)
+QDax -> Scoring : scoring_fn(init_genotypes, key)
+Scoring -> JaxEnv : jit(vmap(reset/step))\nrolls out all genotypes
+JaxEnv --> Scoring : trajectories
+Scoring --> QDax : (fitness, descriptor, extras)
+QDax -> Repertoire : MapElitesRepertoire.init(...)
+activate Repertoire
+Repertoire --> QDax : repertoire
+QDax --> Trainer : (repertoire, emitter_state, init_metrics)
+
+== QD loop ==
+
+loop num_iterations
+    Trainer -> QDax : update(repertoire, emitter_state, key)
+    QDax -> QDax : emitter.emit(repertoire, ...)
+    QDax -> Scoring : scoring_fn(offspring, key)
+    Scoring -> JaxEnv : jit(vmap(rollout))
+    JaxEnv --> Scoring : trajectories
+    Scoring --> QDax : (fitness, descriptor, extras)
+    QDax -> Repertoire : add(offspring, descriptor, fitness)
+    Repertoire --> QDax : updated repertoire
+    QDax --> Trainer : (repertoire, emitter_state, metrics)
+    Trainer -> Trainer : accumulate env_steps / episodes,\ncheck BudgetMode
+end
+
+== Finalisation ==
+
+Trainer -> Repertoire : select best genotype
+Repertoire --> Trainer : best_params (flat pytree)
+
+Trainer -> Policy : FlaxPolicyAdapter(module, best_params, masked=...)
+activate Policy
+Policy --> Trainer : policy
+deactivate Policy
+
+alt save_repertoire
+  Trainer -> Repertoire : pickle.dump(repertoire,\n  output_dir/repertoire.pkl)
+end
+
+Trainer --> User : TrainingResult(best_policy=policy,\n  metadata={grid_shape, descriptor,\n            num_iterations, repertoire_path})
+deactivate QDax
+deactivate Repertoire
+deactivate JaxEnv
+deactivate Trainer
+
+note over Trainer, QDax
+  Slow path (env api != "jax_parallel"): trainer calls
+  make_numpy_scoring_function instead, which wraps the
+  PettingZooWrapper in a Python rollout loop and emits
+  a UserWarning. Contract back to QDax is identical.
+end note
+
+@enduml
