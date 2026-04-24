@@ -88,15 +88,29 @@ def _extract_positions_velocities_np(obs_dict, agents):
 
 
 def _ensure_worker_context(spec: _RolloutSpec):
-    """Build & cache per-worker env + module on first call."""
+    """Build & cache per-worker env + module on first call.
+
+    The cache signature deliberately omits ``descriptor_fn`` identity:
+    when a spec is shipped across the process boundary the descriptor
+    object is reconstructed (new ``id``) on every task, which would
+    invalidate the cache on every call and rebuild the env / Flax
+    module each time. Instead we key on stable structural fields and
+    update ``descriptor_fn`` in place — within one
+    :func:`make_numpy_scoring_function` instance the spec is constant,
+    so this is correct.
+    """
     cached_sig = _NUMPY_WORKER_CACHE.get("sig")
     sig = (
         spec.env_name,
-        id(spec.descriptor_fn),  # cheap identity check; specs reuse the same fn
+        type(spec.descriptor_fn).__qualname__,
         tuple(spec.layer_sizes),
         spec.activation,
+        spec.action_type,
     )
     if cached_sig == sig:
+        # Refresh the descriptor_fn handle so the cached one matches
+        # the freshly-unpickled spec on each task.
+        _NUMPY_WORKER_CACHE["descriptor_fn"] = spec.descriptor_fn
         return _NUMPY_WORKER_CACHE
 
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
@@ -197,7 +211,6 @@ def _numpy_rollout(args):
 
 def make_numpy_scoring_function(
     env_name: str,
-    module,
     layer_sizes: Sequence[int],
     episode_length: int,
     descriptor_fn: Callable,
@@ -215,9 +228,9 @@ def make_numpy_scoring_function(
         env_name: Registered env name. The env is constructed once
             per scoring call via
             :class:`~deap_pettingzoo.environments.PettingZooWrapper`.
-        module: Flax module returned by :func:`make_flax_mlp`
-            (used purely for forward passes — no JAX rollout).
-        layer_sizes: MLP topology; used to decode flat genotypes.
+        layer_sizes: MLP topology; the worker rebuilds the Flax module
+            from this + ``activation`` on first call. Used to decode
+            flat genotypes.
         episode_length: Max steps per rollout.
         descriptor_fn: Pure JAX descriptor function. The numpy
             trajectory is converted to :class:`jnp.ndarray`\u200bs before
@@ -244,7 +257,8 @@ def make_numpy_scoring_function(
 
         * ``scoring_function.close()`` — close the persistent executor.
         * ``scoring_function._executor`` — lazily-created executor ref
-          (None until first call; ``_SerialExecutor`` for serial).
+          (``None`` until first parallel call; the actual executor
+          object thereafter; reset to ``None`` after ``close()``).
     """
     import jax
     import jax.numpy as jnp
@@ -285,6 +299,9 @@ def make_numpy_scoring_function(
         )
         state["ctx"] = ctx
         state["executor"] = ctx.__enter__()
+        # Mirror the live ref onto the public attribute so callers
+        # (and tests) can introspect the actual executor object.
+        scoring_function._executor = state["executor"]  # type: ignore[attr-defined]
         return state["executor"]
 
     def scoring_function(genotypes, key):
@@ -330,9 +347,10 @@ def make_numpy_scoring_function(
             finally:
                 state["executor"] = None
                 state["ctx"] = None
+                scoring_function._executor = None  # type: ignore[attr-defined]
 
     scoring_function.close = _close  # type: ignore[attr-defined]
-    scoring_function._executor = lambda: state["executor"]  # type: ignore[attr-defined]
+    scoring_function._executor = None  # type: ignore[attr-defined]
     scoring_function._num_workers = effective_workers  # type: ignore[attr-defined]
     scoring_function._parallel_backend = parallel_backend  # type: ignore[attr-defined]
     return scoring_function

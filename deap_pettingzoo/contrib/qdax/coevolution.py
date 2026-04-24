@@ -358,7 +358,7 @@ class QDaxSideState(SideState):
             if self._genotype_layout == "flat":
                 params = flat_to_pytree(np.asarray(params), layer_sizes)
             return FlaxPolicyAdapter(
-                self._module, params, action_space=action_space, masked=False
+                self._module, params, action_space=action_space
             )
 
         self._policy_factory = _factory
@@ -402,7 +402,6 @@ class QDaxSideState(SideState):
             self._module,
             params,
             action_space=self._action_space,
-            masked=False,
         )
 
         # Delegate the episode to the injected evaluator. We trust it

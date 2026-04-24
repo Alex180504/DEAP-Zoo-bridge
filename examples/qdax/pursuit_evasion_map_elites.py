@@ -39,7 +39,7 @@ def main() -> None:
 
     register_jaxmarl_env(
         "jaxmarl_simple_tag",
-        "MPE_simple_tag_v3",
+        env_id="MPE_simple_tag_v3",
         default_episode_len=25,
     )
 

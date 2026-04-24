@@ -80,11 +80,35 @@ def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any
     agents = list(env.possible_agents)
     pursuers = [a for a in agents if a.startswith("adversary")]
     evaders = [a for a in agents if not a.startswith("adversary")]
-    default_kwargs = {
-        "num_pursuers": len(pursuers) or len(agents) // 2,
-        "num_evaders": len(evaders) or len(agents) - len(pursuers),
-    }
+
+    if pursuers and evaders:
+        default_kwargs = {
+            "num_pursuers": len(pursuers),
+            "num_evaders": len(evaders),
+        }
+    else:
+        default_kwargs = {}
+        if "num_pursuers" not in kwargs or "num_evaders" not in kwargs:
+            raise ValueError(
+                "Could not infer a consistent pursuit/evasion agent partition "
+                f"from env.possible_agents={agents!r}. Automatic inference only "
+                "works for tag-style envs with agent names prefixed by "
+                "'adversary'. Please pass explicit descriptor_kwargs with both "
+                "'num_pursuers' and 'num_evaders'."
+            )
+
     merged = {**default_kwargs, **kwargs}
+    num_pursuers = int(merged["num_pursuers"])
+    num_evaders = int(merged["num_evaders"])
+    if num_pursuers + num_evaders != len(agents):
+        raise ValueError(
+            "Descriptor agent counts must sum to the number of possible "
+            f"agents: num_pursuers={num_pursuers}, num_evaders={num_evaders}, "
+            f"len(env.possible_agents)={len(agents)}."
+        )
+    merged["num_pursuers"] = num_pursuers
+    merged["num_evaders"] = num_evaders
+
     if name == "pursuit_evasion_2d":
         return pe_desc.formation_spread_and_mean_distance(**merged)
     if name == "pursuit_evasion_3d":
@@ -204,7 +228,6 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
         )
         scoring_fn = make_numpy_scoring_function(
             config.env_name,
-            module,
             layer_sizes=layer_sizes,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,

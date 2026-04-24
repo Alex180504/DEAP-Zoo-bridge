@@ -247,7 +247,9 @@ def make_executor(
         )
 
     n = resolve_num_workers(num_workers)
-    if n <= 1 and backend == "process":
+    # Serial fast-path applies regardless of backend: there's no point
+    # importing scoop / starting a Dask Client just to run inline.
+    if n <= 1:
         return _SerialExecutor()
 
     if backend == "process":
