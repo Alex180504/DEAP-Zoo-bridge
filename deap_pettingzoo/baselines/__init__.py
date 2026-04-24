@@ -49,6 +49,23 @@ from deap_pettingzoo.baselines.compatibility import (
     get_compatible_algorithms,
     format_compatibility_matrix,
 )
+from deap_pettingzoo.baselines.coevolution import (
+    CoEvolutionConfig,
+    CoEvolutionTrainer,
+    Side,
+    OpponentPool,
+    PopulationPool,
+    ArchivePool,
+    FrozenPolicyPool,
+    CompositePool,
+    HallOfFame,
+    RingHallOfFame,
+    ElitistHallOfFame,
+    uniform_sampler,
+    latest_sampler,
+    fitness_proportional_sampler,
+    tournament_sampler,
+)
 
 __all__ = [
     "BaselineTrainer",
@@ -80,4 +97,20 @@ __all__ = [
     "build_compatibility_matrix",
     "get_compatible_algorithms",
     "format_compatibility_matrix",
+    # Co-evolution
+    "CoEvolutionConfig",
+    "CoEvolutionTrainer",
+    "Side",
+    "OpponentPool",
+    "PopulationPool",
+    "ArchivePool",
+    "FrozenPolicyPool",
+    "CompositePool",
+    "HallOfFame",
+    "RingHallOfFame",
+    "ElitistHallOfFame",
+    "uniform_sampler",
+    "latest_sampler",
+    "fitness_proportional_sampler",
+    "tournament_sampler",
 ]

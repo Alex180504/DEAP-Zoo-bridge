@@ -258,5 +258,11 @@ def _register_builtins():
     except ImportError:
         pass
 
+    try:
+        from deap_pettingzoo.baselines.coevolution import CoEvolutionTrainer
+        register_trainer('coevolution', CoEvolutionTrainer)
+    except ImportError:
+        pass
+
 
 _register_builtins()
