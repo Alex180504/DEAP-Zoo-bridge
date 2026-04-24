@@ -160,6 +160,12 @@ class SideState:
         self.generation = 0
         self.best_fitness: float = -np.inf
         self.history: List[GenerationStats] = []
+        #: Per-side global numpy RNG state for EA/CMA operator isolation.
+        #: Subclasses that use ``np.random.*`` operators set this after
+        #: seeding in :meth:`initialise` (via the trainer). When set,
+        #: :meth:`step_generation` wraps operator calls in a save/set/restore
+        #: block so each side advances its own RNG stream independently.
+        self._np_state: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Lifecycle hooks — subclasses override
@@ -307,11 +313,7 @@ class EASideState(SideState):
         #: operations in :meth:`step_generation` so one side's RNG draws
         #: never influence another side's evolution.
         self._rng: np.random.Generator = np.random.default_rng()
-        #: Per-side global numpy RNG state. The trainer saves the post-init
-        #: global state here so that EA operators (crossover_blend,
-        #: mutate_gaussian) which rely on ``np.random.*`` continue from the
-        #: side-specific seeded stream and do not interfere with other sides.
-        self._np_state: Optional[Any] = None
+        # _np_state inherited from SideState — set by the trainer after seeding.
 
     def initialise(
         self,
@@ -438,7 +440,7 @@ class EASideState(SideState):
                 self.toolbox.mutate(ind)
                 del ind.fitness.values
 
-        if self._np_state is not None:
+        if global_state_before is not None:
             self._np_state = np.random.get_state()
             np.random.set_state(global_state_before)
 
@@ -540,11 +542,7 @@ class CMAESSideState(SideState):
         self._policy_factory: Optional[PolicyFactory] = None
         self._action_space: Any = None
         self._ind_init = None
-        #: Per-side global numpy RNG state. Saved after seeding in
-        #: :meth:`initialise` by the trainer so that CMA generate/update
-        #: calls (which use ``np.random.*`` internally) continue from the
-        #: side-specific seeded stream without interfering with other sides.
-        self._np_state: Optional[Any] = None
+        # _np_state inherited from SideState — set by the trainer after seeding.
 
     def initialise(
         self,
@@ -649,7 +647,7 @@ class CMAESSideState(SideState):
         # populated even before evaluation begins.
         next_population = self.toolbox.generate()
 
-        if self._np_state is not None:
+        if global_state_before is not None:
             self._np_state = np.random.get_state()
             np.random.set_state(global_state_before)
 

@@ -250,8 +250,9 @@ class CoEvolutionTrainer(BaselineTrainer):
             # the same seeded stream in subsequent step_generation calls.
             # This must happen before restoring the old global state so that
             # the side-specific seed is preserved for future generations.
-            if hasattr(state, "_np_state"):
-                state._np_state = np.random.get_state()
+            # _np_state is defined on SideState base class, so this always
+            # applies and we don't need a hasattr() guard.
+            state._np_state = np.random.get_state()
             np.random.set_state(previous_np_state)
 
         # Bootstrap: evaluate each evolving side's initial population
