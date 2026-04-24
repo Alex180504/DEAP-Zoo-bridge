@@ -614,9 +614,9 @@ package "deap_pettingzoo.baselines.coevolution" {
   }
 
   class CompositePool {
-    -primary: OpponentPool
-    -secondary: OpponentPool
-    -mix: float
+    -pools: Sequence[OpponentPool]
+    -weights: Sequence[float]
+    +__init__(pools, weights)
     +sample_opponent(rng)
   }
 
@@ -679,10 +679,15 @@ package "deap_pettingzoo.baselines.coevolution" {
   }
 
   class CoEvolutionEvaluator {
-    -env_factory: Callable
-    -sides: List[Side]
-    -learner_factories: Dict
-    +evaluate(genome, learner_side_name, pools, rng, k_opponents)
+    -env_wrapper: PettingZooWrapper
+    -learner_role_prefixes: Tuple[str, ...]
+    -learner_factory: Callable
+    -opponent_sides: List[(name, prefixes, pool)]
+    -k_opponents: int
+    -aggregation: str
+    -max_steps: int
+    +__init__(env_wrapper, learner_role_prefixes, learner_factory,\n  opponent_sides, k_opponents, aggregation,\n  max_steps, flatten_obs, masked)
+    +evaluate(individual, seed, rng)
   }
 
   class CoEvolutionTrainer {
@@ -705,7 +710,7 @@ package "deap_pettingzoo.baselines.coevolution" {
   Side o-- HallOfFame
 
   ArchivePool --> HallOfFame : "reads"
-  CompositePool o-- "2" OpponentPool
+  CompositePool o-- "*" OpponentPool
 
   CoEvolutionConfig *-- "1..*" Side
   CoEvolutionTrainer ..> CoEvolutionConfig : consumes
