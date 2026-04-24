@@ -108,10 +108,17 @@ class Side:
     frozen_policies: Optional[Sequence[PolicyProtocol]] = None
 
     def __post_init__(self) -> None:
-        if self.optimizer not in {"ea", "cma", "frozen"}:
+        if self.optimizer not in {
+            "ea",
+            "cma",
+            "frozen",
+            "qdax_map_elites",
+            "qdax_cma_me",
+        }:
             raise ValueError(
-                f"Side {self.name!r}: optimizer must be 'ea', 'cma', or "
-                f"'frozen'; got {self.optimizer!r}."
+                f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
+                "'frozen', 'qdax_map_elites', or 'qdax_cma_me'; got "
+                f"{self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -772,6 +779,16 @@ def make_side_state(side: Side) -> SideState:
         return CMAESSideState(side)
     if side.optimizer == "frozen":
         return FrozenSideState(side)
+    if side.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
+        try:
+            from deap_pettingzoo.contrib.qdax.coevolution import QDaxSideState
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                f"Side {side.name!r}: optimizer={side.optimizer!r} requires "
+                "the QDax extra. Install with `pip install "
+                "deap-pettingzoo[qdax]`."
+            ) from exc
+        return QDaxSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )

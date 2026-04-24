@@ -25,6 +25,7 @@ from .registry import (
     unregister_env,
 )
 from .turn_based import MaskedSimultaneousAdapter, SequentialTurnAdapter
+from .jax_parallel import JaxEnvProtocol, JaxEnvToPettingZooAdapter
 
 __all__ = [
     'PettingZooWrapper',
@@ -37,6 +38,8 @@ __all__ = [
     'build_env',
     'MaskedSimultaneousAdapter',
     'SequentialTurnAdapter',
+    'JaxEnvProtocol',
+    'JaxEnvToPettingZooAdapter',
 ]
 
 
