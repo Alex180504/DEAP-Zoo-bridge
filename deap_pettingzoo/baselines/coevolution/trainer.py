@@ -34,7 +34,9 @@ expose a :class:`PolicyProtocol`.
 
 from __future__ import annotations
 
+import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -47,6 +49,11 @@ from deap_pettingzoo.baselines.base import (
     TrainingResult,
 )
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
+from deap_pettingzoo.utils.parallel import (
+    SUPPORTED_BACKENDS,
+    make_executor,
+    resolve_num_workers,
+)
 
 from .evaluator import CoEvolutionEvaluator
 from .sides import GenerationStats, Side, SideState, make_side_state
@@ -100,6 +107,19 @@ class CoEvolutionConfig:
     reporting_side: Optional[str] = None
     max_steps_per_episode: int = 200
     seed: Optional[int] = None
+    #: Phase 8 \u2014 number of worker processes used to parallelise the
+    #: ``k_opponents`` episode loop *inside* one
+    #: :meth:`CoEvolutionEvaluator.evaluate` call. ``1`` (default) runs
+    #: serially. ``k_opponents == 1`` always falls back to serial,
+    #: regardless of ``num_workers``. Only EA/CMA learner sides are
+    #: parallelised \u2014 QDax-side learners keep their inner numpy-pool
+    #: lifecycle (use ``optimizer_config['num_workers']`` there) and
+    #: frozen sides do not run learner episodes.
+    num_workers: int = 1
+    #: Phase 8 \u2014 backend selector matching
+    #: :func:`deap_pettingzoo.utils.parallel.make_executor`. One of
+    #: ``'process'``, ``'scoop'``, ``'dask'``. Default ``'process'``.
+    parallel_backend: str = "process"
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_MODES:
@@ -193,6 +213,11 @@ class CoEvolutionConfig:
             raise ValueError(
                 f"snapshot_every must be >= 1, got {self.snapshot_every}."
             )
+        if self.parallel_backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"parallel_backend={self.parallel_backend!r} invalid; "
+                f"must be one of {SUPPORTED_BACKENDS}."
+            )
 
 
 class CoEvolutionTrainer(BaselineTrainer):
@@ -224,6 +249,23 @@ class CoEvolutionTrainer(BaselineTrainer):
         env = PettingZooWrapper(
             config.env_name, env_config=config.env_config or None
         )
+
+        # Stash env-construction metadata so _build_evaluator can pass
+        # it down to CoEvolutionEvaluator workers (Phase 8).
+        self._env_name: str = config.env_name
+        self._env_config: Optional[Dict[str, Any]] = config.env_config
+
+        # Resolve the executor up front so we can size pools sanely
+        # and emit one warning if num_workers > 1 with k_opponents == 1.
+        resolved_workers = resolve_num_workers(coev_cfg.num_workers)
+        if resolved_workers > 1 and coev_cfg.k_opponents == 1:
+            warnings.warn(
+                "CoEvolutionConfig: num_workers="
+                f"{coev_cfg.num_workers} but k_opponents=1; "
+                "parallelism is a no-op and the serial path will be used.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         # Seed RNGs *before* any side-state initialisation so that
         # side.initialise()'s randomness (CMA's np.random.seed, weight
@@ -262,33 +304,42 @@ class CoEvolutionTrainer(BaselineTrainer):
         # Bootstrap: evaluate each evolving side's initial population
         # against the *initial* state of the other sides so fitnesses
         # exist before the first step_generation.
-        self._bootstrap_populations(env, states, coev_cfg)
+        # All evaluator construction happens inside the executor
+        # context so EA/CMA learner sides can dispatch their
+        # k_opponents episodes through a shared worker pool.
+        with make_executor(
+            coev_cfg.num_workers, backend=coev_cfg.parallel_backend
+        ) as executor:
+            self._executor = executor
+            self._bootstrap_populations(env, states, coev_cfg)
 
-        # Generation loop.
-        per_side_history: Dict[str, List[GenerationStats]] = {
-            name: [] for name in states
-        }
-        if coev_cfg.schedule == "synchronous":
-            for _g in range(num_generations):
-                self._run_synchronous_generation(
-                    env, states, coev_cfg, per_side_history
-                )
-        else:  # alternating
-            total = 0
-            rotation = [n for n in states]
-            while total < num_generations:
-                for name in rotation:
-                    for _inner in range(coev_cfg.alternating_generations):
-                        if total >= num_generations:
-                            break
-                        self._run_alternating_step(
-                            env, states, coev_cfg, per_side_history, name
-                        )
-                        total += 1
+            # Generation loop.
+            per_side_history: Dict[str, List[GenerationStats]] = {
+                name: [] for name in states
+            }
+            if coev_cfg.schedule == "synchronous":
+                for _g in range(num_generations):
+                    self._run_synchronous_generation(
+                        env, states, coev_cfg, per_side_history
+                    )
+            else:  # alternating
+                total = 0
+                rotation = list(states)
+                while total < num_generations:
+                    for name in rotation:
+                        for _inner in range(coev_cfg.alternating_generations):
+                            if total >= num_generations:
+                                break
+                            self._run_alternating_step(
+                                env, states, coev_cfg, per_side_history, name
+                            )
+                            total += 1
 
-        # Build reporting-side policy.
-        reporting = states[coev_cfg.reporting_side]
-        policy = reporting.best_policy(env)
+            # Build reporting-side policy *inside* the executor scope
+            # in case best_policy() ever needs to evaluate (it does
+            # not today, but cheap insurance).
+            reporting = states[coev_cfg.reporting_side]
+            policy = reporting.best_policy(env)
 
         env.close()
         training_time = time.time() - start
@@ -318,6 +369,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             "k_opponents": coev_cfg.k_opponents,
             "aggregation": coev_cfg.aggregation,
             "reporting_side": coev_cfg.reporting_side,
+            "coevolution_num_workers": resolved_workers,
+            "coevolution_parallel_backend": coev_cfg.parallel_backend,
             "sides": [
                 {
                     "name": s.name,
@@ -469,6 +522,16 @@ class CoEvolutionTrainer(BaselineTrainer):
         ), "frozen sides never become learners."
         # Per-side RNG derived from trainer RNG (still deterministic
         # under a fixed base seed; differs per individual-episode).
+        # Phase 8: only EA / CMA learners get the shared executor.
+        # QDax learners stay serial (their inner numpy-pool already
+        # uses optimizer_config['num_workers']) and frozen sides never
+        # call _build_evaluator at all.
+        learner_optimizer = learner_state.side.optimizer
+        executor_for_side = (
+            self._executor
+            if learner_optimizer in {"ea", "cma"}
+            else None
+        )
         evaluator = CoEvolutionEvaluator(
             env_wrapper=env,
             learner_role_prefixes=learner_state.side.role_prefixes,
@@ -477,6 +540,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             k_opponents=coev_cfg.k_opponents,
             aggregation=coev_cfg.aggregation,
             max_steps=coev_cfg.max_steps_per_episode,
+            executor=executor_for_side,
+            env_name=getattr(self, "_env_name", None),
+            env_config=getattr(self, "_env_config", None),
+            learner_masked=bool(getattr(learner_state, "masked", False)),
         )
         # Inject a deterministic RNG so evaluations under a fixed seed
         # replay identically.  Wrap a closure so the evaluator always

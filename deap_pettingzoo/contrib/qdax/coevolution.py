@@ -28,12 +28,16 @@ opponents and QDax individuals is straightforward.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Sequence, Tuple
 
 import numpy as np
 
 from deap_pettingzoo.baselines.base import PolicyProtocol
-from deap_pettingzoo.baselines.coevolution.pools import OpponentPool, _BasePool
+from deap_pettingzoo.baselines.coevolution.pools import (
+    OpponentPool,
+    OpponentSnapshot,
+    _BasePool,
+)
 from deap_pettingzoo.baselines.coevolution.samplers import (
     Sampler,
     uniform_sampler,
@@ -78,6 +82,8 @@ class QDaxRepertoirePool(_BasePool):
         *,
         mode: str = "uniform",
         temperature: float = 1.0,
+        layer_sizes: Optional[Sequence[int]] = None,
+        activation: str = "tanh",
     ) -> None:
         if mode not in {"uniform", "fitness"}:
             raise ValueError(
@@ -88,6 +94,14 @@ class QDaxRepertoirePool(_BasePool):
         self._policy_factory = policy_factory
         self._mode = mode
         self._temperature = float(temperature)
+        # Snapshot metadata \u2014 required for parallel evaluation. When
+        # left as ``None`` the pool falls back to the default
+        # (live-policy) snapshot path, which fails to pickle Flax
+        # objects and is therefore only useful in serial mode.
+        self._layer_sizes: Optional[Tuple[int, ...]] = (
+            tuple(int(s) for s in layer_sizes) if layer_sizes is not None else None
+        )
+        self._activation = activation
         self._refresh_filled()
 
     def _refresh_filled(self) -> None:
@@ -118,6 +132,51 @@ class QDaxRepertoirePool(_BasePool):
         probs = probs / probs.sum()
         return int(rng.choice(self._filled_idx, p=probs))
 
+
+    def snapshot_opponents(
+        self, rng: np.random.Generator, k: int
+    ) -> List[OpponentSnapshot]:
+        """Sample ``k`` cells and ship flat-params payloads for workers.
+
+        Each snapshot carries the per-cell flat parameter vector plus
+        ``layer_sizes`` / ``activation`` so workers can rebuild the
+        :class:`FlaxPolicyAdapter` without touching the live
+        repertoire (which holds non-picklable JAX device arrays).
+        """
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
+        if self._layer_sizes is None:
+            raise ValueError(
+                "QDaxRepertoirePool.snapshot_opponents: pool was constructed "
+                "without 'layer_sizes='. Co-evolution parallelism requires "
+                "layer_sizes so workers can rebuild the Flax policy. "
+                "Pass layer_sizes=... to the QDaxRepertoirePool constructor "
+                "(typically the same tuple used to build the host module)."
+            )
+        import jax
+
+        from deap_pettingzoo.contrib.qdax.policy import pytree_to_flat
+
+        snaps: List[OpponentSnapshot] = []
+        for _ in range(k):
+            idx = self._sample_cell(rng)
+            params = jax.tree_util.tree_map(
+                lambda leaf, j=idx: np.asarray(leaf[j])
+                if hasattr(leaf, "__getitem__") else leaf,
+                self._repertoire.genotypes,
+            )
+            flat = pytree_to_flat(params, self._layer_sizes)
+            snaps.append(
+                OpponentSnapshot(
+                    kind="qdax_flax",
+                    payload={
+                        "flat_params": np.asarray(flat, dtype=np.float32),
+                        "layer_sizes": self._layer_sizes,
+                        "activation": self._activation,
+                    },
+                )
+            )
+        return snaps
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
         import jax  # noqa: F401 \u2014 required for device_get below
 
@@ -367,6 +426,8 @@ class QDaxSideState(SideState):
             _factory,
             mode=cfg["pool_mode"],
             temperature=cfg["pool_temperature"],
+            layer_sizes=layer_sizes,
+            activation=cfg["activation"],
         )
 
     # ------------------------------------------------------------------
