@@ -9,7 +9,7 @@ policy per agent, drawn from that side's
 Rewards are partitioned per-side; the learner's fitness defaults to the
 sum of its agents' rewards (symmetric competitive / cooperative with
 additive fitness). Aggregation over ``k_opponents`` samples is
-configurable (``'mean' | 'min' | 'max'``).
+configurable (``'mean' | 'min' | 'max' | 'sum'``).
 
 This evaluator reuses the same tolerant ``get_action`` invocation
 semantics as :class:`MixedPolicyEvaluator` and consumes the env via

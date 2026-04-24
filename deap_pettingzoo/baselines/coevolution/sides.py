@@ -165,7 +165,11 @@ class SideState:
     # Lifecycle hooks — subclasses override
     # ------------------------------------------------------------------
 
-    def initialise(self, env: PettingZooWrapper) -> None:  # pragma: no cover - abstract
+    def initialise(
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:  # pragma: no cover - abstract
         raise NotImplementedError
 
     def step_generation(
@@ -296,8 +300,28 @@ class EASideState(SideState):
         self.hof = tools.HallOfFame(1)
         self._policy_factory: Optional[PolicyFactory] = None
         self._action_space: Any = None
+        #: Per-side deterministic RNG. Seeded from the trainer-provided
+        #: ``rng`` (derived from :attr:`CoEvolutionConfig.seed`) in
+        #: :meth:`initialise`, falling back to ``self.seed`` or
+        #: ``np.random.default_rng()``. Used for all stochastic EA
+        #: operations in :meth:`step_generation` so one side's RNG draws
+        #: never influence another side's evolution.
+        self._rng: np.random.Generator = np.random.default_rng()
 
-    def initialise(self, env: PettingZooWrapper) -> None:
+    def initialise(
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:
+        # Per-side RNG — prefer the trainer-provided rng, fall back to
+        # the side's own optimizer_config seed, finally to a fresh one.
+        if rng is not None:
+            self._rng = rng
+        elif self.seed is not None:
+            self._rng = np.random.default_rng(int(self.seed))
+        else:
+            self._rng = np.random.default_rng()
+
         sample_obs = env.reset(seed=0)
         learner_agent = next(
             a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
@@ -383,15 +407,17 @@ class EASideState(SideState):
         self.rebind_evaluator(evaluator)
 
         # Simple (mu, lambda)=(N, N) generational loop with full
-        # replacement — matches EATrainer's "simple" strategy.
+        # replacement — matches EATrainer's "simple" strategy. All
+        # stochastic decisions use the per-side Generator so one
+        # side's RNG draws do not influence another side.
         offspring = [self.toolbox.clone(ind) for ind in self.population]
         for i in range(1, len(offspring), 2):
-            if np.random.random() < self.crossover_rate:
+            if self._rng.random() < self.crossover_rate:
                 self.toolbox.mate(offspring[i - 1], offspring[i])
                 del offspring[i - 1].fitness.values
                 del offspring[i].fitness.values
         for ind in offspring:
-            if np.random.random() < self.mutation_rate:
+            if self._rng.random() < self.mutation_rate:
                 self.toolbox.mutate(ind)
                 del ind.fitness.values
 
@@ -494,7 +520,11 @@ class CMAESSideState(SideState):
         self._action_space: Any = None
         self._ind_init = None
 
-    def initialise(self, env: PettingZooWrapper) -> None:
+    def initialise(
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:
         sample_obs = env.reset(seed=0)
         learner_agent = next(
             a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
@@ -503,7 +533,13 @@ class CMAESSideState(SideState):
         self._action_space = _resolve_side_action_space(env, self.side.role_prefixes)
         output_size = required_output_size(self._action_space)
 
-        if self.seed is not None:
+        # If a per-side rng is provided, derive a CMA seed from it so
+        # multiple CMA sides stay independent under a single trainer
+        # seed. Otherwise fall back to the side's explicit seed.
+        if rng is not None:
+            cma_seed = int(rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
+            np.random.seed(cma_seed)
+        elif self.seed is not None:
             np.random.seed(int(self.seed))
 
         genome_config = {
@@ -650,7 +686,11 @@ class FrozenSideState(SideState):
         )
         self._policies = policies
 
-    def initialise(self, env: PettingZooWrapper) -> None:
+    def initialise(
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:
         # Nothing to probe; the user provided pre-built policies.
         return None
 
