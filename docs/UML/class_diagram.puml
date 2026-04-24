@@ -582,4 +582,152 @@ note bottom of openspiel
   for OpenSpiel turn-based games.
 end note
 
+package "deap_pettingzoo.baselines.coevolution" {
+
+  interface "OpponentPool <<Protocol>>" as OpponentPool {
+    +sample_opponent(rng): PolicyProtocol
+    +sample_opponents(rng, k): List[PolicyProtocol]
+    +update(population_like)
+    +__len__(): int
+  }
+
+  class PopulationPool {
+    -items: Sequence
+    -factory: Callable
+    -sampler: Sampler
+    +sample_opponent(rng)
+    +update(new_population)
+  }
+
+  class ArchivePool {
+    -archive: HallOfFame
+    -policy_factory: Callable
+    -sampler: Sampler
+    +sample_opponent(rng)
+    +update(hof)
+  }
+
+  class FrozenPolicyPool {
+    -policies: Sequence[PolicyProtocol]
+    +sample_opponent(rng)
+    +update(new_policies)
+  }
+
+  class CompositePool {
+    -primary: OpponentPool
+    -secondary: OpponentPool
+    -mix: float
+    +sample_opponent(rng)
+  }
+
+  abstract class HallOfFame {
+    +items: List
+    +fitnesses: ndarray
+    +is_empty: bool
+    +{abstract} add(snapshot, fitness)
+    +extend(snapshots, fitnesses)
+    +clear()
+  }
+
+  class RingHallOfFame {
+    -capacity: int
+    +add(snapshot, fitness)
+  }
+
+  class ElitistHallOfFame {
+    -capacity: int
+    +add(snapshot, fitness)
+  }
+
+  class "Side <<dataclass>>" as Side {
+    +name: str
+    +role_prefixes: Tuple[str, ...]
+    +optimizer: str
+    +optimizer_config: dict
+    +hof: Optional[HallOfFame]
+    +use_archive_in_opponent_pool: bool
+    +archive_mix: float
+    +opponent_sampler: Sampler
+    +archive_sampler: Sampler
+    +frozen_policies: Optional[Sequence]
+  }
+
+  abstract class SideState {
+    +side: Side
+    +{abstract} initialise(env, evaluator, rng)
+    +{abstract} step_generation(evaluator, rng)
+    +{abstract} current_pool(): OpponentPool
+    +{abstract} best_policy(): PolicyProtocol
+    +snapshot_best()
+  }
+
+  class EASideState
+  class CMAESSideState
+  class FrozenSideState
+
+  class "CoEvolutionConfig <<dataclass>>" as CoEvolutionConfig {
+    +mode: str
+    +sides: List[Side]
+    +schedule: str
+    +alternating_generations: int
+    +k_opponents: int
+    +aggregation: str
+    +snapshot_every: int
+    +reporting_side: Optional[str]
+    +max_steps_per_episode: int
+    +seed: Optional[int]
+  }
+
+  class CoEvolutionEvaluator {
+    -env_factory: Callable
+    -sides: List[Side]
+    -learner_factories: Dict
+    +evaluate(genome, learner_side_name, pools, rng, k_opponents)
+  }
+
+  class CoEvolutionTrainer {
+    +train(config): TrainingResult
+  }
+
+  PopulationPool ..|> OpponentPool
+  ArchivePool ..|> OpponentPool
+  FrozenPolicyPool ..|> OpponentPool
+  CompositePool ..|> OpponentPool
+
+  HallOfFame <|-- RingHallOfFame
+  HallOfFame <|-- ElitistHallOfFame
+
+  SideState <|-- EASideState
+  SideState <|-- CMAESSideState
+  SideState <|-- FrozenSideState
+
+  SideState o-- Side
+  Side o-- HallOfFame
+
+  ArchivePool --> HallOfFame : "reads"
+  CompositePool o-- "2" OpponentPool
+
+  CoEvolutionConfig *-- "1..*" Side
+  CoEvolutionTrainer ..> CoEvolutionConfig : consumes
+  CoEvolutionTrainer ..> SideState : "builds per side"
+  CoEvolutionTrainer ..> CoEvolutionEvaluator : uses
+  CoEvolutionEvaluator ..> OpponentPool : "samples one per side"
+}
+
+note bottom of OpponentPool
+  Source-agnostic Protocol. Any object
+  satisfying this contract (population,
+  archive, frozen RL policies, future
+  QDax repertoires) plugs into
+  CoEvolutionTrainer without trainer
+  modification.
+end note
+
+note bottom of CoEvolutionTrainer
+  Registered as "coevolution". Three modes:
+  competitive_2pop, self_play_hof, cooperative.
+  Schedule: synchronous | alternating.
+  Reports reporting_side's best policy.
+end note
+
 @enduml
