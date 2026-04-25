@@ -416,6 +416,15 @@ class MAPElitesTrainer(BaselineTrainer):
             "num_iterations": num_iters,
         }
 
+        _persist_qdax_results(
+            config,
+            algorithm="map_elites",
+            history=history,
+            summary=metrics_out,
+            training_time=elapsed,
+            extra_summary={"descriptor": params["descriptor"]},
+        )
+
         return TrainingResult(
             algorithm="map_elites",
             policy=champion_policy,
@@ -565,6 +574,15 @@ class CMAMETrainer(BaselineTrainer):
             "num_iterations": num_iters,
         }
 
+        _persist_qdax_results(
+            config,
+            algorithm="cma_me",
+            history=history,
+            summary=metrics_out,
+            training_time=elapsed,
+            extra_summary={"descriptor": params["descriptor"]},
+        )
+
         return TrainingResult(
             algorithm="cma_me",
             policy=champion_policy,
@@ -576,3 +594,52 @@ class CMAMETrainer(BaselineTrainer):
 
 
 __all__ = ["MAPElitesTrainer", "CMAMETrainer"]
+
+
+# ---------------------------------------------------------------------------
+# Logging helper
+# ---------------------------------------------------------------------------
+
+
+def _persist_qdax_results(
+    config: TrainingConfig,
+    *,
+    algorithm: str,
+    history,
+    summary: Dict[str, Any],
+    training_time: float,
+    extra_summary: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write per-iteration QDax metrics + final summary via ExperimentLogger.
+
+    Each entry in ``history`` is a dict-like of QDax scalars (typically
+    ``qd_score``, ``coverage``, ``max_fitness``, ``min_fitness``,
+    ``mean_fitness``). Numeric scalars are coerced to float; non-numeric
+    fields are skipped. No-op when ``config.output_dir`` is ``None``.
+    """
+    from deap_pettingzoo.baselines._logging_helpers import (
+        build_logger,
+        write_summary,
+    )
+
+    with build_logger(config, algorithm=algorithm) as log:
+        for i, entry in enumerate(history):
+            row: Dict[str, Any] = {
+                "iteration": i,
+                "env_steps": 0,
+                "wall_time": 0.0,
+            }
+            try:
+                items = entry.items()
+            except AttributeError:
+                continue
+            for k, v in items:
+                try:
+                    row[str(k)] = float(np.asarray(v))
+                except (TypeError, ValueError):
+                    continue
+            log.row("metrics", row)
+        full_summary = {"algorithm": algorithm, **summary}
+        if extra_summary:
+            full_summary.update(extra_summary)
+        write_summary(log, full_summary, training_time_s=training_time)

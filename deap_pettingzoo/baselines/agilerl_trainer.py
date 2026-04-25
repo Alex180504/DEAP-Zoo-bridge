@@ -149,6 +149,41 @@ class AgileRLTrainer(BaselineTrainer):
             pass
 
         policy = AgileRLPolicyWrapper(agent, agent_ids, self.ALGORITHM_NAME)
+
+        # ----- Persist results via ExperimentLogger -------------------------
+        # No-op when ``config.output_dir is None``.
+        from deap_pettingzoo.baselines._logging_helpers import (
+            build_logger,
+            write_summary,
+        )
+        with build_logger(config, algorithm=self.ALGORITHM_NAME) as log:
+            ep_rewards = list(metrics.get("episode_rewards", []) or [])
+            for idx, r in enumerate(ep_rewards):
+                log.row(
+                    "episodes",
+                    {
+                        "episode_idx": idx,
+                        "seed": seed,
+                        "reward": float(r),
+                        "length": -1,
+                        "success": -1,
+                    },
+                )
+            write_summary(
+                log,
+                {
+                    "algorithm": self.ALGORITHM_NAME,
+                    "num_episodes": int(metrics.get("num_episodes", len(ep_rewards))),
+                    "env_steps": int(metrics.get("env_steps", 0)),
+                    "mean_episode_reward": (
+                        float(np.mean(ep_rewards)) if ep_rewards else None
+                    ),
+                    "mean_loss": metrics.get("mean_loss"),
+                    "on_policy": self.ON_POLICY,
+                },
+                training_time_s=training_time,
+            )
+
         return TrainingResult(
             algorithm=self.ALGORITHM_NAME,
             policy=policy,

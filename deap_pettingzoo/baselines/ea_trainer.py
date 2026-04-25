@@ -11,6 +11,11 @@ from typing import Dict, Any, Optional
 import numpy as np
 from deap import algorithms, tools
 
+from deap_pettingzoo.baselines._logging_helpers import (
+    build_logger,
+    dump_fitness_history,
+    write_summary,
+)
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
@@ -479,7 +484,28 @@ class EATrainer(BaselineTrainer):
         
         # Wrap genome as policy
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
-        
+
+        # ----- Persist results via ExperimentLogger -----------------------
+        # No-op when ``config.output_dir is None`` (NoOpLogger) so the
+        # backend stays usable without the analysis stack.
+        with build_logger(config, algorithm="ea") as log:
+            dump_fitness_history(
+                log,
+                fitness_history,
+                env_steps_per_iteration=self.population_size * max_steps_per_episode,
+            )
+            write_summary(
+                log,
+                {
+                    "algorithm": "ea",
+                    "final_fitness": float(best_individual.fitness.values[0]),
+                    "num_generations": num_generations,
+                    "population_size": self.population_size,
+                    "strategy": self.strategy,
+                },
+                training_time_s=training_time,
+            )
+
         # Create result
         return TrainingResult(
             algorithm='ea',
