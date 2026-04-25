@@ -493,8 +493,10 @@ class RLSideState(SideState):
 
             # Zero-fill obs and raw_actions for any RL agent that has
             # already terminated (MultiAgentReplayBuffer requires the
-            # full agent_ids roster on every write).
-            if len(rl_obs) < len(rl_ids):
+            # full agent_ids roster on every write). Both dicts are
+            # non-empty here (guaranteed by the `if not rl_obs: break`
+            # guard above), but we check defensively to avoid StopIteration.
+            if len(rl_obs) < len(rl_ids) and rl_obs and raw_actions:
                 _ref_obs = next(iter(rl_obs.values()))
                 _ref_act = np.asarray(next(iter(raw_actions.values())))
                 for a in rl_ids:
