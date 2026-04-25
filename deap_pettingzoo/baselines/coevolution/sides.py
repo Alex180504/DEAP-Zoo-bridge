@@ -114,10 +114,11 @@ class Side:
             "frozen",
             "qdax_map_elites",
             "qdax_cma_me",
+            "rl",
         }:
             raise ValueError(
                 f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
-                "'frozen', 'qdax_map_elites', or 'qdax_cma_me'; got "
+                "'frozen', 'qdax_map_elites', 'qdax_cma_me', or 'rl'; got "
                 f"{self.optimizer!r}."
             )
         if not self.role_prefixes:
@@ -789,6 +790,13 @@ def make_side_state(side: Side) -> SideState:
                 "deap-pettingzoo[qdax]`."
             ) from exc
         return QDaxSideState(side)
+    if side.optimizer == "rl":
+        # Imported lazily so the AgileRL dependency stays optional —
+        # users without `pip install 'deap-pettingzoo[rl-baselines]'`
+        # only hit the ImportError if they actually configure an RL side.
+        from .rl_side import RLSideState
+
+        return RLSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )
