@@ -33,6 +33,8 @@ from deap_pettingzoo.baselines.coevolution.pools import (
     OpponentSnapshot,
     PopulationPool,
     rebuild_opponent_policy,
+    register_frozen_policy,
+    unregister_frozen_policy,
 )
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 from deap_pettingzoo.genomes.fixed_topology import FixedTopologyGenome
@@ -152,6 +154,39 @@ class TestSnapshotRoundtrip:
             obs = env.reset(seed=0)[agent]
             assert policy.get_action(obs) is not None
         finally:
+            env.close()
+
+    def test_frozen_policy_pool_registry_snapshot(self):
+        """FrozenPolicyPool with registry_names= produces kind='frozen_registered'
+        snapshots; rebuild_opponent_policy resolves them via the global registry."""
+        env = PettingZooWrapper("simple_tag_v3")
+        agent = env.possible_agents[0]
+        action_space = env.action_space(agent)
+        reg_name = "_test_frozen_registry_policy_"
+        try:
+            # Register the factory before creating snapshots (mirrors the
+            # worker-bootstrap pattern described in the API docs).
+            register_frozen_policy(
+                reg_name, lambda: _PicklableSampler(action_space)
+            )
+            pool = FrozenPolicyPool(
+                [_PicklableSampler(action_space), _PicklableSampler(action_space)],
+                registry_names=[reg_name, reg_name],
+            )
+            rng = np.random.default_rng(0)
+            snaps = pool.snapshot_opponents(rng, 2)
+            # All snapshots must use the registry path.
+            assert all(s.kind == "frozen_registered" for s in snaps)
+            assert all(s.payload["name"] == reg_name for s in snaps)
+            # Snapshots must be picklable (no live policy object inside).
+            blob = pickle.dumps(snaps)
+            restored = pickle.loads(blob)
+            # rebuild_opponent_policy must resolve via the registry.
+            policy = rebuild_opponent_policy(restored[0], action_space=action_space)
+            obs = env.reset(seed=0)[agent]
+            assert policy.get_action(obs) is not None
+        finally:
+            unregister_frozen_policy(reg_name)
             env.close()
 
     def test_composite_pool_snapshot_dispatches(self):
