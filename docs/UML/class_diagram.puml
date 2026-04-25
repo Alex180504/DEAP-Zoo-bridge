@@ -749,6 +749,28 @@ package "deap_pettingzoo.baselines.coevolution" {
   class CMAESSideState
   class FrozenSideState
 
+  class RLPolicyPool {
+    - policy: PolicyProtocol
+    + update(policy)
+    + sample_opponent(rng): PolicyProtocol
+    + snapshot_sync(): RLPolicyPool
+    + snapshot_opponents(rng, k): "raises NotImplementedError"
+  }
+
+  class RLSideState {
+    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learning_steps_per_gen learn() calls.\n   v1: MADDPG / MATD3 only.
+    +algorithm: str
+    +is_on_policy: bool
+    +rollout_episodes_per_gen: int
+    +learning_steps_per_gen: int
+    +resolved_device: str
+    + current_pool(): RLPolicyPool
+    + best_policy(): AgileRLPolicyWrapper
+  }
+
+  RLPolicyPool ..|> OpponentPool
+  RLSideState  --|> SideState
+
   class QDaxRepertoirePool {
     - repertoire
     - policy_factory: Callable
