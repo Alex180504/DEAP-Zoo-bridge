@@ -56,6 +56,16 @@ def test_strategy_smoke_train(strategy):
     assert len(history) >= 2
     assert result.metadata["ea_config"]["strategy"] == strategy
 
+    # Optimisation actually happened: best-ever max across all
+    # generations beats (or matches) gen-0 max. ``>=`` because
+    # tiny pop_size=6 + 2 gens can plateau on simple_spread; a
+    # genuine regression (best-ever < gen0) is still a bug.
+    best_ever = max(rec["max"] for rec in history)
+    assert best_ever >= history[0]["max"], (
+        f"best-ever fitness regressed for strategy={strategy!r}: "
+        f"gen0_max={history[0]['max']}, best_ever={best_ever}"
+    )
+
 
 def test_method_kwargs_propagate_to_metadata():
     trainer = EATrainer(

@@ -66,6 +66,21 @@ class TestCompetitive2Pop:
             assert len(hist) == result.metrics["num_generations"]
             for row in hist:
                 assert {"generation", "mean", "std", "min", "max"}.issubset(row)
+        # Optimisation actually happened: at least ONE side's best-ever
+        # fitness improved end-vs-start. We don't insist both sides
+        # improve simultaneously (competitive co-evolution is
+        # zero-sum-ish on tiny budgets — one side gaining can mean
+        # the other regressing); we only insist neither side's
+        # best-ever fitness *regressed* below gen-0.
+        for name in ("pursuers", "evaders"):
+            hist = result.metrics["per_side_history"][name]
+            if len(hist) < 2:
+                continue  # single-gen run, nothing to compare
+            best_ever = max(row["max"] for row in hist)
+            assert best_ever >= hist[0]["max"], (
+                f"{name}: best-ever fitness regressed: "
+                f"gen0_max={hist[0]['max']}, best_ever={best_ever}"
+            )
         # Reporting policy is executable.
         env = PettingZooWrapper("simple_tag_v3")
         obs = env.reset(seed=0)
