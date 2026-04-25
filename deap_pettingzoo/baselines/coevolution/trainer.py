@@ -56,7 +56,12 @@ from deap_pettingzoo.utils.parallel import (
 )
 
 from .evaluator import CoEvolutionEvaluator
+from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
+from deap_pettingzoo.utils.device_check import (
+    torch_uses_cuda,
+    warn_on_gpu_contention,
+)
 
 
 VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
@@ -301,6 +306,38 @@ class CoEvolutionTrainer(BaselineTrainer):
             state._np_state = np.random.get_state()
             np.random.set_state(previous_np_state)
 
+        # GPU-contention check: if any RL side resolved a CUDA device
+        # *and* JAX has GPU access (typical sign of a co-located QDax
+        # side), warn once — both libraries will fight for the same
+        # device memory.
+        rl_cuda_sides = [
+            name for name, s in states.items()
+            if isinstance(s, RLSideState)
+            and torch_uses_cuda(s.resolved_device)
+        ]
+        qdax_sides = [
+            name for name, s in states.items()
+            if s.side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
+        ]
+        warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
+
+        # Parallel co-evolution is not supported when an RL side is
+        # in play (RLPolicyPool.snapshot_opponents raises). Fall back
+        # to serial with a one-shot warning so the user knows.
+        has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
+        if has_rl_side and resolved_workers > 1:
+            warnings.warn(
+                "CoEvolutionConfig: num_workers="
+                f"{coev_cfg.num_workers} but an RL side is present; "
+                "parallel co-evolution is not yet supported with RL "
+                "sides (AgileRLPolicyWrapper holds live torch state "
+                "that does not pickle across spawn). Falling back to "
+                "num_workers=1 for this run.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            resolved_workers = 1
+
         # Bootstrap: evaluate each evolving side's initial population
         # against the *initial* state of the other sides so fitnesses
         # exist before the first step_generation.
@@ -435,10 +472,23 @@ class CoEvolutionTrainer(BaselineTrainer):
             # Pathological — nothing is actually evolving — do at least
             # one pass to produce output.
             return 1
-        ep_per_gen = sum(
-            int(s.optimizer_config.get("population_size", 20)) * coev_cfg.k_opponents
-            for s in evolving
-        )
+        # Per-side episode count per generation.
+        # • EA / CMA / QDax sides: population_size * k_opponents
+        #   (one rollout per individual per opponent sample).
+        # • RL sides: rollout_episodes_per_gen (no population —
+        #   k_opponents does not apply, the RL side samples one
+        #   opponent per rollout episode internally).
+        ep_per_gen = 0
+        for s in evolving:
+            if s.optimizer == "rl":
+                ep_per_gen += int(
+                    s.optimizer_config.get("rollout_episodes_per_gen", 4)
+                )
+            else:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("population_size", 20))
+                    * coev_cfg.k_opponents
+                )
         ep_per_gen = max(1, ep_per_gen)
         if config.budget_mode == BudgetMode.ENV_STEPS:
             steps_per_gen = ep_per_gen * coev_cfg.max_steps_per_episode
@@ -509,11 +559,27 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         pool_snapshot: Optional[Dict[str, Any]] = None,
-    ) -> CoEvolutionEvaluator:
+    ) -> Any:
         opp_sides = self._collect_opponent_sides(
             states, learner_state.side.name, coev_cfg,
             pool_snapshot=pool_snapshot,
         )
+        # RL learner sides bypass CoEvolutionEvaluator entirely — they
+        # drive their own rollouts (with replay-buffer side effects)
+        # and consume the driver context directly inside
+        # step_generation. We still build opp_sides via the shared
+        # snapshot machinery so the synchronous schedule's contract
+        # holds for the RL side too.
+        if learner_state.side.optimizer == "rl":
+            return _RLDriverContext(
+                env_wrapper=env,
+                learner_role_prefixes=learner_state.side.role_prefixes,
+                opponent_sides=opp_sides,
+                max_steps=coev_cfg.max_steps_per_episode,
+                rng=np.random.default_rng(
+                    self._rng.integers(0, 2**63 - 1)
+                ),
+            )
         # Fallback for self-play bootstrap: if learner's own pool would
         # be drawn from an empty archive, use pure current-gen pool to
         # avoid ArchivePool empty errors on the very first generation.
@@ -577,9 +643,17 @@ class CoEvolutionTrainer(BaselineTrainer):
         # break that contract — earlier sides would have already
         # mutated their populations/HoFs by the time later sides are
         # evaluated.
-        pool_snapshot: Dict[str, Any] = {
-            name: state.current_pool() for name, state in states.items()
-        }
+        pool_snapshot: Dict[str, Any] = {}
+        for name, state in states.items():
+            pool = state.current_pool()
+            # RL pools mutate in place each gen (both the pool object
+            # and the underlying torch agent). Honour an optional
+            # snapshot_sync() hook so opponents see a frozen pre-learn
+            # view consistent with the synchronous-schedule contract.
+            snap = getattr(pool, "snapshot_sync", None)
+            if callable(snap):
+                pool = snap()
+            pool_snapshot[name] = pool
         for name, state in states.items():
             if state.side.optimizer == "frozen":
                 continue

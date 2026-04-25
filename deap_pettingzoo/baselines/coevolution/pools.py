@@ -685,6 +685,112 @@ class CompositePool(_BasePool):
         return self._pools
 
 
+# ---------------------------------------------------------------------------
+# RL pool (degenerate size-1; wraps a live AgileRLPolicyWrapper)
+# ---------------------------------------------------------------------------
+
+
+class RLPolicyPool(_BasePool):
+    """Single-element opponent pool wrapping a live RL policy snapshot.
+
+    Used by :class:`~deap_pettingzoo.baselines.coevolution.rl_side.RLSideState`
+    to expose its current AgileRL agent to *other* sides during
+    bidirectional EA-RL co-evolution. Conceptually a degenerate pool
+    of size 1: every :meth:`sample_opponent` call returns the same
+    cached policy object (the RL side updates it once per generation).
+
+    The pool stays serial-only in the current implementation —
+    :meth:`snapshot_opponents` raises because ``AgileRLPolicyWrapper``
+    holds live torch state that does not survive ``spawn``-pickle.
+    Co-evolution runs that include an RL side fall back to serial
+    evaluation on the EA side; see :class:`CoEvolutionConfig` docstring
+    for the runtime warning emitted in that case.
+    """
+
+    def __init__(self, policy: PolicyProtocol) -> None:
+        if policy is None:
+            raise ValueError("RLPolicyPool: policy must not be None.")
+        self._policy = policy
+
+    def update(self, population_like: Any) -> None:
+        """Swap in a fresh policy (typically called once per generation).
+
+        Args:
+            population_like: A :class:`PolicyProtocol` instance. Other
+                pool implementations accept iterables; this one is
+                always size-1 so we accept the policy directly.
+        """
+        if population_like is None:
+            raise ValueError("RLPolicyPool.update: policy must not be None.")
+        self._policy = population_like
+
+    def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
+        # rng intentionally unused — degenerate pool of size 1.
+        return self._policy
+
+    def sample_opponents(
+        self, rng: np.random.Generator, k: int
+    ) -> List[PolicyProtocol]:
+        if k < 1:
+            raise ValueError(f"sample_opponents: k must be >= 1, got {k}.")
+        return [self._policy] * k
+
+    def snapshot_opponents(
+        self, rng: np.random.Generator, k: int
+    ) -> List[OpponentSnapshot]:
+        raise NotImplementedError(
+            "RLPolicyPool.snapshot_opponents: parallel co-evolution with an "
+            "RL side is not yet supported because AgileRLPolicyWrapper "
+            "holds live torch state that does not pickle across spawn. "
+            "Set CoEvolutionConfig.num_workers=1 (or rely on the EA-side "
+            "fallback warning) when an RL side is in play."
+        )
+
+    def snapshot_sync(self) -> "RLPolicyPool":
+        """Return a frozen copy of this pool for the synchronous schedule.
+
+        The synchronous co-evolution schedule snapshots every side's
+        opponent pool at the start of a generation so that all sides
+        evaluate against the same frozen view of their opponents. EA
+        pools satisfy this naturally: their underlying population list
+        is replaced (not mutated) at the end of ``step_generation``,
+        so the snapshot reference still points at the previous
+        population.
+
+        RL pools are different — both the pool object **and** the
+        underlying torch agent's weights are mutated in place by the
+        RL side's ``learn()`` step. Returning ``self`` would leak the
+        post-learn policy back into the same generation's evaluations
+        that should have used the pre-learn policy. We therefore
+        return a fresh ``RLPolicyPool`` wrapping a deep copy of the
+        wrapper (which transitively deep-copies the underlying torch
+        modules).
+
+        The trainer calls this only when a non-RL side is the next
+        learner; the RL side's own ``step_generation`` reads its live
+        wrapper directly via the driver context and does not go
+        through this snapshot path.
+        """
+        import copy
+
+        try:
+            frozen = copy.deepcopy(self._policy)
+        except Exception:  # pragma: no cover — torch deepcopy edge cases
+            # Fallback: reuse the live policy. Documented limitation —
+            # synchronous-schedule contract is best-effort for RL sides
+            # whose wrappers cannot be deep-copied.
+            frozen = self._policy
+        return RLPolicyPool(frozen)
+
+    def __len__(self) -> int:
+        return 1
+
+    @property
+    def policy(self) -> PolicyProtocol:
+        """Currently-cached policy (exposed for introspection / testing)."""
+        return self._policy
+
+
 __all__ = [
     "PolicyFactory",
     "OpponentPool",
@@ -693,6 +799,7 @@ __all__ = [
     "ArchivePool",
     "FrozenPolicyPool",
     "CompositePool",
+    "RLPolicyPool",
     "rebuild_opponent_policy",
     "register_frozen_policy",
     "unregister_frozen_policy",
