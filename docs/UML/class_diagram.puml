@@ -861,4 +861,201 @@ note bottom of CoEvolutionTrainer
   Reports reporting_side's best policy.
 end note
 
+' ---------------- experiment logging ----------------
+
+package "deap_pettingzoo.utils.logging" {
+
+  class "RunManifest <<dataclass>>" as RunManifest {
+    +schema_version: int
+    +run_id: str
+    +algorithm: str
+    +env_name: str
+    +env_config: dict
+    +seed: Optional[int]
+    +budget_mode: Optional[str]
+    +budget_value: Any
+    +hyperparams: dict
+    +notes: str
+    +created_at: str
+    +wall_time_s: Optional[float]
+    +artifacts: dict[str, str]
+    +environment: dict
+    +write(path: Path)
+  }
+
+  interface Sink <<Protocol>> {
+    +open(run_dir: Path)
+    +log_row(table: str, row: Mapping)
+    +log_scalar(name: str, value: float, step: int)
+    +flush()
+    +close()
+  }
+
+  class NoOpSink
+  class JsonManifestSink {
+    -tables: tuple[str, ...]
+    +DEFAULT_TABLES = ("summary",)
+  }
+  class CsvScalarSink {
+    -writers: dict[str, DictWriter]
+    -headers: dict[str, list[str]]
+  }
+  class ParquetTrajectorySink
+  class TensorBoardSink
+  class MultiSink {
+    -sinks: list[Sink]
+  }
+
+  class ExperimentLogger {
+    +run_dir: Path
+    +manifest: RunManifest
+    -sink: Sink
+    +{static} create(output_dir, *, algorithm, env_name, seed, ...)
+    +{static} from_config(config, *, algorithm, notes)
+    +row(table, row)
+    +scalar(name, value, step)
+    +add_artifact(name, path)
+    +close()
+    +__enter__() / __exit__()
+  }
+
+  class NoOpLogger {
+    +run_dir = Path()
+    +manifest.run_id = "noop"
+  }
+
+  class FrameRecorder {
+    -run_dir: Path
+    -fps: int
+    +start_episode(idx)
+    +add_frame(rgb)
+    +end_episode(): Optional[Path]
+  }
+
+  class capture_environment_metadata <<function>>
+}
+
+ExperimentLogger o-- RunManifest
+ExperimentLogger o-- Sink
+NoOpLogger ..|> ExperimentLogger
+MultiSink o-- "*" Sink
+NoOpSink         ..|> Sink
+JsonManifestSink ..|> Sink
+CsvScalarSink    ..|> Sink
+ParquetTrajectorySink ..|> Sink
+TensorBoardSink  ..|> Sink
+MultiSink        ..|> Sink
+RunManifest ..> capture_environment_metadata : "fills .environment"
+
+note bottom of ExperimentLogger
+  All baseline trainers use
+  baselines._logging_helpers.build_logger()
+  → ExperimentLogger.from_config().
+  When config.output_dir is None →
+  NoOpLogger (zero disk I/O).
+  Backend has no functional dependency
+  on artefacts; the analysis & UI
+  layers consume them read-only.
+end note
+
+' ---------------- offline analysis ----------------
+
+package "deap_pettingzoo.analysis" {
+
+  class "RunRecord <<dataclass>>" as RunRecord {
+    +run_dir: Path
+    +manifest: dict
+    +metrics: pd.DataFrame
+    +episodes: pd.DataFrame
+    +trajectories: pd.DataFrame
+    +summary: dict
+    +algorithm: str
+    +env_name: str
+    +seed: Optional[int]
+    +run_id: str
+    +wall_time_s: Optional[float]
+    +final_fitness: Optional[float]
+  }
+
+  class Experiment {
+    +root: Path
+    +runs: list[RunRecord]
+    +filter(*, algorithm, env, seed): Experiment
+    +by_algorithm(): dict[str, list[RunRecord]]
+    +by_env(): dict[str, list[RunRecord]]
+    +summary_table(): pd.DataFrame
+    +final_scores(metric): dict[str, ndarray]
+  }
+
+  class loaders <<module>> {
+    +load_run(run_dir): RunRecord
+    +load_experiment(root, pattern): Experiment
+  }
+
+  class aggregate <<module>> {
+    +iqm(scores): float
+    +bootstrap_ci(scores, *, statistic, n_resamples, ci, seed)
+    +mean_with_ci(scores, **kw)
+    +iqm_with_ci(scores, **kw)
+    +learning_curve_with_ci(runs, *, x_col, y_col, statistic)
+    +aggregate_summary(score_groups): pd.DataFrame
+  }
+
+  class compare <<module>> {
+    +cohens_d(a, b): float
+    +cliffs_delta(a, b): float
+    +mann_whitney(a, b, alternative)
+    +welch_t(a, b, alternative)
+    +pairwise_table(experiment, *, metric, test): pd.DataFrame
+  }
+
+  class rliable_bridge <<module>> {
+    +aggregate_metrics_table(score_groups, *, reps)
+    +performance_profile(score_groups, *, taus, reps)
+    +probability_of_improvement(score_groups, *, reps)
+    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col, x_grid, reps)
+  }
+
+  class plots <<module>> {
+    +plot_learning_curves(runs_by_algo, ...)
+    +plot_eval_distribution(score_groups, ...)
+    +plot_performance_profile(score_groups, *, taus, ...)
+    +plot_pi_matrix(score_groups, ...)
+  }
+
+  class report <<module>> {
+    +build_report(experiment, output_dir, *, metric, fmt, include_figures, title): Path
+  }
+}
+
+Experiment "1" *-- "*" RunRecord
+loaders ..> Experiment : returns
+loaders ..> RunRecord : returns
+aggregate ..> RunRecord : reads .metrics
+compare ..> Experiment : reads .final_scores()
+rliable_bridge ..> Experiment : "score_groups input"
+plots ..> aggregate
+report ..> aggregate
+report ..> compare
+report ..> plots
+
+RunRecord ..> RunManifest : "loads manifest.json"
+
+note bottom of rliable_bridge
+  Lazy-imports rliable; raises
+  ImportError("install with .[analysis]")
+  if missing. iqm() in aggregate matches
+  rliable.metrics.aggregate_iqm to 1e-9.
+end note
+
+note bottom of report
+  Renders Markdown or HTML via jinja2
+  with summary_table, aggregate_summary,
+  pairwise_table, plus optional
+  fig_eval_distribution.png and
+  fig_learning_curves.png. The
+  forthcoming Streamlit UI consumes the
+  same surfaces — no new public API.
+end note
+
 @enduml
