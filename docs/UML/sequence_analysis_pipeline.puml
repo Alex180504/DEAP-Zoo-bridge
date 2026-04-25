@@ -1,0 +1,61 @@
+@startuml sequence_analysis_pipeline
+title Analysis Pipeline – Disk → Experiment → Stats / Plots / Report
+
+actor "Researcher" as R
+participant "load_experiment" as LE
+participant "Experiment" as EX
+participant "RunRecord" as RR
+participant "aggregate" as AG
+participant "compare" as CMP
+participant "rliable_bridge" as RLB
+participant "plots" as PL
+participant "report.build_report" as RPT
+database  "Filesystem\n<root>/<run_dir>/" as FS
+
+R -> LE: load_experiment("results/exp1")
+LE -> FS: glob "**/manifest.json"
+loop per run dir
+    LE -> RR: RunRecord(run_dir, manifest, metrics, episodes, summary)
+    RR -> FS: read manifest.json + metrics.csv + summary.json
+end
+LE --> R: Experiment(root, runs)
+
+R -> EX: filter(algorithm=...)
+EX --> R: filtered Experiment
+
+R -> EX: summary_table()
+EX --> R: pd.DataFrame[algorithm, env, seed, run_id, wall_time_s, final_fitness]
+
+R -> EX: final_scores(metric="final_fitness")
+EX --> R: dict[algo -> ndarray]
+
+R -> AG: aggregate_summary(score_groups)
+AG --> R: DataFrame[mean+CI, iqm+CI, median]
+
+R -> AG: learning_curve_with_ci(runs, statistic="iqm")
+AG --> R: DataFrame[x, y, low, high]
+
+R -> CMP: pairwise_table(experiment, test="mann_whitney")
+CMP --> R: long-form DataFrame[a, b, p, cliffs_delta, cohens_d]
+
+opt rliable installed
+    R -> RLB: aggregate_metrics_table(score_groups)
+    RLB --> R: DataFrame
+    R -> RLB: performance_profile(score_groups, taus)
+    RLB --> R: DataFrame
+end
+
+R -> PL: plot_learning_curves(runs_by_algo)
+PL --> R: matplotlib Figure
+R -> PL: plot_eval_distribution(score_groups)
+PL --> R: Figure
+
+R -> RPT: build_report(experiment, out_dir, fmt="html")
+RPT -> AG: aggregate_summary(...)
+RPT -> CMP: pairwise_table(...)
+RPT -> PL: plot_eval_distribution(...)
+RPT -> PL: plot_learning_curves(...)
+RPT -> FS: write report.html + figures
+RPT --> R: Path
+
+@enduml
