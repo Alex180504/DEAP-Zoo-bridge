@@ -186,6 +186,13 @@ class RLSideState(SideState):
         self._last_returns: List[float] = []
         self._bootstrap_ctx: Optional[_RLDriverContext] = None
         self._total_transitions: int = 0
+        #: Counters used by tests to assert that learning actually fired.
+        #: ``_total_learn_calls`` increments for every successful
+        #: ``agent.learn(experiences)`` invocation;
+        #: ``_total_learn_failures`` increments for every caught
+        #: failure inside :meth:`step_generation`.
+        self._total_learn_calls: int = 0
+        self._total_learn_failures: int = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -315,7 +322,7 @@ class RLSideState(SideState):
             return
         try:
             r = self._collect_episode(self._bootstrap_ctx)
-        except Exception as exc:  # pragma: no cover - bootstrap is best-effort
+        except (RuntimeError, ValueError, TypeError) as exc:
             warnings.warn(
                 f"RLSideState({self.side.name!r}): bootstrap rollout "
                 f"failed: {exc}",
@@ -353,7 +360,9 @@ class RLSideState(SideState):
                 experiences = self._memory.sample(self.batch_size)
                 try:
                     self._agent.learn(experiences)
-                except Exception as exc:  # pragma: no cover - version drift
+                    self._total_learn_calls += 1
+                except (RuntimeError, ValueError, TypeError) as exc:
+                    self._total_learn_failures += 1
                     warnings.warn(
                         f"RLSideState({self.side.name!r}): "
                         f"agent.learn() failed: {exc}",
@@ -543,7 +552,7 @@ class RLSideState(SideState):
                     rl_obs, raw_actions, rl_reward, rl_next_obs, rl_term
                 )
                 self._total_transitions += 1
-            except Exception as exc:  # pragma: no cover — buffer drift
+            except (RuntimeError, ValueError, TypeError) as exc:
                 warnings.warn(
                     f"RLSideState({self.side.name!r}): "
                     f"save_to_memory failed: {exc}",

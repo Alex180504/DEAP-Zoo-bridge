@@ -70,6 +70,13 @@ def test_evaluate_returns_single_tuple():
     fitness = evaluator.evaluate(_DeapLikeIndividual(genome), seed=0)
     assert isinstance(fitness, tuple) and len(fitness) == 1
     assert isinstance(fitness[0], float)
+    # Sanity: the aggregated learner fitness must be finite and within
+    # a sane range. simple_tag rewards are O(few hundred) per episode;
+    # values outside this window indicate either NaN/inf leakage or a
+    # reward-aggregation bug.
+    import math
+    assert math.isfinite(fitness[0]), f"non-finite fitness: {fitness[0]}"
+    assert -1e6 < fitness[0] < 1e6, f"fitness out of sane range: {fitness[0]}"
     assert evaluator.last_details is not None
     assert isinstance(evaluator.last_details, CoEvolutionEvalResult)
     assert len(evaluator.last_details.per_sample_learner) == 2

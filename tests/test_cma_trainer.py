@@ -97,6 +97,20 @@ class TestCMAESTrainerTraining:
         for record in result.metrics["fitness_history"]:
             assert {"generation", "mean", "std", "min", "max"} <= record.keys()
 
+        # Optimisation actually happened: best-ever fitness improved
+        # end-vs-start. Uses ``>=`` because tiny budgets can plateau
+        # on this env, but the regression case (CMA never improves
+        # at all) would still trip a strict ``>`` later if needed.
+        history = result.metrics["fitness_history"]
+        assert len(history) >= 2, (
+            "need at least two generations to assess improvement"
+        )
+        best_ever_end = max(rec["max"] for rec in history)
+        assert best_ever_end >= history[0]["max"], (
+            f"best-ever fitness regressed: gen0_max={history[0]['max']}, "
+            f"best_ever={best_ever_end}"
+        )
+
     @pytest.mark.slow
     def test_trained_policy_is_usable_by_unified_evaluator(self):
         trainer = CMAESTrainer(hidden_size=16, population_size=6, sigma0=0.3)
