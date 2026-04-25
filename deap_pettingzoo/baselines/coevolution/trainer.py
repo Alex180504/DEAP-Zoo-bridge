@@ -380,7 +380,6 @@ class CoEvolutionTrainer(BaselineTrainer):
 
         env.close()
         training_time = time.time() - start
-
         metrics = {
             "per_side_history": {
                 name: [self._stats_to_dict(s) for s in hist]
@@ -421,6 +420,15 @@ class CoEvolutionTrainer(BaselineTrainer):
             ],
         }
 
+        self._persist_results(
+            config,
+            coev_cfg,
+            per_side_history,
+            states,
+            training_time,
+            num_generations,
+        )
+
         return TrainingResult(
             algorithm="coevolution",
             policy=policy,
@@ -429,6 +437,65 @@ class CoEvolutionTrainer(BaselineTrainer):
             seed=coev_cfg.seed,
             training_time=training_time,
         )
+
+    # ----- Logging helpers --------------------------------------------
+
+    def _persist_results(
+        self,
+        config: TrainingConfig,
+        coev_cfg: "CoEvolutionConfig",
+        per_side_history: Dict[str, List[GenerationStats]],
+        states: Dict[str, Any],
+        training_time: float,
+        num_generations: int,
+    ) -> None:
+        """Write coevolution metrics + summary via :class:`ExperimentLogger`.
+
+        Each side's per-generation stats land in ``metrics.csv`` with a
+        ``side`` discriminator column; a single ``summary.json`` records
+        per-side final bests.
+        """
+        from deap_pettingzoo.baselines._logging_helpers import (
+            build_logger,
+            write_summary,
+        )
+
+        with build_logger(config, algorithm="coevolution") as log:
+            for name, hist in per_side_history.items():
+                for s in hist:
+                    log.row(
+                        "metrics",
+                        {
+                            "iteration": int(s.generation),
+                            "env_steps": 0,
+                            "wall_time": 0.0,
+                            "side": name,
+                            "mean": s.mean,
+                            "std": s.std,
+                            "min": s.min,
+                            "max": s.max,
+                            "best_fitness": s.best_fitness,
+                        },
+                    )
+            write_summary(
+                log,
+                {
+                    "algorithm": "coevolution",
+                    "mode": coev_cfg.mode,
+                    "schedule": coev_cfg.schedule,
+                    "num_generations": num_generations,
+                    "final_best": {
+                        name: (
+                            None
+                            if state.side.optimizer == "frozen"
+                            else float(state.best_fitness)
+                        )
+                        for name, state in states.items()
+                    },
+                    "reporting_side": coev_cfg.reporting_side,
+                },
+                training_time_s=training_time,
+            )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
