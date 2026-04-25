@@ -28,6 +28,7 @@ from .pools import (
     OpponentPool,
     PolicyFactory,
     PopulationPool,
+    RLPolicyPool,
 )
 from .samplers import (
     Sampler,
@@ -45,6 +46,7 @@ from .sides import (
     SideState,
     make_side_state,
 )
+from .rl_side import RLSideState, SUPPORTED_RL_ALGORITHMS
 from .trainer import (
     VALID_MODES,
     VALID_SCHEDULES,
@@ -64,6 +66,8 @@ __all__ = [
     "EASideState",
     "CMAESSideState",
     "FrozenSideState",
+    "RLSideState",
+    "SUPPORTED_RL_ALGORITHMS",
     "GenerationStats",
     "make_side_state",
     # Pools
@@ -72,6 +76,7 @@ __all__ = [
     "ArchivePool",
     "FrozenPolicyPool",
     "CompositePool",
+    "RLPolicyPool",
     "PolicyFactory",
     # Archives
     "HallOfFame",
