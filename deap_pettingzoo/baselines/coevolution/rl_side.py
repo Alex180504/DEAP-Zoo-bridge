@@ -487,32 +487,41 @@ class RLSideState(SideState):
                 else (action_result, action_result)
             )
 
-            # Squeeze leading vectorisation dim before sending to env.
-            # raw_actions retains the batch dimension and is used for the
-            # replay buffer (matching AgileRLTrainer._run_off_policy).
+            # Squeeze leading vectorisation dim before sending to env
+            # AND before storing in the replay buffer. Storing batched
+            # actions (shape (1, action_dim)) alongside unbatched obs
+            # (shape (features,)) causes a 2-vs-3 ndim mismatch in
+            # MADDPG.learn() when the buffer's sampled tensors are
+            # passed to actor/critic forward passes. AgileRLTrainer's
+            # off-policy loop has the same latent bug, but it swallows
+            # learn() failures via `except Exception`, so it goes
+            # undetected there. Here we keep obs and action shapes
+            # rank-aligned at write time.
             env_actions: Dict[str, Any] = {}
+            squeezed_actions: Dict[str, Any] = {}
             for aid, act in actions.items():
                 arr = np.asarray(act)
                 if arr.ndim > 0 and arr.shape[0] == 1:
                     arr = arr[0]
+                squeezed_actions[aid] = arr
                 if arr.shape == ():
                     env_actions[aid] = arr.item()
                 else:
                     env_actions[aid] = arr
 
-            # Zero-fill obs and raw_actions for any RL agent that has
+            # Zero-fill obs and squeezed_actions for any RL agent that has
             # already terminated (MultiAgentReplayBuffer requires the
             # full agent_ids roster on every write). Both dicts are
             # non-empty here (guaranteed by the `if not rl_obs: break`
             # guard above), but we check defensively to avoid StopIteration.
-            if len(rl_obs) < len(rl_ids) and rl_obs and raw_actions:
+            if len(rl_obs) < len(rl_ids) and rl_obs and squeezed_actions:
                 _ref_obs = next(iter(rl_obs.values()))
-                _ref_act = np.asarray(next(iter(raw_actions.values())))
+                _ref_act = np.asarray(next(iter(squeezed_actions.values())))
                 for a in rl_ids:
                     if a not in rl_obs:
                         rl_obs[a] = np.zeros_like(_ref_obs)
-                    if a not in raw_actions:
-                        raw_actions[a] = np.zeros_like(_ref_act)
+                    if a not in squeezed_actions:
+                        squeezed_actions[a] = np.zeros_like(_ref_act)
 
             # Opponent actions via PolicyProtocol.
             for agent, obs in observations.items():
@@ -544,12 +553,12 @@ class RLSideState(SideState):
                 for a in rl_ids
             }
 
-            # Use raw_actions (matching the batched format AgileRL's learn()
-            # expects) so the buffer's stored shapes are consistent with
-            # the off-policy training loop in AgileRLTrainer.
+            # Use squeezed_actions (rank-aligned with obs) so the
+            # buffer's stored shapes are consistent and `agent.learn()`
+            # doesn't hit a 2-vs-3 dim mismatch when batches are sampled.
             try:
                 self._memory.save_to_memory(
-                    rl_obs, raw_actions, rl_reward, rl_next_obs, rl_term
+                    rl_obs, squeezed_actions, rl_reward, rl_next_obs, rl_term
                 )
                 self._total_transitions += 1
             except (RuntimeError, ValueError, TypeError) as exc:
