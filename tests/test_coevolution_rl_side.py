@@ -132,7 +132,7 @@ class TestEAvsRL:
                 Side("pursuers", ("adversary",), "ea", _ea_cfg(0)),
                 Side("evaders", ("agent",), "rl", _rl_cfg("maddpg")),
             ],
-            k_opponents=1,  # required: RLPolicyPool cannot snapshot for k>1 parallel
+            k_opponents=1,  # RLPolicyPool is size-1; num_workers=1 is the hard constraint
             max_steps_per_episode=15,
             num_workers=1,
             seed=42,

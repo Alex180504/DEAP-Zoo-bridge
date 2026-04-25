@@ -62,9 +62,10 @@ def main() -> None:
                 },
             ),
         ],
-        # k_opponents must be 1 when an RL side is in play — the EA
-        # side's evaluator samples the same RL policy every episode
-        # anyway (RLPolicyPool is degenerate size-1).
+        # k_opponents=1 is recommended when an RL side is present:
+        # RLPolicyPool is degenerate size-1, so any value > 1 will just
+        # resample the same live RL policy each time (no extra diversity).
+        # The hard constraint is num_workers=1, not k_opponents.
         k_opponents=1,
         max_steps_per_episode=25,
         # num_workers is auto-clamped to 1 when an RL side is present

@@ -56,6 +56,7 @@ SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "ippo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
     "mappo":  ("agilerl.algorithms.ippo",   "IPPO",   True),
     "grouped_ippo": ("agilerl.algorithms.ippo", "IPPO", True),
+    "ippo-grouped": ("agilerl.algorithms.ippo", "IPPO", True),
 }
 
 
@@ -478,17 +479,29 @@ class RLSideState(SideState):
             )
 
             # Squeeze leading vectorisation dim before sending to env.
+            # raw_actions retains the batch dimension and is used for the
+            # replay buffer (matching AgileRLTrainer._run_off_policy).
             env_actions: Dict[str, Any] = {}
-            squeezed_actions: Dict[str, Any] = {}
             for aid, act in actions.items():
                 arr = np.asarray(act)
                 if arr.ndim > 0 and arr.shape[0] == 1:
                     arr = arr[0]
-                squeezed_actions[aid] = arr
                 if arr.shape == ():
                     env_actions[aid] = arr.item()
                 else:
                     env_actions[aid] = arr
+
+            # Zero-fill obs and raw_actions for any RL agent that has
+            # already terminated (MultiAgentReplayBuffer requires the
+            # full agent_ids roster on every write).
+            if len(rl_obs) < len(rl_ids):
+                _ref_obs = next(iter(rl_obs.values()))
+                _ref_act = np.asarray(next(iter(raw_actions.values())))
+                for a in rl_ids:
+                    if a not in rl_obs:
+                        rl_obs[a] = np.zeros_like(_ref_obs)
+                    if a not in raw_actions:
+                        raw_actions[a] = np.zeros_like(_ref_act)
 
             # Opponent actions via PolicyProtocol.
             for agent, obs in observations.items():
@@ -520,13 +533,12 @@ class RLSideState(SideState):
                 for a in rl_ids
             }
 
-            # Use squeezed actions (matching obs's lack of leading vec
-            # dim) so the buffer's stored shapes are consistent and
-            # `agent.learn()` doesn't hit a 2-vs-3 dim mismatch when
-            # batches are sampled.
+            # Use raw_actions (matching the batched format AgileRL's learn()
+            # expects) so the buffer's stored shapes are consistent with
+            # the off-policy training loop in AgileRLTrainer.
             try:
                 self._memory.save_to_memory(
-                    rl_obs, squeezed_actions, rl_reward, rl_next_obs, rl_term
+                    rl_obs, raw_actions, rl_reward, rl_next_obs, rl_term
                 )
                 self._total_transitions += 1
             except Exception as exc:  # pragma: no cover — buffer drift

@@ -12,7 +12,7 @@ control over per-side ``device`` configuration.
 from __future__ import annotations
 
 import warnings
-from typing import Iterable, List, Sequence
+from typing import Sequence
 
 
 def torch_uses_cuda(device: object) -> bool:
