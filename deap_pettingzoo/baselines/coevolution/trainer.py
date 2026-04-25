@@ -308,7 +308,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         # context so EA/CMA learner sides can dispatch their
         # k_opponents episodes through a shared worker pool.
         with make_executor(
-            coev_cfg.num_workers, backend=coev_cfg.parallel_backend
+            resolved_workers, backend=coev_cfg.parallel_backend
         ) as executor:
             self._executor = executor
             self._bootstrap_populations(env, states, coev_cfg)

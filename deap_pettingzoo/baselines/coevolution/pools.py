@@ -330,7 +330,10 @@ class _BasePool:
         if k < 1:
             raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
         return [
-            OpponentSnapshot(kind="frozen", payload={"policy": self.sample_opponent(rng)})  # type: ignore[attr-defined]
+            OpponentSnapshot(
+                kind="frozen",
+                payload={"policy": self.sample_opponent(rng)},
+            )  # type: ignore[attr-defined]
             for _ in range(k)
         ]
 
