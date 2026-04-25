@@ -766,19 +766,30 @@ class RLPolicyPool(_BasePool):
         wrapper (which transitively deep-copies the underlying torch
         modules).
 
-        The trainer calls this only when a non-RL side is the next
-        learner; the RL side's own ``step_generation`` reads its live
+        This method runs once per generation whenever the synchronous
+        schedule snapshots pools — regardless of which side is the next
+        learner. The RL side's own ``step_generation`` reads its live
         wrapper directly via the driver context and does not go
         through this snapshot path.
         """
         import copy
+        import warnings
 
         try:
             frozen = copy.deepcopy(self._policy)
-        except Exception:  # pragma: no cover — torch deepcopy edge cases
-            # Fallback: reuse the live policy. Documented limitation —
-            # synchronous-schedule contract is best-effort for RL sides
-            # whose wrappers cannot be deep-copied.
+        except Exception as exc:  # pragma: no cover — torch deepcopy edge cases
+            # Fallback: reuse the live policy. Emit a warning so callers can
+            # detect that the synchronous-schedule isolation guarantee does
+            # not hold for this RL side — opponents may see post-learn
+            # weights from within the same generation.
+            warnings.warn(
+                f"RLPolicyPool.snapshot_sync: deep-copy of RL policy failed "
+                f"({exc!r}); falling back to the live policy reference. "
+                "The synchronous-schedule isolation contract (opponents see "
+                "pre-learn weights) is best-effort for this snapshot.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             frozen = self._policy
         return RLPolicyPool(frozen)
 
