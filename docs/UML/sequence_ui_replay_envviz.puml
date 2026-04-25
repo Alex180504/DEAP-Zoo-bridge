@@ -1,0 +1,46 @@
+@startuml sequence_ui_replay_envviz
+title Streamlit UI – Replay & Live Env Visualisation
+
+actor "User" as U
+participant "Streamlit\nReplay page" as RP
+participant "Streamlit\nLive Rollout page" as LP
+participant "services.rollout" as RS
+participant "RunRecord" as RR
+participant "PettingZoo env\n(rgb_array)" as ENV
+participant "Policy / Genome" as POL
+database  "<run_dir>/replays/" as FS
+
+== Saved replay ==
+U -> RP: pick run + episode
+RP -> FS: list episode_*.{mp4,gif}
+FS --> RP: paths
+alt mp4 present
+    RP --> U: st.video(<path>)
+else gif fallback
+    RP --> U: st.image(<path>)
+end
+
+== On-demand rollout ==
+U -> LP: pick run, click "Run rollout"
+LP -> RR: load(run_dir)
+RR --> LP: manifest, summary, artifacts
+
+LP -> RS: run_episode(run_dir, max_steps, time_budget)
+RS -> ENV: build from manifest.env_name + env_config\n(render_mode="rgb_array")
+RS -> POL: load policy from manifest.artifacts\n(or rebuild from summary.best_genome)
+
+ENV -> RS: reset() → obs
+loop while not done and within budget
+    RS -> POL: act(obs)
+    POL --> RS: action
+    RS -> ENV: step(action)
+    ENV --> RS: obs, reward, done, info
+    ENV --> RS: render() → rgb frame
+    RS --> LP: yield frame
+    LP --> U: refresh st.image placeholder
+end
+
+RS --> LP: episode summary (cumulative reward, steps, wall_time)
+LP --> U: summary card
+
+@enduml
