@@ -31,6 +31,18 @@ from deap_pettingzoo.utils.logging.experiment_logger import (
     ExperimentLogger,
     NoOpLogger,
 )
+from deap_pettingzoo.utils.logging.checkpoints import (
+    KIND_AGILERL,
+    KIND_CMA_GENOME,
+    KIND_COEVOLUTION,
+    KIND_EA_GENOME,
+    KIND_QDAX_REPERTOIRE,
+    KNOWN_KINDS,
+    PolicyCheckpointEntry,
+    register_existing_artifact,
+    save_agilerl_agent,
+    save_ea_genome,
+)
 from deap_pettingzoo.utils.logging.manifest import (
     RunManifest,
     capture_environment_metadata,
@@ -67,4 +79,15 @@ __all__ = [
     "SCHEMA_VERSION",
     "EPISODES_COLUMNS",
     "METRICS_REQUIRED_COLUMNS",
+    # Policy checkpoints
+    "PolicyCheckpointEntry",
+    "save_ea_genome",
+    "save_agilerl_agent",
+    "register_existing_artifact",
+    "KIND_EA_GENOME",
+    "KIND_CMA_GENOME",
+    "KIND_AGILERL",
+    "KIND_QDAX_REPERTOIRE",
+    "KIND_COEVOLUTION",
+    "KNOWN_KINDS",
 ]
