@@ -208,10 +208,19 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
 
     def _snapshot_obs(self):
         current = getattr(self.aec_env, "agent_selection", None)
+        # Some AEC wrappers (e.g. shimmy's OpenSpielCompatibilityV0) surface
+        # action masks via ``aec_env.infos`` rather than embedding them in the
+        # observation dict returned by ``observe()``. Fall back to that source
+        # when ``_observe()`` returns no mask.
+        aec_infos = getattr(self.aec_env, "infos", {}) or {}
         obs_dict: Dict[str, np.ndarray] = {}
         infos: Dict[str, Dict[str, Any]] = {}
         for agent in self.agents:
             arr, mask = self._observe(agent)
+            if mask is None:
+                raw = aec_infos.get(agent, {}).get("action_mask")
+                if raw is not None:
+                    mask = np.asarray(raw)
             obs_dict[agent] = arr
             info: Dict[str, Any] = {}
             if mask is not None and agent == current:
