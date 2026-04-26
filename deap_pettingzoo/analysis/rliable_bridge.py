@@ -45,22 +45,73 @@ def _stack_scores(score_groups: Mapping[str, Sequence[float]]) -> Dict[str, np.n
     return out
 
 
+def _stack_score_matrices(
+    score_matrices: Mapping[str, np.ndarray],
+) -> Dict[str, np.ndarray]:
+    """Validate and pass through canonical ``(n_runs, n_tasks)`` matrices.
+
+    Accepts the multi-task layout produced by
+    :func:`deap_pettingzoo.analysis.collect_score_matrices`. Empty
+    algorithms are dropped; 1-D inputs are reshaped to a single task
+    column for symmetry with :func:`_stack_scores`.
+    """
+    out: Dict[str, np.ndarray] = {}
+    for algo, mat in score_matrices.items():
+        arr = np.asarray(mat, dtype=float)
+        if arr.size == 0:
+            continue
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        elif arr.ndim != 2:
+            raise ValueError(
+                f"score matrix for {algo!r} must be 1-D or 2-D, got "
+                f"shape {arr.shape}"
+            )
+        out[algo] = arr
+    return out
+
+
+def _resolve_matrices(
+    score_groups: Optional[Mapping[str, Sequence[float]]],
+    score_matrices: Optional[Mapping[str, np.ndarray]],
+) -> Dict[str, np.ndarray]:
+    """Pick the multi-task ``score_matrices`` path when given, else fall back.
+
+    Exactly one of ``score_groups`` / ``score_matrices`` must be
+    non-``None``.
+    """
+    if score_matrices is not None and score_groups is not None:
+        raise ValueError(
+            "pass either score_groups (single-task) or score_matrices "
+            "(multi-task), not both"
+        )
+    if score_matrices is not None:
+        return _stack_score_matrices(score_matrices)
+    if score_groups is not None:
+        return _stack_scores(score_groups)
+    raise ValueError("one of score_groups or score_matrices is required")
+
+
 def aggregate_metrics_table(
-    score_groups: Mapping[str, Sequence[float]],
+    score_groups: Optional[Mapping[str, Sequence[float]]] = None,
     *,
+    score_matrices: Optional[Mapping[str, np.ndarray]] = None,
     reps: int = 2000,
     confidence_interval_size: float = 0.95,
 ) -> Any:
     """rliable aggregate scores (mean, median, IQM, optimality gap).
 
-    Returns a :class:`pandas.DataFrame` with one row per algorithm and
-    columns ``mean``, ``median``, ``iqm``, ``optimality_gap``, each
-    accompanied by ``_lo`` / ``_hi`` for the bootstrap CI.
+    Either pass ``score_groups`` (``{algo: [seed_scores...]}``,
+    single-task) **or** ``score_matrices`` (``{algo: ndarray[n_runs,
+    n_tasks]}``, multi-task). Returns a :class:`pandas.DataFrame` with
+    one row per algorithm and columns ``mean``, ``median``, ``iqm``,
+    ``optimality_gap``, each accompanied by ``_lo`` / ``_hi`` for the
+    bootstrap CI.
     """
     library, metrics = _require_rliable()
     import pandas as pd  # noqa: WPS433
 
-    matrices = _stack_scores(score_groups)
+    matrices = _resolve_matrices(score_groups, score_matrices)
     if not matrices:
         return pd.DataFrame()
 
@@ -93,9 +144,49 @@ def aggregate_metrics_table(
     return pd.DataFrame(rows).set_index("algorithm")
 
 
-def performance_profile(
-    score_groups: Mapping[str, Sequence[float]],
+def aggregate_metrics_forest(
+    score_matrices: Mapping[str, np.ndarray],
     *,
+    reps: int = 2000,
+    confidence_interval_size: float = 0.95,
+) -> Any:
+    """Tidy long-form aggregate-metrics frame for the rliable forest plot.
+
+    Returns one row per ``(algorithm, metric)`` pair with columns
+    ``algorithm``, ``metric``, ``point``, ``lo``, ``hi``. ``metric``
+    cycles through ``mean``, ``median``, ``iqm``, ``optimality_gap``.
+    Designed to feed straight into
+    :func:`deap_pettingzoo.analysis.plots.plot_aggregate_metrics_forest`.
+    """
+    import pandas as pd  # noqa: WPS433
+
+    table = aggregate_metrics_table(
+        score_matrices=score_matrices,
+        reps=reps,
+        confidence_interval_size=confidence_interval_size,
+    )
+    if table.empty:
+        return pd.DataFrame(columns=["algorithm", "metric", "point", "lo", "hi"])
+
+    rows = []
+    for algo, row in table.iterrows():
+        for name in ("mean", "median", "iqm", "optimality_gap"):
+            rows.append(
+                {
+                    "algorithm": algo,
+                    "metric": name,
+                    "point": float(row[name]),
+                    "lo": float(row[f"{name}_lo"]),
+                    "hi": float(row[f"{name}_hi"]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def performance_profile(
+    score_groups: Optional[Mapping[str, Sequence[float]]] = None,
+    *,
+    score_matrices: Optional[Mapping[str, np.ndarray]] = None,
     tau_min: Optional[float] = None,
     tau_max: Optional[float] = None,
     n_tau: int = 50,
@@ -104,12 +195,14 @@ def performance_profile(
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Compute performance profiles ``P(score >= tau)`` per algorithm.
 
+    Either ``score_groups`` (single-task seeds) or ``score_matrices``
+    (canonical multi-task ``(n_runs, n_tasks)`` layout) must be passed.
     Returns ``(taus, point_estimates, intervals)`` where
     ``point_estimates[algo]`` is a 1-D array of length ``n_tau`` and
     ``intervals[algo]`` is a ``(2, n_tau)`` array of lo/hi bounds.
     """
     library, _ = _require_rliable()
-    matrices = _stack_scores(score_groups)
+    matrices = _resolve_matrices(score_groups, score_matrices)
     if not matrices:
         return np.empty(0), {}, {}
 
@@ -131,19 +224,22 @@ def performance_profile(
 
 
 def probability_of_improvement(
-    score_groups: Mapping[str, Sequence[float]],
+    score_groups: Optional[Mapping[str, Sequence[float]]] = None,
     *,
+    score_matrices: Optional[Mapping[str, np.ndarray]] = None,
     reps: int = 2000,
 ) -> Any:
     """Pairwise P(X > Y) matrix with bootstrap CIs.
 
-    Returns a :class:`pandas.DataFrame` with one row per ordered pair
-    ``(algo_x, algo_y)``: ``probability``, ``ci_lo``, ``ci_hi``.
+    Either ``score_groups`` (single-task) or ``score_matrices``
+    (multi-task) must be supplied. Returns a :class:`pandas.DataFrame`
+    with one row per ordered pair ``(algo_x, algo_y)``: ``probability``,
+    ``ci_lo``, ``ci_hi``.
     """
     library, metrics = _require_rliable()
     import pandas as pd  # noqa: WPS433
 
-    matrices = _stack_scores(score_groups)
+    matrices = _resolve_matrices(score_groups, score_matrices)
     keys = sorted(matrices.keys())
 
     pairs: Dict[str, tuple] = {}
@@ -163,7 +259,7 @@ def probability_of_improvement(
     )
 
     rows = []
-    for label, (ka_kb,) in zip(pairs.keys(), [(p,) for p in pairs.keys()]):  # noqa: B905
+    for label in pairs:
         ka, kb = label.split("__vs__")
         rows.append(
             {

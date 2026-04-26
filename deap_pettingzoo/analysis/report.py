@@ -64,6 +64,15 @@ def build_report(
     if include_figures and score_groups:
         figures.extend(_render_figures(experiment, score_groups, output_dir))
 
+    multitask: Optional[dict] = None
+    if len(experiment.by_env()) >= 2:
+        multitask = _build_multitask_section(
+            experiment,
+            output_dir,
+            metric=metric,
+            include_figures=include_figures,
+        )
+
     if fmt == "md":
         return _write_markdown(
             output_dir,
@@ -74,6 +83,7 @@ def build_report(
             pairwise=pairwise,
             figures=figures,
             metric=metric,
+            multitask=multitask,
         )
     return _write_html(
         output_dir,
@@ -84,6 +94,7 @@ def build_report(
         pairwise=pairwise,
         figures=figures,
         metric=metric,
+        multitask=multitask,
     )
 
 
@@ -131,6 +142,70 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
     return out
 
 
+def _build_multitask_section(
+    experiment: Experiment,
+    output_dir: Path,
+    *,
+    metric: str,
+    include_figures: bool,
+) -> Optional[dict]:
+    """Compute multi-task aggregate frame + (optional) figures.
+
+    Returns ``None`` when fewer than two environments yield non-empty
+    score columns. Always uses auto min-max normalisation.
+    """
+    from deap_pettingzoo.analysis.multi_task import collect_score_matrices  # noqa: WPS433
+    from deap_pettingzoo.analysis.normalize import (  # noqa: WPS433
+        NormalizationSpec,
+        normalize_score_matrices,
+    )
+
+    matrices, env_names = collect_score_matrices(experiment, metric=metric)
+    if len(env_names) < 2 or not matrices:
+        return None
+
+    spec = NormalizationSpec.from_minmax(matrices, env_names)
+    normed = normalize_score_matrices(matrices, env_names, spec)
+
+    forest = None
+    try:
+        from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
+            aggregate_metrics_forest,
+        )
+        forest = aggregate_metrics_forest(normed, reps=2000)
+    except ImportError:
+        forest = None  # rliable not installed → table omitted
+
+    figures: list = []
+    if include_figures:
+        try:
+            from deap_pettingzoo.analysis import plots  # noqa: WPS433
+            if forest is not None and len(forest) > 0:
+                fig = plots.plot_aggregate_metrics_forest(
+                    forest, title="Aggregate metrics across tasks (95% CI)"
+                )
+                p = output_dir / "fig_multitask_forest.png"
+                fig.savefig(p, dpi=140)
+                figures.append(("Aggregate-metrics forest", p.name))
+            fig = plots.plot_per_env_eval(
+                matrices, env_names, title="Per-env score distributions (raw)"
+            )
+            p = output_dir / "fig_multitask_per_env.png"
+            fig.savefig(p, dpi=140)
+            figures.append(("Per-env distributions", p.name))
+        except Exception:  # pragma: no cover - matplotlib missing
+            pass
+
+    return {
+        "envs": list(env_names),
+        "n_algos": len(matrices),
+        "spec_low": dict(spec.low),
+        "spec_high": dict(spec.high),
+        "forest": forest,
+        "figures": figures,
+    }
+
+
 def _write_markdown(
     output_dir: Path,
     *,
@@ -141,6 +216,7 @@ def _write_markdown(
     pairwise,
     figures,
     metric: str,
+    multitask: Optional[dict] = None,
 ) -> Path:
     lines: list = [f"# {title}", ""]
     lines.append(f"- **Runs analysed:** {n_runs}")
@@ -161,6 +237,27 @@ def _write_markdown(
     lines.append("")
     lines.append(_df_to_md(pairwise))
     lines.append("")
+
+    if multitask is not None:
+        lines.append("## Multi-task aggregate")
+        lines.append("")
+        lines.append(
+            f"- **Environments ({len(multitask['envs'])}):** "
+            + ", ".join(f"`{e}`" for e in multitask["envs"])
+        )
+        lines.append(f"- **Algorithms compared:** {multitask['n_algos']}")
+        lines.append("- **Normalisation:** auto min-max per task")
+        lines.append("")
+        if multitask["forest"] is not None and len(multitask["forest"]) > 0:
+            lines.append("### Aggregate metrics on normalised scores")
+            lines.append("")
+            lines.append(_df_to_md(multitask["forest"]))
+            lines.append("")
+        for label, fname in multitask["figures"]:
+            lines.append(f"### {label}")
+            lines.append("")
+            lines.append(f"![{label}]({fname})")
+            lines.append("")
 
     if figures:
         lines.append("## Figures")
@@ -186,6 +283,7 @@ def _write_html(
     pairwise,
     figures,
     metric: str,
+    multitask: Optional[dict] = None,
 ) -> Path:
     summary_html = _df_to_html(summary)
     aggregate_html = _df_to_html(
@@ -197,6 +295,32 @@ def _write_html(
         fig_html_parts.append(
             f'<figure><img src="{fname}" alt="{label}" />'
             f"<figcaption>{label}</figcaption></figure>"
+        )
+
+    multitask_html = ""
+    if multitask is not None:
+        envs_str = ", ".join(f"<code>{e}</code>" for e in multitask["envs"])
+        forest_html = (
+            _df_to_html(multitask["forest"])
+            if multitask["forest"] is not None and len(multitask["forest"]) > 0
+            else ""
+        )
+        mt_figs = "".join(
+            f'<figure><img src="{fn}" alt="{lbl}" />'
+            f"<figcaption>{lbl}</figcaption></figure>"
+            for lbl, fn in multitask["figures"]
+        )
+        multitask_html = (
+            "<h2>Multi-task aggregate</h2>"
+            f"<p><strong>Environments ({len(multitask['envs'])}):</strong> {envs_str}<br/>"
+            f"<strong>Algorithms compared:</strong> {multitask['n_algos']}<br/>"
+            "<strong>Normalisation:</strong> auto min-max per task</p>"
+            + (
+                "<h3>Aggregate metrics on normalised scores</h3>" + forest_html
+                if forest_html
+                else ""
+            )
+            + mt_figs
         )
 
     body = f"""<!doctype html>
@@ -248,6 +372,7 @@ figcaption {{ color: var(--muted); font-size: 0.9rem; margin-top: 0.3rem; }}
 {aggregate_html}
 <h2>Pairwise comparison (Mann-Whitney U + Cliff's delta)</h2>
 {pairwise_html}
+{multitask_html}
 {"<h2>Figures</h2>" + "".join(fig_html_parts) if fig_html_parts else ""}
 </body></html>
 """

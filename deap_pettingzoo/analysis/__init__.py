@@ -52,15 +52,30 @@ from deap_pettingzoo.analysis.policies import (
     PolicyReloadUnavailable,
     load_policy,
 )
+from deap_pettingzoo.analysis.multi_task import (
+    collect_score_matrices,
+    final_score_table,
+)
+from deap_pettingzoo.analysis.normalize import (
+    NormalizationSpec,
+    normalize_score_matrices,
+)
+from deap_pettingzoo.analysis.rliable_bridge import (
+    aggregate_metrics_forest,
+)
 
 __all__ = [
     "CoevolutionPolicyBundle",
     "Experiment",
+    "NormalizationSpec",
     "PolicyReloadUnavailable",
     "RunRecord",
+    "aggregate_metrics_forest",
     "bootstrap_ci",
     "cliffs_delta",
     "cohens_d",
+    "collect_score_matrices",
+    "final_score_table",
     "iqm",
     "learning_curve_with_ci",
     "load_experiment",
@@ -68,6 +83,7 @@ __all__ = [
     "load_run",
     "mann_whitney",
     "mean_with_ci",
+    "normalize_score_matrices",
     "pairwise_table",
     "welch_t",
 ]
