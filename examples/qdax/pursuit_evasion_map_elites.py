@@ -61,10 +61,8 @@ def main() -> None:
 
     config = TrainingConfig(
         env_name="jaxmarl_simple_tag",
-        algorithm="map_elites",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=iterations_budget * batch_size,
-        seed=args.seed,
         output_dir=output_dir,
         algorithm_params={
             "hidden_sizes": hidden,

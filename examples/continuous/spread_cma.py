@@ -13,6 +13,8 @@ Run with::
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from deap_pettingzoo.baselines import CMAESTrainer
@@ -34,6 +36,7 @@ def main() -> None:
         algorithm_params={"seed": 0},
         env_config=ENV_CONFIG,
         continuous=True,
+        output_dir=Path("results/continuous_spread_cma"),
     )
 
     print(f"Training CMA-ES on {ENV_NAME} (continuous actions)...")

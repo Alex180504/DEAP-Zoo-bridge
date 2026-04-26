@@ -22,6 +22,8 @@ Requires the ``rl-baselines`` extra::
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 from deap_pettingzoo.baselines.coevolution import (
     CoEvolutionConfig,
@@ -79,6 +81,7 @@ def main() -> None:
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=200,
         algorithm_params={"coevolution": config},
+        output_dir=Path("results/coevolution_ea_vs_maddpg"),
     )
 
     print("Running EA-vs-MADDPG bidirectional co-evolution...")
