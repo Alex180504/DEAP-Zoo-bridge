@@ -90,8 +90,15 @@ scoop = [
 dask = [
     "dask[distributed]>=2024.1",
 ]
+ui = [
+    "deap-pettingzoo[analysis]",
+    "streamlit>=1.30",
+    "plotly>=5.0",
+    "pillow>=10.0",
+    "imageio>=2.31",
+]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask,ui]"
 ]
 
 [tool.setuptools]

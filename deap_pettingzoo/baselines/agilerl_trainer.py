@@ -64,6 +64,11 @@ class AgileRLTrainer(BaselineTrainer):
         "batch_size": 64,
         "memory_size": 10_000,
         "learning_delay": 500,
+        # Off-policy learning frequency: call agent.learn() once every
+        # ``learn_step`` env steps after ``learning_delay``. The previous
+        # behaviour (learn every single env step) is recoverable via
+        # ``learn_step=1`` but is dramatically slower on CPU.
+        "learn_step": 100,
         "rollout_steps": 256,
         "device": "cpu",
     }
@@ -118,6 +123,7 @@ class AgileRLTrainer(BaselineTrainer):
             "batch_size",
             "memory_size",
             "learning_delay",
+            "learn_step",
             "rollout_steps",
             "max_steps_per_episode",
         }
@@ -169,6 +175,16 @@ class AgileRLTrainer(BaselineTrainer):
                         "success": -1,
                     },
                 )
+            from deap_pettingzoo.utils.logging import save_agilerl_agent
+            save_agilerl_agent(
+                log,
+                agent,
+                extra={
+                    "algorithm": self.ALGORITHM_NAME,
+                    "env_name": config.env_name,
+                    "agent_ids": list(agent_ids),
+                },
+            )
             write_summary(
                 log,
                 {
@@ -276,6 +292,57 @@ class AgileRLTrainer(BaselineTrainer):
             unwrapped[agent_id] = arr
         return unwrapped
 
+    @staticmethod
+    def _mean_loss(loss: Any) -> Optional[float]:
+        """Reduce AgileRL's heterogeneous ``learn()`` return to a scalar.
+
+        AgileRL returns one of:
+          * ``None`` (some on-policy paths),
+          * ``float`` / ``torch.Tensor`` scalar,
+          * ``dict[str, float]`` (per-agent total loss),
+          * ``dict[str, tuple[float, float, ...]]`` (per-agent
+            ``(actor_loss, critic_loss, ...)`` — current MADDPG path).
+
+        Returns the mean across all leaf scalars, or ``None`` if the
+        payload is empty / non-numeric.
+        """
+        if loss is None:
+            return None
+
+        scalars: List[float] = []
+
+        def _flatten(node: Any) -> None:
+            if node is None:
+                return
+            if hasattr(node, "item") and not isinstance(node, (bytes, str)):
+                # Tensor / 0-d ndarray.
+                try:
+                    scalars.append(float(node.item()))
+                    return
+                except Exception:  # pragma: no cover
+                    pass
+            if isinstance(node, (int, float)):
+                scalars.append(float(node))
+                return
+            if isinstance(node, dict):
+                for v in node.values():
+                    _flatten(v)
+                return
+            if isinstance(node, (list, tuple)):
+                for v in node:
+                    _flatten(v)
+                return
+            # Fallback: best-effort cast.
+            try:
+                scalars.append(float(node))
+            except (TypeError, ValueError):
+                return
+
+        _flatten(loss)
+        if not scalars:
+            return None
+        return float(np.mean(scalars))
+
     # --- Training loops ---------------------------------------------------
 
     def _run_off_policy(
@@ -300,6 +367,9 @@ class AgileRLTrainer(BaselineTrainer):
         )
         batch_size = int(params["batch_size"])
         learning_delay = int(params["learning_delay"])
+        learn_step = max(1, int(params.get("learn_step", 1)))
+        progress_interval = max(1, budget_steps // 20) if self.verbose else 0
+        loop_start = time.time()
 
         obs, info = env.reset(seed=seed)
         episode_rewards: List[float] = []
@@ -312,24 +382,44 @@ class AgileRLTrainer(BaselineTrainer):
             actions, raw_actions = (
                 action_result if isinstance(action_result, tuple) else (action_result, action_result)
             )
+            # Squeeze the leading vec-dim of 1 from BOTH dicts:
+            #   * ``actions`` -> sent to env.step (ints for Discrete,
+            #     1-D arrays for Box).
+            #   * ``raw_actions`` -> stored in the replay buffer (always
+            #     the continuous representation the critic expects).
+            # Storing ``raw_actions`` unsqueezed (shape ``(1, act_dim)``)
+            # next to unbatched obs (shape ``(features,)``) caused a
+            # 2-vs-3 ndim mismatch in MADDPG.learn(); using ``actions``
+            # for the buffer instead would silently break discrete envs
+            # where ``actions`` are scalar ints but the critic was built
+            # for the continuous representation.
             env_actions = self._unwrap_actions_for_env(actions)
+            buffer_actions: Dict[str, Any] = {}
+            for aid, act in raw_actions.items():
+                arr = np.asarray(act)
+                if arr.ndim > 0 and arr.shape[0] == 1:
+                    arr = arr[0]
+                buffer_actions[aid] = arr
             next_obs, reward, termination, truncation, info = env.step(env_actions)
 
             memory.save_to_memory(
-                obs, raw_actions, reward, next_obs, termination
+                obs, buffer_actions, reward, next_obs, termination
             )
 
             ep_reward += float(sum(reward.values()))
             ep_len += 1
 
-            if step >= learning_delay and len(memory) >= batch_size:
+            if (
+                step >= learning_delay
+                and len(memory) >= batch_size
+                and (step - learning_delay) % learn_step == 0
+            ):
                 experiences = memory.sample(batch_size)
                 try:
                     loss = agent.learn(experiences)
-                    if isinstance(loss, dict):
-                        losses.append(
-                            float(np.mean([float(v) for v in loss.values()]))
-                        )
+                    mean_loss = self._mean_loss(loss)
+                    if mean_loss is not None:
+                        losses.append(mean_loss)
                 except Exception as exc:  # pragma: no cover - version drift
                     if self.verbose:
                         print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
@@ -342,6 +432,18 @@ class AgileRLTrainer(BaselineTrainer):
                 obs, info = env.reset()
             else:
                 obs = next_obs
+
+            if progress_interval and (step + 1) % progress_interval == 0:
+                elapsed = time.time() - loop_start
+                pct = 100.0 * (step + 1) / budget_steps
+                last_r = episode_rewards[-1] if episode_rewards else float("nan")
+                print(
+                    f"[{self.ALGORITHM_NAME}] step {step + 1}/{budget_steps} "
+                    f"({pct:5.1f}%) | episodes={len(episode_rewards)} | "
+                    f"last_reward={last_r:.2f} | learn_calls={len(losses)} | "
+                    f"elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
 
         if ep_len > 0:
             episode_rewards.append(ep_reward)
@@ -391,10 +493,9 @@ class AgileRLTrainer(BaselineTrainer):
                     collect_rollouts_multi_agent(agent, env, n_steps=remaining)
                     try:
                         loss = agent.learn()
-                        if isinstance(loss, dict):
-                            losses.append(
-                                float(np.mean([float(v) for v in loss.values()]))
-                            )
+                        mean_loss = self._mean_loss(loss)
+                        if mean_loss is not None:
+                            losses.append(mean_loss)
                     except Exception as exc:  # pragma: no cover
                         if self.verbose:
                             print(

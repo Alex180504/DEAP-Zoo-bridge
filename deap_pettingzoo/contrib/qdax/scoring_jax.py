@@ -86,6 +86,13 @@ def make_jax_scoring_function(
             f"action_type must be 'discrete' or 'continuous'; got {action_type!r}."
         )
     agent_list = list(agents if agents is not None else jax_env.agents)
+    # Agents present in the env but NOT in agent_list need noop actions so
+    # jax_env.step() receives a complete action dict.
+    all_env_agents = list(jax_env.agents)
+    policy_set = set(agent_list)
+    noop_agents = [a for a in all_env_agents if a not in policy_set]
+    _noop_action = jnp.array(0, dtype=jnp.int32)  # works for discrete MPE
+
     extract = extract_state_fn or _extract_positions_velocities
 
     def _action(raw):
@@ -104,6 +111,8 @@ def make_jax_scoring_function(
             for a in agent_list:
                 raw = module.apply({"params": params}, obs[a])
                 actions[a] = _action(raw)
+            for a in noop_agents:
+                actions[a] = _noop_action
             new_obs, new_state, rewards, dones, _infos = jax_env.step(
                 sub, state, actions
             )

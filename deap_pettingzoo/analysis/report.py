@@ -202,13 +202,42 @@ def _write_html(
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{title}</title>
 <style>
-body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; max-width: 980px; }}
-table {{ border-collapse: collapse; margin: 1rem 0; }}
-th, td {{ border: 1px solid #ccc; padding: 0.3rem 0.6rem; font-size: 0.92rem; }}
-th {{ background: #f4f4f4; }}
+:root {{
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --border: #cccccc;
+    --th-bg: #f4f4f4;
+}}
+@media (prefers-color-scheme: dark) {{
+    :root {{
+        --bg: #0e1117;
+        --fg: #e6e6e6;
+        --muted: #a0a0a0;
+        --border: #3a3a3a;
+        --th-bg: #1c2129;
+    }}
+}}
+body {{
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 2rem; max-width: 980px;
+    background: var(--bg); color: var(--fg);
+}}
+table {{ border-collapse: collapse; margin: 1rem 0; color: var(--fg); }}
+th, td {{
+    border: 1px solid var(--border);
+    padding: 0.3rem 0.6rem; font-size: 0.92rem;
+}}
+th {{ background: var(--th-bg); }}
+tr:nth-child(even) td {{ background: rgba(127,127,127,0.06); }}
+a {{ color: #4ea1ff; }}
+code {{
+    background: rgba(127,127,127,0.15); padding: 0 0.25rem; border-radius: 3px;
+}}
 figure {{ margin: 1.5rem 0; }}
-figure img {{ max-width: 100%; }}
-figcaption {{ color: #666; font-size: 0.9rem; margin-top: 0.3rem; }}
+figure img {{ max-width: 100%; background: #ffffff; border-radius: 4px; }}
+figcaption {{ color: var(--muted); font-size: 0.9rem; margin-top: 0.3rem; }}
 </style></head><body>
 <h1>{title}</h1>
 <p><strong>Runs analysed:</strong> {n_runs} &middot;
