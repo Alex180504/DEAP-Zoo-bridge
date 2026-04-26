@@ -1058,4 +1058,101 @@ note bottom of report
   same surfaces — no new public API.
 end note
 
+package "deap_pettingzoo.utils.logging.checkpoints" {
+    class PolicyCheckpointEntry <<dataclass, frozen>> {
+        + kind: str
+        + path: str
+        + extra: dict
+        --
+        + {static} from_manifest_entry(entry: dict) -> PolicyCheckpointEntry
+    }
+
+    class checkpoints <<module>> {
+        + KIND_EA_GENOME = "ea_genome_v1"
+        + KIND_CMA_GENOME = "cma_genome_v1"
+        + KIND_AGILERL = "agilerl_v1"
+        + KIND_QDAX_REPERTOIRE = "qdax_repertoire_v1"
+        + KIND_COEVOLUTION = "coevolution_v1"
+        + KNOWN_KINDS: frozenset[str]
+        --
+        + save_ea_genome(logger, genome, *, filename, kind, extra) -> Path | None
+        + save_agilerl_agent(logger, agent, *, filename, extra) -> Path | None
+        + register_existing_artifact(logger, *, kind, path, extra) -> Path | None
+    }
+}
+
+package "deap_pettingzoo.analysis.policies" {
+    class PolicyReloadUnavailable <<RuntimeError>>
+
+    class CoevolutionPolicyBundle {
+        + reporting_side: str
+        + sides: dict[str, Any]
+        + env_name: str | None
+        --
+        + side_names() -> list[str]
+        + get_side(name, *, action_space=None) -> Policy
+    }
+
+    class policies <<module>> {
+        + load_policy(run_record, *, action_space=None) -> Policy | CoevolutionPolicyBundle
+    }
+}
+
+package "deap_pettingzoo.ui" {
+    class _launcher <<module>> {
+        + StreamlitNotInstalled
+        + run(results_root=None, *, extra_args=None) -> int
+        + main() -> int
+    }
+
+    class UISettings <<dataclass, frozen>> {
+        + results_root: Path
+        + results_root_exists: bool
+    }
+
+    class UIState <<dataclass>> {
+        + results_root: Path
+        + selected_run_ids: list[str]
+        + metric: str
+        + statistic: str
+        + ci_level: float
+        + n_resamples: int
+        + pairwise_test: str
+        --
+        + {static} from_mapping(data: Mapping) -> UIState
+        + {static} from_streamlit() -> UIState
+        + persist() -> None
+        + update_selected(run_ids: Iterable[str]) -> None
+    }
+
+    class RunSummary <<dataclass>> {
+        + run_id: str
+        + run_dir: Path
+        + algorithm: str
+        + env_name: str
+        + seed: int | None
+        + wall_time_s: float | None
+        + final_summary: dict
+    }
+
+    class data <<module>> {
+        + discover_runs(root: Path) -> list[RunSummary]
+        + load_experiment_cached(run_dirs) -> Experiment
+    }
+
+    class config <<module>> {
+        + DEFAULT_ROOT_ENV_VAR = "DEAP_RESULTS_ROOT"
+        + DEFAULT_RESULTS_ROOT: Path
+        + load_settings(*, results_root=None) -> UISettings
+    }
+}
+
+policies ..> RunRecord : "reads .manifest"
+policies ..> PolicyCheckpointEntry : parses
+checkpoints ..> RunManifest : "writes .artifacts['policy']"
+data ..> RunRecord : loads
+data ..> Experiment : builds
+config ..> UISettings : returns
+_launcher ..> config : "DEAP_RESULTS_ROOT env"
+
 @enduml
