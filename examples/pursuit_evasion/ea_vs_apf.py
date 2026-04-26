@@ -37,11 +37,9 @@ import numpy as np
 from deap import tools
 
 from deap_pettingzoo.contrib.pursuit_evasion import PursuitEvasionEnv, PursuitEvasionConfig
+from deap_pettingzoo.contrib.pursuit_evasion import APFEvaderPolicy, APFConfig
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
-from deap_pettingzoo.policies import (
-    APFEvaderPolicy,
-    APFConfig,
-    FeedforwardNeuralPolicy,
+from deap_pettingzoo.policies import (dNeuralPolicy,
 )
 from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import (
@@ -49,6 +47,7 @@ from deap_pettingzoo.integration.deap_integration import (
     create_toolbox,
     clone_individual,
 )
+from deap_pettingzoo.utils.logging import ExperimentLogger
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +59,7 @@ NUM_GENERATIONS = 15
 MAX_STEPS_PER_EPISODE = 150
 HIDDEN_SIZE = 48
 SEED = 0
+OUTPUT_DIR = Path("results/pursuit_evasion_ea_vs_apf")
 
 # Scenario — scaled down from 10v10 for a reasonable prototype runtime.
 # Change ``num_good`` / ``num_adversaries`` to 10 for the full methodology.
@@ -312,8 +312,53 @@ def main() -> None:
     print(f"  APF evader reward   : {eval_stats['evader_mean']:+.2f} "
           f"± {eval_stats['evader_std']:.2f}")
 
-    out_dir = Path("results/pursuit_evasion_ea_vs_apf")
+    out_dir = OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mirror the per-generation stats into the canonical run layout so
+    # the analysis UI / report can pick this experiment up alongside the
+    # rest of the baselines.
+    logger = ExperimentLogger.create(
+        out_dir,
+        algorithm="ea",
+        env_name="pursuit_evasion",
+        seed=SEED,
+        budget_mode="eval_episodes",
+        budget_value=POPULATION_SIZE * (NUM_GENERATIONS + 1),
+        hyperparams={
+            "population_size": POPULATION_SIZE,
+            "num_generations": NUM_GENERATIONS,
+            "hidden_size": HIDDEN_SIZE,
+            "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
+            "num_adversaries": ENV_CONFIG.num_adversaries,
+            "num_good": ENV_CONFIG.num_good,
+            "num_obstacles": ENV_CONFIG.num_obstacles,
+        },
+        notes="EA pursuers vs APF evaders.",
+    )
+    with logger:
+        for h in result["history"]:
+            logger.row("metrics", {
+                "iteration": int(h["gen"]),
+                "env_steps": int(h["gen"]) * POPULATION_SIZE,
+                "wall_time": 0.0,
+                "mean": float(h["avg"]),
+                "std": float(h["std"]),
+                "min": float(h["min"]),
+                "max": float(h["max"]),
+                "best": float(h["max"]),
+            })
+        logger.summary({
+            "final_fitness": float(result["best_fitness"]),
+            "best_fitness": float(result["best_fitness"]),
+            "num_generations": NUM_GENERATIONS,
+            "population_size": POPULATION_SIZE,
+            "training_time_s": float(evolution_time),
+            "eval_pursuer_mean": eval_stats["pursuer_mean"],
+            "eval_pursuer_std": eval_stats["pursuer_std"],
+            "eval_evader_mean": eval_stats["evader_mean"],
+        })
+
     np.savez(
         out_dir / "fitness_history.npz",
         history=np.array([(h["gen"], h["avg"], h["std"], h["min"], h["max"])
@@ -322,6 +367,7 @@ def main() -> None:
                                 ("min", "f4"), ("max", "f4")]),
     )
     print(f"\n  Saved fitness history to {out_dir / 'fitness_history.npz'}")
+    print(f"  Logged run to {logger.run_dir}")
     _section("Done")
 
 

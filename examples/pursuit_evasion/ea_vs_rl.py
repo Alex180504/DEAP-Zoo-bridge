@@ -61,6 +61,7 @@ from deap_pettingzoo.integration.deap_integration import (
     setup_deap_creators,
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
+from deap_pettingzoo.utils.logging import ExperimentLogger
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,9 @@ def train_maddpg_opponent() -> AgileRLPolicyWrapper:
             "learning_delay": MADDPG_WARMUP,
             "max_steps_per_episode": ENV_CONFIG["max_cycles"],
         },
+        # MADDPGTrainer auto-logs through build_logger when output_dir
+        # is set; emits its own manifest/episodes/summary under this dir.
+        output_dir=OUTPUT_DIR / "maddpg_opponent",
     )
 
     result = trainer.train(cfg)
@@ -325,6 +329,49 @@ def main() -> None:
     print(f"  Total                 : {stage1_time + stage2_time + stage3_time:6.1f}s")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Log the EA-vs-frozen-MADDPG stage as a canonical run so the UI
+    # can compare it against the EA-vs-APF baseline alongside the
+    # MADDPG opponent run logged by stage 1.
+    ea_logger = ExperimentLogger.create(
+        OUTPUT_DIR / "ea_pursuers",
+        algorithm="ea",
+        env_name=ENV_NAME,
+        seed=SEED,
+        budget_mode="eval_episodes",
+        budget_value=POPULATION_SIZE * (NUM_GENERATIONS + 1),
+        hyperparams={
+            "population_size": POPULATION_SIZE,
+            "num_generations": NUM_GENERATIONS,
+            "hidden_size": HIDDEN_SIZE,
+            "max_steps_per_episode": ENV_CONFIG["max_cycles"],
+            "opponent": "maddpg_frozen",
+            "maddpg_steps": MADDPG_STEPS,
+        },
+        notes="EA pursuers vs frozen MADDPG evaders.",
+    )
+    with ea_logger:
+        for h in evo["history"]:
+            ea_logger.row("metrics", {
+                "iteration": int(h["gen"]),
+                "env_steps": int(h["gen"]) * POPULATION_SIZE,
+                "wall_time": 0.0,
+                "mean": float(h["avg"]),
+                "max": float(h["max"]),
+                "best": float(h["max"]),
+            })
+        ea_logger.summary({
+            "final_fitness": float(evo["best_fitness"]),
+            "best_fitness": float(evo["best_fitness"]),
+            "num_generations": NUM_GENERATIONS,
+            "population_size": POPULATION_SIZE,
+            "training_time_s": float(stage2_time),
+            "eval_pursuer_mean": stats["pursuer_mean"],
+            "eval_pursuer_std": stats["pursuer_std"],
+            "eval_evader_mean": stats["evader_mean"],
+            "stage1_maddpg_train_time_s": float(stage1_time),
+        })
+
     np.savez(
         OUTPUT_DIR / "summary.npz",
         history=np.array(
@@ -336,6 +383,7 @@ def main() -> None:
         final_evader_mean=np.float32(stats["evader_mean"]),
     )
     _section(f"Saved summary to {OUTPUT_DIR / 'summary.npz'}")
+    print(f"  Logged EA run to {ea_logger.run_dir}")
 
 
 if __name__ == "__main__":
