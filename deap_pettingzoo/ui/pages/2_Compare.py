@@ -114,7 +114,17 @@ with st.sidebar:
 state.persist()
 
 # ----- learning curves -----------------------------------------------------
-tab_curves, tab_pairwise, tab_summary = st.tabs(["Curves", "Pairwise", "Summary"])
+_envs_in_selection = list(experiment.by_env().keys())
+_is_multitask = len(_envs_in_selection) >= 2
+if _is_multitask:
+    tab_curves, tab_pairwise, tab_multitask, tab_summary = st.tabs(
+        ["Curves", "Pairwise", "Multi-task", "Summary"]
+    )
+else:
+    tab_curves, tab_pairwise, tab_summary = st.tabs(
+        ["Curves", "Pairwise", "Summary"]
+    )
+    tab_multitask = None
 
 with tab_curves:
     st.subheader(f"{state.statistic.upper()} of `{state.metric}` vs `{x_col}`")
@@ -177,6 +187,86 @@ with tab_pairwise:
             st.dataframe(tbl, use_container_width=True)
     except Exception as exc:
         st.error(f"Pairwise table failed: {exc}")
+
+if tab_multitask is not None:
+    with tab_multitask:
+        st.subheader("Cross-task aggregation (rliable)")
+        st.caption(
+            "Selected runs span "
+            f"{len(_envs_in_selection)} environments: "
+            + ", ".join(f"`{e}`" for e in _envs_in_selection)
+        )
+        algos_in_selection = sorted(experiment.by_algorithm().keys())
+        norm_mode = st.radio(
+            "Normalisation",
+            ["auto min-max", "reference algorithm", "off"],
+            horizontal=True,
+        )
+        ref_algo = None
+        if norm_mode == "reference algorithm":
+            ref_algo = st.selectbox("Reference algorithm", algos_in_selection)
+
+        try:
+            from deap_pettingzoo.analysis import (  # noqa: WPS433
+                NormalizationSpec,
+                aggregate_metrics_forest,
+                collect_score_matrices,
+                normalize_score_matrices,
+            )
+            from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
+                performance_profile,
+                probability_of_improvement,
+            )
+            from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
+
+            matrices, env_names = collect_score_matrices(
+                experiment, metric="final_fitness"
+            )
+            if not matrices or len(env_names) < 2:
+                st.info("No multi-task scores available across the selection.")
+            else:
+                if norm_mode == "auto min-max":
+                    spec = NormalizationSpec.from_minmax(matrices, env_names)
+                    normed = normalize_score_matrices(matrices, env_names, spec)
+                elif norm_mode == "reference algorithm" and ref_algo:
+                    spec = NormalizationSpec.from_reference_algorithm(
+                        matrices, env_names, ref_algo
+                    )
+                    normed = normalize_score_matrices(matrices, env_names, spec)
+                else:
+                    normed = matrices
+
+                st.markdown("**Aggregate metrics (95% bootstrap CI)**")
+                forest = aggregate_metrics_forest(normed, reps=2000)
+                st.dataframe(forest, use_container_width=True)
+                fig_forest = _plots.plot_aggregate_metrics_forest(forest)
+                st.pyplot(fig_forest)
+
+                st.markdown("**Performance profile (normalised)**")
+                taus, point, intervals = performance_profile(
+                    score_matrices=normed, reps=1000, n_tau=40
+                )
+                fig_pp = _plots.plot_normalized_performance_profile(
+                    taus, point, intervals
+                )
+                st.pyplot(fig_pp)
+
+                st.markdown("**Per-env score distributions (raw)**")
+                fig_env = _plots.plot_per_env_eval(matrices, env_names)
+                st.pyplot(fig_env)
+
+                st.markdown("**Probability of improvement (normalised)**")
+                poi = probability_of_improvement(
+                    score_matrices=normed, reps=1000
+                )
+                st.dataframe(poi, use_container_width=True)
+        except ImportError as exc:
+            st.error(
+                "Multi-task analysis requires the `[analysis]` extra "
+                f"({exc})."
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Multi-task analysis failed: {exc}")
 
 with tab_summary:
     try:

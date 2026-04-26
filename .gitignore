@@ -181,3 +181,4 @@ pyrightconfig.json
 results/
 .report-out/
 errors.txt
+test_results.txt
