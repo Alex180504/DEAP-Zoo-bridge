@@ -239,6 +239,17 @@ class CMAESTrainer(BaselineTrainer):
                 fitness_history,
                 env_steps_per_iteration=self.population_size * max_steps_per_episode,
             )
+            from deap_pettingzoo.utils.logging import save_ea_genome, KIND_CMA_GENOME
+            save_ea_genome(
+                log,
+                best_genome,
+                kind=KIND_CMA_GENOME,
+                extra={
+                    "final_fitness": float(best_individual.fitness.values[0]),
+                    "env_name": config.env_name,
+                    "variant": self.variant,
+                },
+            )
             write_summary(
                 log,
                 {

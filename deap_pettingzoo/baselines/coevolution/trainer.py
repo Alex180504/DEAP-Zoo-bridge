@@ -58,6 +58,97 @@ from deap_pettingzoo.utils.parallel import (
 from .evaluator import CoEvolutionEvaluator
 from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
+
+
+# ---------------------------------------------------------------------------
+# QDax-specific evaluator
+# ---------------------------------------------------------------------------
+
+class _QDaxPolicyEvaluator:
+    """Thin evaluator that accepts a pre-constructed policy (FlaxPolicyAdapter)
+    instead of a DEAP individual with a genome.
+
+    QDaxSideState converts its JAX pytree genotype into a policy *before*
+    calling ``evaluator.evaluate(policy)``, so the generic
+    ``CoEvolutionEvaluator`` (which requires ``individual.genome``) cannot
+    be used directly.  This wrapper runs one episode with the given policy
+    against sampled opponents and returns a scalar fitness.
+    """
+
+    def __init__(self, env_wrapper, learner_role_prefixes, opponent_sides,
+                 k_opponents, aggregation, max_steps, rng_factory):
+        self._env = env_wrapper
+        self._learner_prefixes = learner_role_prefixes
+        self._opponent_sides = opponent_sides
+        self._k = k_opponents
+        self._aggregation = aggregation
+        self._max_steps = max_steps
+        self._rng_factory = rng_factory  # callable () -> Generator
+
+        self._learner_agents = [
+            a for a in env_wrapper.possible_agents
+            if any(a.startswith(p) for p in learner_role_prefixes)
+        ]
+        self._side_agents: Dict[str, list] = {}
+        for side_name, prefixes, _pool in opponent_sides:
+            self._side_agents[side_name] = [
+                a for a in env_wrapper.possible_agents
+                if any(a.startswith(p) for p in prefixes)
+            ]
+
+    def evaluate(self, policy) -> float:
+        """Run k episodes with *policy* for all learner agents; return fitness."""
+        rng = self._rng_factory()
+        rewards = []
+        for i in range(self._k):
+            opp_policies: Dict[str, Any] = {}
+            for side_name, _prefixes, pool in self._opponent_sides:
+                side_policy = pool.sample_opponent(rng)
+                for agent in self._side_agents[side_name]:
+                    opp_policies[agent] = side_policy
+
+            learner_total = self._run_episode(policy, opp_policies, seed=i)
+            rewards.append(learner_total)
+
+        arr = np.asarray(rewards, dtype=np.float64)
+        if self._aggregation == "mean":
+            return float(arr.mean())
+        if self._aggregation == "min":
+            return float(arr.min())
+        if self._aggregation == "max":
+            return float(arr.max())
+        return float(arr.mean())
+
+    def _run_episode(self, policy, opp_policies, seed=None) -> float:
+        from deap_pettingzoo.baselines.coevolution.evaluator import _invoke_get_action
+
+        observations = self._env.reset(seed=seed)
+        if hasattr(policy, "reset"):
+            policy.reset()
+        for p in opp_policies.values():
+            if hasattr(p, "reset"):
+                p.reset()
+
+        total = 0.0
+        steps = 0
+        while steps < self._max_steps and observations:
+            infos = getattr(self._env, "last_infos", {}) or {}
+            actions: Dict[str, Any] = {}
+            for agent, obs in observations.items():
+                mask = infos.get(agent, {}).get("action_mask")
+                if agent in self._learner_agents:
+                    actions[agent] = _invoke_get_action(policy, obs, mask, deterministic=True)
+                elif agent in opp_policies:
+                    actions[agent] = _invoke_get_action(opp_policies[agent], obs, mask)
+            observations, rew, terms, truncs, _ = self._env.step(actions)
+            for agent in self._learner_agents:
+                total += float(rew.get(agent, 0.0))
+            steps += 1
+            if terms and all(terms.values()):
+                break
+            if truncs and all(truncs.values()):
+                break
+        return total
 from deap_pettingzoo.utils.device_check import (
     torch_uses_cuda,
     warn_on_gpu_contention,
@@ -496,6 +587,73 @@ class CoEvolutionTrainer(BaselineTrainer):
                 },
                 training_time_s=training_time,
             )
+            self._save_coevolution_policy(log, coev_cfg, states)
+
+    def _save_coevolution_policy(
+        self,
+        log: Any,
+        coev_cfg: "CoEvolutionConfig",
+        states: Dict[str, Any],
+    ) -> None:
+        """Serialize per-side genomes to ``checkpoints/policy.json``.
+
+        Only EA/CMA sides with a ``FixedTopologyGenome`` snapshot are
+        persisted; frozen and QDax sides are skipped (frozen policies
+        were supplied by the caller; QDax repertoires live in their
+        own subprocesses and are out of scope for this hook).
+        """
+        from deap_pettingzoo.utils.logging import KIND_COEVOLUTION
+        from deap_pettingzoo.utils.logging.checkpoints import (
+            _checkpoints_dir,
+            _is_real_logger,
+            _register,
+        )
+        import json as _json
+
+        if not _is_real_logger(log):
+            return
+        sides_payload: Dict[str, Any] = {}
+        for name, state in states.items():
+            if state.side.optimizer not in {"ea", "cma"}:
+                continue
+            try:
+                snap = state.best_snapshot()
+            except (AssertionError, AttributeError):
+                continue
+            if hasattr(snap, "to_dict"):
+                sides_payload[name] = {
+                    "kind": (
+                        "ea_genome_v1"
+                        if state.side.optimizer == "ea"
+                        else "cma_genome_v1"
+                    ),
+                    "genome": snap.to_dict(),
+                    "best_fitness": float(state.best_fitness),
+                }
+        if not sides_payload:
+            return
+        target = _checkpoints_dir(log.run_dir) / "policy.json"
+        target.write_text(
+            _json.dumps(
+                {
+                    "schema": "coevolution_v1",
+                    "reporting_side": coev_cfg.reporting_side,
+                    "sides": sides_payload,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        _register(
+            log,
+            kind=KIND_COEVOLUTION,
+            path=target,
+            extra={
+                "reporting_side": coev_cfg.reporting_side,
+                "side_names": sorted(sides_payload.keys()),
+            },
+        )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
@@ -611,6 +769,11 @@ class CoEvolutionTrainer(BaselineTrainer):
         for name, state in states.items():
             if state.side.optimizer == "frozen":
                 continue
+            # QDax-backed sides already evaluated their initial repertoire
+            # inside map_elites.init() during initialise(); they expose no
+            # rebind_evaluator / evaluate_population interface.
+            if not hasattr(state, "rebind_evaluator"):
+                continue
             evaluator = self._build_evaluator(env, state, states, coev_cfg)
             # Set toolbox.evaluate then evaluate the population.
             state.rebind_evaluator(evaluator)  # type: ignore[attr-defined]
@@ -665,6 +828,27 @@ class CoEvolutionTrainer(BaselineTrainer):
             if learner_optimizer in {"ea", "cma"}
             else None
         )
+
+        # QDax sides drive their own JAX update loop; their scoring
+        # function receives a pre-built FlaxPolicyAdapter, not a DEAP
+        # individual.  Use a lightweight episode evaluator that skips
+        # the genome-based factory entirely.
+        if learner_optimizer in {"qdax_map_elites", "qdax_cma_me"}:
+            trainer_rng = self._rng
+
+            def _qdax_rng_factory():
+                return np.random.default_rng(trainer_rng.integers(0, 2**63 - 1))
+
+            return _QDaxPolicyEvaluator(
+                env_wrapper=env,
+                learner_role_prefixes=learner_state.side.role_prefixes,
+                opponent_sides=opp_sides,
+                k_opponents=coev_cfg.k_opponents,
+                aggregation=coev_cfg.aggregation,
+                max_steps=coev_cfg.max_steps_per_episode,
+                rng_factory=_qdax_rng_factory,
+            )
+
         evaluator = CoEvolutionEvaluator(
             env_wrapper=env,
             learner_role_prefixes=learner_state.side.role_prefixes,

@@ -38,6 +38,60 @@ def _read_parquet_if_exists(path: Path):
         return None
 
 
+def _synthesise_metrics_from_episodes(episodes, summary: Dict[str, Any]):
+    """Build a ``metrics``-shaped frame from a per-episode reward log.
+
+    Produces columns ``iteration``, ``env_steps``, ``wall_time``,
+    ``mean``, ``min``, ``max`` so RL runs (which log per-episode rewards
+    in ``episodes.csv``) can share aggregation utilities with EA runs
+    (which log per-generation aggregates in ``metrics.csv``).
+
+    Aggregation is a running window of size ``max(1, n_episodes // 50)``
+    so the curve is smoothed but still has ~50 points.
+    """
+    pd = _lazy_pd()
+    df = episodes.copy()
+    if "reward" not in df.columns:
+        return None
+    n = len(df)
+    if n == 0:
+        return None
+
+    # iteration / env_steps axes
+    if "episode_idx" in df.columns:
+        df = df.sort_values("episode_idx").reset_index(drop=True)
+    iters = pd.Series(range(n), name="iteration")
+    if "length" in df.columns and (df["length"] > 0).all():
+        env_steps = df["length"].cumsum().astype(int)
+    else:
+        # Fall back to summary totals (num_episodes -> env_steps).
+        total_env_steps = summary.get("env_steps")
+        total_episodes = summary.get("num_episodes") or n
+        steps_per_ep = (
+            float(total_env_steps) / max(1, int(total_episodes))
+            if total_env_steps is not None
+            else 1.0
+        )
+        env_steps = ((iters + 1) * steps_per_ep).round().astype(int)
+
+    # Smoothed reward: rolling window over per-episode rewards.
+    window = max(1, n // 50)
+    reward = df["reward"].astype(float)
+    rolling = reward.rolling(window=window, min_periods=1)
+
+    out = pd.DataFrame(
+        {
+            "iteration": iters,
+            "env_steps": env_steps.values,
+            "wall_time": [0.0] * n,
+            "mean": rolling.mean().values,
+            "min": rolling.min().values,
+            "max": rolling.max().values,
+        }
+    )
+    return out
+
+
 @dataclass
 class RunRecord:
     """A single hydrated training run.
@@ -139,6 +193,13 @@ def load_run(run_dir: str | Path) -> RunRecord:
                     summary = json.load(f)
             except (OSError, json.JSONDecodeError):
                 summary = {}
+
+    # When a trainer (typically RL) logs per-episode rewards instead of
+    # aggregated per-iteration metrics, synthesise a ``metrics``-shaped
+    # frame so cross-algorithm tools (learning_curve_with_ci, the Compare
+    # page) can plot EA and RL on the same axes.
+    if metrics is None and episodes is not None and len(episodes) > 0:
+        metrics = _synthesise_metrics_from_episodes(episodes, summary)
 
     return RunRecord(
         run_dir=run_dir,

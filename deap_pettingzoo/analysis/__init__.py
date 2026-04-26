@@ -47,9 +47,16 @@ from deap_pettingzoo.analysis.compare import (
     pairwise_table,
     welch_t,
 )
+from deap_pettingzoo.analysis.policies import (
+    CoevolutionPolicyBundle,
+    PolicyReloadUnavailable,
+    load_policy,
+)
 
 __all__ = [
+    "CoevolutionPolicyBundle",
     "Experiment",
+    "PolicyReloadUnavailable",
     "RunRecord",
     "bootstrap_ci",
     "cliffs_delta",
@@ -57,6 +64,7 @@ __all__ = [
     "iqm",
     "learning_curve_with_ci",
     "load_experiment",
+    "load_policy",
     "load_run",
     "mann_whitney",
     "mean_with_ci",
