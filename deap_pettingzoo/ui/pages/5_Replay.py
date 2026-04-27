@@ -14,7 +14,7 @@ from deap_pettingzoo.ui.services.data import discover_runs
 # prefix is captured non-greedily and may be empty (e.g. legacy
 # `episode_0001.mp4`). Trainers currently emit `train_`; live-rollout
 # capture uses `live_`.
-_EPISODE_RE = re.compile(r"^(?P<prefix>\w*?)episode_\d+\.(?:mp4|gif)$")
+_EPISODE_RE = re.compile(r"^(?P<prefix>.*?)episode_\d+\.(?:mp4|gif)$")
 
 
 def _prefix_of(path: Path) -> str:

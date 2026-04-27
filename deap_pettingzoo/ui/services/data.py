@@ -108,13 +108,17 @@ def load_experiment_cached(run_dirs: List[Path]) -> "Experiment":
     from deap_pettingzoo.analysis.loaders import Experiment, load_run
 
     runs: List["RunRecord"] = []
-    common_root: Optional[Path] = None
+    resolved_parents: List[Path] = []
     for run_dir in run_dirs:
         try:
             runs.append(load_run(run_dir))
         except (FileNotFoundError, ValueError):
             continue
-        # Track the common parent for the Experiment.root field.
-        parent = Path(run_dir).resolve().parent
-        common_root = parent if common_root is None else common_root
-    return Experiment(root=common_root or Path.cwd(), runs=runs)
+        resolved_parents.append(Path(run_dir).resolve().parent)
+
+    if resolved_parents:
+        import os
+        common_root: Path = Path(os.path.commonpath([str(p) for p in resolved_parents]))
+    else:
+        common_root = Path.cwd()
+    return Experiment(root=common_root, runs=runs)

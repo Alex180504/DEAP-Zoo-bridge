@@ -37,7 +37,17 @@ def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
     if not (hasattr(base, "original_cam_range") and hasattr(base, "draw")):
         return
 
-    import pygame as _pygame
+    try:
+        import pygame as _pygame
+    except ImportError:
+        import warnings
+        warnings.warn(
+            "pygame is not installed; _patch_fixed_cam_range will be skipped. "
+            "Install it to enable stable-viewport frame recording.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
 
     _cam = base.original_cam_range  # fixed at env construction
 
