@@ -16,13 +16,23 @@ from deap_pettingzoo.ui.services.data import (
     discover_runs,
     load_experiment_cached,
 )
+from deap_pettingzoo.ui.services.management import (
+    create_folder,
+    delete_run,
+    move_run,
+    rename_run,
+)
 from deap_pettingzoo.ui.services.state import UIState
 
 __all__ = [
     "DEFAULT_ROOT_ENV_VAR",
     "UISettings",
     "UIState",
+    "create_folder",
+    "delete_run",
     "discover_runs",
     "load_experiment_cached",
     "load_settings",
+    "move_run",
+    "rename_run",
 ]
