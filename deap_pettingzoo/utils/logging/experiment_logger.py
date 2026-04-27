@@ -240,14 +240,22 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         fps: int = 20,
         fmt: str = "mp4",
         max_frames_per_episode: Optional[int] = None,
+        episode_prefix: str = "",
     ) -> FrameRecorder:
-        """Lazily build and cache a :class:`FrameRecorder` rooted at the run dir."""
+        """Lazily build and cache a :class:`FrameRecorder` rooted at the run dir.
+
+        ``episode_prefix`` is woven into output filenames as
+        ``frames/{prefix}episode_NNNN.{ext}``. Trainers should pass
+        ``"train_"`` to keep training captures distinct from future
+        live-rollout captures sharing the same ``frames/`` directory.
+        """
         if self._frame_recorder is None:
             self._frame_recorder = FrameRecorder(
                 self.run_dir,
                 fps=fps,
                 fmt=fmt,
                 max_frames_per_episode=max_frames_per_episode,
+                episode_prefix=episode_prefix,
             )
         return self._frame_recorder
 

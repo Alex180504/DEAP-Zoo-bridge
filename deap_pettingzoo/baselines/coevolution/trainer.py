@@ -38,7 +38,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -330,6 +330,10 @@ class CoEvolutionTrainer(BaselineTrainer):
     requires matching env / budget configuration by hand.
     """
 
+    #: Coevolution iterates per generation — default to one champion
+    #: rollout artefact per generation when recording is enabled.
+    _default_recording_every_n: ClassVar[int] = 1
+
     def train(self, config: TrainingConfig) -> TrainingResult:
         coev_cfg = config.algorithm_params.get("coevolution")
         if not isinstance(coev_cfg, CoEvolutionConfig):
@@ -445,11 +449,59 @@ class CoEvolutionTrainer(BaselineTrainer):
             per_side_history: Dict[str, List[GenerationStats]] = {
                 name: [] for name in states
             }
+
+            # Optional frame recording: build the logger up-front so we
+            # can render a champion rollout every ``cadence`` generations
+            # using the reporting side's current best policy. Recording
+            # is best-effort — any error is swallowed so it cannot break
+            # training.
+            from deap_pettingzoo.baselines._logging_helpers import build_logger
+
+            self._recording_log = build_logger(config, algorithm="coevolution")
+            recording_cfg = config.recording
+            recording_cadence = self._resolve_recording_every_n(config)
+            self._recording_recorder = None
+            if recording_cfg.enabled:
+                rec_max_steps = int(
+                    config.algorithm_params.get("max_steps_per_episode", 100)
+                )
+                recorder = self._recording_log.get_frame_recorder(
+                    fps=recording_cfg.fps,
+                    fmt=recording_cfg.fmt,
+                    max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                    episode_prefix=recording_cfg.episode_prefix or "train_",
+                )
+                if recorder.enabled:
+                    self._recording_recorder = recorder
+                    self._recording_max_steps = rec_max_steps
+
+            def _record_champion_if_due(gen: int) -> None:
+                """Render one multi-policy rollout using each side's
+                current best policy, mapped per role prefix.
+
+                Coevolution is heterogeneous, so we cannot reuse
+                :class:`UnifiedEvaluator` (which broadcasts a single
+                policy to every agent). Instead we drive the env
+                directly and dispatch each agent's observation to the
+                side that owns its role prefix.
+                """
+                if self._recording_recorder is None:
+                    return
+                if gen % recording_cadence != 0:
+                    return
+                try:
+                    self._record_coevolution_rollout(
+                        config, coev_cfg, states, gen
+                    )
+                except Exception:
+                    pass
+
             if coev_cfg.schedule == "synchronous":
                 for _g in range(num_generations):
                     self._run_synchronous_generation(
                         env, states, coev_cfg, per_side_history
                     )
+                    _record_champion_if_due(_g + 1)
             else:  # alternating
                 total = 0
                 rotation = list(states)
@@ -462,6 +514,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                                 env, states, coev_cfg, per_side_history, name
                             )
                             total += 1
+                            _record_champion_if_due(total)
 
             # Build reporting-side policy *inside* the executor scope
             # in case best_policy() ever needs to evaluate (it does
@@ -470,6 +523,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             policy = reporting.best_policy(env)
 
         env.close()
+        # FrameRecorder has no close(); end_episode() is invoked per
+        # rollout in _record_coevolution_rollout. Nothing to do here.
         training_time = time.time() - start
         metrics = {
             "per_side_history": {
@@ -551,7 +606,15 @@ class CoEvolutionTrainer(BaselineTrainer):
             write_summary,
         )
 
-        with build_logger(config, algorithm="coevolution") as log:
+        # Reuse the logger built in ``train()`` (so frame recording and
+        # metrics share a single run directory). Falls back to building
+        # a fresh one if the trainer was used without going through
+        # ``train()`` (defensive).
+        log = getattr(self, "_recording_log", None) or build_logger(
+            config, algorithm="coevolution"
+        )
+
+        with log:
             for name, hist in per_side_history.items():
                 for s in hist:
                     log.row(
@@ -670,6 +733,87 @@ class CoEvolutionTrainer(BaselineTrainer):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _record_coevolution_rollout(
+        self,
+        config: TrainingConfig,
+        coev_cfg: "CoEvolutionConfig",
+        states: Dict[str, "SideState"],
+        gen: int,
+    ) -> None:
+        """Run one heterogeneous-policy rollout and stream frames.
+
+        Each side's current best policy is mapped to the env agents
+        whose names start with the side's :attr:`Side.role_prefixes`.
+        Frames are pulled via ``env.render()`` after a fresh
+        ``rgb_array`` reset and after every step. Best-effort: a
+        FrameRecorder error or env quirk should not break training,
+        so the caller wraps this in a try/except.
+        """
+        recorder = self._recording_recorder
+        if recorder is None:
+            return
+
+        # A dedicated env in rgb_array mode — keep it isolated from the
+        # training env so we don't perturb its RNG/state.
+        record_env = PettingZooWrapper(
+            config.env_name,
+            env_config=config.env_config or None,
+            render_mode="rgb_array",
+        )
+        try:
+            # Build per-agent policy mapping.
+            agent_to_policy: Dict[str, Any] = {}
+            for state in states.values():
+                pol = state.best_policy(record_env)
+                for agent in record_env.possible_agents:
+                    if agent.startswith(state.side.role_prefixes):
+                        agent_to_policy[agent] = pol
+
+            seed = coev_cfg.seed if coev_cfg.seed is not None else None
+            obs_dict = record_env.reset(
+                seed=int(seed) + gen if seed is not None else None
+            )
+            recorder.start_episode(gen)
+            try:
+                frame = record_env.render()
+                if frame is not None:
+                    recorder.add_frame(frame)
+            except Exception:
+                pass
+
+            max_steps = self._recording_max_steps
+            for _step in range(max_steps):
+                if not obs_dict:
+                    break
+                actions = {}
+                for agent, obs in obs_dict.items():
+                    pol = agent_to_policy.get(agent)
+                    if pol is None:
+                        # No side claims this agent — random fallback.
+                        actions[agent] = record_env.action_space(agent).sample()
+                    else:
+                        try:
+                            actions[agent] = pol.get_action(
+                                obs,
+                                action_space=record_env.action_space(agent),
+                            )
+                        except Exception:
+                            actions[agent] = record_env.action_space(agent).sample()
+                obs_dict, _, terms, truncs, _ = record_env.step(actions)
+                try:
+                    frame = record_env.render()
+                    if frame is not None:
+                        recorder.add_frame(frame)
+                except Exception:
+                    pass
+                if terms and all(terms.values()):
+                    break
+                if truncs and all(truncs.values()):
+                    break
+            recorder.end_episode()
+        finally:
+            record_env.close()
 
     @staticmethod
     def _stats_to_dict(s: GenerationStats) -> Dict[str, Any]:

@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Union
+from typing import Any, ClassVar, Dict, List, Optional, Protocol, Union
 import numpy as np
 
 
@@ -18,6 +18,63 @@ class BudgetMode(Enum):
     ENV_STEPS = "env_steps"
     EVAL_EPISODES = "eval_episodes"
     WALL_CLOCK = "wall_clock"
+
+
+@dataclass
+class RecordingConfig:
+    """Opt-in frame-recording configuration nested on :class:`TrainingConfig`.
+
+    When ``enabled=True``, supported trainers run one extra champion-rollout
+    episode per recording cadence and pipe ``env.render('rgb_array')`` frames
+    through :class:`~deap_pettingzoo.utils.logging.replay.FrameRecorder`,
+    producing ``<run_dir>/frames/{episode_prefix}episode_NNNN.{mp4,gif}``.
+
+    Attributes:
+        enabled: Master on/off switch. When False all trainers skip recording.
+        every_n_generations: Recording cadence in generations / iterations.
+            ``None`` defers to the trainer's class-level
+            ``_default_recording_every_n`` (1 for EA / CMA-ES / Coevolution,
+            10 for AgileRL family).
+        fps: Frames-per-second for the encoded artefact.
+        fmt: Container format. ``"mp4"`` (requires ``imageio[ffmpeg]``) or
+            ``"gif"`` (base ``imageio``). ``mp4`` falls back to ``gif`` if
+            ffmpeg is unavailable.
+        max_frames_per_episode: Hard cap on captured frames per episode
+            (``None`` = no cap).
+        episode_prefix: Filename prefix written before ``episode_NNNN``;
+            trainers default to ``"train_"`` so they don't collide with
+            future ``"live_"`` rollout captures sharing the same
+            ``frames/`` directory.
+    """
+    enabled: bool = False
+    every_n_generations: Optional[int] = None
+    fps: int = 20
+    fmt: str = "mp4"
+    max_frames_per_episode: Optional[int] = None
+    episode_prefix: str = ""
+
+    def __post_init__(self) -> None:
+        if self.every_n_generations is not None and self.every_n_generations <= 0:
+            raise ValueError(
+                "RecordingConfig.every_n_generations must be positive or None, "
+                f"got {self.every_n_generations}"
+            )
+        if self.fps <= 0:
+            raise ValueError(f"RecordingConfig.fps must be positive, got {self.fps}")
+        fmt = str(self.fmt).lower().lstrip(".")
+        if fmt not in {"mp4", "gif"}:
+            raise ValueError(
+                f"RecordingConfig.fmt must be 'mp4' or 'gif', got {self.fmt!r}"
+            )
+        self.fmt = fmt
+        if (
+            self.max_frames_per_episode is not None
+            and self.max_frames_per_episode <= 0
+        ):
+            raise ValueError(
+                "RecordingConfig.max_frames_per_episode must be positive or None, "
+                f"got {self.max_frames_per_episode}"
+            )
 
 
 @dataclass
@@ -52,6 +109,7 @@ class TrainingConfig:
     continuous: bool = False
     output_dir: Optional[Path] = None
     render: bool = False
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -208,7 +266,26 @@ class BaselineTrainer(ABC):
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
     """
-    
+
+    #: Default recording cadence (in generations / iterations) used when
+    #: ``TrainingConfig.recording.every_n_generations`` is ``None``.
+    #: EA / CMA-ES / Coevolution leave this at 1 (record every generation);
+    #: AgileRL-family trainers override to 10 since they iterate hundreds of
+    #: times per run.
+    _default_recording_every_n: ClassVar[int] = 1
+
+    def _resolve_recording_every_n(self, config: TrainingConfig) -> int:
+        """Resolve the recording cadence honouring the trainer-aware default.
+
+        User-supplied ``config.recording.every_n_generations`` always wins;
+        ``None`` falls back to the class-level
+        :attr:`_default_recording_every_n`.
+        """
+        explicit = config.recording.every_n_generations
+        if explicit is not None:
+            return int(explicit)
+        return int(type(self)._default_recording_every_n)
+
     @abstractmethod
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train the algorithm with the given configuration.
