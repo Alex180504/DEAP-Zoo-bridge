@@ -799,40 +799,38 @@ def _mixed_worker_evaluate(
     genome = FixedTopologyGenome(
         layer_sizes=list(spec.layer_sizes),
         activation=spec.activation,
-        weight_range=(-1.0, 1.0),
+        weight_range=tuple(payload.weight_range),
         random_seed=None,
     )
     genome.set_weights(np.asarray(payload.weights, dtype=float))
 
-    # Resolve factories once per worker process (lazy cache keyed on spec).
+    # Resolve factories and build the evaluator once per worker process.
+    # The cache key includes all fields that influence evaluator construction
+    # so that a single worker correctly handles spec changes across runs.
     cache_key = (
         spec.env_factory_qualname,
         spec.scripted_factory_qualname,
         spec.learner_factory_qualname,
+        spec.max_steps,
+        tuple(spec.learner_prefixes),
     )
     if _MIXED_WORKER_CACHE.get("key") != cache_key:
         _MIXED_WORKER_CACHE["key"] = cache_key
-        _MIXED_WORKER_CACHE["env_factory"] = _resolve_callable(
-            spec.env_factory_qualname
-        )
-        _MIXED_WORKER_CACHE["scripted_factory"] = _resolve_callable(
-            spec.scripted_factory_qualname
-        )
-        _MIXED_WORKER_CACHE["learner_factory"] = _resolve_callable(
-            spec.learner_factory_qualname
+        env_factory = _resolve_callable(spec.env_factory_qualname)
+        scripted_factory = _resolve_callable(spec.scripted_factory_qualname)
+        learner_factory = _resolve_callable(spec.learner_factory_qualname)
+        _MIXED_WORKER_CACHE["env_factory"] = env_factory
+        _MIXED_WORKER_CACHE["scripted_factory"] = scripted_factory
+        _MIXED_WORKER_CACHE["learner_factory"] = learner_factory
+        _MIXED_WORKER_CACHE["evaluator"] = MixedPolicyEvaluator(
+            env_factory=env_factory,
+            scripted_policy_factory=scripted_factory,
+            learner_agent_prefixes=list(spec.learner_prefixes),
+            learner_factory=learner_factory,
+            max_steps=spec.max_steps,
         )
 
-    env_factory = _MIXED_WORKER_CACHE["env_factory"]
-    scripted_factory = _MIXED_WORKER_CACHE["scripted_factory"]
-    learner_factory = _MIXED_WORKER_CACHE["learner_factory"]
-
-    evaluator = MixedPolicyEvaluator(
-        env_factory=env_factory,
-        scripted_policy_factory=scripted_factory,
-        learner_agent_prefixes=list(spec.learner_prefixes),
-        learner_factory=learner_factory,
-        max_steps=spec.max_steps,
-    )
+    evaluator = _MIXED_WORKER_CACHE["evaluator"]
 
     class _Ind:
         __slots__ = ("genome",)
