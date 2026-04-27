@@ -35,6 +35,40 @@ from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
 
 
+# Module-level flag so we only emit the "frame recording is unsupported
+# on the QDax/JAX path" warning once per process even if the user starts
+# multiple QDax trainers in the same script.
+_QDAX_RECORDING_WARNED = False
+
+
+def _warn_recording_unsupported_once(config: TrainingConfig) -> None:
+    """Emit a one-shot RuntimeWarning when recording is requested.
+
+    Frame recording requires running policy rollouts inside the
+    PettingZoo wrapper (so :meth:`PettingZooWrapper.render` can return
+    RGB arrays). The QDax path runs scoring entirely in JAX-compiled
+    Brax-style scoring functions and never touches the PettingZoo
+    wrapper at training time, so there is no env to render.
+    """
+    global _QDAX_RECORDING_WARNED
+    if _QDAX_RECORDING_WARNED:
+        return
+    if not getattr(config, "recording", None):
+        return
+    if not config.recording.enabled:
+        return
+    warnings.warn(
+        "RecordingConfig.enabled=True is ignored on the QDax/JAX path "
+        "(MAPElitesTrainer / CMAMETrainer): training scoring runs "
+        "entirely in jit-compiled JAX with no live PettingZoo env to "
+        "render. To record QDax behaviours, post-train with "
+        "UnifiedEvaluator on the best individual instead.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    _QDAX_RECORDING_WARNED = True
+
+
 _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "layer_sizes": None,  # inferred from env if None
     "hidden_sizes": (32, 32),
@@ -326,6 +360,7 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        _warn_recording_unsupported_once(config)
 
         import jax
         from qdax.core.map_elites import MAPElites
@@ -481,6 +516,7 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        _warn_recording_unsupported_once(config)
 
         import jax
         import jax.numpy as jnp

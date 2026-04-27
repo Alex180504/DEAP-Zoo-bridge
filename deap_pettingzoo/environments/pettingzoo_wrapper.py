@@ -10,6 +10,54 @@ from .registry import (
 )
 
 
+def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
+    """Pin MPE's per-frame ``cam_range`` to a stable value for recordings.
+
+    MPE's ``SimpleEnv.draw()`` recomputes ``cam_range`` every frame as the
+    maximum absolute entity coordinate.  As agents move the zoom level
+    fluctuates, making static obstacles appear to drift in screen-space
+    even though they are motionless in world coordinates.  (The
+    ``dynamic_rescaling`` flag only controls entity *radius*, not the
+    viewport computation.)
+
+    This function replaces ``draw`` on the underlying ``SimpleEnv``
+    instance with a version that uses ``original_cam_range`` — set once
+    at env construction — so all frames share the same pixel-per-world-unit
+    scale.  Safe to call on non-MPE wrappers; silently no-ops if the
+    expected attribute chain is absent.
+    """
+    try:
+        # PettingZooWrapper.env  → aec_to_parallel_wrapper
+        # .aec_env               → OrderEnforcingWrapper
+        # .env                   → AssertOutOfBoundsWrapper
+        # .env                   → SimpleEnv  (owns .draw, .world, .screen)
+        base = wrapper.env.aec_env.env.env
+    except AttributeError:
+        return
+    if not (hasattr(base, "original_cam_range") and hasattr(base, "draw")):
+        return
+
+    import pygame as _pygame
+
+    _cam = base.original_cam_range  # fixed at env construction
+
+    def _fixed_draw(b=base):
+        b.screen.fill((255, 255, 255))
+        for entity in b.world.entities:
+            x, y = entity.state.p_pos
+            y = -y  # flip y to match MPE display convention
+            x = (x / _cam) * b.width // 2 * 0.9 + b.width // 2
+            y = (y / _cam) * b.height // 2 * 0.9 + b.height // 2
+            # Clamp so agents that stray beyond cam_range don't crash.
+            x = float(max(1, min(b.width - 1, x)))
+            y = float(max(1, min(b.height - 1, y)))
+            radius = entity.size * 350  # dynamic_rescaling disabled
+            _pygame.draw.circle(b.screen, entity.color * 200, (x, y), radius)
+            _pygame.draw.circle(b.screen, (0, 0, 0), (x, y), radius, 1)
+
+    base.draw = _fixed_draw
+
+
 class _SupportedEnvsDescriptor:
     """Descriptor backing ``PettingZooWrapper.SUPPORTED_ENVS``.
 
@@ -99,6 +147,9 @@ class PettingZooWrapper:
             env_config=self.env_config,
             render_mode=render_mode,
         )
+
+        if render_mode == "rgb_array":
+            _patch_fixed_cam_range(self)
 
         # Store agent information
         self.possible_agents = self.env.possible_agents

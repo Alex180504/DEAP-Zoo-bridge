@@ -41,6 +41,7 @@ class FrameRecorder:
         fps: int = 20,
         fmt: str = "mp4",
         max_frames_per_episode: Optional[int] = None,
+        episode_prefix: str = "",
     ) -> None:
         self.run_dir = Path(run_dir)
         self.fps = int(fps)
@@ -48,6 +49,7 @@ class FrameRecorder:
         if self.fmt not in {"mp4", "gif"}:
             raise ValueError(f"FrameRecorder: fmt must be 'mp4' or 'gif', got {fmt!r}")
         self.max_frames_per_episode = max_frames_per_episode
+        self.episode_prefix = str(episode_prefix)
         self.enabled: bool = True
         self._frames: List[np.ndarray] = []
         self._episode_idx: Optional[int] = None
@@ -90,11 +92,11 @@ class FrameRecorder:
         self._frames_dir.mkdir(parents=True, exist_ok=True)
         ep = self._episode_idx
         fmt = self.fmt
-        path = self._frames_dir / f"episode_{ep:04d}.{fmt}"
+        path = self._frames_dir / f"{self.episode_prefix}episode_{ep:04d}.{fmt}"
 
         try:
             if fmt == "mp4":
-                imageio.mimsave(path, self._frames, fps=self.fps)
+                imageio.mimsave(path, self._frames, fps=self.fps, macro_block_size=1)
             else:
                 # imageio gif uses 'duration' (seconds per frame).
                 imageio.mimsave(path, self._frames, duration=1.0 / max(self.fps, 1))
@@ -112,7 +114,7 @@ class FrameRecorder:
                     )
                     self._warned_fallback = True
                 self.fmt = "gif"
-                path = self._frames_dir / f"episode_{ep:04d}.gif"
+                path = self._frames_dir / f"{self.episode_prefix}episode_{ep:04d}.gif"
                 try:
                     imageio.mimsave(
                         path, self._frames, duration=1.0 / max(self.fps, 1)

@@ -7,7 +7,9 @@ from .deap_integration import (
     create_toolbox,
     crossover_blend,
     mutate_gaussian,
-    clone_individual
+    clone_individual,
+    make_parallel_evaluate_map,
+    make_mixed_parallel_evaluate_map,
 )
 from .cma_integration import (
     setup_cma_strategy,
@@ -25,6 +27,8 @@ __all__ = [
     'crossover_blend',
     'mutate_gaussian',
     'clone_individual',
+    'make_parallel_evaluate_map',
+    'make_mixed_parallel_evaluate_map',
     'setup_cma_strategy',
     'setup_cma_one_plus_lambda_strategy',
     'make_cma_ind_init',

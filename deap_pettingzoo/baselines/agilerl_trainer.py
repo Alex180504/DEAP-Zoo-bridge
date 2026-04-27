@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import importlib
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -58,6 +58,12 @@ class AgileRLTrainer(BaselineTrainer):
     ALGORITHM_NAME: str = "agilerl"
     ALGORITHM_IMPORT: Tuple[str, str] = ("agilerl", "")
     ON_POLICY: bool = False
+
+    #: AgileRL training is rollout-based, not generation-based, so the
+    #: default cadence is the largest sensible bucket. Currently we only
+    #: emit a single end-of-training rollout regardless of cadence; the
+    #: ClassVar value is kept for API parity with EA/CMA/CoEvo trainers.
+    _default_recording_every_n: ClassVar[int] = 10
 
     # Default hyperparameters; subclasses may override.
     DEFAULT_PARAMS: Dict[str, Any] = {
@@ -155,6 +161,55 @@ class AgileRLTrainer(BaselineTrainer):
             pass
 
         policy = AgileRLPolicyWrapper(agent, agent_ids, self.ALGORITHM_NAME)
+
+        # ----- Optional end-of-training frame recording ------------------
+        # AgileRL is rollout-based (no "generation" concept), so the
+        # default cadence semantics from EA do not apply. We instead
+        # record a single champion rollout at the end of training when
+        # ``RecordingConfig.enabled`` is set. Any error is swallowed so
+        # recording cannot break training.
+        recording_cfg = config.recording
+        if recording_cfg.enabled:
+            try:
+                from deap_pettingzoo.baselines._logging_helpers import (
+                    build_logger as _build_logger_for_record,
+                )
+                from deap_pettingzoo.baselines.unified_evaluator import (
+                    UnifiedEvaluator,
+                )
+
+                _record_log = _build_logger_for_record(
+                    config, algorithm=self.ALGORITHM_NAME
+                )
+                recorder = _record_log.get_frame_recorder(
+                    fps=recording_cfg.fps,
+                    fmt=recording_cfg.fmt,
+                    max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                    episode_prefix=recording_cfg.episode_prefix or "train_",
+                )
+                if recorder.enabled:
+                    rec_eval = UnifiedEvaluator(
+                        max_steps=int(
+                            params.get("max_steps_per_episode", 100)
+                        ),
+                        frame_recorder=recorder,
+                    )
+                    try:
+                        rec_eval.evaluate(
+                            policy=policy,
+                            env_name=config.env_name,
+                            num_episodes=1,
+                            seed=seed,
+                            env_config=dict(config.env_config)
+                            if config.env_config
+                            else None,
+                        )
+                    finally:
+                        rec_eval.close()
+                # NoOpLogger close is a no-op; real logger close flushes.
+                _record_log.close()
+            except Exception:
+                pass
 
         # ----- Persist results via ExperimentLogger -------------------------
         # No-op when ``config.output_dir is None``.

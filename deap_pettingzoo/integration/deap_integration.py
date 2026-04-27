@@ -712,3 +712,252 @@ def evaluate_population_parallel(
     ]
     return list(executor.map(_worker_evaluate, payloads))
 
+
+# --------------------------------------------------------------------------
+# MixedPolicyEvaluator parallel evaluation plumbing
+# --------------------------------------------------------------------------
+
+@dataclass
+class _MixedWorkerSpec:
+    """Picklable spec for a MixedPolicyEvaluator factory-path worker.
+
+    Carries the **names** of the module-level callables rather than the
+    callables themselves, because callables are not always picklable
+    (closures, lambdas, nested functions). The worker resolves them via
+    :func:`_resolve_callable`.
+
+    Attributes:
+        env_factory_qualname: Fully-qualified name of the env factory
+            (e.g. ``"examples.pursuit_evasion.ea_vs_apf.build_env"``).
+        scripted_factory_qualname: Fully-qualified name of the scripted-
+            policy factory.
+        learner_factory_qualname: Fully-qualified name of the learner-
+            policy factory.
+        learner_prefixes: Tuple of agent-name prefixes for learner side.
+        max_steps: Episode step cap.
+        eval_episodes: Number of episodes to average per call.
+        layer_sizes: NN topology ``[in, hidden…, out]``.
+        activation: Activation name.
+    """
+
+    env_factory_qualname: str
+    scripted_factory_qualname: str
+    learner_factory_qualname: str
+    learner_prefixes: Tuple[str, ...]
+    max_steps: int
+    eval_episodes: int
+    layer_sizes: Tuple[int, ...]
+    activation: str
+
+
+_MIXED_WORKER_CACHE: Dict[str, Any] = {}
+
+
+def _resolve_callable(qualname: str) -> Any:
+    """Import and return a module-level callable by its qualified name.
+
+    Args:
+        qualname: Dotted ``module.attribute`` path, e.g.
+            ``"mypackage.module.my_function"``.
+
+    Returns:
+        The resolved callable.
+
+    Raises:
+        ImportError: If the module cannot be imported.
+        AttributeError: If the attribute is missing from the module.
+    """
+    module_name, _, attr = qualname.rpartition(".")
+    if not module_name:
+        raise ValueError(
+            f"_resolve_callable requires a fully-qualified name "
+            f"(module.attribute), got {qualname!r}."
+        )
+    import importlib
+
+    mod = importlib.import_module(module_name)
+    return getattr(mod, attr)
+
+
+def _mixed_worker_evaluate(
+    payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
+) -> tuple:
+    """Top-level worker for MixedPolicyEvaluator parallel evaluation.
+
+    Resolves all factories from their qualified names, builds a fresh
+    :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`, and
+    evaluates the genome over ``spec.eval_episodes`` episodes.
+
+    This function is module-level and therefore picklable on all
+    platforms (including Windows spawn).
+    """
+    from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
+
+    payload, spec = payload_and_spec
+
+    # Rebuild genome from payload.
+    genome = FixedTopologyGenome(
+        layer_sizes=list(spec.layer_sizes),
+        activation=spec.activation,
+        weight_range=(-1.0, 1.0),
+        random_seed=None,
+    )
+    genome.set_weights(np.asarray(payload.weights, dtype=float))
+
+    # Resolve factories once per worker process (lazy cache keyed on spec).
+    cache_key = (
+        spec.env_factory_qualname,
+        spec.scripted_factory_qualname,
+        spec.learner_factory_qualname,
+    )
+    if _MIXED_WORKER_CACHE.get("key") != cache_key:
+        _MIXED_WORKER_CACHE["key"] = cache_key
+        _MIXED_WORKER_CACHE["env_factory"] = _resolve_callable(
+            spec.env_factory_qualname
+        )
+        _MIXED_WORKER_CACHE["scripted_factory"] = _resolve_callable(
+            spec.scripted_factory_qualname
+        )
+        _MIXED_WORKER_CACHE["learner_factory"] = _resolve_callable(
+            spec.learner_factory_qualname
+        )
+
+    env_factory = _MIXED_WORKER_CACHE["env_factory"]
+    scripted_factory = _MIXED_WORKER_CACHE["scripted_factory"]
+    learner_factory = _MIXED_WORKER_CACHE["learner_factory"]
+
+    evaluator = MixedPolicyEvaluator(
+        env_factory=env_factory,
+        scripted_policy_factory=scripted_factory,
+        learner_agent_prefixes=list(spec.learner_prefixes),
+        learner_factory=learner_factory,
+        max_steps=spec.max_steps,
+    )
+
+    class _Ind:
+        __slots__ = ("genome",)
+
+        def __init__(self, g):
+            self.genome = g
+
+    ind = _Ind(genome)
+    total = sum(
+        evaluator.run_episode(ind, seed=payload.seed).fitness
+        for _ in range(spec.eval_episodes)
+    )
+    return (total / spec.eval_episodes,)
+
+
+def make_mixed_parallel_evaluate_map(
+    executor: Any,
+    evaluator: Any,
+    *,
+    eval_episodes: int = 1,
+) -> Any:
+    """Build a ``map``-shaped callable for parallel :class:`MixedPolicyEvaluator` eval.
+
+    The returned callable has the signature
+    ``pmap(evaluate_fn, individuals) -> list`` — compatible with
+    ``toolbox.register("map", pmap)``.
+
+    The evaluator **must** have been constructed via the factory path
+    (``env_factory`` + ``scripted_policy_factory`` + ``learner_factory``
+    all set as module-level callables).  Live-object construction raises
+    ``ValueError``.
+
+    Example::
+
+        evaluator = MixedPolicyEvaluator(
+            env_factory=build_env,
+            scripted_policy_factory=build_scripted_evaders,
+            learner_agent_prefixes=["adversary"],
+            learner_factory=_learner_factory,
+            max_steps=200,
+        )
+        with make_executor(n_workers) as executor:
+            pmap = make_mixed_parallel_evaluate_map(
+                executor, evaluator, eval_episodes=3
+            )
+            toolbox.register("map", pmap)
+
+    Args:
+        executor: A context-managed executor (e.g. from
+            :func:`~deap_pettingzoo.utils.parallel.make_executor`).
+        evaluator: A :class:`MixedPolicyEvaluator` built with the factory
+            path.
+        eval_episodes: Episodes averaged per genome per worker call.
+
+    Returns:
+        ``pmap`` callable compatible with ``toolbox.register("map", pmap)``.
+
+    Raises:
+        ValueError: If the evaluator was not built with the factory path.
+        ValueError: If factories are not importable (not module-level).
+    """
+    from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
+
+    if not isinstance(evaluator, MixedPolicyEvaluator):
+        raise TypeError(
+            f"evaluator must be a MixedPolicyEvaluator, got {type(evaluator)!r}."
+        )
+    if evaluator.env_factory is None or evaluator.scripted_policy_factory is None:
+        raise ValueError(
+            "make_mixed_parallel_evaluate_map requires the evaluator to be "
+            "constructed with 'env_factory' and 'scripted_policy_factory'. "
+            "Live-object construction (env_wrapper=...) cannot be pickled "
+            "across worker processes."
+        )
+
+    def _qualname(fn: Any) -> str:
+        mod = getattr(fn, "__module__", None)
+        name = getattr(fn, "__qualname__", None)
+        if mod is None or name is None or "<" in name:
+            raise ValueError(
+                f"Factory {fn!r} is not a module-level callable (module={mod!r}, "
+                f"qualname={name!r}). Lambdas and closures cannot be pickled "
+                "across processes. Use a module-level def instead."
+            )
+        return f"{mod}.{name}"
+
+    # Sample genome from the evaluator's env to discover topology.
+    sample_env = evaluator.env_wrapper
+    pursuer_id = next(
+        a for a in sample_env.possible_agents
+        if a.startswith(evaluator.learner_agent_prefixes)
+    )
+    obs = sample_env.reset(seed=0)
+    input_size = int(obs[pursuer_id].shape[0])
+    act_space = sample_env.action_space(pursuer_id)
+    output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+
+    spec = _MixedWorkerSpec(
+        env_factory_qualname=_qualname(evaluator.env_factory),
+        scripted_factory_qualname=_qualname(evaluator.scripted_policy_factory),
+        learner_factory_qualname=_qualname(evaluator.learner_factory),
+        learner_prefixes=evaluator.learner_agent_prefixes,
+        max_steps=evaluator.max_steps,
+        eval_episodes=eval_episodes,
+        layer_sizes=(input_size, output_size),  # placeholder; overridden per-genome
+        activation="tanh",  # placeholder; overridden per-genome
+    )
+
+    def _pmap(_evaluate_ignored, individuals):
+        inds = list(individuals)
+        payloads = []
+        for ind in inds:
+            genome = ind.genome
+            per_ind_spec = _MixedWorkerSpec(
+                env_factory_qualname=spec.env_factory_qualname,
+                scripted_factory_qualname=spec.scripted_factory_qualname,
+                learner_factory_qualname=spec.learner_factory_qualname,
+                learner_prefixes=spec.learner_prefixes,
+                max_steps=spec.max_steps,
+                eval_episodes=spec.eval_episodes,
+                layer_sizes=tuple(genome.layer_sizes),
+                activation=genome.activation,
+            )
+            payloads.append((_individual_to_payload(ind), per_ind_spec))
+        return list(executor.map(_mixed_worker_evaluate, payloads))
+
+    return _pmap
+
