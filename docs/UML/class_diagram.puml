@@ -1173,11 +1173,20 @@ package "deap_pettingzoo.ui" {
         + seed: int | None
         + wall_time_s: float | None
         + final_summary: dict
+        + started_at: datetime | None
+        + display_name: str | None
     }
 
     class data <<module>> {
         + discover_runs(root: Path) -> list[RunSummary]
         + load_experiment_cached(run_dirs) -> Experiment
+    }
+
+    class management <<module>> {
+        + rename_run(run_dir: Path, display_name: str) -> None
+        + delete_run(run_dir: Path) -> None
+        + create_folder(parent: Path, name: str) -> Path
+        + move_run(run_dir: Path, target_dir: Path) -> None
     }
 
     class config <<module>> {
