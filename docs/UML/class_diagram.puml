@@ -294,17 +294,31 @@ package "deap_pettingzoo.evaluators" {
     }
 
     class MixedPolicyEvalResult <<dataclass>> {
-        + rewards: dict
-        + episode_length: int
-        + captured: bool
+        + fitness: float
+        + learner_reward: float
+        + scripted_reward: float
+        + steps: int
     }
 
     class MixedPolicyEvaluator {
-        - env_wrapper: PettingZooWrapper
         - max_steps: int
+        - learner_agent_prefixes: List[str]
+        - learner_factory: LearnerPolicyFactory
+        + env_wrapper: Optional[PettingZooWrapper]
+        + env_factory: Optional[EnvFactory]
+        + scripted_policy_factory: Optional[ScriptedPolicyFactory]
+        + learner_agents: List[str]
+        + scripted_agents: List[str]
         --
-        + __init__(env_wrapper, max_steps, ...)
-        + evaluate(policies: dict, seed=None) -> MixedPolicyEvalResult
+        + __init__(learner_agent_prefixes, learner_factory,
+          max_steps=500,
+          env_wrapper=None, scripted_policies=None,
+          env_factory=None, scripted_policy_factory=None)
+        .. live-object path OR factory path; not both ..
+        + evaluate(individual, seed=None) -> Tuple[float]
+        + run_episode(individual, seed=None) -> MixedPolicyEvalResult
+        - _build_episode_context() -> (env, scripted)
+        - _validate_agent_coverage() -> None
     }
 
     BaseEvaluator <|-- SingleEpisodeEvaluator
@@ -328,6 +342,12 @@ package "deap_pettingzoo.integration" {
         + crossover_blend(ind1, ind2, alpha) -> tuple
         + mutate_gaussian(individual, mu, sigma, indpb) -> tuple
         + clone_individual(individual) -> Individual
+        + make_parallel_evaluate_map(executor,
+            worker_spec) -> Callable
+        + make_mixed_parallel_evaluate_map(executor,
+            evaluator, *, eval_episodes=1) -> Callable
+        -- _EvalWorkerSpec / _MixedWorkerSpec carry
+           qualnames; picklable across spawn workers --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -362,6 +382,16 @@ package "deap_pettingzoo.baselines" {
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
+        + recording: RecordingConfig
+    }
+
+    class RecordingConfig <<dataclass>> {
+        + enabled: bool
+        + every_n_generations: Optional[int]
+        + fps: int
+        + fmt: str
+        + max_frames_per_episode: Optional[int]
+        + episode_prefix: str
     }
 
     class TrainingResult <<dataclass>> {
@@ -520,6 +550,7 @@ package "deap_pettingzoo.baselines" {
 
     ' Relationships
     TrainingConfig --> BudgetMode : uses
+    TrainingConfig *-- RecordingConfig : recording
     ComparisonConfig --> BudgetMode : uses
     TrainingResult --> PolicyProtocol : contains
 
@@ -577,9 +608,15 @@ note bottom of GenomePolicyWrapper
 end note
 
 note bottom of MixedPolicyEvaluator
-  Evaluates heterogeneous per-agent
-  policies (e.g. EA pursuers vs. APF
-  evaders) in one episode.
+  Two construction paths:
+  * Live-object path (env_wrapper=...) —
+    backward-compatible; not picklable.
+  * Factory path (env_factory=...,
+    scripted_policy_factory=...) —
+    required for parallel evaluation;
+    factories must be module-level callables.
+  Use make_mixed_parallel_evaluate_map
+  to integrate with DEAP toolbox.map.
 end note
 
 note bottom of SelfPlayEvaluator
@@ -927,6 +964,9 @@ package "deap_pettingzoo.utils.logging" {
   class FrameRecorder {
     -run_dir: Path
     -fps: int
+    -fmt: str
+    -max_frames_per_episode: Optional[int]
+    -episode_prefix: str
     +start_episode(idx)
     +add_frame(rgb)
     +end_episode(): Optional[Path]
