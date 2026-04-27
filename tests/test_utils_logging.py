@@ -213,3 +213,20 @@ def test_frame_recorder_skipped_when_imageio_missing(tmp_path: Path):
         # mp4 or gif fallback
         assert out.is_file()
         assert out.suffix in {".mp4", ".gif"}
+
+
+def test_frame_recorder_episode_prefix(tmp_path: Path):
+    """``episode_prefix`` is woven into the artefact filename."""
+    pytest.importorskip("imageio")
+    from deap_pettingzoo.utils.logging import FrameRecorder
+
+    rec = FrameRecorder(run_dir=tmp_path, episode_prefix="train_")
+    rec.start_episode(7)
+    frame = (np.random.default_rng(0).integers(0, 255, size=(8, 8, 3))).astype(np.uint8)
+    rec.add_frame(frame)
+    rec.add_frame(frame)
+    out = rec.end_episode()
+    if out is not None:
+        assert out.is_file()
+        assert out.name.startswith("train_episode_0007")
+        assert out.suffix in {".mp4", ".gif"}
