@@ -65,7 +65,6 @@ with st.sidebar:
         "- **Diff** – side-by-side manifest / hyperparam diff\n"
         "- **Hyperparams** – effect-size sweeps\n"
         "- **Replay** – play recorded frames\n"
-        "- **Live Rollout** – run a saved policy in a fresh env\n"
         "- **Report** – render the HTML/PDF report"
     )
 

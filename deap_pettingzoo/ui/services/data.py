@@ -10,7 +10,8 @@ stay consistent.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -32,6 +33,8 @@ class RunSummary:
     seed: Optional[int]
     wall_time_s: Optional[float]
     final_summary: dict
+    started_at: Optional[datetime] = field(default=None)
+    display_name: Optional[str] = field(default=None)
 
 
 def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
@@ -75,6 +78,15 @@ def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
             rec = load_run(run_dir)
         except (FileNotFoundError, ValueError):
             continue
+        # Parse optional fields from the raw manifest dict
+        raw_started_at = (rec.manifest or {}).get("started_at")
+        started_at: Optional[datetime] = None
+        if raw_started_at:
+            try:
+                started_at = datetime.fromisoformat(str(raw_started_at))
+            except (ValueError, TypeError):
+                pass
+        display_name: Optional[str] = (rec.manifest or {}).get("display_name") or None
         out.append(
             RunSummary(
                 run_id=rec.run_id,
@@ -84,6 +96,8 @@ def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
                 seed=rec.seed,
                 wall_time_s=rec.wall_time_s,
                 final_summary=dict(rec.summary or {}),
+                started_at=started_at,
+                display_name=display_name,
             )
         )
 
