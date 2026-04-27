@@ -33,7 +33,10 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--env", default="simple_tag_v3")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output", default="results/ea_vs_qdax_coevolution")
     args = parser.parse_args()
+
+    from pathlib import Path
 
     from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
     from deap_pettingzoo.baselines.coevolution import (
@@ -85,15 +88,23 @@ def main() -> None:
         env_name=args.env,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=generations * pop,
-        algorithm_params={"coevolution": coev_cfg},
+        algorithm_params={"coevolution": coev_cfg, "seed": args.seed},
+        output_dir=Path(args.output),
     )
 
     trainer = CoEvolutionTrainer()
     result = trainer.train(config)
+    per_side = result.metrics.get("per_side_history", {})
+    final_best = result.metrics.get("final_best", {})
+    best = max((v for v in final_best.values() if v is not None), default=float("nan"))
     print(f"Algorithm:    {result.algorithm}")
-    print(f"Best fitness: {result.metrics.get('best_fitness', float('nan')):.4f}")
+    print(f"Best fitness: {best:.4f}")
     print(f"Wall time:    {result.training_time:.2f}s")
-    print(f"Sides trained: {list(result.metadata.get('per_side_history', {}).keys())}")
+    print(f"Sides trained: {list(per_side.keys())}")
+    for side_name, history in per_side.items():
+        if history:
+            last = history[-1]
+            print(f"  {side_name}: gen {last['generation']} best={last['best_fitness']:.3f}")
 
 
 if __name__ == "__main__":

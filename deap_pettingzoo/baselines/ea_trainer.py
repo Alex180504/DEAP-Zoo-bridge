@@ -7,10 +7,15 @@ unified BaselineTrainer interface.
 
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, ClassVar, Optional
 import numpy as np
 from deap import algorithms, tools
 
+from deap_pettingzoo.baselines._logging_helpers import (
+    build_logger,
+    dump_fitness_history,
+    write_summary,
+)
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
@@ -18,6 +23,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingResult,
     PolicyProtocol,
 )
+from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.deap_integration import (
@@ -134,7 +140,12 @@ class EATrainer(BaselineTrainer):
     Wraps the existing DEAP integration to provide a unified
     training interface compatible with BaselineTrainer.
     """
-    
+
+    #: Per-generation cadence is the natural fit for EA — every
+    #: generation produces one champion-rollout artefact when
+    #: ``TrainingConfig.recording.enabled`` is set.
+    _default_recording_every_n: ClassVar[int] = 1
+
     def __init__(
         self,
         hidden_size: int = 64,
@@ -344,6 +355,55 @@ class EATrainer(BaselineTrainer):
         # Track metrics
         fitness_history = []
 
+        # ----- Logger + optional FrameRecorder ---------------------------
+        # Logger is built up-front (run_dir is created eagerly in
+        # ``ExperimentLogger.create``) so the FrameRecorder can write
+        # ``frames/train_episode_NNNN.{mp4,gif}`` while training is
+        # still running. Falls back to NoOpLogger when
+        # ``config.output_dir is None``.
+        log = build_logger(config, algorithm="ea")
+        recording_cfg = config.recording
+        recording_cadence = self._resolve_recording_every_n(config)
+        recording_evaluator: Optional[UnifiedEvaluator] = None
+        if recording_cfg.enabled:
+            recorder = log.get_frame_recorder(
+                fps=recording_cfg.fps,
+                fmt=recording_cfg.fmt,
+                max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                episode_prefix=recording_cfg.episode_prefix or "train_",
+            )
+            if recorder.enabled:
+                recording_evaluator = UnifiedEvaluator(
+                    max_steps=max_steps_per_episode,
+                    frame_recorder=recorder,
+                )
+
+        def _record_champion_if_due(gen: int) -> None:
+            """Record one champion-rollout episode when cadence hits.
+
+            Best-effort: any failure is swallowed so recording can't
+            break a long training run.
+            """
+            if recording_evaluator is None or hof.items == []:
+                return
+            if gen % recording_cadence != 0:
+                return
+            try:
+                best = hof[0]
+                champ_policy = GenomePolicyWrapper(
+                    best.genome, config.env_name, action_space=action_space
+                )
+                rollout_seed = config.algorithm_params.get('seed')
+                recording_evaluator.evaluate(
+                    policy=champ_policy,
+                    env_name=config.env_name,
+                    num_episodes=1,
+                    seed=int(rollout_seed) if rollout_seed is not None else None,
+                    env_config=dict(config.env_config) if config.env_config else None,
+                )
+            except Exception:
+                pass
+
         # --- Parallel evaluation setup ----------------------------------
         # ``algorithm_params["num_workers"]`` overrides the constructor
         # default. ``resolve_num_workers`` normalises 0/None to 1 and
@@ -425,6 +485,7 @@ class EATrainer(BaselineTrainer):
                     population, toolbox, stats, hof, fitness_history,
                     num_generations, rng,
                     eval_population=_eval_population,
+                    on_generation=_record_champion_if_due,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
@@ -445,6 +506,9 @@ class EATrainer(BaselineTrainer):
                         'min': record['min'],
                         'max': record['max'],
                     })
+                # eaMu*Lambda doesn't expose a per-gen hook; record once
+                # against the final hall-of-fame champion.
+                _record_champion_if_due(num_generations)
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
                     population, toolbox,
@@ -464,12 +528,15 @@ class EATrainer(BaselineTrainer):
                         'min': record['min'],
                         'max': record['max'],
                     })
+                _record_champion_if_due(num_generations)
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
         # --- End parallel evaluation scope ------------------------------
 
         # Clean up
         env.close()
+        if recording_evaluator is not None:
+            recording_evaluator.close()
         
         training_time = time.time() - start_time
         
@@ -479,7 +546,42 @@ class EATrainer(BaselineTrainer):
         
         # Wrap genome as policy
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
-        
+
+        # ----- Persist results via the (already-constructed) logger ------
+        # No-op when ``config.output_dir is None`` (NoOpLogger) so the
+        # backend stays usable without the analysis stack.
+        try:
+            with log:
+                dump_fitness_history(
+                    log,
+                    fitness_history,
+                    env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                )
+                from deap_pettingzoo.utils.logging import save_ea_genome, KIND_EA_GENOME
+                save_ea_genome(
+                    log,
+                    best_genome,
+                    kind=KIND_EA_GENOME,
+                    extra={
+                        "final_fitness": float(best_individual.fitness.values[0]),
+                        "env_name": config.env_name,
+                    },
+                )
+                write_summary(
+                    log,
+                    {
+                        "algorithm": "ea",
+                        "final_fitness": float(best_individual.fitness.values[0]),
+                        "num_generations": num_generations,
+                        "population_size": self.population_size,
+                        "strategy": self.strategy,
+                    },
+                    training_time_s=training_time,
+                )
+        except Exception:
+            # Defensive: never fail training because of logging cleanup.
+            pass
+
         # Create result
         return TrainingResult(
             algorithm='ea',
@@ -583,6 +685,7 @@ class EATrainer(BaselineTrainer):
         rng,
         *,
         eval_population,
+        on_generation=None,
     ) -> None:
         """In-house ``eaSimple``-style generational loop.
 
@@ -595,6 +698,11 @@ class EATrainer(BaselineTrainer):
             eval_population: Callable ``(inds) -> [fitness_tuple, ...]``
                 that runs serial or parallel evaluation depending on
                 the configured worker count.
+            on_generation: Optional callable ``(gen: int) -> None``
+                invoked after each generation completes (after the
+                hall-of-fame and statistics are updated). Used by the
+                opt-in frame-recording machinery to fire one extra
+                champion-rollout episode.
         """
         for gen in range(1, num_generations + 1):
             offspring = toolbox.select(population, len(population))
@@ -627,3 +735,6 @@ class EATrainer(BaselineTrainer):
                 'min': record['min'],
                 'max': record['max'],
             })
+
+            if on_generation is not None:
+                on_generation(gen)

@@ -43,6 +43,21 @@ viz = [
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
 ]
+logging = [
+    "pyarrow>=14.0",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+tensorboard = [
+    "tensorboard>=2.13",
+]
+analysis = [
+    "deap-pettingzoo[viz]",
+    "pandas>=2.0",
+    "scipy>=1.11",
+    "rliable>=1.2.0",
+    "jinja2>=3.1",
+]
 rl-baselines = [
     "agilerl>=2.0.0",
     "torch>=2.0.0",
@@ -75,8 +90,15 @@ scoop = [
 dask = [
     "dask[distributed]>=2024.1",
 ]
+ui = [
+    "deap-pettingzoo[analysis]",
+    "streamlit>=1.30",
+    "plotly>=5.0",
+    "pillow>=10.0",
+    "imageio>=2.31",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask,ui]"
 ]
 
 [tool.setuptools]

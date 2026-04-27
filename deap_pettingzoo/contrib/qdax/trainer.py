@@ -35,6 +35,40 @@ from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
 
 
+# Module-level flag so we only emit the "frame recording is unsupported
+# on the QDax/JAX path" warning once per process even if the user starts
+# multiple QDax trainers in the same script.
+_QDAX_RECORDING_WARNED = False
+
+
+def _warn_recording_unsupported_once(config: TrainingConfig) -> None:
+    """Emit a one-shot RuntimeWarning when recording is requested.
+
+    Frame recording requires running policy rollouts inside the
+    PettingZoo wrapper (so :meth:`PettingZooWrapper.render` can return
+    RGB arrays). The QDax path runs scoring entirely in JAX-compiled
+    Brax-style scoring functions and never touches the PettingZoo
+    wrapper at training time, so there is no env to render.
+    """
+    global _QDAX_RECORDING_WARNED
+    if _QDAX_RECORDING_WARNED:
+        return
+    if not getattr(config, "recording", None):
+        return
+    if not config.recording.enabled:
+        return
+    warnings.warn(
+        "RecordingConfig.enabled=True is ignored on the QDax/JAX path "
+        "(MAPElitesTrainer / CMAMETrainer): training scoring runs "
+        "entirely in jit-compiled JAX with no live PettingZoo env to "
+        "render. To record QDax behaviours, post-train with "
+        "UnifiedEvaluator on the best individual instead.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    _QDAX_RECORDING_WARNED = True
+
+
 _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "layer_sizes": None,  # inferred from env if None
     "hidden_sizes": (32, 32),
@@ -223,12 +257,31 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
                 stacklevel=2,
             )
         raw_jax_env = spec.factory(**(config.env_config or {}))
+        # The JAX env may have heterogeneous agents (e.g. simple_tag has
+        # adversaries with obs_size=16 and a good agent with obs_size=14).
+        # Filter agent_list to only agents whose obs size matches the policy
+        # input (layer_sizes[0]) so the shared network applies cleanly.
+        import jax as _jax
+        _k0 = _jax.random.PRNGKey(0)
+        _obs0, _ = raw_jax_env.reset(_k0)
+        _all_agents = list(_obs0.keys())
+        _matching = [a for a in _all_agents
+                     if int(_obs0[a].shape[0]) == layer_sizes[0]]
+        if not _matching:
+            # No agent matches — rebuild with the first agent's actual obs size.
+            _agent0 = _all_agents[0]
+            actual_in_dim = int(_obs0[_agent0].shape[0])
+            layer_sizes = (actual_in_dim, *layer_sizes[1:])
+            module = make_flax_mlp(layer_sizes, activation=params["activation"])
+            _matching = [a for a in _all_agents
+                         if int(_obs0[a].shape[0]) == actual_in_dim]
         scoring_fn = make_jax_scoring_function(
             raw_jax_env,
             module,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
             action_type="discrete" if not config.continuous else "continuous",
+            agents=_matching,
         )
     else:
         warnings.warn(
@@ -307,6 +360,7 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        _warn_recording_unsupported_once(config)
 
         import jax
         from qdax.core.map_elites import MAPElites
@@ -416,6 +470,18 @@ class MAPElitesTrainer(BaselineTrainer):
             "num_iterations": num_iters,
         }
 
+        _persist_qdax_results(
+            config,
+            algorithm="map_elites",
+            history=history,
+            summary=metrics_out,
+            training_time=elapsed,
+            extra_summary={"descriptor": params["descriptor"]},
+            repertoire_path=Path(metadata["repertoire_path"])
+            if "repertoire_path" in metadata
+            else None,
+        )
+
         return TrainingResult(
             algorithm="map_elites",
             policy=champion_policy,
@@ -450,6 +516,7 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        _warn_recording_unsupported_once(config)
 
         import jax
         import jax.numpy as jnp
@@ -565,6 +632,18 @@ class CMAMETrainer(BaselineTrainer):
             "num_iterations": num_iters,
         }
 
+        _persist_qdax_results(
+            config,
+            algorithm="cma_me",
+            history=history,
+            summary=metrics_out,
+            training_time=elapsed,
+            extra_summary={"descriptor": params["descriptor"]},
+            repertoire_path=Path(metadata["repertoire_path"])
+            if "repertoire_path" in metadata
+            else None,
+        )
+
         return TrainingResult(
             algorithm="cma_me",
             policy=champion_policy,
@@ -576,3 +655,68 @@ class CMAMETrainer(BaselineTrainer):
 
 
 __all__ = ["MAPElitesTrainer", "CMAMETrainer"]
+
+
+# ---------------------------------------------------------------------------
+# Logging helper
+# ---------------------------------------------------------------------------
+
+
+def _persist_qdax_results(
+    config: TrainingConfig,
+    *,
+    algorithm: str,
+    history,
+    summary: Dict[str, Any],
+    training_time: float,
+    extra_summary: Optional[Dict[str, Any]] = None,
+    repertoire_path: Optional[Path] = None,
+) -> None:
+    """Write per-iteration QDax metrics + final summary via ExperimentLogger.
+
+    Each entry in ``history`` is a dict-like of QDax scalars (typically
+    ``qd_score``, ``coverage``, ``max_fitness``, ``min_fitness``,
+    ``mean_fitness``). Numeric scalars are coerced to float; non-numeric
+    fields are skipped. No-op when ``config.output_dir`` is ``None``.
+
+    If ``repertoire_path`` points to an existing file, it is registered
+    in ``manifest.artifacts['policy']`` so the analysis loader can
+    rebuild a policy for the UI's Live Rollout page.
+    """
+    from deap_pettingzoo.baselines._logging_helpers import (
+        build_logger,
+        write_summary,
+    )
+    from deap_pettingzoo.utils.logging import (
+        KIND_QDAX_REPERTOIRE,
+        register_existing_artifact,
+    )
+
+    with build_logger(config, algorithm=algorithm) as log:
+        for i, entry in enumerate(history):
+            row: Dict[str, Any] = {
+                "iteration": i,
+                "env_steps": 0,
+                "wall_time": 0.0,
+            }
+            try:
+                items = entry.items()
+            except AttributeError:
+                continue
+            for k, v in items:
+                try:
+                    row[str(k)] = float(np.asarray(v))
+                except (TypeError, ValueError):
+                    continue
+            log.row("metrics", row)
+        full_summary = {"algorithm": algorithm, **summary}
+        if extra_summary:
+            full_summary.update(extra_summary)
+        if repertoire_path is not None:
+            register_existing_artifact(
+                log,
+                kind=KIND_QDAX_REPERTOIRE,
+                path=Path(repertoire_path),
+                extra={"algorithm": algorithm},
+            )
+        write_summary(log, full_summary, training_time_s=training_time)

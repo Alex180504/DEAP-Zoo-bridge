@@ -5,7 +5,7 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Tuple
 import json
 import numpy as np
 
@@ -15,6 +15,7 @@ from deap_pettingzoo.baselines.base import (
     PolicyProtocol,
 )
 from deap_pettingzoo.environments import PettingZooWrapper
+from deap_pettingzoo.utils.logging.replay import FrameRecorder
 
 
 class UnifiedEvaluator(BaselineEvaluator):
@@ -24,14 +25,31 @@ class UnifiedEvaluator(BaselineEvaluator):
     the common PolicyProtocol interface.
     """
     
-    def __init__(self, max_steps: int = 500):
+    def __init__(
+        self,
+        max_steps: int = 500,
+        *,
+        frame_recorder: Optional[FrameRecorder] = None,
+        record_episode_offset: int = 0,
+    ):
         """Initialize unified evaluator.
         
         Args:
             max_steps: Maximum steps per episode.
+            frame_recorder: Optional :class:`FrameRecorder`. When supplied
+                each evaluation episode is wrapped with
+                ``start_episode/end_episode`` and ``env.render('rgb_array')``
+                frames are streamed via ``add_frame``. Trainers running a
+                champion-rollout pass an enabled recorder here; routine
+                evaluations leave this ``None`` (default).
+            record_episode_offset: Starting episode index for the recorder
+                (so successive generations don't overwrite each other's
+                ``episode_NNNN`` artefacts).
         """
         self.max_steps = max_steps
         self._env_cache: Dict[Tuple, PettingZooWrapper] = {}
+        self.frame_recorder = frame_recorder
+        self.record_episode_offset = int(record_episode_offset)
     
     def evaluate(
         self,
@@ -57,8 +75,17 @@ class UnifiedEvaluator(BaselineEvaluator):
         Returns:
             EvalResult with reward statistics.
         """
-        # Build a hashable cache key that includes env_config and render_mode
-        render_mode = 'human' if render else None
+        # Build a hashable cache key that includes env_config and render_mode.
+        # When a FrameRecorder is attached we need ``rgb_array`` (so render
+        # actually returns a frame); ``human`` mode pops a window but
+        # returns None. ``rgb_array`` takes precedence over ``human`` when
+        # both are requested.
+        if self.frame_recorder is not None and self.frame_recorder.enabled:
+            render_mode: Optional[str] = 'rgb_array'
+        elif render:
+            render_mode = 'human'
+        else:
+            render_mode = None
         config_key = json.dumps(env_config, sort_keys=True) if env_config else None
         cache_key = (env_name, config_key, render_mode)
 
@@ -77,18 +104,33 @@ class UnifiedEvaluator(BaselineEvaluator):
         # Run episodes
         episode_rewards = []
         episode_lengths = []
-        
-        for _ in range(num_episodes):
+        recorder = self.frame_recorder
+        recording = recorder is not None and recorder.enabled
+
+        for ep_idx in range(num_episodes):
             # Generate episode seed
             if seed is not None:
                 ep_seed = int(rng.integers(0, 2**31 - 1))
             else:
                 ep_seed = None
-            
+
+            if recording:
+                recorder.start_episode(self.record_episode_offset + ep_idx)
+
             # Run episode
-            total_reward, length = self._run_episode(policy, env, ep_seed, render)
+            total_reward, length = self._run_episode(
+                policy, env, ep_seed, render, recorder=recorder if recording else None
+            )
             episode_rewards.append(total_reward)
             episode_lengths.append(length)
+
+            if recording:
+                recorder.end_episode()
+
+        if recording:
+            # Advance offset so successive evaluate() calls (e.g. one per
+            # generation) keep producing distinct episode_NNNN artefacts.
+            self.record_episode_offset += num_episodes
         
         # Compute statistics
         return EvalResult(
@@ -106,7 +148,9 @@ class UnifiedEvaluator(BaselineEvaluator):
         policy: PolicyProtocol,
         env: PettingZooWrapper,
         seed: Optional[int],
-        render: bool
+        render: bool,
+        *,
+        recorder: Optional[FrameRecorder] = None,
     ) -> tuple:
         """Run a single episode.
         
@@ -115,6 +159,8 @@ class UnifiedEvaluator(BaselineEvaluator):
             env: Environment instance.
             seed: Random seed for this episode.
             render: Whether to render.
+            recorder: Optional active :class:`FrameRecorder` collecting
+                ``rgb_array`` frames per step.
             
         Returns:
             Tuple of (total_reward, episode_length).
@@ -122,7 +168,14 @@ class UnifiedEvaluator(BaselineEvaluator):
         # Reset policy and environment
         policy.reset()
         observations = env.reset(seed=seed)
-        
+
+        # Capture initial frame so the artefact starts on the reset state.
+        if recorder is not None:
+            try:
+                recorder.add_frame(env.render())
+            except Exception:
+                pass
+
         # Track rewards per agent
         agent_rewards = dict.fromkeys(env.possible_agents, 0.0)
         steps = 0
@@ -149,7 +202,14 @@ class UnifiedEvaluator(BaselineEvaluator):
             
             # Step environment
             observations, rewards, terminations, truncations, _ = env.step(actions)
-            
+
+            # Capture post-step frame for recording.
+            if recorder is not None:
+                try:
+                    recorder.add_frame(env.render())
+                except Exception:
+                    pass
+
             # Accumulate rewards for active agents
             for agent, reward in rewards.items():
                 if agent in agent_rewards:

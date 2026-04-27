@@ -1,0 +1,44 @@
+@startuml sequence_multitask_aggregation
+title Multi-task Aggregation — collect → normalise → rliable forest
+
+actor "Researcher" as R
+participant "Experiment" as EX
+participant "multi_task\n.collect_score_matrices" as CSM
+participant "NormalizationSpec" as NS
+participant "normalize_score_matrices" as NORM
+participant "rliable_bridge\n.aggregate_metrics_forest" as FOREST
+participant "rliable_bridge\n.performance_profile" as PP
+participant "rliable_bridge\n.probability_of_improvement" as POI
+participant "plots" as PL
+
+R -> CSM: collect_score_matrices(experiment, metric="final_fitness")
+CSM -> EX: by_env(), runs_for(algo, env)
+CSM --> R: matrices: dict[algo -> ndarray(n_runs, n_envs)]\n         env_names: list[str]
+
+alt user picks "auto min-max"
+    R -> NS: NormalizationSpec.from_minmax(matrices, env_names)
+else user picks "reference algorithm"
+    R -> NS: NormalizationSpec.from_reference_algorithm(matrices, env_names, algorithm=ref)
+else user provides bounds
+    R -> NS: NormalizationSpec.from_dict(low, high)
+end
+NS --> R: spec
+
+R -> NORM: normalize_score_matrices(matrices, env_names, spec)
+NORM --> R: normalised_matrices
+
+R -> FOREST: aggregate_metrics_forest(normalised_matrices, reps=2000)
+FOREST --> R: DataFrame[algorithm, metric, point, lo, hi]\n            metric in {mean, median, iqm, optimality_gap}
+
+R -> PP: performance_profile(score_matrices=normalised_matrices)
+PP --> R: taus, point, intervals
+
+R -> POI: probability_of_improvement(score_matrices=normalised_matrices)
+POI --> R: DataFrame[algo_x, algo_y, probability, ci_low, ci_high]
+
+R -> PL: plot_aggregate_metrics_forest(forest_df)
+R -> PL: plot_normalized_performance_profile(taus, point, intervals)
+R -> PL: plot_per_env_eval(matrices, env_names)
+PL --> R: matplotlib Figures
+
+@enduml
