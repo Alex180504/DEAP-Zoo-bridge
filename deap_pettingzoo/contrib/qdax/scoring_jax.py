@@ -91,7 +91,56 @@ def make_jax_scoring_function(
     all_env_agents = list(jax_env.agents)
     policy_set = set(agent_list)
     noop_agents = [a for a in all_env_agents if a not in policy_set]
-    _noop_action = jnp.array(0, dtype=jnp.int32)  # works for discrete MPE
+
+    def _get_action_space(agent):
+        if hasattr(jax_env, "action_space"):
+            return jax_env.action_space(agent)
+        action_spaces = getattr(jax_env, "action_spaces", None)
+        if action_spaces is not None:
+            return action_spaces[agent]
+        return None
+
+    def _noop_action_for_agent(agent):
+        space = _get_action_space(agent)
+        if space is None:
+            raise ValueError(
+                "make_jax_scoring_function cannot infer a noop action for "
+                f"omitted agent {agent!r}; include all env agents in `agents` "
+                "or provide an environment exposing action_space metadata."
+            )
+        if action_type == "continuous":
+            shape = getattr(space, "shape", None)
+            if shape is None:
+                raise ValueError(
+                    "Continuous action_type requires action spaces with a "
+                    f"defined shape; could not infer noop action for agent {agent!r}."
+                )
+            dtype = getattr(space, "dtype", jnp.float32)
+            if shape == ():
+                return jnp.array(0, dtype=dtype)
+            return jnp.zeros(shape, dtype=dtype)
+        # Discrete-like spaces: preserve shape for MultiDiscrete-style spaces.
+        if hasattr(space, "nvec"):
+            return jnp.zeros(jnp.shape(space.nvec), dtype=jnp.int32)
+        shape = getattr(space, "shape", ())
+        if shape in (None, ()):
+            return jnp.array(0, dtype=jnp.int32)
+        return jnp.zeros(shape, dtype=jnp.int32)
+
+    if noop_agents:
+        _noop_action = _noop_action_for_agent(noop_agents[0])
+        for _noop_agent in noop_agents[1:]:
+            _agent_noop = _noop_action_for_agent(_noop_agent)
+            if _agent_noop.shape != _noop_action.shape or _agent_noop.dtype != _noop_action.dtype:
+                raise ValueError(
+                    "Omitted agents must share a compatible action shape/dtype "
+                    f"for noop actions; got {_noop_agent!r} with "
+                    f"{_agent_noop.shape}/{_agent_noop.dtype} versus "
+                    f"{noop_agents[0]!r} with {_noop_action.shape}/{_noop_action.dtype}. "
+                    "Include all env agents in `agents` for heterogeneous action spaces."
+                )
+    else:
+        _noop_action = jnp.array(0, dtype=jnp.int32)
 
     extract = extract_state_fn or _extract_positions_velocities
 

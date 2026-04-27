@@ -18,6 +18,7 @@ from __future__ import annotations
 import streamlit as st
 
 from deap_pettingzoo.ui.services import (
+    DEFAULT_ROOT_ENV_VAR,
     UIState,
     discover_runs,
     load_settings,
@@ -47,7 +48,7 @@ with st.sidebar:
         "Directory",
         value=str(settings.results_root),
         help=(
-            f"Override via env var ${{DEFAULT_ROOT_ENV_VAR}} or by typing here."
+            f"Override via env var ${DEFAULT_ROOT_ENV_VAR} or by typing here."
         ),
     )
     if new_root and new_root != str(settings.results_root):

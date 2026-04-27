@@ -65,8 +65,6 @@ from deap_pettingzoo.evaluators.base_evaluator import BaseEvaluator
 LearnerPolicyFactory = Callable[[Any, str, Any], "PolicyLike"]
 EnvFactory = Callable[[], PettingZooWrapper]
 ScriptedPolicyFactory = Callable[[PettingZooWrapper], Dict[str, "PolicyLike"]]
-EnvFactory = Callable[[], PettingZooWrapper]
-ScriptedPolicyFactory = Callable[[PettingZooWrapper], Dict[str, "PolicyLike"]]
 
 
 def _invoke_get_action(
@@ -248,10 +246,15 @@ class MixedPolicyEvaluator(BaseEvaluator):
             )
             self._validate_agent_coverage()
         else:
-            # Factory path: build one env now to validate and cache agent lists.
-            self.env_wrapper = env_factory()  # type: ignore[misc]
-            self.scripted_policies = scripted_policy_factory(self.env_wrapper)  # type: ignore[misc]
+            # Factory path: build one env now to validate and cache agent lists,
+            # then close it — actual episodes use fresh instances from env_factory.
+            _init_env = env_factory()  # type: ignore[misc]
+            self.env_wrapper: Optional[PettingZooWrapper] = _init_env
+            self.scripted_policies: Dict[str, "PolicyLike"] = scripted_policy_factory(_init_env)  # type: ignore[misc]
             self._validate_agent_coverage()
+            # Release resources held by the validation env; episodes get their own.
+            _init_env.close()
+            self.env_wrapper = None
 
     def _validate_agent_coverage(self) -> None:
         """Partition and validate agent coverage from the current env_wrapper."""
