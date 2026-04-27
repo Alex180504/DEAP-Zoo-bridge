@@ -9,6 +9,7 @@ stay consistent.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -117,7 +118,6 @@ def load_experiment_cached(run_dirs: List[Path]) -> "Experiment":
         resolved_parents.append(Path(run_dir).resolve().parent)
 
     if resolved_parents:
-        import os
         common_root: Path = Path(os.path.commonpath([str(p) for p in resolved_parents]))
     else:
         common_root = Path.cwd()
