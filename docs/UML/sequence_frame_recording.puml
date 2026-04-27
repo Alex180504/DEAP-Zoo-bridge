@@ -1,0 +1,71 @@
+@startuml sequence_frame_recording
+title Frame Recording – Trainer → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
+
+actor "Researcher" as R
+participant "EATrainer / CMAESTrainer /\nCoEvolutionTrainer / AgileRLTrainer" as T
+participant "ExperimentLogger" as EL
+participant "FrameRecorder" as FR
+participant "UnifiedEvaluator\n(or _record_coevolution_rollout)" as UE
+participant "PettingZooWrapper\n(render_mode='rgb_array')" as PZ
+participant "imageio" as IO
+participant "Filesystem\n<run_dir>/frames/" as FS
+
+R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, episode_prefix='')
+
+== Recording setup (once per train()) ==
+T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  episode_prefix=cfg.episode_prefix or 'train_')
+EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  episode_prefix='train_')
+FR --> EL: recorder
+EL --> T: recorder
+
+note over T
+  Cadence resolved by
+  ``BaselineTrainer._resolve_recording_every_n``:
+   • EA / CMA / CoEvo  default = 1
+   • AgileRL           default = 10
+  User-supplied value wins.
+end note
+
+== Champion rollout (every N generations) ==
+loop generation g in 1..G  where g % every_n == 0
+    T -> UE: evaluate(policy=champion,\n  env_name, num_episodes=1,\n  frame_recorder=recorder)
+    UE -> PZ: reset()
+    UE -> FR: start_episode()
+    activate FR
+    loop step
+        UE -> PZ: render() → np.ndarray (H,W,3) uint8
+        PZ --> UE: frame
+        UE -> FR: add_frame(frame)
+        UE -> PZ: step(actions)
+    end
+    UE -> FR: end_episode()
+    FR -> IO: imwrite(frames/train_episode_{g:04d}.mp4, frames, fps)
+    IO -> FS: write artefact
+    deactivate FR
+    UE --> T: EvaluationResult (discarded)
+end
+
+== Coevolution variant (heterogeneous policies) ==
+note right of T
+  CoEvolutionTrainer uses a custom
+  ``_record_coevolution_rollout`` helper instead of
+  ``UnifiedEvaluator.evaluate`` because evaluator broadcasts
+  one policy to all agents but per-side obs sizes differ.
+end note
+
+== AgileRL variant (one-shot end) ==
+note right of T
+  AgileRLTrainer records exactly **one** rollout
+  after training completes (no per-generation cadence
+  because RL training is rollout-based, not generational).
+end note
+
+== Cleanup ==
+T -> EL: close()
+note right of EL
+  FrameRecorder has **no** close():
+  artefacts are finalised inside
+  each end_episode() call.
+end note
+
+@enduml

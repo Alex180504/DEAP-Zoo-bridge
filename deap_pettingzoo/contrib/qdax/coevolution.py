@@ -272,6 +272,14 @@ class QDaxSideState(SideState):
         self._pool: Optional[QDaxRepertoirePool] = None
         self._last_batch_fitness = np.array([0.0])
 
+        # Placeholder evaluator used only during MAPElites.init() before the
+        # first step_generation() call supplies a real evaluator factory.
+        class _NullEvaluator:
+            def evaluate(self, _policy) -> float:
+                return 0.0
+
+        self._current_evaluator: Any = _NullEvaluator()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

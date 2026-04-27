@@ -1,0 +1,28 @@
+"""UI services — pure-Python helpers shared across pages.
+
+Each module is import-safe without ``streamlit`` so it can be
+unit-tested directly (cache decorators are no-ops outside Streamlit's
+runtime).
+"""
+
+from __future__ import annotations
+
+from deap_pettingzoo.ui.services.config import (
+    DEFAULT_ROOT_ENV_VAR,
+    UISettings,
+    load_settings,
+)
+from deap_pettingzoo.ui.services.data import (
+    discover_runs,
+    load_experiment_cached,
+)
+from deap_pettingzoo.ui.services.state import UIState
+
+__all__ = [
+    "DEFAULT_ROOT_ENV_VAR",
+    "UISettings",
+    "UIState",
+    "discover_runs",
+    "load_experiment_cached",
+    "load_settings",
+]

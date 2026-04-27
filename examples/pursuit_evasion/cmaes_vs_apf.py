@@ -32,6 +32,7 @@ from deap_pettingzoo.policies import (
     APFEvaderPolicy,
     FeedforwardNeuralPolicy,
 )
+from deap_pettingzoo.utils.logging import ExperimentLogger
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ MAX_STEPS_PER_EPISODE = 150
 HIDDEN_SIZE = 48
 SIGMA0 = 0.3
 SEED = 0
+OUTPUT_DIR = Path("results/pursuit_evasion_cmaes_vs_apf")
 
 ENV_CONFIG = PursuitEvasionConfig(
     num_adversaries=4,
@@ -238,8 +240,52 @@ def main() -> None:
     print(f"  APF evader reward   : {eval_stats['evader_mean']:+.2f} "
           f"± {eval_stats['evader_std']:.2f}")
 
-    out_dir = Path("results/pursuit_evasion_cmaes_vs_apf")
+    out_dir = OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = ExperimentLogger.create(
+        out_dir,
+        algorithm="cma-es",
+        env_name="pursuit_evasion",
+        seed=SEED,
+        budget_mode="eval_episodes",
+        budget_value=POPULATION_SIZE * NUM_GENERATIONS,
+        hyperparams={
+            "population_size": POPULATION_SIZE,
+            "num_generations": NUM_GENERATIONS,
+            "hidden_size": HIDDEN_SIZE,
+            "sigma0": SIGMA0,
+            "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
+            "search_dimension": result["dimension"],
+            "num_adversaries": ENV_CONFIG.num_adversaries,
+            "num_good": ENV_CONFIG.num_good,
+            "num_obstacles": ENV_CONFIG.num_obstacles,
+        },
+        notes="CMA-ES pursuers vs APF evaders.",
+    )
+    with logger:
+        for h in result["history"]:
+            logger.row("metrics", {
+                "iteration": int(h["gen"]),
+                "env_steps": int(h["gen"]) * POPULATION_SIZE,
+                "wall_time": 0.0,
+                "mean": float(h["avg"]),
+                "std": float(h["std"]),
+                "min": float(h["min"]),
+                "max": float(h["max"]),
+                "best": float(h["max"]),
+            })
+        logger.summary({
+            "final_fitness": float(result["best_fitness"]),
+            "best_fitness": float(result["best_fitness"]),
+            "num_generations": NUM_GENERATIONS,
+            "population_size": POPULATION_SIZE,
+            "training_time_s": float(evolution_time),
+            "eval_pursuer_mean": eval_stats["pursuer_mean"],
+            "eval_pursuer_std": eval_stats["pursuer_std"],
+            "eval_evader_mean": eval_stats["evader_mean"],
+        })
+
     np.savez(
         out_dir / "fitness_history.npz",
         history=np.array([(h["gen"], h["avg"], h["std"], h["min"], h["max"])
@@ -248,6 +294,7 @@ def main() -> None:
                                 ("min", "f4"), ("max", "f4")]),
     )
     print(f"\n  Saved fitness history to {out_dir / 'fitness_history.npz'}")
+    print(f"  Logged run to {logger.run_dir}")
     _section("Done")
 
 

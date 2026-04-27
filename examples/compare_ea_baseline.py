@@ -101,12 +101,19 @@ def main():
                 # forwarded to AgileRL's MADDPG(...) constructor.
                 'trainer_params': {
                     'device': 'cpu',
+                    # Periodic progress prints so long CPU training does
+                    # not look like a hang.
+                    'verbose': True,
                 },
                 'algorithm_params': {
                     'seed': 0,
                     'batch_size': 128,
                     'memory_size': 10_000,
                     'learning_delay': 500,
+                    # Throttle gradient updates: learn once every 100 env
+                    # steps after ``learning_delay``. Drastically faster on
+                    # CPU than the previous per-step learning.
+                    'learn_step': 100,
                     'lr_actor': 3e-4,
                     'lr_critic': 3e-4,
                 },

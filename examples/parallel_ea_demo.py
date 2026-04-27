@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 from deap_pettingzoo.baselines.ea_trainer import EATrainer
+
+
+OUTPUT_ROOT = Path("results/parallel_ea_demo")
 
 
 def _run(num_workers: int) -> tuple[float, float]:
@@ -26,6 +30,9 @@ def _run(num_workers: int) -> tuple[float, float]:
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=64,  # 16 generations * 4 individuals
         algorithm_params={"seed": 0},
+        # Each invocation gets its own subdir so the UI shows two
+        # comparable runs (serial vs process-pool).
+        output_dir=OUTPUT_ROOT / f"workers_{num_workers}",
     )
     trainer = EATrainer(
         hidden_size=16,

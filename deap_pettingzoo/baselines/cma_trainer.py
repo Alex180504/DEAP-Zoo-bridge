@@ -10,11 +10,16 @@ is drop-in compatible with :class:`UnifiedEvaluator` and
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 import numpy as np
 from deap import tools
 
+from deap_pettingzoo.baselines._logging_helpers import (
+    build_logger,
+    dump_fitness_history,
+    write_summary,
+)
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
@@ -25,6 +30,7 @@ from deap_pettingzoo.baselines.ea_trainer import (
     GenomePolicyWrapper,
     _resolve_shared_action_space,
 )
+from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.cma_integration import (
@@ -50,6 +56,10 @@ class CMAESTrainer(BaselineTrainer):
     under identical budget/environment configurations via
     :func:`compare_baselines`.
     """
+
+    #: CMA-ES iterates per generation just like EA, so the natural
+    #: recording cadence is one artefact per generation.
+    _default_recording_every_n: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -161,6 +171,46 @@ class CMAESTrainer(BaselineTrainer):
 
         fitness_history = []
 
+        # ----- Logger + optional FrameRecorder ---------------------------
+        log = build_logger(config, algorithm="cma-es")
+        recording_cfg = config.recording
+        recording_cadence = self._resolve_recording_every_n(config)
+        recording_evaluator: Optional[UnifiedEvaluator] = None
+        if recording_cfg.enabled:
+            recorder = log.get_frame_recorder(
+                fps=recording_cfg.fps,
+                fmt=recording_cfg.fmt,
+                max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                episode_prefix=recording_cfg.episode_prefix or "train_",
+            )
+            if recorder.enabled:
+                recording_evaluator = UnifiedEvaluator(
+                    max_steps=max_steps_per_episode,
+                    frame_recorder=recorder,
+                )
+
+        def _record_champion_if_due(gen: int) -> None:
+            """One champion-rollout episode per recording cadence (1-indexed)."""
+            if recording_evaluator is None or len(hof) == 0:
+                return
+            if gen % recording_cadence != 0:
+                return
+            try:
+                best = hof[0]
+                champ_policy = GenomePolicyWrapper(
+                    best.genome, config.env_name, action_space=action_space
+                )
+                rollout_seed = config.algorithm_params.get("seed")
+                recording_evaluator.evaluate(
+                    policy=champ_policy,
+                    env_name=config.env_name,
+                    num_episodes=1,
+                    seed=int(rollout_seed) if rollout_seed is not None else None,
+                    env_config=dict(config.env_config) if config.env_config else None,
+                )
+            except Exception:
+                pass
+
         # --- Parallel evaluation setup --------------------------------
         requested = config.algorithm_params.get("num_workers", self.num_workers)
         effective_workers = resolve_num_workers(requested)
@@ -219,13 +269,51 @@ class CMAESTrainer(BaselineTrainer):
                         "max": record["max"],
                     }
                 )
+                # gen is 0-indexed in this loop — fire callback with 1-indexed.
+                _record_champion_if_due(gen + 1)
 
         env.close()
+        if recording_evaluator is not None:
+            recording_evaluator.close()
         training_time = time.time() - start_time
 
         best_individual = hof[0]
         best_genome = best_individual.genome
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
+
+        # ----- Persist results via the (already-constructed) logger ------
+        try:
+            with log:
+                dump_fitness_history(
+                    log,
+                    fitness_history,
+                    env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                )
+                from deap_pettingzoo.utils.logging import save_ea_genome, KIND_CMA_GENOME
+                save_ea_genome(
+                    log,
+                    best_genome,
+                    kind=KIND_CMA_GENOME,
+                    extra={
+                        "final_fitness": float(best_individual.fitness.values[0]),
+                        "env_name": config.env_name,
+                        "variant": self.variant,
+                    },
+                )
+                write_summary(
+                    log,
+                    {
+                        "algorithm": "cma-es",
+                        "final_fitness": float(best_individual.fitness.values[0]),
+                        "num_generations": num_generations,
+                        "population_size": self.population_size,
+                        "dimension": dimension,
+                        "variant": self.variant,
+                    },
+                    training_time_s=training_time,
+                )
+        except Exception:
+            pass
 
         return TrainingResult(
             algorithm="cma-es",

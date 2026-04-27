@@ -1,0 +1,62 @@
+@startuml sequence_ui_browse_compare
+title Streamlit UI – Browse → Compare
+
+actor "User" as U
+participant "Streamlit\nBrowse page" as B
+participant "Streamlit\nCompare page" as C
+participant "services.data" as DS
+participant "Experiment" as EX
+participant "analysis.aggregate" as AG
+participant "analysis.compare" as CMP
+participant "analysis.rliable_bridge" as RLB
+participant "analysis.plots" as PL
+
+U -> B: open Browse, set root_dir
+B -> DS: load_experiment(root, max_mtime)
+note right of DS: @cache_resource\nkeyed by (root, max_mtime)
+DS --> B: Experiment
+
+U -> B: apply filters (algo, env, date)
+B -> EX: filter(...).summary_table()
+EX --> B: DataFrame
+
+U -> B: tick checkboxes → select N runs
+B -> B: session_state["selected_run_ids"] = [...]
+
+U -> C: navigate to Compare
+C -> EX: filter(run_ids=selected)
+EX --> C: subset Experiment
+
+== Tab: Summary ==
+C -> EX: summary_table()
+EX --> C: DataFrame
+C -> AG: aggregate_summary(final_scores)
+AG --> C: DataFrame[mean+CI, iqm+CI]
+
+== Tab: Learning curves ==
+C -> AG: learning_curve_with_ci(runs, statistic, x_col, y_col)
+AG --> C: DataFrame
+C -> PL: plot_learning_curves(runs_by_algo)
+PL --> C: Figure
+C --> U: render
+
+== Tab: Pairwise ==
+C -> CMP: pairwise_table(exp, metric, test)
+CMP --> C: DataFrame
+C --> U: styled table (effect-size colours)
+
+== Tab: Profile / PI (optional) ==
+alt rliable available
+    C -> RLB: performance_profile(score_groups, taus)
+    RLB --> C: DataFrame
+    C -> PL: plot_performance_profile(...)
+    PL --> C: Figure
+    C -> RLB: probability_of_improvement(score_groups)
+    RLB --> C: DataFrame
+    C -> PL: plot_pi_matrix(...)
+    PL --> C: Figure
+else
+    C --> U: banner "install rliable for full stats"
+end
+
+@enduml

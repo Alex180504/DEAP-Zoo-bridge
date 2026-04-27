@@ -26,6 +26,7 @@ from __future__ import annotations
 import random
 import sys
 import time
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -46,6 +47,7 @@ from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import is_registered
 from deap_pettingzoo.evaluators import SelfPlayEvaluator
 from deap_pettingzoo.genomes import FixedTopologyGenome
+from deap_pettingzoo.utils.logging import ExperimentLogger
 
 
 ENV_NAME = "openspiel_connect_four"
@@ -58,6 +60,7 @@ MUTATION_SIGMA = 0.2
 MUTATION_PROB = 0.3
 CROSSOVER_PROB = 0.5
 SEED = 42
+OUTPUT_DIR = Path("results/openspiel_connect_four_selfplay")
 
 
 def _register_connect_four() -> None:
@@ -160,46 +163,96 @@ def main() -> None:
     toolbox = _setup_deap(obs_dim)
     population: List = toolbox.population(n=POPULATION)
 
-    t0 = time.time()
-    for ind in population:
-        ind.fitness.values = evaluator.evaluate(ind, seed=SEED)
-
-    best_history: List[float] = [max(ind.fitness.values[0] for ind in population)]
-    print(
-        f"Gen 0 — best fitness: {best_history[0]:+.3f} "
-        f"(elapsed {time.time() - t0:.2f}s)"
+    logger = ExperimentLogger.create(
+        OUTPUT_DIR,
+        algorithm="ea_selfplay",
+        env_name=ENV_NAME,
+        seed=SEED,
+        budget_mode="eval_episodes",
+        budget_value=POPULATION * (GENERATIONS + 1),
+        hyperparams={
+            "population": POPULATION,
+            "generations": GENERATIONS,
+            "hidden": HIDDEN,
+            "mutation_sigma": MUTATION_SIGMA,
+            "mutation_prob": MUTATION_PROB,
+            "crossover_prob": CROSSOVER_PROB,
+        },
+        notes="Connect Four self-play (OpenSpiel via shimmy).",
     )
 
-    for gen in range(1, GENERATIONS + 1):
-        parents = tools.selTournament(population, k=POPULATION, tournsize=3)
-        offspring = [toolbox.individual() for _ in range(POPULATION)]
-        for new, src in zip(offspring, parents):
-            new.genome.set_weights(list(src.genome.get_weights()))
-            new.fitness.values = src.fitness.values
+    with logger:
+        t0 = time.time()
+        for ind in population:
+            ind.fitness.values = evaluator.evaluate(ind, seed=SEED)
 
-        for c1, c2 in zip(offspring[::2], offspring[1::2]):
-            if random.random() < CROSSOVER_PROB:
-                _crossover(c1, c2)
-                del c1.fitness.values
-                del c2.fitness.values
-
-        for ind in offspring:
-            if random.random() < MUTATION_PROB:
-                _mutate(ind)
-                if ind.fitness.valid:
-                    del ind.fitness.values
-
-        for ind in offspring:
-            if not ind.fitness.valid:
-                ind.fitness.values = evaluator.evaluate(ind, seed=SEED + gen)
-
-        population[:] = offspring
-        best = max(ind.fitness.values[0] for ind in population)
-        best_history.append(best)
+        fits = [ind.fitness.values[0] for ind in population]
+        best_history: List[float] = [max(fits)]
+        logger.row("metrics", {
+            "iteration": 0,
+            "env_steps": POPULATION,
+            "wall_time": time.time() - t0,
+            "best": float(max(fits)),
+            "mean": float(np.mean(fits)),
+            "std": float(np.std(fits)),
+            "min": float(min(fits)),
+            "max": float(max(fits)),
+        })
         print(
-            f"Gen {gen} — best fitness: {best:+.3f} "
+            f"Gen 0 — best fitness: {best_history[0]:+.3f} "
             f"(elapsed {time.time() - t0:.2f}s)"
         )
+
+        for gen in range(1, GENERATIONS + 1):
+            parents = tools.selTournament(population, k=POPULATION, tournsize=3)
+            offspring = [toolbox.individual() for _ in range(POPULATION)]
+            for new, src in zip(offspring, parents):
+                new.genome.set_weights(list(src.genome.get_weights()))
+                new.fitness.values = src.fitness.values
+
+            for c1, c2 in zip(offspring[::2], offspring[1::2]):
+                if random.random() < CROSSOVER_PROB:
+                    _crossover(c1, c2)
+                    del c1.fitness.values
+                    del c2.fitness.values
+
+            for ind in offspring:
+                if random.random() < MUTATION_PROB:
+                    _mutate(ind)
+                    if ind.fitness.valid:
+                        del ind.fitness.values
+
+            for ind in offspring:
+                if not ind.fitness.valid:
+                    ind.fitness.values = evaluator.evaluate(ind, seed=SEED + gen)
+
+            population[:] = offspring
+            fits = [ind.fitness.values[0] for ind in population]
+            best = max(fits)
+            best_history.append(best)
+            logger.row("metrics", {
+                "iteration": gen,
+                "env_steps": POPULATION * (gen + 1),
+                "wall_time": time.time() - t0,
+                "best": float(best),
+                "mean": float(np.mean(fits)),
+                "std": float(np.std(fits)),
+                "min": float(min(fits)),
+                "max": float(max(fits)),
+            })
+            print(
+                f"Gen {gen} — best fitness: {best:+.3f} "
+                f"(elapsed {time.time() - t0:.2f}s)"
+            )
+
+        total_time = time.time() - t0
+        logger.summary({
+            "final_fitness": float(max(best_history)),
+            "best_fitness": float(max(best_history)),
+            "num_generations": GENERATIONS,
+            "population": POPULATION,
+            "training_time_s": total_time,
+        })
 
     print()
     print("=" * 60)
