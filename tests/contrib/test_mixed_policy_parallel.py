@@ -188,13 +188,11 @@ class TestMixedPolicyEvaluatorFactoryPath:
             learner_factory=_learner_factory,
             max_steps=_SMALL_CFG.max_cycles,
         )
-        try:
-            # A validation env is built during __init__ and stored.
-            assert evaluator.env_wrapper is not None
-            assert len(evaluator.learner_agents) > 0
-            assert len(evaluator.scripted_agents) > 0
-        finally:
-            evaluator.env_wrapper.close()
+        # Factory path: validation env is built and closed during __init__,
+        # so env_wrapper is None — agent lists are cached for use by workers.
+        assert evaluator.env_wrapper is None
+        assert len(evaluator.learner_agents) > 0
+        assert len(evaluator.scripted_agents) > 0
 
     def test_run_episode_returns_structured_result(self):
         evaluator = MixedPolicyEvaluator(
@@ -204,16 +202,13 @@ class TestMixedPolicyEvaluatorFactoryPath:
             learner_factory=_learner_factory,
             max_steps=_SMALL_CFG.max_cycles,
         )
-        try:
-            ind, _ = _make_individual()
-            res = evaluator.run_episode(ind, seed=0)
-            assert res.steps > 0
-            assert res.steps <= _SMALL_CFG.max_cycles
-            assert np.isfinite(res.learner_reward)
-            assert np.isfinite(res.scripted_reward)
-            assert res.fitness == res.learner_reward
-        finally:
-            evaluator.env_wrapper.close()
+        ind, _ = _make_individual()
+        res = evaluator.run_episode(ind, seed=0)
+        assert res.steps > 0
+        assert res.steps <= _SMALL_CFG.max_cycles
+        assert np.isfinite(res.learner_reward)
+        assert np.isfinite(res.scripted_reward)
+        assert res.fitness == res.learner_reward
 
     def test_evaluate_returns_fitness_tuple(self):
         evaluator = MixedPolicyEvaluator(
@@ -223,14 +218,11 @@ class TestMixedPolicyEvaluatorFactoryPath:
             learner_factory=_learner_factory,
             max_steps=_SMALL_CFG.max_cycles,
         )
-        try:
-            ind, _ = _make_individual()
-            result = evaluator.evaluate(ind, seed=1)
-            assert isinstance(result, tuple)
-            assert len(result) == 1
-            assert isinstance(result[0], float)
-        finally:
-            evaluator.env_wrapper.close()
+        ind, _ = _make_individual()
+        result = evaluator.evaluate(ind, seed=1)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+        assert isinstance(result[0], float)
 
     def test_factory_path_and_live_path_produce_finite_fitness(self):
         """Both construction paths should produce finite, real fitness values."""
@@ -259,7 +251,7 @@ class TestMixedPolicyEvaluatorFactoryPath:
             assert np.isfinite(factory_fit[0])
         finally:
             env.close()
-            factory_ev.env_wrapper.close()
+            # factory_ev's validation env is already closed in __init__.
 
 
 # ---------------------------------------------------------------------------
@@ -303,42 +295,36 @@ class TestMakeMixedParallelEvaluateMap:
 
     def test_serial_executor_returns_fitness_list(self):
         ev = self._make_evaluator()
-        try:
-            with _SerialExecutor() as ex:
-                pmap = make_mixed_parallel_evaluate_map(
-                    ex, ev, eval_episodes=1
-                )
-                ind, _ = _make_individual()
-                results = pmap(None, [ind, ind])
-            assert len(results) == 2
-            for fit in results:
-                assert isinstance(fit, tuple)
-                assert len(fit) == 1
-                assert np.isfinite(fit[0])
-        finally:
-            ev.env_wrapper.close()
+        with _SerialExecutor() as ex:
+            pmap = make_mixed_parallel_evaluate_map(
+                ex, ev, eval_episodes=1
+            )
+            ind, _ = _make_individual()
+            results = pmap(None, [ind, ind])
+        assert len(results) == 2
+        for fit in results:
+            assert isinstance(fit, tuple)
+            assert len(fit) == 1
+            assert np.isfinite(fit[0])
 
     def test_pmap_matches_direct_evaluate(self):
         """pmap(serial) should produce the same fitness as direct evaluate."""
         ev = self._make_evaluator()
-        try:
-            ind, _ = _make_individual()
-            direct = ev.run_episode(ind, seed=0).fitness
+        ind, _ = _make_individual()
+        direct = ev.run_episode(ind, seed=0).fitness
 
-            with _SerialExecutor() as ex:
-                pmap = make_mixed_parallel_evaluate_map(
-                    ex, ev, eval_episodes=1
-                )
-                # pmap ignores the evaluate_fn argument.
-                [(parallel_fit,)] = pmap(None, [ind])
+        with _SerialExecutor() as ex:
+            pmap = make_mixed_parallel_evaluate_map(
+                ex, ev, eval_episodes=1
+            )
+            # pmap ignores the evaluate_fn argument.
+            [(parallel_fit,)] = pmap(None, [ind])
 
-            # Both run a single episode with the same genome.
-            # Fitness values won't be identical (different env instances,
-            # possibly different random state), but both should be finite.
-            assert np.isfinite(direct)
-            assert np.isfinite(parallel_fit)
-        finally:
-            ev.env_wrapper.close()
+        # Both run a single episode with the same genome.
+        # Fitness values won't be identical (different env instances,
+        # possibly different random state), but both should be finite.
+        assert np.isfinite(direct)
+        assert np.isfinite(parallel_fit)
 
     def test_rejects_lambda_factory(self):
         """Lambda factories are not module-level and cannot be pickled."""
@@ -348,12 +334,9 @@ class TestMakeMixedParallelEvaluateMap:
             learner_agent_prefixes=["adversary"],
             learner_factory=lambda g, a, s: FeedforwardNeuralPolicy(g, action_space=s),
         )
-        try:
-            with _SerialExecutor() as ex:
-                with pytest.raises(ValueError, match="module-level"):
-                    make_mixed_parallel_evaluate_map(ex, ev)
-        finally:
-            ev.env_wrapper.close()
+        with _SerialExecutor() as ex:
+            with pytest.raises(ValueError, match="module-level"):
+                make_mixed_parallel_evaluate_map(ex, ev)
 
 
 # ---------------------------------------------------------------------------
@@ -410,19 +393,16 @@ class TestMixedParallelProcessPool:
             learner_factory=_learner_factory,
             max_steps=_SMALL_CFG.max_cycles,
         )
-        try:
-            ind, _ = _make_individual()
-            population = [ind, ind, ind, ind]
+        ind, _ = _make_individual()
+        population = [ind, ind, ind, ind]
 
-            with make_executor(2) as executor:
-                pmap = make_mixed_parallel_evaluate_map(
-                    executor, ev, eval_episodes=1
-                )
-                results = pmap(None, population)
+        with make_executor(2) as executor:
+            pmap = make_mixed_parallel_evaluate_map(
+                executor, ev, eval_episodes=1
+            )
+            results = pmap(None, population)
 
-            assert len(results) == 4
-            for fit in results:
-                assert isinstance(fit, tuple)
-                assert np.isfinite(fit[0])
-        finally:
-            ev.env_wrapper.close()
+        assert len(results) == 4
+        for fit in results:
+            assert isinstance(fit, tuple)
+            assert np.isfinite(fit[0])
