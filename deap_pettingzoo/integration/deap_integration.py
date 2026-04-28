@@ -918,15 +918,19 @@ def make_mixed_parallel_evaluate_map(
         return f"{mod}.{name}"
 
     # Sample genome from the evaluator's env to discover topology.
-    sample_env = evaluator.env_wrapper
-    pursuer_id = next(
-        a for a in sample_env.possible_agents
-        if a.startswith(evaluator.learner_agent_prefixes)
-    )
-    obs = sample_env.reset(seed=0)
-    input_size = int(obs[pursuer_id].shape[0])
-    act_space = sample_env.action_space(pursuer_id)
-    output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+    temp_env = evaluator.env_wrapper if evaluator.env_wrapper is not None else evaluator.env_factory()
+    try:
+        pursuer_id = next(
+            a for a in temp_env.possible_agents
+            if a.startswith(evaluator.learner_agent_prefixes)
+        )
+        obs = temp_env.reset(seed=0)
+        input_size = int(obs[pursuer_id].shape[0])
+        act_space = temp_env.action_space(pursuer_id)
+        output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+    finally:
+        if evaluator.env_wrapper is None:
+            temp_env.close()
 
     spec = _MixedWorkerSpec(
         env_factory_qualname=_qualname(evaluator.env_factory),
