@@ -25,8 +25,8 @@ import numpy as np
 class ActionHead:
     """Base action-head protocol."""
 
-    #: Whether :meth:`decode` accepts an ``action_mask`` keyword. Defaults
-    #: to ``False``; :class:`MaskedDiscreteHead` overrides to ``True``.
+    #: Whether :meth:`decode` accepts an ``action_mask`` keyword. 
+    #: Defaults to ``False``; :class:`MaskedDiscreteHead` overrides to ``True``.
     supports_mask: bool = False
 
     def decode(self, raw_output: np.ndarray) -> Any:  # pragma: no cover - abstract
@@ -104,8 +104,7 @@ class MaskedDiscreteHead(DiscreteHead):
                 f"got size {mask.size}"
             )
         if not np.any(mask):
-            # Nothing legal (waiting-turn agent); return 0 — adapter will
-            # discard this action anyway.
+            # Nothing legal (waiting-turn agent); return 0 — adapter will discard this action anyway.
             return 0
         masked = np.where(mask.astype(bool), arr, -np.inf)
         return int(np.argmax(masked))
@@ -128,8 +127,12 @@ class BoxHead(ActionHead):
         shape: Action shape; inferred from ``low``/``high`` when possible.
 
     Raises:
-        ValueError: If ``low``/``high`` contain non-finite values and no
-            explicit ``shape`` is provided, or if ``shape`` is empty.
+        ValueError: If ``low``/``high`` are scalars and no explicit
+            ``shape`` is provided, or if ``shape`` is empty.
+
+    Note:
+        Non-finite bounds (``±inf``) are silently replaced with ``∓1.0``
+        so that unbounded :class:`Box` spaces still produce finite actions.
     """
 
     def __init__(

@@ -38,9 +38,9 @@ class TestMPE2EnvSmoke:
     def test_step_once_with_zero_actions(self, env_name):
         wrapper = PettingZooWrapper(env_name)
         wrapper.reset(seed=0)
-        # Build a zero-action dict compatible with whatever action-space
-        # type the env uses.  For Discrete: int 0.  For Box/MultiDiscrete:
-        # np.zeros matching the low/nvec shape.
+        # Build a zero-action dict compatible with whatever action-space type the env uses.  
+        # For Discrete: int 0.  
+        # For Box/MultiDiscrete:np.zeros matching the low/nvec shape.
         actions = {}
         for agent in wrapper.possible_agents:
             space = wrapper.env.action_space(agent)

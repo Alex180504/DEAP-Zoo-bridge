@@ -59,7 +59,7 @@ if not runs:
     st.info(f"No runs found under **{root}**.")
     st.stop()
 
-# ----- sidebar filters & management ----------------------------------------
+# Sidebar filters & management 
 algos = sorted({r.algorithm for r in runs})
 envs = sorted({r.env_name for r in runs})
 
@@ -144,7 +144,7 @@ with st.sidebar:
         else:
             st.caption("No subfolders found. Create one above first.")
 
-# ----- apply filters & sort ------------------------------------------------
+# Apply filters & sort
 filtered = [
     r for r in runs
     if r.algorithm in sel_algos
@@ -178,7 +178,7 @@ filtered.sort(key=_SORT_NONE_LAST.get(sort_col, _SORT_NONE_LAST["started_at"]), 
 
 st.caption(f"{len(filtered)} of {len(runs)} runs match.")
 
-# ----- table ---------------------------------------------------------------
+# Table
 rows = [
     {
         "name": r.display_name or r.run_id,
@@ -225,7 +225,7 @@ selected_run_dirs = {
 state.update_selected(selected_run_ids)
 state.persist()
 
-# ----- delete confirmation dialog ------------------------------------------
+# Delete confirmation dialog
 if st.session_state.get("_browse_confirm_delete"):
     n = len(state.selected_run_ids)
     st.warning(
@@ -259,7 +259,7 @@ if st.session_state.get("_browse_confirm_delete"):
         st.session_state["_browse_confirm_delete"] = False
         st.rerun()
 
-# ----- manage selected runs ------------------------------------------------
+# Manage selected runs
 if selected_run_ids:
     with st.expander(f"⚙️ Manage {len(selected_run_ids)} selected run(s)", expanded=False):
         st.markdown("**Rename** — sets a human-readable display name (stored in manifest).")

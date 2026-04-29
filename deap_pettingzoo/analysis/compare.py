@@ -16,9 +16,7 @@ import numpy as np
 
 from deap_pettingzoo.analysis.loaders import Experiment
 
-# ---------------------------------------------------------------------------
 # Effect-size helpers
-# ---------------------------------------------------------------------------
 
 
 def cohens_d(x: Sequence[float], y: Sequence[float]) -> float:
@@ -61,9 +59,7 @@ def cliffs_delta(x: Sequence[float], y: Sequence[float]) -> float:
     return (gt - lt) / float(a.size * b.size)
 
 
-# ---------------------------------------------------------------------------
 # Hypothesis tests
-# ---------------------------------------------------------------------------
 
 
 def mann_whitney(
@@ -196,9 +192,7 @@ def welch_t(x: Sequence[float], y: Sequence[float]) -> Dict[str, float]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Pairwise tables
-# ---------------------------------------------------------------------------
 
 
 def pairwise_table(

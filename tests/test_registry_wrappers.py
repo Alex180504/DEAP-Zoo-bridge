@@ -11,8 +11,7 @@ These tests verify three invariants:
    so they always see the parallel-shaped env the rest of the stack
    expects.
 
-The tests avoid any :mod:`supersuit` dependency and use tiny fake
-wrappers that record which env they saw.
+The tests avoid any :mod:`supersuit` dependency and use tiny mock wrappers that record which env they saw.
 """
 
 from __future__ import annotations

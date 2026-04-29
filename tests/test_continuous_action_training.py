@@ -38,7 +38,7 @@ CONTINUOUS_ENVS = [
 
 
 # ---------------------------------------------------------------------------
-# Phase A — required_output_size helper
+# required_output_size helper
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ class TestRequiredOutputSize:
 
 
 # ---------------------------------------------------------------------------
-# Phase B — evaluator wires BoxHead for continuous envs
+# Evaluator wires BoxHead for continuous envs
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ def test_box_head_wired_in_single_episode_evaluator(env_name):
 
 
 # ---------------------------------------------------------------------------
-# Phase B/C — trainer smoke on continuous envs
+# Trainer smoke tests on continuous envs
 # ---------------------------------------------------------------------------
 
 
@@ -219,7 +219,7 @@ def test_cmaes_trainer_continuous_smoke(env_name):
 
 
 # ---------------------------------------------------------------------------
-# Phase B — heterogeneous-space guard
+# Heterogeneous-space guard tests
 # ---------------------------------------------------------------------------
 
 

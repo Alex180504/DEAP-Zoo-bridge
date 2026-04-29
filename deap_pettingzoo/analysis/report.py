@@ -98,9 +98,7 @@ def build_report(
     )
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> list:

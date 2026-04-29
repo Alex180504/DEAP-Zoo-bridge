@@ -209,7 +209,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
             ValueError: If neither path provides enough information, or
                 if a non-learner agent has no scripted policy (live path).
         """
-        # --- Validate construction paths ---
+        # Validate construction paths
         has_live = env_wrapper is not None
         has_factory = env_factory is not None
 

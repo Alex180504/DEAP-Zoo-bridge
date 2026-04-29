@@ -296,11 +296,6 @@ class TestComparisonWorkflow:
             results_file = Path(tmpdir) / 'results' / 'comparison_results.json'
             assert results_file.exists()
 
-
-# ===========================================================================
-# Phase 5: Extensibility — compatibility module
-# ===========================================================================
-
 from deap_pettingzoo.baselines.compatibility import (
     EnvironmentInfo,
     CompatibilityResult,

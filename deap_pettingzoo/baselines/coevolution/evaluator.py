@@ -40,16 +40,9 @@ LearnerPolicyFactory = Callable[[Any, str, Any], PolicyProtocol]
 VALID_AGGREGATIONS = ("mean", "min", "max", "sum")
 
 
-# ---------------------------------------------------------------------------
-# Worker-side state for parallel co-evolution (Phase 8)
-# ---------------------------------------------------------------------------
+# Worker-side state for parallel co-evolution
 
 
-# Module-global cache of process-local PettingZooWrapper instances,
-# keyed on ``(env_name, _hashable(env_config))``. Workers build a env
-# lazily on first episode and reuse it across every subsequent episode
-# for the rest of the worker's lifetime. Mirrors the
-# ``_NUMPY_WORKER_CACHE`` pattern in ``contrib/qdax/scoring_numpy.py``.
 _COEV_WORKER_ENV_CACHE: Dict[Tuple[Any, ...], PettingZooWrapper] = {}
 
 
@@ -65,6 +58,15 @@ def _hashable_env_config(env_config: Optional[Dict[str, Any]]) -> Tuple[Any, ...
 def _resolve_worker_env(
     env_name: str, env_config: Optional[Dict[str, Any]]
 ) -> PettingZooWrapper:
+    """Return a process-local :class:`PettingZooWrapper`, cached by key.
+
+    Note:
+        ``_COEV_WORKER_ENV_CACHE`` is module-global and keyed on
+        ``(env_name, _hashable(env_config))``.  Workers build an env
+        lazily on first use and reuse it for the rest of the worker's
+        lifetime.  Mirrors the ``_NUMPY_WORKER_CACHE`` pattern in
+        ``contrib/qdax/scoring_numpy.py``.
+    """
     key: Tuple[Any, ...] = (env_name, _hashable_env_config(env_config))
     cached = _COEV_WORKER_ENV_CACHE.get(key)
     if cached is not None:
@@ -114,6 +116,13 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
     :class:`ProcessPoolExecutor`, SCOOP, and Dask. All state
     (env, genome, opponent policies) is rebuilt from the payload —
     nothing live crosses the process boundary.
+
+    Note:
+        Opponent policies are materialised fresh each episode: each
+        side's :class:`OpponentSnapshot` is rebuilt into one shared
+        policy covering all agents in that side — the canonical
+        "one champion drives the whole team" contract, matching the
+        driver-side serial path.
     """
     from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 
@@ -133,9 +142,6 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
         a: name for name, members in side_agents.items() for a in members
     }
 
-    # Materialise opponent policies once per episode. Each side's
-    # snapshot becomes one shared policy across that side's agents
-    # (same contract as the driver-side serial path).
     opponent_policies: Dict[str, PolicyProtocol] = {}
     for side_name, snapshot in payload.opponent_snapshots.items():
         members = side_agents.get(side_name, [])
@@ -293,14 +299,13 @@ class CoEvolutionEvaluator(BaseEvaluator):
     ) -> None:
         """Build a co-evolution evaluator.
 
-        Phase 8 parallel evaluation kwargs (all optional, all keyword-only):
+        Parallel evaluation kwargs (all optional, all keyword-only):
 
         * ``executor`` — a context-managed executor matching the
           :func:`deap_pettingzoo.utils.parallel.make_executor` protocol.
           When provided **and** ``k_opponents > 1``, the
           ``k_opponents`` episodes inside one :meth:`evaluate` call are
-          dispatched via ``executor.map``. ``None`` keeps the serial
-          path bit-for-bit identical to pre-Phase-8 behaviour.
+          dispatched via ``executor.map``.
         * ``env_name`` / ``env_config`` — picklable env-construction
           metadata so workers can rebuild a process-local
           :class:`PettingZooWrapper`. Required when ``executor`` is
@@ -391,9 +396,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self.learner_agents: List[str] = learner_agents
         self.side_agents: Dict[str, List[str]] = side_agents
 
-    # ------------------------------------------------------------------
     # BaseEvaluator
-    # ------------------------------------------------------------------
 
     def evaluate(
         self,
@@ -414,9 +417,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         result = self.run(individual, seed=seed, rng=rng)
         return (result.fitness,)
 
-    # ------------------------------------------------------------------
     # Core loop
-    # ------------------------------------------------------------------
 
     def run(
         self,
@@ -432,6 +433,11 @@ class CoEvolutionEvaluator(BaseEvaluator):
         per :meth:`run` call regardless of worker count), then each
         episode is shipped as a picklable :class:`_EpisodePayload` to
         the executor. Aggregation always happens on the driver.
+
+        Note:
+            Parallel execution is enabled only when an executor is wired
+            **and** ``k_opponents > 1``.  Single-episode evaluations skip
+            the executor overhead entirely.
         """
         if individual is None or not hasattr(individual, "genome") or individual.genome is None:
             raise ValueError("CoEvolutionEvaluator requires an individual with a 'genome'.")
@@ -439,9 +445,6 @@ class CoEvolutionEvaluator(BaseEvaluator):
         if rng is None:
             rng = np.random.default_rng(seed)
 
-        # Decision: parallel iff executor is wired AND k > 1.
-        # Single-episode evaluations skip the pool overhead entirely
-        # (matches the documented Phase 8 contract).
         use_parallel = self._executor is not None and self.k_opponents > 1
 
         if use_parallel:
@@ -454,6 +457,14 @@ class CoEvolutionEvaluator(BaseEvaluator):
         seed: Optional[int],
         rng: np.random.Generator,
     ) -> CoEvolutionEvalResult:
+        """Run ``k_opponents`` episodes serially and aggregate results.
+
+        Note:
+            One opponent policy is sampled per side and shared across all
+            agents in that side.  This matches the canonical self-play
+            contract ("one champion drives the whole team") and reduces
+            opponent-sampling variance compared to per-agent sampling.
+        """
         learner_rewards: List[float] = []
         side_reward_samples: Dict[str, List[float]] = {
             name: [] for name, _, _ in self.opponent_sides
@@ -462,11 +473,6 @@ class CoEvolutionEvaluator(BaseEvaluator):
 
         for i in range(self.k_opponents):
             episode_seed = None if seed is None else int(seed) + i
-            # Sample ONE opponent policy per side (shared across that
-            # side's agents). This matches the canonical self-play
-            # contract ("one champion drives the whole team") and
-            # massively reduces opponent-sampling variance compared
-            # to sampling per-agent.
             opp_policies: Dict[str, PolicyProtocol] = {}
             for side_name, _prefixes, pool in self.opponent_sides:
                 side_policy = pool.sample_opponent(rng)
@@ -489,8 +495,15 @@ class CoEvolutionEvaluator(BaseEvaluator):
         seed: Optional[int],
         rng: np.random.Generator,
     ) -> CoEvolutionEvalResult:
-        # Snapshot k opponents per side on the driver. Each side gets
-        # k snapshots; we transpose to one dict-per-episode below.
+        """Dispatch ``k_opponents`` episodes to :attr:`_executor` and aggregate.
+
+        Note:
+            All ``k`` opponent snapshots per side are taken on the driver
+            before any worker is launched so pool RNGs and archive cursors
+            mutate exactly once per call.  The per-side snapshot lists are
+            then transposed to one ``{side: snapshot}`` dict per episode
+            before building :class:`_EpisodePayload` objects.
+        """
         per_side_snapshots: Dict[str, List[OpponentSnapshot]] = {}
         side_role_prefixes: Dict[str, Tuple[str, ...]] = {}
         for side_name, prefixes, pool in self.opponent_sides:

@@ -57,8 +57,7 @@ class CMAESTrainer(BaselineTrainer):
     :func:`compare_baselines`.
     """
 
-    #: CMA-ES iterates per generation just like EA, so the natural
-    #: recording cadence is one artefact per generation.
+    # CMA-ES iterates per generation just like EA, so the natural recording cadence is one artefact per generation.
     _default_recording_every_n: ClassVar[int] = 1
 
     def __init__(
@@ -92,6 +91,13 @@ class CMAESTrainer(BaselineTrainer):
                 :class:`deap.cma.StrategyOnePlusLambda` — a single-parent
                 elitist variant that is typically more sample-efficient
                 on unimodal objectives.
+
+        Raises:
+            ValueError: If ``variant`` is not ``'mu_mu_lambda'`` or
+                ``'one_plus_lambda'``.
+            ValueError: If ``num_workers`` is negative.
+            ValueError: If ``parallel_backend`` is not in
+                :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -128,6 +134,13 @@ class CMAESTrainer(BaselineTrainer):
         Returns:
             :class:`TrainingResult` whose ``policy`` wraps the best-found
             genome as a :class:`PolicyProtocol`.
+
+        Raises:
+            ValueError: If ``config.budget_mode`` is not supported
+                (propagated from :meth:`_translate_budget`).
+            ValueError: If the environment uses heterogeneous action
+                spaces (propagated from
+                :func:`~deap_pettingzoo.baselines.ea_trainer._resolve_shared_action_space`).
         """
         start_time = time.time()
 
@@ -150,8 +163,7 @@ class CMAESTrainer(BaselineTrainer):
             aggregation_method="sum",
         )
 
-        # Seed NumPy's global RNG — deap.cma.Strategy samples via
-        # numpy.random.standard_normal, so this is the only control knob.
+        # Seed NumPy's global RNG — deap.cma.Strategy samples via numpy.random.standard_normal, so this is the only control knob.
         seed = config.algorithm_params.get("seed", None)
         if seed is not None:
             np.random.seed(int(seed))
@@ -171,7 +183,7 @@ class CMAESTrainer(BaselineTrainer):
 
         fitness_history = []
 
-        # ----- Logger + optional FrameRecorder ---------------------------
+        # Logger + optional FrameRecorder
         log = build_logger(config, algorithm="cma-es")
         recording_cfg = config.recording
         recording_cadence = self._resolve_recording_every_n(config)
@@ -211,7 +223,7 @@ class CMAESTrainer(BaselineTrainer):
             except Exception:
                 pass
 
-        # --- Parallel evaluation setup --------------------------------
+        # Parallel evaluation setup
         requested = config.algorithm_params.get("num_workers", self.num_workers)
         effective_workers = resolve_num_workers(requested)
         backend = config.algorithm_params.get(
@@ -269,7 +281,7 @@ class CMAESTrainer(BaselineTrainer):
                         "max": record["max"],
                     }
                 )
-                # gen is 0-indexed in this loop — fire callback with 1-indexed.
+                # gen is 0-indexed in this loop - fire callback with 1-indexed.
                 _record_champion_if_due(gen + 1)
 
         env.close()
@@ -281,7 +293,7 @@ class CMAESTrainer(BaselineTrainer):
         best_genome = best_individual.genome
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
 
-        # ----- Persist results via the (already-constructed) logger ------
+        # Persist results via the logger
         try:
             with log:
                 dump_fitness_history(
@@ -361,6 +373,10 @@ class CMAESTrainer(BaselineTrainer):
         Matches :meth:`EATrainer._translate_budget` so identical budget
         configurations yield the same number of generations for both
         trainers.
+
+        Raises:
+            ValueError: If ``config.budget_mode`` is not
+                ``BudgetMode.ENV_STEPS`` or ``BudgetMode.EVAL_EPISODES``.
         """
         max_steps_per_episode = config.algorithm_params.get(
             "max_steps_per_episode", 200

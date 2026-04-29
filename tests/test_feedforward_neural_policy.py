@@ -306,7 +306,7 @@ class TestFeedforwardNeuralPolicyEdgeCases:
         observation = np.random.randn(10)
         action = policy.forward(observation)
         
-        # With zero weights and biases, output should be zero (or processed through activation)
+        # With zero weights and biases, output should be zero
         assert action.shape == (4,)
     
     def test_policy_repr(self):

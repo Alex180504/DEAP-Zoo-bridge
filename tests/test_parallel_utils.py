@@ -90,18 +90,6 @@ class TestParallelMap:
             results = parallel_map(_square, list(range(8)), executor=ex)
         assert results == [i * i for i in range(8)]
 
-
-# --------------------------------------------------------------------------
-# Phase 7: SCOOP + Dask backend dispatch tests.
-#
-# SCOOP is not a listed dev dep; installing it requires a launcher
-# (``python -m scoop``). We cover the dispatch path by stubbing
-# ``scoop.futures`` in ``sys.modules``. Dask is ``importorskip`` ed;
-# when present we stand up a threaded Client so the test is
-# self-contained and ResourceWarning-clean.
-# --------------------------------------------------------------------------
-
-
 class TestScoopBackend:
     def test_scoop_import_error_when_missing(self, monkeypatch):
         # Ensure scoop is hidden from importers.
@@ -164,19 +152,6 @@ class TestDaskBackend:
         with pytest.raises(ImportError, match="dask"):
             make_executor(2, backend="dask")
 
-
-# --------------------------------------------------------------------------
-# Phase 7: pickle regression guard.
-#
-# SCOOP and Dask use strict ``pickle`` — no ``cloudpickle`` fallback is
-# guaranteed. Every payload the trainers ship across the process
-# boundary must round-trip through ``pickle.dumps`` / ``pickle.loads``.
-# This test is a structural regression check so that accidental
-# reintroduction of closures or unpicklable state is caught at
-# unit-test time rather than at deploy time.
-# --------------------------------------------------------------------------
-
-
 class TestPayloadPickleability:
     def test_genome_payload_roundtrip(self):
         import pickle
@@ -220,7 +195,6 @@ class TestPayloadPickleability:
         assert spec2.aggregation_method == "mean"
 
     def test_rollout_spec_roundtrip_with_descriptor(self):
-        """Regression: closures in descriptors broke pickling pre-Phase 3."""
         pytest.importorskip("flax")
         import pickle
 

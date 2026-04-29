@@ -217,11 +217,6 @@ class TestPoolSurface:
             env.close()
 
 
-# ---------------------------------------------------------------------------
-# "Did learning actually happen?" — guards against silent training failures.
-# ---------------------------------------------------------------------------
-
-
 class _RandomBoxPolicy:
     """Tiny opponent policy that samples uniformly from a Box space.
 
@@ -286,7 +281,7 @@ def _build_rl_state_and_ctx(seed: int = 0):
 
 
 class TestLearningActuallyHappens:
-    """Phase B: assertions that the optimisation step actually fires."""
+    """Assertions that the optimisation step actually fires."""
 
     def test_buffer_shape_invariant_obs_and_action(self):
         """``obs`` and ``action`` tensors stored in the replay buffer

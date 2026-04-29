@@ -1,6 +1,6 @@
 """Open environment registry for deap-bridge.
 
-A single source of truth mapping a string ``env_name`` to the factory used
+A single source-of-truth mapping a string ``env_name`` to the factory used
 by :class:`~deap_pettingzoo.environments.PettingZooWrapper` and
 :func:`~deap_pettingzoo.baselines.agilerl_adapter.build_parallel_env`.
 
@@ -10,7 +10,7 @@ instantiation.  MPE2 and ``marl-aquarium`` environments are auto-registered
 on package import if their respective packages are installed (see
 ``deap_pettingzoo/environments/builtin.py``).
 
-Typical third-party use::
+Example third-party use::
 
     from my_pkg import my_env_module  # exposes .parallel_env(**cfg)
     from deap_pettingzoo.environments.registry import register_env
@@ -32,32 +32,48 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 
-# A ``factory`` is either:
-#   - a module exposing ``.parallel_env(render_mode=None, **cfg)`` for
-#     ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``), or
-#   - a callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
-EnvFactory = Any
+class EnvFactory:
+    """Factory for constructing PettingZoo environments.
+    
+    Can be either:
+      - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
+        ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
+      - A callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
+    """
 
-#: Declared API of a registered env. ``'parallel'`` keeps the legacy
-#: fast path; ``'aec'`` routes the factory output through
-#: :func:`pettingzoo.utils.conversions.aec_to_parallel` at build time
-#: (requires simultaneous-step semantics, i.e.
-#: ``metadata['is_parallelizable'] = True``); ``'auto'`` inspects the
-#: constructed env against PettingZoo base classes and converts as
-#: needed; ``'aec_masked'`` and ``'aec_sequential'`` wrap **strictly
-#: turn-based** AEC envs via adapters in
-#: :mod:`deap_pettingzoo.environments.turn_based` — ``aec_masked``
-#: presents a parallel-shaped facade where every agent appears each
-#: step with only the current player's action executed (EA-friendly;
-#: wastes N−1 inferences/step but needs no evaluator changes);
-#: ``aec_sequential`` returns single-agent dicts per step, preserving
-#: true turn semantics for future TD-learning / AlphaZero-style use.
-#: ``jax_parallel`` routes a JAX-native env (e.g. JaxMARL) through
-#: :class:`~deap_pettingzoo.environments.jax_parallel.JaxEnvToPettingZooAdapter`,
-#: giving a numpy-facing parallel facade at the cost of a per-step
-#: JAX↔numpy boundary.  The underlying env is *not* ``jit``’d — QDax
-#: integrations that need the fast JAX path go through
-#: :mod:`deap_pettingzoo.contrib.qdax.scoring_jax` directly instead.
+
+EnvApi = Literal[
+    "parallel",
+    "aec",
+    "auto",
+    "aec_masked",
+    "aec_sequential",
+    "jax_parallel",
+]
+"""Declared API of a registered environment.
+
+Attributes:
+    parallel: Factory returns a ``ParallelEnv`` directly (legacy fast path).
+    aec: Factory returns an ``AECEnv``, converted via
+        :func:`pettingzoo.utils.conversions.aec_to_parallel` at build time.
+        Requires simultaneous-step semantics
+        (``metadata['is_parallelizable'] = True``).
+    auto: Inspects constructed env against PettingZoo base classes and
+        converts as needed.
+    aec_masked: Wraps strictly turn-based AEC envs via
+        :class:`~deap_pettingzoo.environments.turn_based.MaskedSimultaneousAdapter`.
+        Presents a parallel-shaped facade where every agent appears each
+        step with only the current player's action executed (EA-friendly;
+        wastes N−1 inferences/step but needs no evaluator changes).
+    aec_sequential: Wraps strictly turn-based AEC envs via
+        :class:`~deap_pettingzoo.environments.turn_based.SequentialTurnAdapter`.
+        Returns single-agent dicts per step, preserving true turn semantics.
+    jax_parallel: Routes a JAX-native env (e.g. JaxMARL) through
+        :class:`~deap_pettingzoo.environments.jax_parallel.JaxEnvToPettingZooAdapter`,
+        giving a numpy-facing parallel facade. The underlying env is not
+        ``jit``'d; use :mod:`deap_pettingzoo.contrib.qdax.scoring_jax` for
+        the fast JAX path.
+"""
 EnvApi = Literal[
     "parallel",
     "aec",
@@ -102,13 +118,12 @@ class EnvSpec:
     notes: str = ""
     tags: frozenset = field(default_factory=frozenset)
     api: EnvApi = "parallel"
-    #: Ordered tuple of callables applied to the constructed env after
-    #: api coercion (turn-based adapter / ``aec_to_parallel`` / identity).
-    #: Each callable takes the current env and returns a wrapped env,
-    #: matching the :mod:`supersuit` wrapper signature. The chain runs
-    #: left-to-right. Default is an empty tuple (no wrapping). See the
-    #: README "Env transforms via SuperSuit" section for the canonical
-    #: ordering of the common MPE wrappers.
+    """Ordered tuple of callables applied to the constructed env after API
+    coercion (turn-based adapter / ``aec_to_parallel`` / identity). Each
+    callable takes the current env and returns a wrapped env, matching the
+    :mod:`supersuit` wrapper signature. The chain runs left-to-right.
+    Default is an empty tuple (no wrapping).
+    """
     wrappers: Tuple[Callable[[Any], Any], ...] = ()
 
 
@@ -507,11 +522,7 @@ def build_env(
 
 
 def clear_registry() -> None:
-    """Remove every registered environment.
-
-    Intended for tests that want a clean slate.  Production code should not
-    need this.
-    """
+    """Remove every registered environment. Intended for tests."""
     _REGISTRY.clear()
 
 

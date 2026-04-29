@@ -87,5 +87,4 @@ class TestRLPolicyPool:
         # independent (deep-copied) policy whose .name == "a".
         snap_policy = snapshot.sample_opponent(np.random.default_rng(0))
         assert snap_policy.name == "a"
-        # And the live pool advanced.
         assert pool.sample_opponent(np.random.default_rng(0)) is p2

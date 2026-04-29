@@ -3,8 +3,7 @@
 Covers the two turn-based adapters in
 :mod:`deap_pettingzoo.environments.turn_based`, action-mask plumbing
 through :class:`MaskedDiscreteHead` + :class:`FeedforwardNeuralPolicy`,
-the :class:`SelfPlayEvaluator`, and the MADDPG/MATD3 compatibility
-carve-out.
+the :class:`SelfPlayEvaluator`, and the MADDPG/MATD3 compatibility gap.
 """
 
 from __future__ import annotations
@@ -199,9 +198,7 @@ class TestMaskedSimultaneousAdapter:
         env.reset(seed=0)
         # n_turns=3 → 6 turns total.
         for _ in range(6):
-            # pick an action that differs from player's own last — we
-            # don't track it here; just pick 0 each turn and flip 1.
-            # easier: read mask to pick the first legal action.
+            # pick an action that differs from player's last action
             masks = {a: env.aec_env.observe(a).get("action_mask") for a in env.agents}
             actions = {a: int(np.argmax(m)) for a, m in masks.items()}
             obs, rewards, terms, truncs, _ = env.step(actions)
@@ -239,7 +236,6 @@ class TestSequentialTurnAdapter:
         env = self._make()
         env.reset(seed=0)
         # 3 turns × 2 players = 6 steps — run 5 and check last carries both.
-        # simpler: spin through until empty and verify final returns.
         terms_final = {}
         for i in range(20):
             if not env.agents:

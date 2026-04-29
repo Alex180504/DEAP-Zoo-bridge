@@ -51,7 +51,7 @@ class AgileRLPolicyWrapper:
         self._obs_cache: Dict[str, np.ndarray] = {}
         self._algorithm_name = algorithm_name or type(agent).__name__
 
-    # --- PolicyProtocol ----------------------------------------------------
+    # Policy protocol
 
     def get_action(self, observation: np.ndarray, **_: Any) -> Any:
         """Return a deterministic action for the next agent in rotation.
@@ -86,7 +86,7 @@ class AgileRLPolicyWrapper:
         self._call_index = 0
         self._obs_cache = {}
 
-    # --- Internal helpers --------------------------------------------------
+    # Internal helpers
 
     def _build_full_obs_dict(self) -> Dict[str, np.ndarray]:
         """Return ``{agent_id: obs}`` with zero-filled placeholders for any
@@ -103,9 +103,7 @@ class AgileRLPolicyWrapper:
         full: Dict[str, np.ndarray] = {}
         fallback_shape = next(iter(self._obs_cache.values())).shape
         fallback_dtype = next(iter(self._obs_cache.values())).dtype
-        # Use the underlying algorithm's full agent roster so subsets
-        # (e.g. evaders-only wrappers) still satisfy MADDPG/MATD3's
-        # "every actor keyed" precondition.
+        # Use the underlying algorithm's full agent roster so subsets still satisfy MADDPG/MATD3 "every agent keyed" precondition.
         for aid in self._full_agent_roster():
             if aid in self._obs_cache:
                 full[aid] = self._obs_cache[aid]
@@ -156,7 +154,7 @@ class AgileRLPolicyWrapper:
             return np.zeros(shape, dtype=dtype)
         return np.zeros(fallback_shape, dtype=fallback_dtype)
 
-    # --- Introspection helpers --------------------------------------------
+    # Introspection helpers
 
     @property
     def agent_ids(self) -> list:

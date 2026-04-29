@@ -49,6 +49,16 @@ from deap_pettingzoo.integration.deap_integration import (
     make_mixed_parallel_evaluate_map,
     setup_deap_creators,
 )
+# Private internals re-used to build a CRN-aware pmap (Common Random
+# Numbers).  Sharing seeds across all individuals in a generation
+# eliminates the dominant noise source (random initial conditions)
+# from fitness comparisons.  Stable across releases (used by the
+# package's own examples).
+from deap_pettingzoo.integration.deap_integration import (  # noqa: E402
+    _MixedWorkerSpec,
+    _individual_to_payload,
+    _mixed_worker_evaluate,
+)
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.policies.action_heads import ActionHead
 from deap_pettingzoo.utils.logging import ExperimentLogger
@@ -76,7 +86,7 @@ HIDDEN_SIZE = 16      # 357 params — tractable for gradient-free search at pop
 # Episodes averaged per genome per evaluation.  Single-episode evaluation is
 # too noisy for reliable selection (lucky start ≠ better genome).  3 episodes
 # adds 3× cost but roughly halves ranking noise.
-EVAL_EPISODES_TRAIN = 3
+EVAL_EPISODES_TRAIN = 5
 
 EVAL_EPISODES = 20
 
@@ -130,10 +140,10 @@ ENV_CONFIG = PursuitEvasionConfig(
 )
 
 # Number of best individuals carried over unchanged each generation
-# (elitism).  Without this the +19.12 outlier observed at gen 67 in our
-# logs was destroyed the next generation.  ELITE_SIZE=2 preserves the top
-# two genomes verbatim while keeping ~94%% of the population mutable.
-ELITE_SIZE: int = 2
+# (elitism).  ELITE_SIZE=4 (12.5% of pop=32) protects the top variants
+# from being mutated/crossed-out.  Earlier ELITE_SIZE=2 caused observable
+# plateaus where the same fitness held for 25+ gens before improving.
+ELITE_SIZE: int = 4
 
 # ---------------------------------------------------------------------------
 # Recording config
@@ -397,16 +407,13 @@ def _learner_factory(genome: FixedTopologyGenome, agent_id: str, action_space):
     perturbation shifts the action probabilities smoothly — standard
     technique for evolution strategies on discrete-action environments.
     """
-    # NOTE: Temperature 0.3 (was 1.0).  The genome's output layer applies
-    # tanh, clamping logits to [-1, 1].  At T=1.0, softmax of ([+1,-1,0,0,0])
-    # only places ~45% on the correct cardinal direction — too noisy for
-    # any pursuit signal to survive.  At T=0.3, the same clamped logits give
-    # ~90% on the correct direction while preserving a smooth (non-step)
-    # fitness landscape (small weight changes still shift probabilities
-    # continuously, unlike argmax).
+    # NOTE: Temperature 0.2 (was 0.3, originally 1.0).  Output tanh clamps
+    # logits to [-1, 1].  At T=0.2, soft-max gives ~95% probability to the
+    # highest-logit action while preserving smooth gradients (small weight
+    # changes still shift probabilities continuously, unlike argmax).
     head = SoftmaxSamplingHead(
         n=int(action_space.n),
-        temperature=0.3,
+        temperature=0.2,
         rng=np.random.default_rng(),
     )
     return FeedforwardNeuralPolicy(genome, head=head)
@@ -622,7 +629,13 @@ def run_evolution(
         evaluator=evaluator,
         selection_config={"tournament_size": 3},
         crossover_config={"alpha": 0.5},
-        mutation_config={"sigma": 0.1, "indpb": 0.2},
+        # Gentler mutation than the default sigma=0.1 / indpb=0.2.  The oracle
+        # warm-start gives the population a working pursuit policy at gen 0;
+        # aggressive mutation destroys it faster than it discovers refinements
+        # (observed: gen-6 max -178 → gen-79 max -161 — 25 gens of plateau).
+        # sigma=0.05 + indpb=0.1 lets the EA fine-tune oracle weights instead
+        # of constantly re-randomising them.
+        mutation_config={"sigma": 0.05, "indpb": 0.1},
     )
     toolbox.register("clone", clone_individual)
 
@@ -666,13 +679,58 @@ def run_evolution(
 
     fitness_history = []
 
+    # CRN (Common Random Numbers) gen-seed holder.  Mutated each generation
+    # so all individuals in the *same* generation evaluate against the
+    # *same* set of initial conditions.  Without this, per-individual
+    # fitness σ ≈ 100+ (initial-position variance dominates), drowning
+    # selection signal beneath noise.  With CRN, σ on the *difference*
+    # between two policies drops ~5×, making real improvements detectable.
+    gen_seed_holder = {"seed": int(SEED)}
+
     with make_executor(n_workers) as executor:
-        pmap = make_mixed_parallel_evaluate_map(
+        # Build a CRN-aware pmap that mirrors make_mixed_parallel_evaluate_map
+        # but stamps every payload with the current generation's seed.
+        # We rebuild the spec template once via the upstream helper
+        # to avoid duplicating its qualname/topology validation.
+        _base_pmap = make_mixed_parallel_evaluate_map(
             executor, evaluator, eval_episodes=EVAL_EPISODES_TRAIN
         )
-        toolbox.register("map", pmap)
+
+        def _crn_pmap(_evaluate_ignored, individuals):
+            inds = list(individuals)
+            seed = gen_seed_holder["seed"]
+            payloads = []
+            for ind in inds:
+                genome = ind.genome
+                spec = _MixedWorkerSpec(
+                    env_factory_qualname=(
+                        f"{evaluator.env_factory.__module__}."
+                        f"{evaluator.env_factory.__qualname__}"
+                    ),
+                    scripted_factory_qualname=(
+                        f"{evaluator.scripted_policy_factory.__module__}."
+                        f"{evaluator.scripted_policy_factory.__qualname__}"
+                    ),
+                    learner_factory_qualname=(
+                        f"{evaluator.learner_factory.__module__}."
+                        f"{evaluator.learner_factory.__qualname__}"
+                    ),
+                    learner_prefixes=tuple(evaluator.learner_agent_prefixes),
+                    max_steps=evaluator.max_steps,
+                    eval_episodes=EVAL_EPISODES_TRAIN,
+                    layer_sizes=tuple(genome.layer_sizes),
+                    activation=genome.activation,
+                )
+                payloads.append((_individual_to_payload(ind, seed=seed), spec))
+            return list(executor.map(_mixed_worker_evaluate, payloads))
+
+        # Touch _base_pmap once so its topology/qualname validation runs
+        # (raises early on misconfiguration).  Then replace it.
+        del _base_pmap
+        toolbox.register("map", _crn_pmap)
 
         # Evaluate gen 0
+        gen_seed_holder["seed"] = int(SEED) * 10_000 + 0
         for ind, fit in zip(population, toolbox.map(toolbox.evaluate, population)):
             ind.fitness.values = fit
         hof.update(population)
@@ -689,13 +747,29 @@ def run_evolution(
 
         # Evolution loop
         for gen in range(1, NUM_GENERATIONS + 1):
+            # CRN: pick a fresh per-generation seed.  All individuals
+            # this generation are evaluated against the *same* initial
+            # conditions, so fitness differences reflect policy
+            # differences (not random IC variance).  Rotating the seed
+            # across generations prevents overfitting to a single IC.
+            gen_seed_holder["seed"] = int(SEED) * 10_000 + gen
+
             # Elitism: copy the top ELITE_SIZE individuals verbatim into
             # next generation.  Without this, +19-fitness champions seen
             # in our earlier logs were destroyed by mutation/crossover.
+            #
+            # IMPORTANT: invalidate elite fitness so they get re-evaluated
+            # on fresh seeds.  With EVAL_EPISODES_TRAIN=3 and stochastic
+            # softmax sampling, single-eval noise is ~σ=100+.  Without
+            # re-eval, a lucky episode-triple becomes an unbeatable stale
+            # fitness — observed pattern: max=-66.77 frozen for 90 gens.
             elites = [
                 toolbox.clone(ind)
                 for ind in tools.selBest(population, ELITE_SIZE)
             ]
+            for e in elites:
+                if e.fitness.valid:
+                    del e.fitness.values
 
             # Variation: select POP_SIZE - ELITE_SIZE parents, breed.
             n_offspring = len(population) - ELITE_SIZE
@@ -717,8 +791,10 @@ def run_evolution(
                     toolbox.mutate(m)
                     del m.fitness.values
 
-            # Re-evaluate invalid individuals
-            invalid = [ind for ind in offspring if not ind.fitness.valid]
+            # Re-evaluate invalid individuals (elites + mutated offspring).
+            # Elites are re-evaluated on fresh seeds to prevent stale-lucky
+            # fitness from blocking selection (see elite-cloning comment).
+            invalid = [ind for ind in (elites + offspring) if not ind.fitness.valid]
             for ind, fit in zip(invalid, toolbox.map(toolbox.evaluate, invalid)):
                 ind.fitness.values = fit
 

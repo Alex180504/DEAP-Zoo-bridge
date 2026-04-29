@@ -58,9 +58,7 @@ from .pools import (
 from .samplers import Sampler, uniform_sampler
 
 
-# ---------------------------------------------------------------------------
 # Side declaration
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -138,9 +136,7 @@ class Side:
             )
 
 
-# ---------------------------------------------------------------------------
 # Runtime state — base class
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -161,6 +157,12 @@ class SideState:
 
     Subclasses must implement :meth:`initialise`, :meth:`step_generation`,
     :meth:`current_pool`, and :meth:`best_policy`.
+    
+    Notes:
+        Subclasses that use ``np.random.*`` operators set this after
+        seeding in :meth:`initialise` (via the trainer). When set,
+        :meth:`step_generation` wraps operator calls in a save/set/restore
+        block so each side advances its own RNG stream independently.
     """
 
     def __init__(self, side: Side) -> None:
@@ -168,16 +170,10 @@ class SideState:
         self.generation = 0
         self.best_fitness: float = -np.inf
         self.history: List[GenerationStats] = []
-        #: Per-side global numpy RNG state for EA/CMA operator isolation.
-        #: Subclasses that use ``np.random.*`` operators set this after
-        #: seeding in :meth:`initialise` (via the trainer). When set,
-        #: :meth:`step_generation` wraps operator calls in a save/set/restore
-        #: block so each side advances its own RNG stream independently.
+
         self._np_state: Optional[Any] = None
 
-    # ------------------------------------------------------------------
     # Lifecycle hooks — subclasses override
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -209,9 +205,7 @@ class SideState:
         self.side.hof.add(self.best_snapshot(), float(self.best_fitness))
 
 
-# ---------------------------------------------------------------------------
 # EA side
-# ---------------------------------------------------------------------------
 
 
 def _make_feedforward_policy_factory(
@@ -421,17 +415,7 @@ class EASideState(SideState):
         evaluator = evaluator_factory(self)
         self.rebind_evaluator(evaluator)
 
-        # Simple (mu, lambda)=(N, N) generational loop with full
-        # replacement — matches EATrainer's "simple" strategy. All
-        # stochastic decisions use the per-side Generator so one
-        # side's RNG draws do not influence another side.
-        #
-        # Genetic operators (crossover_blend, mutate_gaussian) call
-        # np.random.* (global RNG). To keep each side's operators on its
-        # own seeded stream and independent of other sides, we save the
-        # current global state, switch to this side's stored stream, run
-        # all operators, then save the resulting state and restore the
-        # original global state.
+        # Simple (mu, lambda)=(N, N) generational loop with full replacement - matches EATrainer's "simple" strategy.
         global_state_before: Optional[Any] = None
         if self._np_state is not None:
             global_state_before = np.random.get_state()
@@ -457,8 +441,7 @@ class EASideState(SideState):
             if not ind.fitness.valid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # Selection → next generation (tournament/roulette/... over the
-        # union of parents + offspring for elitism).
+        # Selection → next generation (tournament/roulette/... over the union of parents + offspring for elitism).
         combined = self.population + offspring
         self.population = self.toolbox.select(combined, self.population_size)
         self.hof.update(self.population)
@@ -514,9 +497,8 @@ def _evaluate_with(individual: Any, evaluator: Any) -> Tuple[float, ...]:
     return evaluator.evaluate(individual)
 
 
-# ---------------------------------------------------------------------------
+# 
 # CMA-ES side
-# ---------------------------------------------------------------------------
 
 
 class CMAESSideState(SideState):
@@ -566,8 +548,7 @@ class CMAESSideState(SideState):
         output_size = required_output_size(self._action_space)
 
         # If a per-side rng is provided, derive a CMA seed from it so
-        # multiple CMA sides stay independent under a single trainer
-        # seed. Otherwise fall back to the side's explicit seed.
+        # multiple CMA sides stay independent under a single trainer seed.
         if rng is not None:
             cma_seed = int(rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
             np.random.seed(cma_seed)
@@ -606,7 +587,7 @@ class CMAESSideState(SideState):
 
         self.toolbox = register_cma_toolbox(self.strategy, self._ind_init, _NoopEvaluator())
         # Seed the population — needed so other sides can sample from
-        # this side before we've completed our first step_generation.
+        # this side before first step_generation is completed.
         self.population = self.toolbox.generate()
         self._policy_factory = _make_feedforward_policy_factory(
             self._action_space, masked=self.masked
@@ -641,10 +622,6 @@ class CMAESSideState(SideState):
             if not ind.fitness.valid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # DEAP's CMA strategy calls np.random.* (global RNG) during
-        # toolbox.update() and toolbox.generate(). To keep this side's
-        # CMA on its own seeded stream and independent of other sides,
-        # save/set/restore the global numpy state around these calls.
         global_state_before: Optional[Any] = None
         if self._np_state is not None:
             global_state_before = np.random.get_state()
@@ -708,9 +685,7 @@ class CMAESSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # Frozen side
-# ---------------------------------------------------------------------------
 
 
 class FrozenSideState(SideState):
@@ -767,9 +742,7 @@ class FrozenSideState(SideState):
         return self._policies[0]
 
 
-# ---------------------------------------------------------------------------
 # Factory
-# ---------------------------------------------------------------------------
 
 
 def make_side_state(side: Side) -> SideState:
@@ -791,9 +764,6 @@ def make_side_state(side: Side) -> SideState:
             ) from exc
         return QDaxSideState(side)
     if side.optimizer == "rl":
-        # Imported lazily so the AgileRL dependency stays optional —
-        # users without `pip install 'deap-pettingzoo[rl-baselines]'`
-        # only hit the ImportError if they actually configure an RL side.
         from .rl_side import RLSideState
 
         return RLSideState(side)

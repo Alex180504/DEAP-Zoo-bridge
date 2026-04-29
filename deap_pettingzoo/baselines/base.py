@@ -121,8 +121,7 @@ class TrainingConfig:
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
-        # Resolve the ``continuous`` shortcut against any explicit
-        # ``env_config["continuous_actions"]`` the caller supplied.
+        # Resolve the ``continuous`` shortcut against any explicit ``env_config["continuous_actions"]`` the caller supplied.
         existing = self.env_config.get("continuous_actions")
         if self.continuous:
             if existing is False:
@@ -132,8 +131,6 @@ class TrainingConfig:
                 )
             self.env_config["continuous_actions"] = True
         elif existing is True:
-            # Keep env_config authoritative but reflect it on the flag
-            # so downstream introspection stays consistent.
             self.continuous = True
 
 
@@ -265,13 +262,13 @@ class BaselineTrainer(ABC):
     
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
+    
+    Note:
+        Default recording cadence (in generations / iterations) used when ``TrainingConfig.recording.every_n_generations`` is ``None``.
+        EA / CMA-ES / Coevolution leave this at 1 (record every generation);
+        AgileRL-family trainers override to 10 since they iterate hundreds of times per run.
     """
-
-    #: Default recording cadence (in generations / iterations) used when
-    #: ``TrainingConfig.recording.every_n_generations`` is ``None``.
-    #: EA / CMA-ES / Coevolution leave this at 1 (record every generation);
-    #: AgileRL-family trainers override to 10 since they iterate hundreds of
-    #: times per run.
+    
     _default_recording_every_n: ClassVar[int] = 1
 
     def _resolve_recording_every_n(self, config: TrainingConfig) -> int:

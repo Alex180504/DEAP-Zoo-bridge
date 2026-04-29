@@ -1,9 +1,7 @@
 """Tests for ``deap_pettingzoo.ui.services`` modules.
 
 These intentionally avoid importing ``streamlit`` so the suite stays
-runnable without the ``[ui]`` extra installed. Page modules
-(``deap_pettingzoo/ui/pages/*.py``) do import ``streamlit`` and are
-covered separately by Phase 6 smoke tests.
+runnable without the ``[ui]`` extra installed.
 """
 
 from __future__ import annotations
