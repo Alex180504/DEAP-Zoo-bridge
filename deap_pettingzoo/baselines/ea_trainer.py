@@ -210,6 +210,15 @@ class EATrainer(BaselineTrainer):
                 config (e.g. ``{'eta': 20.0}`` for SBX).
             mutation_params: Extra kwargs merged into the mutation
                 config.
+
+        Raises:
+            ValueError: If ``strategy`` is not one of the three recognised
+                driver names.
+            ValueError: If ``strategy == 'mu_comma_lambda'`` and
+                ``lambda_ < mu``.
+            ValueError: If ``num_workers`` is negative.
+            ValueError: If ``parallel_backend`` is not in
+                :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -240,13 +249,7 @@ class EATrainer(BaselineTrainer):
         self.selection_params = dict(selection_params or {})
         self.crossover_params = dict(crossover_params or {})
         self.mutation_params = dict(mutation_params or {})
-
-        # Parallel evaluation defaults (overridable via
-        # ``TrainingConfig.algorithm_params``). See
-        # :mod:`deap_pettingzoo.utils.parallel` for semantics; we only
-        # validate the range here. Windows ``spawn`` adds ~1-3s per
-        # worker to the first evaluation — amortised over the whole
-        # run, but noticeable for tiny populations.
+        
         if num_workers < 0:
             raise ValueError(
                 f"num_workers must be >= 0 (or 1 for serial), got {num_workers}."
@@ -263,12 +266,19 @@ class EATrainer(BaselineTrainer):
     
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train EA with the given configuration.
-        
+
         Args:
             config: Training configuration.
-            
+
         Returns:
             TrainingResult with best genome wrapped as policy.
+
+        Raises:
+            ValueError: If ``config.budget_mode`` is not supported by
+                this trainer (propagated from :meth:`_translate_budget`).
+            ValueError: If the environment uses heterogeneous action
+                spaces (propagated from
+                :func:`_resolve_shared_action_space`).
         """
         start_time = time.time()
         
@@ -355,12 +365,6 @@ class EATrainer(BaselineTrainer):
         # Track metrics
         fitness_history = []
 
-        # ----- Logger + optional FrameRecorder ---------------------------
-        # Logger is built up-front (run_dir is created eagerly in
-        # ``ExperimentLogger.create``) so the FrameRecorder can write
-        # ``frames/train_episode_NNNN.{mp4,gif}`` while training is
-        # still running. Falls back to NoOpLogger when
-        # ``config.output_dir is None``.
         log = build_logger(config, algorithm="ea")
         recording_cfg = config.recording
         recording_cadence = self._resolve_recording_every_n(config)
@@ -404,10 +408,6 @@ class EATrainer(BaselineTrainer):
             except Exception:
                 pass
 
-        # --- Parallel evaluation setup ----------------------------------
-        # ``algorithm_params["num_workers"]`` overrides the constructor
-        # default. ``resolve_num_workers`` normalises 0/None to 1 and
-        # caps at ``os.cpu_count()``.
         requested = config.algorithm_params.get("num_workers", self.num_workers)
         effective_workers = resolve_num_workers(requested)
         backend = config.algorithm_params.get(
@@ -424,20 +424,13 @@ class EATrainer(BaselineTrainer):
         with make_executor(
             effective_workers, backend=backend
         ) as executor:
-            # Register toolbox.map so DEAP's built-in eaMu*Lambda
-            # algorithms dispatch through the pool.
+            # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
             if effective_workers > 1:
                 toolbox.register(
                     "map",
                     make_parallel_evaluate_map(executor, worker_spec),
                 )
-
-            # Deterministic per-individual evaluation seeds when a
-            # base seed is provided — makes serial and parallel runs
-            # produce identical fitness arrays. Applied on the
-            # in-house ``simple`` loop only; the ``eaMu*Lambda`` paths
-            # go through DEAP's own ``toolbox.map`` with non-seeded
-            # evaluation (matches prior behaviour).
+                
             base_eval_seed = config.algorithm_params.get("seed")
             _eval_counter = [0]
 
@@ -506,8 +499,7 @@ class EATrainer(BaselineTrainer):
                         'min': record['min'],
                         'max': record['max'],
                     })
-                # eaMu*Lambda doesn't expose a per-gen hook; record once
-                # against the final hall-of-fame champion.
+                # eaMu*Lambda doesn't expose a per-gen hook; record once against the final hall-of-fame champion.
                 _record_champion_if_due(num_generations)
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
@@ -531,7 +523,6 @@ class EATrainer(BaselineTrainer):
                 _record_champion_if_due(num_generations)
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
-        # --- End parallel evaluation scope ------------------------------
 
         # Clean up
         env.close()
@@ -547,9 +538,8 @@ class EATrainer(BaselineTrainer):
         # Wrap genome as policy
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
 
-        # ----- Persist results via the (already-constructed) logger ------
-        # No-op when ``config.output_dir is None`` (NoOpLogger) so the
-        # backend stays usable without the analysis stack.
+        # Persist results via the logger 
+        # No-op when ``config.output_dir is None`` (NoOpLogger) so the backend stays usable without the analysis stack.
         try:
             with log:
                 dump_fitness_history(
@@ -643,12 +633,16 @@ class EATrainer(BaselineTrainer):
     
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:
         """Translate budget config to EA parameters.
-        
+
         Args:
             config: Training configuration.
-            
+
         Returns:
             Dictionary with EA-specific parameters.
+
+        Raises:
+            ValueError: If ``config.budget_mode`` is not
+                ``BudgetMode.ENV_STEPS`` or ``BudgetMode.EVAL_EPISODES``.
         """
         max_steps_per_episode = config.algorithm_params.get('max_steps_per_episode', 200)
         

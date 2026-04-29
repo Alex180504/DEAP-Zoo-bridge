@@ -47,7 +47,8 @@ if not selected_run_dirs:
 
 experiment = _cached_experiment(tuple(str(p) for p in selected_run_dirs))
 
-# ----- controls ------------------------------------------------------------
+# Controls
+
 # Discover columns actually present across the selected runs' metrics.csv so
 # the user can't pick a non-existent y/x column (which would surface as
 # "No runs contained both '<x>' and '<y>'").
@@ -113,7 +114,7 @@ with st.sidebar:
     )
 state.persist()
 
-# ----- learning curves -----------------------------------------------------
+# Learning curves
 _envs_in_selection = list(experiment.by_env().keys())
 _is_multitask = len(_envs_in_selection) >= 2
 if _is_multitask:

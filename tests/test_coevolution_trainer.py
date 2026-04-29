@@ -68,10 +68,7 @@ class TestCompetitive2Pop:
                 assert {"generation", "mean", "std", "min", "max"}.issubset(row)
         # Optimisation actually happened: at least ONE side's best-ever
         # fitness improved end-vs-start. We don't insist both sides
-        # improve simultaneously (competitive co-evolution is
-        # zero-sum-ish on tiny budgets — one side gaining can mean
-        # the other regressing); we only insist neither side's
-        # best-ever fitness *regressed* below gen-0.
+        # improve simultaneously (competitive co-evolution is zero-sum-ish on tiny budgets)
         for name in ("pursuers", "evaders"):
             hist = result.metrics["per_side_history"][name]
             if len(hist) < 2:

@@ -21,7 +21,6 @@ from deap_pettingzoo.environments.registry import (
     build_env,
     get_env_spec,
     is_registered,
-    list_envs,
 )
 
 
@@ -43,6 +42,9 @@ def build_parallel_env(
     Raises:
         ValueError: If ``env_name`` is not registered.  See
             :func:`deap_pettingzoo.environments.registry.register_env`.
+        TypeError: If the factory/api declaration is inconsistent
+            (propagated from
+            :func:`~deap_pettingzoo.environments.registry.build_env`).
     """
     return build_env(env_name, env_config=env_config, render_mode=render_mode)
 
@@ -99,80 +101,8 @@ def translate_budget_to_env_steps(
         "wall-clock training must use a timer-based stop condition."
     )
 
-
-# ---------------------------------------------------------------------------
-# Backwards-compat shims
-# ---------------------------------------------------------------------------
-# Old code imported ``SUPPORTED_PARALLEL_ENVS`` and ``DEFAULT_EPISODE_LEN``
-# directly from this module.  Preserve the names as read-only views over
-# the registry so out-of-tree callers don't break.
-
-
-def _supported_parallel_envs_view() -> Dict[str, Any]:
-    from deap_pettingzoo.environments.registry import _REGISTRY  # noqa: WPS437
-
-    return {name: spec.factory for name, spec in _REGISTRY.items()}
-
-
-def _default_episode_len_view() -> Dict[str, int]:
-    from deap_pettingzoo.environments.registry import _REGISTRY  # noqa: WPS437
-
-    return {name: spec.default_episode_len for name, spec in _REGISTRY.items()}
-
-
-class _RegistryBackedMapping(dict):
-    """Lazy dict-like wrapper that refreshes from the registry on access."""
-
-    def __init__(self, refresh):
-        super().__init__()
-        self._refresh = refresh
-
-    def _sync(self):
-        super().clear()
-        super().update(self._refresh())
-
-    def __contains__(self, key):
-        self._sync()
-        return super().__contains__(key)
-
-    def __getitem__(self, key):
-        self._sync()
-        return super().__getitem__(key)
-
-    def __iter__(self):
-        self._sync()
-        return super().__iter__()
-
-    def __len__(self):
-        self._sync()
-        return super().__len__()
-
-    def keys(self):
-        self._sync()
-        return super().keys()
-
-    def items(self):
-        self._sync()
-        return super().items()
-
-    def values(self):
-        self._sync()
-        return super().values()
-
-    def get(self, key, default=None):
-        self._sync()
-        return super().get(key, default)
-
-
-SUPPORTED_PARALLEL_ENVS = _RegistryBackedMapping(_supported_parallel_envs_view)
-DEFAULT_EPISODE_LEN = _RegistryBackedMapping(_default_episode_len_view)
-
-
 __all__ = [
     "build_parallel_env",
     "extract_space_metadata",
     "translate_budget_to_env_steps",
-    "SUPPORTED_PARALLEL_ENVS",
-    "DEFAULT_EPISODE_LEN",
-    "list_envs",
 ]

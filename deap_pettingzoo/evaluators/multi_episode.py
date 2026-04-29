@@ -7,7 +7,7 @@ from ..environments import PettingZooWrapper
 
 
 class MultiEpisodeEvaluator(BaseEvaluator):
-    """Evaluates individual across multiple episodes for robust fitness estimation."""
+    """Evaluates individual across multiple episodes for fitness estimation."""
     
     VALID_AGGREGATIONS = ['mean', 'median', 'min', 'max']
     
@@ -70,7 +70,9 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             Tuple with a single aggregated fitness value (DEAP format)
             
         Raises:
-            ValueError: If individual is None or invalid
+            ValueError: If individual is None or invalid.
+            RuntimeError: If an exception occurs during any episode rollout
+                (propagated from :class:`SingleEpisodeEvaluator`).
         """
         fitnesses = self._evaluate_episodes(individual)
         aggregated_fitness = self._aggregate_fitnesses(fitnesses)
@@ -87,7 +89,9 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             Tuple of (mean, std, min, max) fitness values
 
         Raises:
-            ValueError: If individual is None or invalid
+            ValueError: If individual is None or invalid.
+            RuntimeError: If an exception occurs during any episode rollout
+                (propagated from :class:`SingleEpisodeEvaluator`).
         """
         fitnesses = self._evaluate_episodes(individual)
 

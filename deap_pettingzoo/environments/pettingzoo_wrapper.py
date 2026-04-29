@@ -23,14 +23,14 @@ def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
     This function replaces ``draw`` on the underlying ``SimpleEnv``
     instance with a version that uses ``original_cam_range`` — set once
     at env construction — so all frames share the same pixel-per-world-unit
-    scale.  Safe to call on non-MPE wrappers; silently no-ops if the
+    scale.  Safe to call on non-MPE wrappers; silently fails if the
     expected attribute chain is absent.
     """
     try:
-        # PettingZooWrapper.env  → aec_to_parallel_wrapper
-        # .aec_env               → OrderEnforcingWrapper
-        # .env                   → AssertOutOfBoundsWrapper
-        # .env                   → SimpleEnv  (owns .draw, .world, .screen)
+        # PettingZooWrapper.env  - aec_to_parallel_wrapper
+        # .aec_env               - OrderEnforcingWrapper
+        # .env                   - AssertOutOfBoundsWrapper
+        # .env                   - SimpleEnv (owns .draw, .world, .screen)
         base = wrapper.env.aec_env.env.env
     except AttributeError:
         return
@@ -108,8 +108,7 @@ class PettingZooWrapper:
         cumulative_rewards: Dict of cumulative rewards per agent
     """
 
-    #: Backwards-compat view of the env registry; prefer
-    #: :func:`deap_pettingzoo.environments.registry.list_envs`.
+    #: Backwards-compatible view of the env registry; prefer :func:`deap_pettingzoo.environments.registry.list_envs`.
     SUPPORTED_ENVS = _SupportedEnvsDescriptor()
 
     @classmethod
@@ -143,8 +142,7 @@ class PettingZooWrapper:
             ... )
         """
         if not is_registered(env_name):
-            # get_env_spec raises a descriptive ValueError listing known
-            # names and recovery suggestions; delegate to it.
+            # get_env_spec raises a descriptive ValueError listing known names and recovery suggestions; delegate to it.
             get_env_spec(env_name)
 
         self.env_name = env_name
@@ -167,11 +165,9 @@ class PettingZooWrapper:
         # Episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {}
-        #: Most recent infos dict returned by the underlying env's
-        #: ``reset``/``step``. Evaluators read
-        #: ``last_infos[agent].get("action_mask")`` to forward legal-action
-        #: masks to mask-aware policies (see
-        #: :class:`~deap_pettingzoo.policies.action_heads.MaskedDiscreteHead`).
+        #: Most recent infos dict returned by the underlying env's ``reset``/``step``. 
+        #: Evaluators read ``last_infos[agent].get("action_mask")`` to forward legal-action
+        #: masks to mask-aware policies (see :class:`~deap_pettingzoo.policies.action_heads.MaskedDiscreteHead`).
         self.last_infos: Dict[str, Dict[str, Any]] = {}
 
     @property
@@ -350,9 +346,8 @@ class PettingZooWrapper:
             try:
                 self.env.close()
             except SystemExit:
-                # aquarium_v0.close() calls sys.exit(); ignore.
                 pass
-            except Exception:  # pragma: no cover - best-effort cleanup
+            except Exception: 
                 pass
         self.env = None
     

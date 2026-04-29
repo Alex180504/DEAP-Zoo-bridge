@@ -13,16 +13,18 @@ from __future__ import annotations
 
 from .registry import is_registered, register_env
 
+"""
+MPE2 registration metadata.
 
-# ---------------------------------------------------------------------------
-# MPE2 (required dependency as of deap-bridge's pyproject.toml, but still
-# wrapped in try/except so environments/__init__.py never hard-crashes).
-# ---------------------------------------------------------------------------
+MPE2 is currently a required dependency in deap-bridge's ``pyproject.toml``,
+but registration stays wrapped in ``try/except`` so
+``environments/__init__.py`` never hard-crashes.
 
-# Per-env notes.  Keys that may be truly heterogeneous across agents or use
-# non-Box/Discrete action spaces are flagged so downstream code (policies,
-# compatibility checks, tests) can surface meaningful errors instead of
-# obscure shape mismatches.
+``_MPE_NOTES`` flags environments that may be heterogeneous across agents or
+use non-Box/Discrete action spaces, allowing downstream policies,
+compatibility checks, and tests to raise clear errors instead of obscure shape
+mismatches.
+"""
 _MPE_NOTES = {
     "simple_v3": "",
     "simple_adversary_v3": (

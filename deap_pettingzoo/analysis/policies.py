@@ -1,25 +1,9 @@
 """Reconstruct a runnable policy from a logged run.
-
-The UI's *Live Rollout* page (Phase 2 of the UI plan) calls
+# TODO: FInish live rollout functionality
+The UI's *Live Rollout* page calls
 :func:`load_policy` to turn a :class:`~deap_pettingzoo.analysis.loaders.RunRecord`
 back into a :class:`~deap_pettingzoo.policies.base.PolicyProtocol` it can
 roll out against an env factory.
-
-Dispatch is by ``manifest.artifacts['policy']['kind']``:
-
-============================  =================================================
-Kind                          Reconstructor
-============================  =================================================
-``ea_genome_v1``              ``FixedTopologyGenome.from_dict`` →
-                              :class:`GenomePolicyWrapper`
-``cma_genome_v1``             same as ``ea_genome_v1``
-``coevolution_v1``            ``RunRecord``-bound multi-side bundle exposing
-                              :meth:`CoevolutionPolicyBundle.get_side`
-``agilerl_v1``                deferred — raises
-                              :class:`PolicyReloadUnavailable` until the
-                              UI's AgileRL deserializer lands.
-``qdax_repertoire_v1``        deferred — same as ``agilerl_v1``.
-============================  =================================================
 
 The loader is intentionally read-only (no env construction) so the UI can
 preview metadata before deciding whether to spin up a rollout env.
@@ -180,7 +164,6 @@ def load_policy(run_record: "RunRecord", *, action_space: Any = None) -> Any:
     if kind in {"agilerl_v1", "qdax_repertoire_v1"}:
         raise PolicyReloadUnavailable(
             f"load_policy for kind={kind!r} is not implemented yet "
-            "(deferred to a follow-up phase of the UI plan)."
         )
 
     raise ValueError(

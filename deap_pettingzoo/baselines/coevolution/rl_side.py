@@ -60,9 +60,7 @@ SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Driver context — replaces the CoEvolutionEvaluator handed to other sides
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -86,9 +84,7 @@ class _RLDriverContext:
     rng: np.random.Generator
 
 
-# ---------------------------------------------------------------------------
 # Side state
-# ---------------------------------------------------------------------------
 
 
 class RLSideState(SideState):
@@ -180,8 +176,8 @@ class RLSideState(SideState):
         self._memory: Any = None
         self._wrapper: Optional[PolicyProtocol] = None
         self._pool: Optional[RLPolicyPool] = None
-        #: Effective torch device after :meth:`initialise`. Read by
-        #: :func:`deap_pettingzoo.utils.device_check.warn_on_gpu_contention`.
+        #: Effective torch device after :meth:`initialise`. 
+        #: Read by :func:`deap_pettingzoo.utils.device_check.warn_on_gpu_contention`.
         self.resolved_device: str = "cpu"
         self._last_returns: List[float] = []
         self._bootstrap_ctx: Optional[_RLDriverContext] = None
@@ -194,9 +190,7 @@ class RLSideState(SideState):
         self._total_learn_calls: int = 0
         self._total_learn_failures: int = 0
 
-    # ------------------------------------------------------------------
     # Lifecycle
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -398,9 +392,7 @@ class RLSideState(SideState):
         self.history.append(stats)
         return stats
 
-    # ------------------------------------------------------------------
     # OpponentPool surface
-    # ------------------------------------------------------------------
 
     def current_pool(self) -> OpponentPool:
         if self._pool is None:
@@ -430,9 +422,7 @@ class RLSideState(SideState):
         """
         return self._wrapper
 
-    # ------------------------------------------------------------------
     # Rollout
-    # ------------------------------------------------------------------
 
     def _collect_episode(self, ctx: _RLDriverContext) -> float:
         """Run one rollout episode, push transitions, return cumulative reward.
@@ -443,6 +433,18 @@ class RLSideState(SideState):
         ``training=True`` because the API is inconsistent across
         algorithms; the buffer's diversity is driven by the
         algorithm's own action-noise schedule).
+
+        Note:
+            The leading vectorisation dim (size 1) is squeezed from
+            ``raw_actions`` before both ``env.step`` and
+            ``save_to_memory``.  Storing batched actions
+            (shape ``(1, action_dim)``) alongside unbatched observations
+            (shape ``(features,)``) causes a 2-vs-3 ndim mismatch in
+            ``MADDPG.learn()`` when the buffer's sampled tensors are
+            passed to actor/critic forward passes.  Keeping obs and
+            action shapes rank-aligned at write time avoids this.
+            :meth:`~deap_pettingzoo.baselines.agilerl_trainer.AgileRLTrainer._run_off_policy`
+            applies the same fix.
         """
         env = ctx.env_wrapper
 
@@ -487,16 +489,6 @@ class RLSideState(SideState):
                 else (action_result, action_result)
             )
 
-            # Squeeze leading vectorisation dim before sending to env
-            # AND before storing in the replay buffer. Storing batched
-            # actions (shape (1, action_dim)) alongside unbatched obs
-            # (shape (features,)) causes a 2-vs-3 ndim mismatch in
-            # MADDPG.learn() when the buffer's sampled tensors are
-            # passed to actor/critic forward passes. AgileRLTrainer's
-            # off-policy loop has the same latent bug, but it swallows
-            # learn() failures via `except Exception`, so it goes
-            # undetected there. Here we keep obs and action shapes
-            # rank-aligned at write time.
             env_actions: Dict[str, Any] = {}
             squeezed_actions: Dict[str, Any] = {}
             for aid, act in actions.items():
@@ -510,10 +502,7 @@ class RLSideState(SideState):
                     env_actions[aid] = arr
 
             # Zero-fill obs and squeezed_actions for any RL agent that has
-            # already terminated (MultiAgentReplayBuffer requires the
-            # full agent_ids roster on every write). Both dicts are
-            # non-empty here (guaranteed by the `if not rl_obs: break`
-            # guard above), but we check defensively to avoid StopIteration.
+            # already terminated (MultiAgentReplayBuffer requires the full agent_ids roster on every write).
             if len(rl_obs) < len(rl_ids) and rl_obs and squeezed_actions:
                 _ref_obs = next(iter(rl_obs.values()))
                 _ref_act = np.asarray(next(iter(squeezed_actions.values())))
@@ -542,8 +531,7 @@ class RLSideState(SideState):
                 if a in next_obs
             }
             # If any RL agent terminated this step, fill its next_obs
-            # with a zero-shaped placeholder of the correct dtype so
-            # the buffer accepts the dict.
+            # with a zero-shaped placeholder of the correct dtype so the buffer accepts the dict.
             for a in rl_ids:
                 if a not in rl_next_obs and a in rl_obs:
                     rl_next_obs[a] = np.zeros_like(rl_obs[a])
@@ -553,9 +541,6 @@ class RLSideState(SideState):
                 for a in rl_ids
             }
 
-            # Use squeezed_actions (rank-aligned with obs) so the
-            # buffer's stored shapes are consistent and `agent.learn()`
-            # doesn't hit a 2-vs-3 dim mismatch when batches are sampled.
             try:
                 self._memory.save_to_memory(
                     rl_obs, squeezed_actions, rl_reward, rl_next_obs, rl_term

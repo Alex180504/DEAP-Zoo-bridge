@@ -5,10 +5,11 @@ This module defines an abstract :class:`AgileRLTrainer` that orchestrates
 multi-agent training through AgileRL's in-process APIs, plus four
 concrete subclasses:
 
-- :class:`MADDPGTrainer` - Multi-Agent DDPG (off-policy)
-- :class:`MATD3Trainer`  - Multi-Agent Twin-Delayed DDPG (off-policy)
-- :class:`IPPOTrainer`   - Independent PPO (on-policy)
-- :class:`MAPPOTrainer`  - Centralized-critic multi-agent PPO (on-policy)
+- :class:`MADDPGTrainer`       - Multi-Agent DDPG (off-policy)
+- :class:`MATD3Trainer`        - Multi-Agent Twin-Delayed DDPG (off-policy)
+- :class:`IPPOTrainer`         - Independent PPO (on-policy)
+- :class:`MAPPOTrainer`        - Centralized-critic multi-agent PPO (on-policy)
+- :class:`GroupedIPPOTrainer`  - Prefix-grouped IPPO (on-policy)
 
 The dependency on ``agilerl`` is imported lazily inside :meth:`train` so
 that ``import deap_pettingzoo.baselines`` does not require the optional
@@ -53,16 +54,18 @@ class AgileRLTrainer(BaselineTrainer):
     - :attr:`ON_POLICY`  - ``True`` for PPO-family algorithms,
       ``False`` for DDPG-family.
     - :meth:`get_capabilities`  - per-algorithm capability flags.
+    
+    Notes:
+        AgileRL training is rollout-based, not generation-based, so the
+        default cadence is the largest sensible bucket. Currently we only
+        emit a single end-of-training rollout regardless of cadence. 
+        The ClassVar value is kept for API parity with other trainers.
     """
 
     ALGORITHM_NAME: str = "agilerl"
     ALGORITHM_IMPORT: Tuple[str, str] = ("agilerl", "")
     ON_POLICY: bool = False
 
-    #: AgileRL training is rollout-based, not generation-based, so the
-    #: default cadence is the largest sensible bucket. Currently we only
-    #: emit a single end-of-training rollout regardless of cadence; the
-    #: ClassVar value is kept for API parity with EA/CMA/CoEvo trainers.
     _default_recording_every_n: ClassVar[int] = 10
 
     # Default hyperparameters; subclasses may override.
@@ -70,10 +73,7 @@ class AgileRLTrainer(BaselineTrainer):
         "batch_size": 64,
         "memory_size": 10_000,
         "learning_delay": 500,
-        # Off-policy learning frequency: call agent.learn() once every
-        # ``learn_step`` env steps after ``learning_delay``. The previous
-        # behaviour (learn every single env step) is recoverable via
-        # ``learn_step=1`` but is dramatically slower on CPU.
+        # Off-policy learning frequency: call agent.learn() once every ``learn_step`` env steps after ``learning_delay``.
         "learn_step": 100,
         "rollout_steps": 256,
         "device": "cpu",
@@ -83,7 +83,7 @@ class AgileRLTrainer(BaselineTrainer):
         self.device = device
         self.verbose = verbose
 
-    # --- BaselineTrainer interface ----------------------------------------
+    # BaselineTrainer interface
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train an AgileRL algorithm under the given budget.
@@ -94,7 +94,12 @@ class AgileRLTrainer(BaselineTrainer):
             ValueError: If the target environment is a turn-based AEC
                 game (``api='aec_masked'`` / ``'aec_sequential'``) and
                 this algorithm does not support turn-based training
-                (e.g. MADDPG / MATD3).
+                (e.g. MADDPG / MATD3), or if ``config.env_name`` is not
+                registered in the environment registry (propagated from
+                :func:`~deap_pettingzoo.baselines.agilerl_adapter.build_parallel_env`).
+            TypeError: If the registered factory's ``api`` declaration is
+                inconsistent (propagated from
+                :func:`~deap_pettingzoo.baselines.agilerl_adapter.build_parallel_env`).
         """
         # Fast-fail on turn-based envs for algos that cannot handle them.
         if not self.get_capabilities().get("supports_turn_based", True):
@@ -154,20 +159,18 @@ class AgileRLTrainer(BaselineTrainer):
         try:
             env.close()
         except SystemExit:
-            # Some third-party envs (e.g. marl-aquarium) call sys.exit()
-            # from close(); suppress to keep the process alive.
+            # Some third-party envs (e.g. marl-aquarium) call sys.exit() from close().
+            # Suppress to keep the process alive.
             pass
         except Exception:  # pragma: no cover
             pass
 
         policy = AgileRLPolicyWrapper(agent, agent_ids, self.ALGORITHM_NAME)
 
-        # ----- Optional end-of-training frame recording ------------------
-        # AgileRL is rollout-based (no "generation" concept), so the
-        # default cadence semantics from EA do not apply. We instead
-        # record a single champion rollout at the end of training when
-        # ``RecordingConfig.enabled`` is set. Any error is swallowed so
-        # recording cannot break training.
+        # Optional end-of-training frame recording
+        # AgileRL is rollout-based (no "generation" concept), so the default cadence semantics from EA do not apply.
+        # Instead, record a single champion rollout at the end of training when ``RecordingConfig.enabled`` is set. 
+        # Any error is ignored so recording cannot break training.
         recording_cfg = config.recording
         if recording_cfg.enabled:
             try:
@@ -211,8 +214,7 @@ class AgileRLTrainer(BaselineTrainer):
             except Exception:
                 pass
 
-        # ----- Persist results via ExperimentLogger -------------------------
-        # No-op when ``config.output_dir is None``.
+        # Persist results via ExperimentLogger unless ``config.output_dir is None``.
         from deap_pettingzoo.baselines._logging_helpers import (
             build_logger,
             write_summary,
@@ -277,7 +279,7 @@ class AgileRLTrainer(BaselineTrainer):
     def get_capabilities(self) -> Dict[str, Any]:  # pragma: no cover
         raise NotImplementedError
 
-    # --- Hooks / helpers --------------------------------------------------
+    # Hooks / helpers
 
     def _import_algorithm(self):
         """Lazily import the AgileRL algorithm class."""
@@ -304,8 +306,7 @@ class AgileRLTrainer(BaselineTrainer):
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
         if config.budget_mode == BudgetMode.WALL_CLOCK:
-            # Soft cap: rely on a large step budget and let the caller's
-            # timer stop us; we return a very large number here.
+            # Soft cap: rely on a large step budget and let the caller's timer stop us; we return a very large number here.
             return 10**9
         return translate_budget_to_env_steps(config)
 
@@ -398,7 +399,7 @@ class AgileRLTrainer(BaselineTrainer):
             return None
         return float(np.mean(scalars))
 
-    # --- Training loops ---------------------------------------------------
+    # Training loops
 
     def _run_off_policy(
         self,
@@ -409,7 +410,25 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
     ) -> Dict[str, Any]:
-        """Hand-rolled off-policy loop using AgileRL's replay buffer."""
+        """Hand-rolled off-policy loop using AgileRL's replay buffer.
+
+        Note:
+            AgileRL's ``get_action`` returns a ``(actions, raw_actions)``
+            tuple.  The two dicts serve different purposes and must each
+            be squeezed independently:
+
+            * ``actions`` — sent to ``env.step``.  Discrete spaces expect
+              Python ints; Box spaces expect 1-D arrays.
+            * ``raw_actions`` — stored in the replay buffer.  Always the
+              continuous representation the critic was built for.
+
+            Storing ``raw_actions`` with its leading vec-dim intact
+            (shape ``(1, act_dim)``) next to unbatched obs
+            (shape ``(features,)``) caused a 2-vs-3 ndim mismatch inside
+            ``MADDPG.learn()``.  Using ``actions`` for the buffer instead
+            would silently break discrete envs where ``actions`` are scalar
+            ints but the critic expects the continuous representation.
+        """
         from agilerl.components.multi_agent_replay_buffer import (  # noqa: WPS433
             MultiAgentReplayBuffer,
         )
@@ -437,17 +456,6 @@ class AgileRLTrainer(BaselineTrainer):
             actions, raw_actions = (
                 action_result if isinstance(action_result, tuple) else (action_result, action_result)
             )
-            # Squeeze the leading vec-dim of 1 from BOTH dicts:
-            #   * ``actions`` -> sent to env.step (ints for Discrete,
-            #     1-D arrays for Box).
-            #   * ``raw_actions`` -> stored in the replay buffer (always
-            #     the continuous representation the critic expects).
-            # Storing ``raw_actions`` unsqueezed (shape ``(1, act_dim)``)
-            # next to unbatched obs (shape ``(features,)``) caused a
-            # 2-vs-3 ndim mismatch in MADDPG.learn(); using ``actions``
-            # for the buffer instead would silently break discrete envs
-            # where ``actions`` are scalar ints but the critic was built
-            # for the continuous representation.
             env_actions = self._unwrap_actions_for_env(actions)
             buffer_actions: Dict[str, Any] = {}
             for aid, act in raw_actions.items():
@@ -557,8 +565,7 @@ class AgileRLTrainer(BaselineTrainer):
                                 f"[{self.ALGORITHM_NAME}] learn() failed: {exc}"
                             )
                     steps_done += remaining
-                    # We cannot cheaply recover per-episode rewards here;
-                    # we report coarse step totals instead.
+                    # We cannot cheaply recover per-episode rewards here - report coarse step totals instead.
                     continue
                 except Exception as exc:  # pragma: no cover
                     if self.verbose:
@@ -568,8 +575,7 @@ class AgileRLTrainer(BaselineTrainer):
                         )
                     collect_rollouts_multi_agent = None
 
-            # Manual fallback: step the env and accumulate rewards; no
-            # learning signal (produces a reasonable but untrained agent).
+            # Manual fallback: step the env and accumulate rewards; no learning signal (produces a reasonable but untrained agent).
             for _ in range(remaining):
                 action_result = agent.get_action(obs, infos=info)
                 actions = (
@@ -602,10 +608,7 @@ class AgileRLTrainer(BaselineTrainer):
         }
 
 
-# ---------------------------------------------------------------------------
 # Concrete trainers
-# ---------------------------------------------------------------------------
-
 
 class MADDPGTrainer(AgileRLTrainer):
     """Multi-Agent DDPG via AgileRL (off-policy, decentralized actors,
@@ -692,8 +695,7 @@ class MAPPOTrainer(IPPOTrainer):
         agent_ids: List[str],
         ctor_kwargs: Dict[str, Any],
     ):
-        # Enable the centralized critic if AgileRL's IPPO exposes such a
-        # kwarg; users may override via TrainingConfig.algorithm_params.
+        # Enable the centralized critic if AgileRL's IPPO exposes such a kwarg; users may override via TrainingConfig.algorithm_params.
         ctor_kwargs.setdefault("shared_critic", True)
         try:
             return alg_cls(
@@ -787,9 +789,6 @@ class GroupedIPPOTrainer(IPPOTrainer):
         for aid in agent_ids:
             groups.setdefault(cls._group_prefix(aid), []).append(aid)
 
-        # Refuse to run when grouping is a no-op: every agent is its
-        # own group. That means the user gained nothing over IPPO and
-        # almost certainly intended a different env or trainer.
         if all(len(members) == 1 for members in groups.values()):
             raise ValueError(
                 f"GroupedIPPOTrainer: agent_ids={agent_ids!r} yield only "

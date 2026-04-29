@@ -60,9 +60,7 @@ from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
 
 
-# ---------------------------------------------------------------------------
 # QDax-specific evaluator
-# ---------------------------------------------------------------------------
 
 class _QDaxPolicyEvaluator:
     """Thin evaluator that accepts a pre-constructed policy (FlaxPolicyAdapter)
@@ -203,21 +201,22 @@ class CoEvolutionConfig:
     reporting_side: Optional[str] = None
     max_steps_per_episode: int = 200
     seed: Optional[int] = None
-    #: Phase 8 \u2014 number of worker processes used to parallelise the
-    #: ``k_opponents`` episode loop *inside* one
-    #: :meth:`CoEvolutionEvaluator.evaluate` call. ``1`` (default) runs
-    #: serially. ``k_opponents == 1`` always falls back to serial,
-    #: regardless of ``num_workers``. Only EA/CMA learner sides are
-    #: parallelised \u2014 QDax-side learners keep their inner numpy-pool
-    #: lifecycle (use ``optimizer_config['num_workers']`` there) and
-    #: frozen sides do not run learner episodes.
     num_workers: int = 1
-    #: Phase 8 \u2014 backend selector matching
-    #: :func:`deap_pettingzoo.utils.parallel.make_executor`. One of
-    #: ``'process'``, ``'scoop'``, ``'dask'``. Default ``'process'``.
     parallel_backend: str = "process"
 
     def __post_init__(self) -> None:
+        """Validate config fields and enforce mode-specific invariants.
+
+        Note:
+            ``self_play_hof`` semantics: each side maintains its own archive
+            of past champions; when sampled *as an opponent* by other sides
+            the draw comes from its HoF rather than the current generation.
+            In symmetric-topology envs this recovers classical self-play; in
+            asymmetric-topology envs (e.g. ``simple_tag`` where pursuers and
+            evaders have different obs/action spaces) it is the natural
+            generalisation — a single HoF cannot span sides with mismatched
+            policy topologies.
+        """
         if self.mode not in VALID_MODES:
             raise ValueError(
                 f"CoEvolutionConfig.mode={self.mode!r} invalid; "
@@ -252,16 +251,6 @@ class CoEvolutionConfig:
                             )
 
         if self.mode == "self_play_hof":
-            # "Self-play with HoF" = each side maintains its own
-            # archive of past champions, and when that side is sampled
-            # as an opponent by OTHER sides, the sample is drawn from
-            # its HoF instead of its current generation. In
-            # symmetric-topology envs this recovers classical
-            # self-play; in asymmetric-topology envs (e.g. simple_tag,
-            # where pursuers and evaders have different obs/action
-            # spaces) it's the natural generalisation — you cannot
-            # share a single HoF across sides with mismatched policy
-            # topologies.
             if len(self.sides) < 2:
                 raise ValueError(
                     "self_play_hof mode requires at least 2 sides with "
@@ -335,6 +324,33 @@ class CoEvolutionTrainer(BaselineTrainer):
     _default_recording_every_n: ClassVar[int] = 1
 
     def train(self, config: TrainingConfig) -> TrainingResult:
+        """Execute the co-evolution training loop.
+
+        Note:
+            Seeding order: ``np.random.seed`` and the per-trainer
+            ``default_rng`` are set *before* any side's ``initialise()``
+            so results are reproducible regardless of side-iteration order.
+            Each side's global NumPy state is saved to ``state._np_state``
+            after ``initialise()`` (before restoring the previous state) so
+            ``step_generation`` resumes from the same deterministic stream.
+
+            GPU/RL contention: if any RL side resolved CUDA *and* JAX has
+            GPU access a ``RuntimeWarning`` is emitted. Parallel
+            co-evolution (``num_workers > 1``) is not supported alongside
+            RL sides (torch state does not pickle across spawn) and falls
+            back to serial automatically.
+
+            Bootstrap: the initial population of every evolving side is
+            evaluated against the other sides' initial state so fitnesses
+            exist before the first ``step_generation`` call. Evaluator
+            construction happens inside the ``make_executor`` context so
+            EA/CMA sides share the worker pool for ``k_opponents`` episode
+            dispatch.
+
+            Frame recording is best-effort: any error in
+            ``_record_coevolution_rollout`` is silently swallowed so it
+            cannot interrupt training.
+        """
         coev_cfg = config.algorithm_params.get("coevolution")
         if not isinstance(coev_cfg, CoEvolutionConfig):
             raise ValueError(
@@ -351,7 +367,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         )
 
         # Stash env-construction metadata so _build_evaluator can pass
-        # it down to CoEvolutionEvaluator workers (Phase 8).
+        # it down to CoEvolutionEvaluator workers.
         self._env_name: str = config.env_name
         self._env_config: Optional[Dict[str, Any]] = config.env_config
 
@@ -367,10 +383,6 @@ class CoEvolutionTrainer(BaselineTrainer):
                 stacklevel=2,
             )
 
-        # Seed RNGs *before* any side-state initialisation so that
-        # side.initialise()'s randomness (CMA's np.random.seed, weight
-        # sampling, etc.) is reproducible under coev_cfg.seed and does
-        # not depend on side-iteration order.
         if coev_cfg.seed is not None:
             np.random.seed(int(coev_cfg.seed))
         self._rng = np.random.default_rng(coev_cfg.seed)
@@ -378,9 +390,6 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState] = {
             s.name: make_side_state(s) for s in coev_cfg.sides
         }
-        # Give every side its own deterministic child RNG, and isolate
-        # initialise() from the global NumPy RNG so one side's seeding
-        # calls (notably CMA) do not leak into the next side.
         for state in states.values():
             side_rng = np.random.default_rng(
                 self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
@@ -391,20 +400,9 @@ class CoEvolutionTrainer(BaselineTrainer):
             except Exception:
                 np.random.set_state(previous_np_state)
                 raise
-            # Save the global numpy state *after* this side's seeding so
-            # its CMA generate/update (and EA operators) can continue from
-            # the same seeded stream in subsequent step_generation calls.
-            # This must happen before restoring the old global state so that
-            # the side-specific seed is preserved for future generations.
-            # _np_state is defined on SideState base class, so this always
-            # applies and we don't need a hasattr() guard.
             state._np_state = np.random.get_state()
             np.random.set_state(previous_np_state)
 
-        # GPU-contention check: if any RL side resolved a CUDA device
-        # *and* JAX has GPU access (typical sign of a co-located QDax
-        # side), warn once — both libraries will fight for the same
-        # device memory.
         rl_cuda_sides = [
             name for name, s in states.items()
             if isinstance(s, RLSideState)
@@ -416,9 +414,6 @@ class CoEvolutionTrainer(BaselineTrainer):
         ]
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
 
-        # Parallel co-evolution is not supported when an RL side is
-        # in play (RLPolicyPool.snapshot_opponents raises). Fall back
-        # to serial with a one-shot warning so the user knows.
         has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
         if has_rl_side and resolved_workers > 1:
             warnings.warn(
@@ -433,12 +428,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             )
             resolved_workers = 1
 
-        # Bootstrap: evaluate each evolving side's initial population
-        # against the *initial* state of the other sides so fitnesses
-        # exist before the first step_generation.
-        # All evaluator construction happens inside the executor
-        # context so EA/CMA learner sides can dispatch their
-        # k_opponents episodes through a shared worker pool.
         with make_executor(
             resolved_workers, backend=coev_cfg.parallel_backend
         ) as executor:
@@ -450,11 +439,6 @@ class CoEvolutionTrainer(BaselineTrainer):
                 name: [] for name in states
             }
 
-            # Optional frame recording: build the logger up-front so we
-            # can render a champion rollout every ``cadence`` generations
-            # using the reporting side's current best policy. Recording
-            # is best-effort — any error is swallowed so it cannot break
-            # training.
             from deap_pettingzoo.baselines._logging_helpers import build_logger
 
             self._recording_log = build_logger(config, algorithm="coevolution")
@@ -584,7 +568,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             training_time=training_time,
         )
 
-    # ----- Logging helpers --------------------------------------------
+    # Logging helpers
 
     def _persist_results(
         self,
@@ -600,16 +584,18 @@ class CoEvolutionTrainer(BaselineTrainer):
         Each side's per-generation stats land in ``metrics.csv`` with a
         ``side`` discriminator column; a single ``summary.json`` records
         per-side final bests.
+
+        Note:
+            Reuses the logger built in ``train()`` (so frame recording and
+            metrics share a single run directory). Falls back to building a
+            fresh one if the trainer is used outside ``train()``
+            (defensive).
         """
         from deap_pettingzoo.baselines._logging_helpers import (
             build_logger,
             write_summary,
         )
 
-        # Reuse the logger built in ``train()`` (so frame recording and
-        # metrics share a single run directory). Falls back to building
-        # a fresh one if the trainer was used without going through
-        # ``train()`` (defensive).
         log = getattr(self, "_recording_log", None) or build_logger(
             config, algorithm="coevolution"
         )
@@ -730,9 +716,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             "supports_turn_based": True,
         }
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
 
     def _record_coevolution_rollout(
         self,
@@ -835,18 +819,20 @@ class CoEvolutionTrainer(BaselineTrainer):
         Episodes per generation ≈
             Σ over evolving sides of (side.population_size * k_opponents).
         Env steps per generation ≈ episodes × max_steps_per_episode.
+
+        Note:
+            Per-side episode counts: EA/CMA/QDax sides contribute
+            ``population_size * k_opponents`` episodes (one rollout per
+            individual per opponent sample); RL sides contribute
+            ``rollout_episodes_per_gen`` (no population — ``k_opponents``
+            does not apply, the RL side samples one opponent per rollout
+            episode internally).
         """
         evolving = [s for s in coev_cfg.sides if s.optimizer != "frozen"]
         if not evolving:
             # Pathological — nothing is actually evolving — do at least
             # one pass to produce output.
             return 1
-        # Per-side episode count per generation.
-        # • EA / CMA / QDax sides: population_size * k_opponents
-        #   (one rollout per individual per opponent sample).
-        # • RL sides: rollout_episodes_per_gen (no population —
-        #   k_opponents does not apply, the RL side samples one
-        #   opponent per rollout episode internally).
         ep_per_gen = 0
         for s in evolving:
             if s.optimizer == "rl":
@@ -909,13 +895,17 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
     ) -> None:
-        """Initial fitness evaluation for every evolving side."""
+        """Initial fitness evaluation for every evolving side.
+
+        Note:
+            QDax-backed sides already evaluated their initial repertoire
+            inside ``map_elites.init()`` during ``initialise()``; they
+            expose no ``rebind_evaluator`` / ``evaluate_population``
+            interface and are therefore skipped.
+        """
         for name, state in states.items():
             if state.side.optimizer == "frozen":
                 continue
-            # QDax-backed sides already evaluated their initial repertoire
-            # inside map_elites.init() during initialise(); they expose no
-            # rebind_evaluator / evaluate_population interface.
             if not hasattr(state, "rebind_evaluator"):
                 continue
             evaluator = self._build_evaluator(env, state, states, coev_cfg)
@@ -934,16 +924,34 @@ class CoEvolutionTrainer(BaselineTrainer):
         coev_cfg: CoEvolutionConfig,
         pool_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        """Construct the evaluator or driver context for *learner_state*.
+
+        Note:
+            RL learner sides bypass :class:`CoEvolutionEvaluator` entirely
+            — they drive their own rollouts (with replay-buffer side effects)
+            and consume an :class:`_RLDriverContext` directly inside
+            ``step_generation``. The shared snapshot machinery is still used
+            so the synchronous schedule's contract holds for the RL side too.
+
+            Executor assignment: only EA/CMA learners receive the shared
+            ``executor``; QDax learners stay serial (their inner numpy-pool
+            already uses ``optimizer_config['num_workers']``) and frozen
+            sides never call ``_build_evaluator`` at all.
+
+            QDax sides drive their own JAX update loop; their scoring
+            function receives a pre-built ``FlaxPolicyAdapter`` rather than
+            a DEAP individual, so a lightweight
+            :class:`_QDaxPolicyEvaluator` is returned instead of
+            :class:`CoEvolutionEvaluator`.
+
+            A deterministic RNG is injected via a closure so evaluations
+            under a fixed seed replay identically; each call forks a fresh
+            child generator to avoid shared state.
+        """
         opp_sides = self._collect_opponent_sides(
             states, learner_state.side.name, coev_cfg,
             pool_snapshot=pool_snapshot,
         )
-        # RL learner sides bypass CoEvolutionEvaluator entirely — they
-        # drive their own rollouts (with replay-buffer side effects)
-        # and consume the driver context directly inside
-        # step_generation. We still build opp_sides via the shared
-        # snapshot machinery so the synchronous schedule's contract
-        # holds for the RL side too.
         if learner_state.side.optimizer == "rl":
             return _RLDriverContext(
                 env_wrapper=env,
@@ -954,18 +962,9 @@ class CoEvolutionTrainer(BaselineTrainer):
                     self._rng.integers(0, 2**63 - 1)
                 ),
             )
-        # Fallback for self-play bootstrap: if learner's own pool would
-        # be drawn from an empty archive, use pure current-gen pool to
-        # avoid ArchivePool empty errors on the very first generation.
         assert (
             learner_state.side.optimizer != "frozen"
         ), "frozen sides never become learners."
-        # Per-side RNG derived from trainer RNG (still deterministic
-        # under a fixed base seed; differs per individual-episode).
-        # Phase 8: only EA / CMA learners get the shared executor.
-        # QDax learners stay serial (their inner numpy-pool already
-        # uses optimizer_config['num_workers']) and frozen sides never
-        # call _build_evaluator at all.
         learner_optimizer = learner_state.side.optimizer
         executor_for_side = (
             self._executor
@@ -973,10 +972,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             else None
         )
 
-        # QDax sides drive their own JAX update loop; their scoring
-        # function receives a pre-built FlaxPolicyAdapter, not a DEAP
-        # individual.  Use a lightweight episode evaluator that skips
-        # the genome-based factory entirely.
         if learner_optimizer in {"qdax_map_elites", "qdax_cma_me"}:
             trainer_rng = self._rng
 
@@ -1006,9 +1001,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             env_config=getattr(self, "_env_config", None),
             learner_masked=bool(getattr(learner_state, "masked", False)),
         )
-        # Inject a deterministic RNG so evaluations under a fixed seed
-        # replay identically.  Wrap a closure so the evaluator always
-        # receives a freshly-forked generator per call.
         trainer_rng = self._rng
 
         original_evaluate = evaluator.evaluate
@@ -1030,21 +1022,25 @@ class CoEvolutionTrainer(BaselineTrainer):
         coev_cfg: CoEvolutionConfig,
         history: Dict[str, List[GenerationStats]],
     ) -> None:
-        # Snapshot every side's opponent pool at the *start* of the
-        # generation. The synchronous schedule's contract is that all
-        # evolving sides advance one generation simultaneously against
-        # a frozen view of every other side's state. Reading
-        # ``state.current_pool()`` live inside the per-side loop would
-        # break that contract — earlier sides would have already
-        # mutated their populations/HoFs by the time later sides are
-        # evaluated.
+        """Advance every non-frozen side by one generation simultaneously.
+
+        Note:
+            Pool snapshot: all sides' opponent pools are captured at the
+            *start* of the generation so every side evaluates against a
+            frozen view of the other sides' state. Reading
+            ``state.current_pool()`` live inside the per-side loop would
+            break the contract — earlier sides would have already mutated
+            their populations/HoFs.
+
+            RL pools mutate in place each generation (both the pool object
+            and the underlying torch agent). An optional
+            ``snapshot_sync()`` hook is honoured so opponents see a frozen
+            pre-learn view consistent with the synchronous-schedule
+            contract.
+        """
         pool_snapshot: Dict[str, Any] = {}
         for name, state in states.items():
             pool = state.current_pool()
-            # RL pools mutate in place each gen (both the pool object
-            # and the underlying torch agent). Honour an optional
-            # snapshot_sync() hook so opponents see a frozen pre-learn
-            # view consistent with the synchronous-schedule contract.
             snap = getattr(pool, "snapshot_sync", None)
             if callable(snap):
                 pool = snap()

@@ -1,4 +1,4 @@
-"""First-class AEC-env support: unit + integration tests.
+"""AEC environment support: unit + integration tests.
 
 Covers the ``api='parallel' | 'aec' | 'auto'`` branch in
 :func:`deap_pettingzoo.environments.registry.build_env`, the
@@ -222,10 +222,7 @@ class TestBuildEnvAECConversion:
         finally:
             unregister_env(name)
 
-    def test_parallel_fast_path_still_works(self):
-        # Regression: default api='parallel' MPE2 registration continues
-        # to instantiate via .parallel_env without passing through the
-        # AEC coercion path.
+    def test_parallel_fast_path(self):
         env = build_env("simple_spread_v3", env_config={"max_cycles": 5, "N": 3})
         from pettingzoo.utils.env import ParallelEnv
 

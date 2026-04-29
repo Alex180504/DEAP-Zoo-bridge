@@ -212,7 +212,7 @@ class TestAgileRLPolicyWrapper:
 
 
 # ---------------------------------------------------------------------------
-# Lazy-import / install-guard behavior
+# Lazy-import / install-guard behaviour
 # ---------------------------------------------------------------------------
 
 

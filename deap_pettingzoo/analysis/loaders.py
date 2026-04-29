@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-# pandas is heavy; lazy-import to keep ``import deap_pettingzoo.analysis`` cheap.
-
 
 def _lazy_pd():
     import pandas as pd  # noqa: WPS433
@@ -122,9 +120,7 @@ class RunRecord:
     trajectories: Optional[Any] = None
     summary: Dict[str, Any] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
     # Convenience accessors
-    # ------------------------------------------------------------------
 
     @property
     def algorithm(self) -> str:
@@ -223,8 +219,6 @@ class Experiment:
     root: Path
     runs: List[RunRecord] = field(default_factory=list)
 
-    # ----- container-ish behaviour -----------------------------------
-
     def __iter__(self):
         return iter(self.runs)
 
@@ -234,7 +228,6 @@ class Experiment:
     def __getitem__(self, idx: int) -> RunRecord:
         return self.runs[idx]
 
-    # ----- selection ---------------------------------------------------
 
     def filter(
         self,
@@ -344,7 +337,7 @@ def load_experiment(
     return Experiment(root=root, runs=runs)
 
 
-# Mapping helpers used by other analysis modules ---------------------
+# Mapping helpers used by other analysis modules
 
 
 def metrics_aligned_to_x(

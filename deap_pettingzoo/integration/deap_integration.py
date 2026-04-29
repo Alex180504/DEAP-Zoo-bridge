@@ -247,13 +247,8 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
             tournsize=cfg.get("tournament_size", 3),
         )
     elif method == "roulette":
-        # ``tools.selRoulette`` samples proportionally to fitness values and
-        # is mathematically only defined for non-negative fitnesses. Several
-        # PettingZoo evaluators in this project return summed episode
-        # rewards that can be negative, which silently produces invalid
-        # sampling (or a ZeroDivisionError) inside DEAP. Wrap the operator
-        # so a bad fitness sign fails loudly at selection time with an
-        # actionable message instead of corrupting the run.
+        # DEAP's selRoulette does not check for negative fitness values, which can lead to silent errors.
+        # This wrapper adds a check and raises a clear error if invalid fitnesses are present.
         def _safe_roulette(individuals, k):
             for ind in individuals:
                 fit = ind.fitness.values[0]
@@ -365,9 +360,6 @@ def _register_mutation(
             indpb=cfg.get("indpb", 0.1),
         )
         return
-    # TODO: ``tools.mutESLogNormal`` requires individuals to carry a
-    # per-gene strategy vector (ES self-adaptation). Supporting it would
-    # need a new genome variant; deferred.
     raise ValueError(
         f"Unknown mutation method {method!r}. "
         f"Supported: {SUPPORTED_MUTATION_METHODS}"
@@ -550,10 +542,7 @@ class _EvalWorkerSpec:
     team_mapping: Optional[Dict[str, str]] = None
 
 
-# Module-global cache populated lazily on each worker. Using a lazy
-# init pattern (instead of ``ProcessPoolExecutor(initializer=...)``)
-# keeps a single code path for the process backend, SCOOP, and Dask —
-# only the process backend supports ``initializer``.
+# Module-global cache populated lazily on each worker. 
 _WORKER_CACHE: Dict[str, Any] = {}
 
 
@@ -564,8 +553,7 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     if evaluator is not None and cached_spec == spec:
         return evaluator
 
-    # First call on this worker, or spec changed (should not happen in
-    # a well-formed train() call but is safe to rebuild on mismatch).
+    # Rebuild if first call on this worker, or spec changed since last build.
     from deap_pettingzoo.environments import PettingZooWrapper
     from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 
@@ -607,7 +595,7 @@ def _worker_evaluate(
         payload_and_spec: ``(_GenomePayload, _EvalWorkerSpec)`` tuple.
             We pack both so every call carries enough context to
             rebuild the evaluator — necessary because SCOOP / Dask do
-            not give us an init hook.
+            not expose an init hook.
 
     Returns:
         Fitness tuple from the evaluator, ready for
@@ -714,7 +702,7 @@ def evaluate_population_parallel(
 
 
 # --------------------------------------------------------------------------
-# MixedPolicyEvaluator parallel evaluation plumbing
+# MixedPolicyEvaluator parallel evaluation code
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -805,8 +793,7 @@ def _mixed_worker_evaluate(
     genome.set_weights(np.asarray(payload.weights, dtype=float))
 
     # Resolve factories and build the evaluator once per worker process.
-    # The cache key includes all fields that influence evaluator construction
-    # so that a single worker correctly handles spec changes across runs.
+    # The cache key includes all fields that influence evaluator construction so that a single worker correctly handles spec changes across runs.
     cache_key = (
         spec.env_factory_qualname,
         spec.scripted_factory_qualname,
@@ -889,8 +876,11 @@ def make_mixed_parallel_evaluate_map(
         ``pmap`` callable compatible with ``toolbox.register("map", pmap)``.
 
     Raises:
-        ValueError: If the evaluator was not built with the factory path.
-        ValueError: If factories are not importable (not module-level).
+        TypeError: If ``evaluator`` is not a :class:`MixedPolicyEvaluator`.
+        ValueError: If the evaluator was not built with the factory path
+            (``env_factory`` or ``scripted_policy_factory`` is ``None``).
+        ValueError: If factories are not importable (not module-level
+            callables — e.g. lambdas or closures).
     """
     from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
 

@@ -99,8 +99,6 @@ class SelfPlayEvaluator(BaseEvaluator):
         self.masked = bool(masked)
         self.flatten_obs = bool(flatten_obs)
 
-    # ------------------------------------------------------------------
-
     def evaluate(
         self,
         individual: Any,
@@ -109,8 +107,8 @@ class SelfPlayEvaluator(BaseEvaluator):
         """Play one self-play episode and return ``(fitness,)``.
 
         Raises:
-            ValueError: If ``individual`` is missing a ``.genome`` attribute
-                or the genome is ``None``.
+            ValueError: If ``individual`` is ``None``, is missing a
+                ``.genome`` attribute, or the genome is ``None``.
         """
         if individual is None:
             raise ValueError("Individual cannot be None")
@@ -153,14 +151,12 @@ class SelfPlayEvaluator(BaseEvaluator):
 
         return (self._aggregate(cumulative),)
 
-    # ------------------------------------------------------------------
-
     def _build_shared_policies(
         self, genome: FixedTopologyGenome
     ) -> Dict[str, FeedforwardNeuralPolicy]:
         """Create one policy *per agent* that all share the **same** genome.
 
-        Shared weights = one learner plays every side of the board. Per-
+        Shared weights - one learner plays every side of the board. Per-
         agent policy instances are still created so each can carry its
         own :class:`ActionHead` (action spaces may differ by role, e.g.
         different ``n`` in asymmetric games).

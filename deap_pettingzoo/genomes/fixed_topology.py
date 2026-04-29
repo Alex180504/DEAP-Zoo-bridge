@@ -7,7 +7,8 @@ class FixedTopologyGenome:
     Fixed-topology neural network genome.
     
     Encodes a feedforward neural network with fixed architecture as a flat
-    vector of weights and biases. Compatible with DEAP's genetic operators.
+    vector of weights and biases. Compatible with DEAP's genetic operators and CMA-ES via cma_integration.py.
+    Used as a template for Qdax weight-compatible Flax policy.
     
     Attributes:
         layer_sizes: List of integers defining network architecture [input, hidden..., output]
@@ -194,7 +195,7 @@ class FixedTopologyGenome:
             layer_sizes=self.layer_sizes,
             activation=self.activation,
             weight_range=self._weight_range,
-            random_seed=None  # Let the clone have its own independent RNG stream
+            random_seed=None  # Allows the clone have its own independent RNG stream
         )
         cloned_genome.set_weights(self.get_weights().copy())
         # Keep the clone's own freshly seeded RNG so it produces an independent stream
