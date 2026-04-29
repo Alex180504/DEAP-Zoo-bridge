@@ -127,31 +127,76 @@ else:
     )
     tab_multitask = None
 
+# When all selected runs share the same algorithm, group by run_id so the
+# user can compare individual runs rather than seeing a single aggregate.
+_algo_groups = experiment.by_algorithm()
+_same_algorithm_mode = len(_algo_groups) == 1
+
 with tab_curves:
     st.subheader(f"{state.statistic.upper()} of `{state.metric}` vs `{x_col}`")
     try:
-        for algo, runs in experiment.by_algorithm().items():
-            if not runs:
-                continue
-            df = learning_curve_with_ci(
-                runs,
-                x_col=x_col,
-                y_col=state.metric,
-                statistic=state.statistic,
-                n_bootstrap=int(state.n_resamples),
-                ci=float(state.ci_level),
-            )
-            if df is None or df.empty:
-                st.caption(f"{algo}: no usable data for `{state.metric}`.")
-                continue
-            try:
-                import plotly.graph_objects as go
+        import plotly.graph_objects as go
 
-                y_col = "iqm" if state.statistic == "iqm" else "mean"
+        if _same_algorithm_mode:
+            # Individual-run curves — one line per run, no CI band.
+            fig = go.Figure()
+            any_data = False
+            for run in experiment:
+                if run.metrics is None:
+                    continue
+                cols = set(run.metrics.columns)
+                if x_col not in cols or state.metric not in cols:
+                    continue
+                df_r = (
+                    run.metrics[[x_col, state.metric]]
+                    .dropna()
+                    .sort_values(x_col)
+                )
+                if df_r.empty:
+                    continue
+                label = run.run_id
+                if run.seed is not None:
+                    label = f"{run.run_id} (seed={run.seed})"
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_r[x_col],
+                        y=df_r[state.metric],
+                        name=label,
+                        mode="lines",
+                    )
+                )
+                any_data = True
+            if any_data:
+                fig.update_layout(
+                    xaxis_title=x_col,
+                    yaxis_title=state.metric,
+                    height=400,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption(f"No usable data for `{state.metric}`.")
+        else:
+            # Multi-algorithm mode: one CI-band curve per algorithm.
+            for algo, runs in _algo_groups.items():
+                if not runs:
+                    continue
+                df = learning_curve_with_ci(
+                    runs,
+                    x_col=x_col,
+                    y_col=state.metric,
+                    statistic=state.statistic,
+                    n_bootstrap=int(state.n_resamples),
+                    ci=float(state.ci_level),
+                )
+                if df is None or df.empty:
+                    st.caption(f"{algo}: no usable data for `{state.metric}`.")
+                    continue
+                y_col_stat = "iqm" if state.statistic == "iqm" else "mean"
                 fig = go.Figure()
                 fig.add_trace(
                     go.Scatter(
-                        x=df[x_col], y=df[y_col], name=f"{algo} ({y_col})",
+                        x=df[x_col], y=df[y_col_stat],
+                        name=f"{algo} ({y_col_stat})",
                         mode="lines",
                     )
                 )
@@ -161,7 +206,7 @@ with tab_curves:
                         y=list(df["hi"]) + list(df["lo"][::-1]),
                         fill="toself", showlegend=False, opacity=0.2,
                         name=f"{algo} CI",
-                        line=dict(width=0),
+                        line={"width": 0},
                     )
                 )
                 fig.update_layout(
@@ -169,16 +214,39 @@ with tab_curves:
                     height=400,
                 )
                 st.plotly_chart(fig, use_container_width=True)
-            except ImportError:
-                st.dataframe(df, use_container_width=True)
+    except ImportError:
+        st.info("Install `plotly` for interactive charts.")
     except Exception as exc:  # surface library errors but don't crash the page
         st.error(f"Curve aggregation failed: {exc}")
 
 with tab_pairwise:
     st.subheader("Pairwise tests on final-fitness")
     try:
-        if len(experiment.by_algorithm()) < 2:
-            st.info("Need at least two algorithms to run pairwise tests.")
+        if _same_algorithm_mode:
+            # Compare runs individually by run_id when all belong to the
+            # same algorithm — build a synthetic Experiment that uses
+            # run_id as the algorithm discriminator.
+            from dataclasses import replace as _dc_replace
+            from deap_pettingzoo.analysis.loaders import Experiment as _Exp
+
+            _proxy_runs = []
+            for _r in experiment:
+                _label = _r.run_id
+                if _r.seed is not None:
+                    _label = f"{_r.run_id} (seed={_r.seed})"
+                _proxy_runs.append(
+                    _dc_replace(_r, manifest={**_r.manifest, "algorithm": _label})
+                )
+            _proxy_exp = _Exp(root=experiment.root, runs=_proxy_runs)
+            if len(_proxy_runs) < 2:
+                st.info("Select at least two runs to enable pairwise tests.")
+            else:
+                tbl = pairwise_table(
+                    _proxy_exp,
+                    metric="final_fitness",
+                    test=state.pairwise_test,
+                )
+                st.dataframe(tbl, use_container_width=True)
         else:
             tbl = pairwise_table(
                 experiment,
