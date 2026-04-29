@@ -130,16 +130,17 @@ class AgileRLTrainer(BaselineTrainer):
         obs_spaces, act_spaces, agent_ids = extract_space_metadata(env)
 
         # Split params: constructor vs. loop knobs.
+        # Note: batch_size and learn_step are accepted by both on-policy
+        # (IPPO/MAPPO) and off-policy (MADDPG/MATD3) constructors, so they
+        # go to ctor_kwargs AND remain in params for the training loop.
         loop_keys = {
-            "batch_size",
             "memory_size",
             "learning_delay",
-            "learn_step",
             "rollout_steps",
             "max_steps_per_episode",
         }
         ctor_kwargs = {k: v for k, v in params.items() if k not in loop_keys}
-        ctor_kwargs.setdefault("device", self.device)
+        ctor_kwargs["device"] = self.device  # Always use trainer's device, not DEFAULT_PARAMS "cpu"
 
         agent = self._build_agent(
             alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs
@@ -527,86 +528,143 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
     ) -> Dict[str, Any]:
-        """On-policy loop: collect rollouts, then call ``agent.learn``.
+        """On-policy rollout loop for IPPO/MAPPO.
 
-        Uses AgileRL's ``collect_rollouts`` helper when available; falls
-        back to a trivial loop that exercises ``get_action`` only.
+        Accumulates ``(states, actions, log_probs, rewards, dones, values)``
+        per agent over ``learn_step`` env steps, then calls
+        ``agent.learn(experiences)`` with the properly structured tuple.
+        This matches the data-flow in AgileRL's official
+        ``train_multi_agent_on_policy`` reference implementation.
         """
-        rollout_steps = int(params["rollout_steps"])
+        # Rollout chunk size: prefer user-specified learn_step, then agent attribute.
+        learn_step = int(params.get("learn_step", getattr(agent, "learn_step", 256)))
+
         episode_rewards: List[float] = []
         losses: List[float] = []
-
-        try:
-            from agilerl.rollouts.on_policy import (  # noqa: WPS433
-                collect_rollouts_multi_agent,
-            )
-        except ImportError:
-            collect_rollouts_multi_agent = None
-
-        obs, info = env.reset(seed=seed)
         steps_done = 0
         ep_reward = 0.0
 
+        obs, info = env.reset(seed=seed)
+        # Per-agent done flags; shape (1,) for non-vectorized env.
+        done: Dict[str, Any] = {a: np.zeros(1) for a in agent_ids}
+
+        print(
+            f"[{self.ALGORITHM_NAME}] Training: {budget_steps:,} steps, "
+            f"learn_step={learn_step}, agents={len(agent_ids)}"
+        )
+
         while steps_done < budget_steps:
-            remaining = min(rollout_steps, budget_steps - steps_done)
+            collect_n = min(learn_step, budget_steps - steps_done)
 
-            if collect_rollouts_multi_agent is not None:
-                # Delegate rollout + learn to AgileRL's helper.
-                try:
-                    collect_rollouts_multi_agent(agent, env, n_steps=remaining)
-                    try:
-                        loss = agent.learn()
-                        mean_loss = self._mean_loss(loss)
-                        if mean_loss is not None:
-                            losses.append(mean_loss)
-                    except Exception as exc:  # pragma: no cover
-                        if self.verbose:
-                            print(
-                                f"[{self.ALGORITHM_NAME}] learn() failed: {exc}"
-                            )
-                    steps_done += remaining
-                    # We cannot cheaply recover per-episode rewards here - report coarse step totals instead.
-                    continue
-                except Exception as exc:  # pragma: no cover
-                    if self.verbose:
-                        print(
-                            f"[{self.ALGORITHM_NAME}] collect_rollouts "
-                            f"failed: {exc}; falling back to manual loop."
-                        )
-                    collect_rollouts_multi_agent = None
+            # Per-step rollout buffers (lists of per-agent values).
+            states:       Dict[str, List] = {a: [] for a in agent_ids}
+            actions_buf:  Dict[str, List] = {a: [] for a in agent_ids}
+            log_probs_buf: Dict[str, List] = {a: [] for a in agent_ids}
+            rewards_buf:  Dict[str, List] = {a: [] for a in agent_ids}
+            dones_buf:    Dict[str, List] = {a: [] for a in agent_ids}
+            values_buf:   Dict[str, List] = {a: [] for a in agent_ids}
 
-            # Manual fallback: step the env, accumulate rewards, then call learn.
-            for _ in range(remaining):
+            for _ in range(collect_n):
                 action_result = agent.get_action(obs, infos=info)
-                actions = (
-                    action_result[0]
-                    if isinstance(action_result, tuple)
-                    else action_result
-                )
-                env_actions = self._unwrap_actions_for_env(actions)
-                next_obs, reward, termination, truncation, info = env.step(
-                    env_actions
-                )
+                if isinstance(action_result, tuple) and len(action_result) >= 4:
+                    action, log_prob, _, value = (
+                        action_result[0], action_result[1],
+                        action_result[2], action_result[3],
+                    )
+                elif isinstance(action_result, tuple):
+                    action = action_result[0]
+                    log_prob = {a: np.zeros(1) for a in agent_ids}
+                    value = {a: np.zeros(1) for a in agent_ids}
+                else:
+                    action = action_result
+                    log_prob = {a: np.zeros(1) for a in agent_ids}
+                    value = {a: np.zeros(1) for a in agent_ids}
+
+                # Strip batch dim (1, ...) → (...) for env.step.
+                env_actions = self._unwrap_actions_for_env(action)
+                next_obs, reward, termination, truncation, info = env.step(env_actions)
                 ep_reward += float(sum(reward.values()))
-                done = any(termination.values()) or any(truncation.values())
-                if done:
+
+                # next_done per agent, shape (1,) int8.
+                next_done: Dict[str, Any] = {
+                    a: np.array(
+                        [int(bool(termination.get(a, False)) or bool(truncation.get(a, False)))],
+                        dtype=np.int8,
+                    )
+                    for a in agent_ids
+                }
+
+                # Accumulate transition (strip leading batch dim from action/log_prob/value).
+                obs_fallback = np.zeros_like(next(iter(obs.values()))) if obs else None
+                for a in agent_ids:
+                    states[a].append(obs.get(a, obs_fallback))
+
+                    act_a = action.get(a)
+                    if act_a is not None:
+                        arr = np.asarray(act_a)
+                        actions_buf[a].append(
+                            arr[0] if arr.ndim > 0 and arr.shape[0] == 1 else arr
+                        )
+                    else:
+                        actions_buf[a].append(np.zeros(()))
+
+                    lp_a = log_prob.get(a)
+                    if lp_a is not None:
+                        lp = np.asarray(lp_a)
+                        log_probs_buf[a].append(
+                            lp[0] if lp.ndim > 0 and lp.shape[0] == 1 else lp
+                        )
+                    else:
+                        log_probs_buf[a].append(np.zeros(()))
+
+                    rewards_buf[a].append(float(reward.get(a, 0.0)))
+                    dones_buf[a].append(done[a])
+
+                    v_a = value.get(a)
+                    if v_a is not None:
+                        v = np.asarray(v_a)
+                        values_buf[a].append(
+                            v[0] if v.ndim > 0 and v.shape[0] == 1 else v
+                        )
+                    else:
+                        values_buf[a].append(np.zeros(()))
+
+                obs = next_obs
+                done = next_done
+                steps_done += 1
+
+                # Reset when all agents are done (episode end).
+                episode_done = any(
+                    bool(termination.get(a, False)) or bool(truncation.get(a, False))
+                    for a in agent_ids
+                )
+                if episode_done:
                     episode_rewards.append(ep_reward)
                     ep_reward = 0.0
                     obs, info = env.reset()
-                else:
-                    obs = next_obs
-                steps_done += 1
-            # Update network weights after each rollout chunk.
+                    done = {a: np.zeros(1, dtype=np.int8) for a in agent_ids}
+
+            # Learn from the collected rollout.
+            experiences = (
+                states, actions_buf, log_probs_buf,
+                rewards_buf, dones_buf, values_buf,
+                obs, done,
+            )
             try:
-                loss = agent.learn()
+                loss = agent.learn(experiences)
                 mean_loss = self._mean_loss(loss)
                 if mean_loss is not None:
                     losses.append(mean_loss)
-            except Exception as exc:  # pragma: no cover
-                if self.verbose:
-                    print(
-                        f"[{self.ALGORITHM_NAME}] learn() failed: {exc}"
-                    )
+            except Exception as exc:
+                print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+
+            loss_str = f" | mean_loss={losses[-1]:.4f}" if losses else ""
+            print(
+                f"[{self.ALGORITHM_NAME}] {steps_done:,}/{budget_steps:,} steps"
+                f" | episodes={len(episode_rewards)}"
+                f" | mean_rew={np.mean(episode_rewards[-10:]) if episode_rewards else 0.0:.2f}"
+                + loss_str
+            )
 
         if ep_reward > 0.0 or not episode_rewards:
             episode_rewards.append(ep_reward)

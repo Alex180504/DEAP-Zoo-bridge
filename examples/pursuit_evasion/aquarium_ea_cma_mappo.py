@@ -92,8 +92,8 @@ from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
 
 # ---- Toggles --------------------------------------------------------------
 
-RUN_EA: bool = False
-RUN_CMAES: bool = False
+RUN_EA: bool = True
+RUN_CMAES: bool = True
 RUN_MAPPO: bool = True
 PROBE_ENV: bool = False        # short env smoke test then exit
 RUN_FINAL_ANALYSIS: bool = True
