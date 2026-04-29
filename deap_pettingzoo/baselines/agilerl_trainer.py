@@ -575,7 +575,7 @@ class AgileRLTrainer(BaselineTrainer):
                         )
                     collect_rollouts_multi_agent = None
 
-            # Manual fallback: step the env and accumulate rewards; no learning signal (produces a reasonable but untrained agent).
+            # Manual fallback: step the env, accumulate rewards, then call learn.
             for _ in range(remaining):
                 action_result = agent.get_action(obs, infos=info)
                 actions = (
@@ -596,6 +596,17 @@ class AgileRLTrainer(BaselineTrainer):
                 else:
                     obs = next_obs
                 steps_done += 1
+            # Update network weights after each rollout chunk.
+            try:
+                loss = agent.learn()
+                mean_loss = self._mean_loss(loss)
+                if mean_loss is not None:
+                    losses.append(mean_loss)
+            except Exception as exc:  # pragma: no cover
+                if self.verbose:
+                    print(
+                        f"[{self.ALGORITHM_NAME}] learn() failed: {exc}"
+                    )
 
         if ep_reward > 0.0 or not episode_rewards:
             episode_rewards.append(ep_reward)
