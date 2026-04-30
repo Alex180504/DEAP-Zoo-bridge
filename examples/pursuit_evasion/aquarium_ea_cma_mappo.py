@@ -92,9 +92,9 @@ from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
 
 # ---- Toggles --------------------------------------------------------------
 
-RUN_EA: bool = True
+RUN_EA: bool = False
 RUN_CMAES: bool = True
-RUN_MAPPO: bool = True
+RUN_MAPPO: bool = False
 PROBE_ENV: bool = False        # short env smoke test then exit
 RUN_FINAL_ANALYSIS: bool = True
 
@@ -108,7 +108,7 @@ N_WORKERS: int = 0             # 0 = os.cpu_count(); 1 = sequential
 # ---- Shared budget --------------------------------------------------------
 
 # Equal env-steps budget across the three algorithms (Phase 2 of the plan).
-TOTAL_ENV_STEPS: int = 1_000_000
+TOTAL_ENV_STEPS: int = 3_000_000
 EVAL_EPISODES: int = 30
 
 # ---- Aquarium env config (5v5 equal-ability) -----------------------------
@@ -117,9 +117,9 @@ EVAL_EPISODES: int = 30
 #   - predator_view_distance=200 default fails the assertion in
 #     utils.scale() because random spawn distances reach ~535 on the
 #     800x800 torus.  Use 2000 for safety.
-#   - fov_enabled=True triggers a buggy padding length in
-#     prey_nearby_sharks_observations (line 761) when prey see fewer
-#     sharks than predator_observe_count.  Disable it.
+#   - fov_enabled=True padding bug in prey_nearby_sharks_observations
+#     is fixed by the monkey-patch in builtin._patch_aquarium(); safe
+#     to enable here.
 #   - render_mode=None is rejected; the wrapper maps it to "rgb_array".
 #
 # Equal-ability: predator and prey share max_velocity, max_acceleration,
@@ -132,56 +132,67 @@ ENV_CONFIG: Dict[str, Any] = {
     "prey_count": 15,
     "max_time_steps": 200,         # episode length cap
     # Equal-ability physics
-    "predator_max_velocity": 7.0,
-    "prey_max_velocity": 5.0,
-    "predator_max_acceleration": 0.7,
-    "prey_max_acceleration": 0.5,
-    "predator_max_steer_force": 0.5,
-    "prey_max_steer_force": 0.3,
+    "predator_max_velocity": 6.0,
+    "prey_max_velocity": 6.0,
+    "predator_max_acceleration": 0.6,
+    "prey_max_acceleration": 0.6,
+    "predator_max_steer_force": 0.4,
+    "prey_max_steer_force": 0.4,
     "predator_view_distance": 2000,
     "prey_view_distance": 2000,
-    "predator_fov": 360,
-    "prey_fov": 360,
     "predator_observe_count": 5,
     "prey_observe_count": 5,
-    "fov_enabled": False,          # MUST be False — see quirks
+    "fov_enabled": True,           # patched — see builtin._patch_aquarium()
+    "predator_fov": 160,
+    "prey_fov": 160,
     "action_count": 16,
     "predator_reward": 10,
-    "catch_radius": 100,
+    "catch_radius": 50,
     "keep_prey_count_constant": False,   # prey don't respawn; episode ends when all caught
     "width": 2000,
     "height": 2000,
 }
 
-APF_CONFIG = AquariumAPFConfig(k_predator=0.3)    # default hyperparameters
+APF_CONFIG = AquariumAPFConfig(k_predator=1.0)    # restore class default; 0.3 was wrongly reduced
+
+# Distance-based reward shaping: dense proximity signal (0 = off).
+# Adds alpha / (1 + dist/200) per predator per step, giving ~0.05 reward
+# when adjacent and ~0.025 at 200 px distance (world size 2000x2000).
+REWARD_SHAPE_ALPHA: float = 0.05
 
 # ---- EA config -----------------------------------------------------------
 
 EA_POPULATION_SIZE: int = 32
-EA_HIDDEN_SIZE: int = 32
-EA_EVAL_EPISODES_TRAIN: int = 1     # CRN, 1 ep per genome per gen
-EA_ELITE_SIZE: int = 4
-EA_MUT_SIGMA: float = 0.1
-EA_MUT_INDPB: float = 0.2
+EA_HIDDEN_SIZE: int = 8              # small net → fewer dims, faster CMA convergence
+EA_EVAL_EPISODES_TRAIN: int = 5     # CRN, 5 eps per genome per gen (reduces noise floor)
+EA_ELITE_SIZE: int = 3
+EA_MUT_SIGMA: float = 0.3           # increased from 0.1 — helps escape fitness plateaus
+EA_MUT_INDPB: float = 0.3           # increased from 0.2 — more genes perturbed per mutation
 EA_CXPB: float = 0.7
 
 # ---- CMA-ES config -------------------------------------------------------
 
 CMA_POPULATION_SIZE: int = 24
-CMA_HIDDEN_SIZE: int = 32
-CMA_EVAL_EPISODES_TRAIN: int = 1
+CMA_HIDDEN_SIZE: int = 8             # matches EA; ~640 dims vs 2640 — within CMA-ES sweet spot
+CMA_EVAL_EPISODES_TRAIN: int = 5
 CMA_SIGMA0: float = 0.3
 
 # ---- MAPPO config (AgileRL) ----------------------------------------------
 
-MAPPO_LEARN_STEP: int = 2048
-MAPPO_BATCH_SIZE: int = 256
+MAPPO_LEARN_STEP: int = 10_240
+MAPPO_BATCH_SIZE: int = 1024
 MAPPO_LR: float = 3e-4
 MAPPO_GAMMA: float = 0.99
 # Extra kwargs forwarded to AgileRL's ``IPPO.__init__`` (e.g.
 # ``{"net_config": {"encoder_config": {"hidden_size": [128, 128]}}}``).
 # Empty dict = use AgileRL's defaults.
-MAPPO_EXTRA: Dict[str, Any] = {}
+MAPPO_EXTRA: Dict[str, Any] = {
+    "ent_coef": 0.05,
+    "net_config": {
+        "encoder_config": {"hidden_size": [64, 64]},
+        "head_config": {"hidden_size": [64]},
+    },
+}
 
 # ---- Recording / logging --------------------------------------------------
 
@@ -271,6 +282,24 @@ def _record_champion_rollout(
     seed: int,
 ) -> None:
     """Render one champion-vs-APF episode and stream frames to *recorder*."""
+    import os
+    import sys
+
+    # On Windows, SDL_VIDEODRIVER=offscreen is not a valid SDL2 driver.
+    # Swap to "dummy" (pure-software surface) so pygame can initialise
+    # headlessly; surfarray.array3d() still returns real pixel data from
+    # the software surface, so recorded frames contain actual content.
+    _sdl_orig = os.environ.get("SDL_VIDEODRIVER")
+    if sys.platform == "win32" and _sdl_orig == "offscreen":
+        print("  [recorder] SDL_VIDEODRIVER=offscreen unsupported on Windows "
+              "— switching to 'dummy' for headless frame capture.")
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        try:
+            import pygame as _pg
+            _pg.display.quit()
+        except Exception:
+            pass
+
     env = build_env(ENV_NAME, render_mode="rgb_array")
     try:
         learner_id = env.possible_agents[0]
@@ -310,6 +339,11 @@ def _record_champion_rollout(
             env.close()
         except SystemExit:
             pass
+        # Restore SDL_VIDEODRIVER so the rest of the process is unaffected.
+        if _sdl_orig is None:
+            os.environ.pop("SDL_VIDEODRIVER", None)
+        else:
+            os.environ["SDL_VIDEODRIVER"] = _sdl_orig
 
 
 # ===========================================================================
@@ -512,9 +546,11 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             elites = [
                 toolbox.clone(ind) for ind in tools.selBest(population, EA_ELITE_SIZE)
             ]
-            for e in elites:
-                if e.fitness.valid:
-                    del e.fitness.values
+            # Keep elite fitness cached — do NOT re-evaluate elites each gen.
+            # Re-evaluating with new random seeds causes the max to regress
+            # (e.g. gen-37 champion scoring 95 looks like 79 on gen-38 seeds),
+            # which destroys selection pressure.  Elites carry their fitness
+            # forward; only crossed/mutated offspring get fresh evaluations.
 
             n_offspring = len(population) - EA_ELITE_SIZE
             offspring = list(map(
@@ -919,6 +955,7 @@ register_scripted_aquarium(
     ENV_NAME,
     ENV_CONFIG,
     apf_config=APF_CONFIG,
+    reward_shape_alpha=REWARD_SHAPE_ALPHA,
     overwrite=True,
 )
 

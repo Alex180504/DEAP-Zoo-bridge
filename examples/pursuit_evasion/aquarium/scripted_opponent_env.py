@@ -16,6 +16,7 @@ per catch in aquarium) — so callers can use a sparse
 
 from __future__ import annotations
 
+import math
 import types as _types
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,6 +120,7 @@ class ScriptedOpponentEnvWrapper:
         learner_prefix: str = "predator",
         scripted_prefix: str = "prey",
         apf_config: Optional[AquariumAPFConfig] = None,
+        reward_shape_alpha: float = 0.0,
     ) -> None:
         """
         Args:
@@ -145,6 +147,7 @@ class ScriptedOpponentEnvWrapper:
         self.learner_prefix = learner_prefix
         self.scripted_prefix = scripted_prefix
         self._apf_config = apf_config or AquariumAPFConfig()
+        self.reward_shape_alpha = float(reward_shape_alpha)
 
         # Filter possible_agents to learner-prefixed only.
         self.possible_agents = [
@@ -314,6 +317,30 @@ class ScriptedOpponentEnvWrapper:
         learner_keys = self.possible_agents  # keep keys stable across steps
         out_obs = {a: observations[a] for a in learner_keys if a in observations}
         out_rewards = {a: float(rewards.get(a, 0.0)) for a in learner_keys}
+
+        # Distance-based reward shaping: dense proximity signal.
+        if self.reward_shape_alpha > 0.0 and self._raw_env is not None:
+            try:
+                prey_pos = [
+                    (float(p.position.x), float(p.position.y))
+                    for p in self._raw_env.prey
+                ]
+                if prey_pos:
+                    for idx, agent_id in enumerate(learner_keys):
+                        if idx < len(self._raw_env.predators):
+                            pred = self._raw_env.predators[idx]
+                            px = float(pred.position.x)
+                            py = float(pred.position.y)
+                            min_dist = min(
+                                math.hypot(px - fx, py - fy)
+                                for fx, fy in prey_pos
+                            )
+                            out_rewards[agent_id] += self.reward_shape_alpha / (
+                                1.0 + min_dist / 200.0
+                            )
+            except Exception:
+                pass
+
         out_terms = {a: bool(terminations.get(a, False)) for a in learner_keys}
         out_truncs = {a: bool(truncations.get(a, False)) for a in learner_keys}
         out_infos = {a: infos.get(a, {}) for a in learner_keys}
@@ -409,9 +436,11 @@ class _ScriptedAquariumFactory:
         self,
         env_config: Dict[str, Any],
         apf_config: AquariumAPFConfig,
+        reward_shape_alpha: float = 0.0,
     ) -> None:
         self.env_config = dict(env_config)
         self.apf_config = apf_config
+        self.reward_shape_alpha = float(reward_shape_alpha)
 
     def __call__(self, render_mode: Optional[str] = None, **kwargs):
         from marl_aquarium import aquarium_v0  # local import — optional dep
@@ -433,6 +462,7 @@ class _ScriptedAquariumFactory:
             action_count=int(cfg.get("action_count", 16)),
             predator_reward=float(cfg.get("predator_reward", 10)),
             apf_config=self.apf_config,
+            reward_shape_alpha=self.reward_shape_alpha,
         )
 
 
@@ -441,6 +471,7 @@ def register_scripted_aquarium(
     env_config: Dict[str, Any],
     apf_config: Optional[AquariumAPFConfig] = None,
     *,
+    reward_shape_alpha: float = 0.0,
     overwrite: bool = True,
 ) -> str:
     """Register a scripted-prey aquarium env in deap-bridge's env registry.
@@ -462,7 +493,11 @@ def register_scripted_aquarium(
     """
     if apf_config is None:
         apf_config = AquariumAPFConfig()
-    factory = _ScriptedAquariumFactory(env_config=env_config, apf_config=apf_config)
+    factory = _ScriptedAquariumFactory(
+        env_config=env_config,
+        apf_config=apf_config,
+        reward_shape_alpha=reward_shape_alpha,
+    )
     if is_registered(env_name) and not overwrite:
         return env_name
     register_env(
