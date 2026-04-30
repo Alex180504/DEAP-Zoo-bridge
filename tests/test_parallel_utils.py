@@ -166,12 +166,14 @@ class TestPayloadPickleability:
             weights=np.arange(6, dtype=np.float64),
             layer_sizes=(2, 3, 2),
             activation="tanh",
+            output_activation="linear",
             weight_range=(-1.0, 1.0),
             seed=42,
         )
         p2 = pickle.loads(pickle.dumps(p))
         assert p2.layer_sizes == (2, 3, 2)
         assert p2.activation == "tanh"
+        assert p2.output_activation == "linear"
         assert p2.seed == 42
         assert np.array_equal(p2.weights, p.weights)
 

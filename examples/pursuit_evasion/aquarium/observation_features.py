@@ -1,0 +1,164 @@
+"""Observation featurization helpers for the scripted aquarium experiment.
+
+The raw marl-aquarium predator observation exposes absolute positions and
+wrapped scalar directions. For pursuit this makes the input harder to
+learn than it needs to be: the task is translation-invariant on a torus,
+and the nearby-entry direction already contains the torus-aware relative
+bearing.
+
+This module converts each predator observation into a more local feature
+set used only by the aquarium EA/CMA/MAPPO comparison:
+
+* self block -> ``[heading_x, heading_y, speed]``
+* each nearby predator/prey entry ->
+  ``[present, rel_x, rel_y, distance, speed]``
+
+where ``rel_x`` and ``rel_y`` are the torus-aware relative offset implied
+by the env's scaled distance + direction fields.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Dict, Optional
+
+import numpy as np
+from gymnasium import spaces
+
+from .apf_policy import aquarium_obs_layout
+
+
+def _scaled_direction_to_unit_vector(scaled_direction: float) -> tuple[float, float]:
+    """Convert aquarium's scaled direction field back to an XY unit vector."""
+    angle_deg = float(scaled_direction) * 360.0 - 180.0
+    rad = math.radians(angle_deg)
+    return math.sin(rad), -math.cos(rad)
+
+
+def aquarium_feature_size(
+    predator_observe_count: int,
+    prey_observe_count: int,
+) -> int:
+    """Return the featurized predator observation size."""
+    return 3 + 5 * int(predator_observe_count) + 5 * int(prey_observe_count)
+
+
+def featurize_aquarium_observation(
+    observation: np.ndarray,
+    predator_observe_count: int,
+    prey_observe_count: int,
+) -> np.ndarray:
+    """Project a raw aquarium observation onto local relative features."""
+    obs = np.asarray(observation, dtype=np.float32).ravel()
+    layout = aquarium_obs_layout(predator_observe_count, prey_observe_count)
+
+    self_block = obs[layout["self"]]
+    heading_x, heading_y = _scaled_direction_to_unit_vector(self_block[3])
+    features = [
+        float(heading_x),
+        float(heading_y),
+        float(self_block[4]),
+    ]
+
+    for block_name in ("predators", "prey"):
+        block = obs[layout[block_name]]
+        for idx in range(block.size // 6):
+            base = idx * 6
+            sx = float(block[base + 1])
+            sy = float(block[base + 2])
+            distance = float(block[base + 3])
+            direction = float(block[base + 4])
+            speed = float(block[base + 5])
+            present = 1.0 if (abs(sx) > 1e-9 or abs(sy) > 1e-9 or abs(distance) > 1e-9) else 0.0
+            if present == 0.0:
+                features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+                continue
+
+            rel_x, rel_y = _scaled_direction_to_unit_vector(direction)
+            features.extend([
+                1.0,
+                float(distance * rel_x),
+                float(distance * rel_y),
+                distance,
+                speed,
+            ])
+
+    return np.asarray(features, dtype=np.float32)
+
+
+def extract_prey_caught_total(infos: Optional[Dict[str, Dict[str, Any]]]) -> int:
+    """Return the highest reported cumulative catch count in an info dict."""
+    best = 0
+    for info in (infos or {}).values():
+        if not isinstance(info, dict):
+            continue
+        value = info.get("prey_caught_total")
+        if value is None:
+            continue
+        try:
+            best = max(best, int(value))
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
+class AquariumObservationFeatureWrapper:
+    """Wrap the scripted aquarium env so all learners see featurized observations."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.predator_observe_count = int(getattr(inner, "predator_observe_count"))
+        self.prey_observe_count = int(getattr(inner, "prey_observe_count"))
+        self.possible_agents = list(getattr(inner, "possible_agents", []))
+        self.agents = list(getattr(inner, "agents", self.possible_agents))
+        self.metadata = getattr(inner, "metadata", {})
+        self.last_infos: Dict[str, Dict[str, Any]] = {}
+
+        shape = (
+            aquarium_feature_size(
+                self.predator_observe_count,
+                self.prey_observe_count,
+            ),
+        )
+        box = spaces.Box(low=-1.0, high=1.0, shape=shape, dtype=np.float32)
+        self.observation_spaces = {agent: box for agent in self.possible_agents}
+        self.action_spaces = {
+            agent: self.inner.action_space(agent) for agent in self.possible_agents
+        }
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+    def observation_space(self, agent: str):
+        return self.observation_spaces[agent]
+
+    def action_space(self, agent: str):
+        return self.inner.action_space(agent)
+
+    def reset(self, seed=None, options=None):
+        observations, infos = self.inner.reset(seed=seed, options=options)
+        self.agents = list(getattr(self.inner, "agents", self.possible_agents))
+        self.last_infos = dict(infos) if infos is not None else {}
+        return self._transform_obs_dict(observations), infos
+
+    def step(self, actions):
+        observations, rewards, terminations, truncations, infos = self.inner.step(actions)
+        self.agents = list(getattr(self.inner, "agents", []))
+        self.last_infos = dict(infos) if infos is not None else {}
+        return (
+            self._transform_obs_dict(observations),
+            rewards,
+            terminations,
+            truncations,
+            infos,
+        )
+
+    def _transform_obs_dict(self, observations: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        return {
+            agent: featurize_aquarium_observation(
+                observation,
+                self.predator_observe_count,
+                self.prey_observe_count,
+            )
+            for agent, observation in observations.items()
+        }

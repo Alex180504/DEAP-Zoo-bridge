@@ -28,7 +28,11 @@ from deap_pettingzoo.contrib.pursuit_evasion import (
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes.fixed_topology import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import (
+    _GenomePayload,
+    _MIXED_WORKER_CACHE,
     _MixedWorkerSpec,
+    _individual_to_payload,
+    _mixed_worker_evaluate,
     make_mixed_parallel_evaluate_map,
     setup_deap_creators,
 )
@@ -363,13 +367,78 @@ class TestMixedWorkerSpecPickle:
             eval_episodes=1,
             layer_sizes=(16, 8, 5),
             activation="tanh",
+            output_activation="linear",
         )
         data = pickle.dumps(spec)
         restored = pickle.loads(data)
         assert restored.learner_prefixes == ("adversary",)
         assert restored.activation == "tanh"
+        assert restored.output_activation == "linear"
         assert restored.layer_sizes == (16, 8, 5)
         assert restored.eval_episodes == 1
+
+
+class TestMixedWorkerActivationPropagation:
+    def test_individual_payload_preserves_output_activation(self):
+        ind, genome = _make_individual()
+        genome.output_activation = "linear"
+
+        payload = _individual_to_payload(ind, seed=123)
+
+        assert payload.activation == "tanh"
+        assert payload.output_activation == "linear"
+        assert payload.seed == 123
+
+    def test_mixed_worker_rebuilds_genome_with_output_activation(self):
+        class _StubResult:
+            def __init__(self, fitness: float):
+                self.fitness = fitness
+
+        class _StubEvaluator:
+            def __init__(self):
+                self.seen_output_activation = None
+
+            def run_episode(self, individual, seed=None):
+                del seed
+                self.seen_output_activation = individual.genome.output_activation
+                return _StubResult(1.0)
+
+        stub = _StubEvaluator()
+        spec = _MixedWorkerSpec(
+            env_factory_qualname="tests.contrib.test_mixed_policy_parallel._build_env",
+            scripted_factory_qualname="tests.contrib.test_mixed_policy_parallel._build_scripted",
+            learner_factory_qualname="tests.contrib.test_mixed_policy_parallel._learner_factory",
+            learner_prefixes=("adversary",),
+            max_steps=20,
+            eval_episodes=1,
+            layer_sizes=(4, 8, 5),
+            activation="relu",
+            output_activation="linear",
+        )
+        _MIXED_WORKER_CACHE["key"] = (
+            spec.env_factory_qualname,
+            spec.scripted_factory_qualname,
+            spec.learner_factory_qualname,
+            spec.max_steps,
+            tuple(spec.learner_prefixes),
+        )
+        _MIXED_WORKER_CACHE["evaluator"] = stub
+        payload = _GenomePayload(
+            weights=np.zeros(85, dtype=np.float64),
+            layer_sizes=spec.layer_sizes,
+            activation=spec.activation,
+            output_activation=spec.output_activation,
+            weight_range=(-1.0, 1.0),
+            seed=0,
+        )
+
+        try:
+            result = _mixed_worker_evaluate((payload, spec))
+        finally:
+            _MIXED_WORKER_CACHE.clear()
+
+        assert result == (1.0,)
+        assert stub.seen_output_activation == "linear"
 
 
 # ---------------------------------------------------------------------------

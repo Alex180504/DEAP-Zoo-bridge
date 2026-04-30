@@ -54,6 +54,7 @@ def setup_deap_creators() -> None:
 def create_deap_individual(
     layer_sizes: List[int],
     activation: str = 'tanh',
+    output_activation: Optional[str] = None,
     weight_range: tuple = (-1.0, 1.0),
     random_seed: Optional[int] = None
 ) -> Any:
@@ -62,7 +63,9 @@ def create_deap_individual(
     
     Args:
         layer_sizes: Network architecture [input, hidden..., output]
-        activation: Activation function ('tanh', 'relu', 'sigmoid', 'linear')
+        activation: Hidden-layer activation function
+        output_activation: Output-layer activation function. Defaults to
+            ``activation`` for backward compatibility.
         weight_range: (min, max) for weight initialization
         random_seed: Seed for reproducibility
         
@@ -78,6 +81,7 @@ def create_deap_individual(
     genome = FixedTopologyGenome(
         layer_sizes=layer_sizes,
         activation=activation,
+        output_activation=output_activation,
         weight_range=weight_range,
         random_seed=random_seed
     )
@@ -136,7 +140,8 @@ def create_toolbox(
     Args:
         genome_config: Configuration for genome creation
             - layer_sizes: List[int] - Network architecture
-            - activation: str (optional) - Activation function
+            - activation: str (optional) - Hidden-layer activation function
+            - output_activation: str (optional) - Output-layer activation
             - weight_range: tuple (optional) - Weight initialization range
             - random_seed: int (optional) - Seed for reproducibility
         evaluator: Evaluator for fitness calculation
@@ -191,6 +196,7 @@ def create_toolbox(
     # Extract config values
     layer_sizes = genome_config['layer_sizes']
     activation = genome_config.get('activation', 'tanh')
+    output_activation = genome_config.get('output_activation', activation)
     weight_range = genome_config.get('weight_range', (-1.0, 1.0))
     base_seed = genome_config.get('random_seed', None)
 
@@ -211,6 +217,7 @@ def create_toolbox(
         return create_deap_individual(
             layer_sizes=layer_sizes,
             activation=activation,
+            output_activation=output_activation,
             weight_range=weight_range,
             random_seed=seed
         )
@@ -511,7 +518,8 @@ class _GenomePayload:
     Attributes:
         weights: Flat numpy weight vector (``genome.get_weights()``).
         layer_sizes: Network topology.
-        activation: Activation function name.
+        activation: Hidden-layer activation function name.
+        output_activation: Output-layer activation function name.
         weight_range: ``(lo, hi)`` tuple (kept for genome
             round-tripping; evaluation is unaffected).
         seed: Optional per-individual seed forwarded to
@@ -521,6 +529,7 @@ class _GenomePayload:
     weights: np.ndarray
     layer_sizes: Tuple[int, ...]
     activation: str
+    output_activation: str
     weight_range: Tuple[float, float]
     seed: Optional[int] = None
 
@@ -607,6 +616,7 @@ def _worker_evaluate(
     genome = FixedTopologyGenome(
         layer_sizes=list(payload.layer_sizes),
         activation=payload.activation,
+        output_activation=payload.output_activation,
         weight_range=tuple(payload.weight_range),
         random_seed=None,
     )
@@ -631,6 +641,9 @@ def _individual_to_payload(
         weights=np.asarray(genome.get_weights(), dtype=float).copy(),
         layer_sizes=tuple(genome.layer_sizes),
         activation=str(genome.activation),
+        output_activation=str(
+            getattr(genome, "output_activation", genome.activation)
+        ),
         weight_range=tuple(getattr(genome, "_weight_range", (-1.0, 1.0))),
         seed=seed,
     )
@@ -725,7 +738,8 @@ class _MixedWorkerSpec:
         max_steps: Episode step cap.
         eval_episodes: Number of episodes to average per call.
         layer_sizes: NN topology ``[in, hidden…, out]``.
-        activation: Activation name.
+        activation: Hidden-layer activation name.
+        output_activation: Output-layer activation name.
     """
 
     env_factory_qualname: str
@@ -736,6 +750,7 @@ class _MixedWorkerSpec:
     eval_episodes: int
     layer_sizes: Tuple[int, ...]
     activation: str
+    output_activation: str
 
 
 _MIXED_WORKER_CACHE: Dict[str, Any] = {}
@@ -787,6 +802,7 @@ def _mixed_worker_evaluate(
     genome = FixedTopologyGenome(
         layer_sizes=list(spec.layer_sizes),
         activation=spec.activation,
+        output_activation=spec.output_activation,
         weight_range=tuple(payload.weight_range),
         random_seed=None,
     )
@@ -931,6 +947,7 @@ def make_mixed_parallel_evaluate_map(
         eval_episodes=eval_episodes,
         layer_sizes=(input_size, output_size),  # placeholder; overridden per-genome
         activation="tanh",  # placeholder; overridden per-genome
+        output_activation="tanh",  # placeholder; overridden per-genome
     )
 
     def _pmap(_evaluate_ignored, individuals):
@@ -947,6 +964,7 @@ def make_mixed_parallel_evaluate_map(
                 eval_episodes=spec.eval_episodes,
                 layer_sizes=tuple(genome.layer_sizes),
                 activation=genome.activation,
+                output_activation=getattr(genome, "output_activation", genome.activation),
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
         return list(executor.map(_mixed_worker_evaluate, payloads))

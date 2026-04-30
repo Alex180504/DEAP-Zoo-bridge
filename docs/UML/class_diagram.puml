@@ -9,12 +9,13 @@ package "deap_pettingzoo.genomes" {
     class FixedTopologyGenome {
         + layer_sizes: List[int]
         + activation: str
+    + output_activation: str
         + input_size: int
         + output_size: int
         + hidden_layers: List[int]
         + weight_range: tuple[float, float]
         --
-        + __init__(layer_sizes, activation, weight_range: tuple[float, float], random_seed)
+    + __init__(layer_sizes, activation, output_activation, weight_range: tuple[float, float], random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
         + get_weights() -> np.ndarray
@@ -32,7 +33,8 @@ package "deap_pettingzoo.policies" {
         - genome: FixedTopologyGenome
         - layers: List[np.ndarray]
         - biases: List[np.ndarray]
-        - activation_fn: callable
+        - hidden_activation_fn: callable
+        - output_activation_fn: callable
         - head: Optional[ActionHead]
         --
         + __init__(genome, action_space=None, head=None)
@@ -40,6 +42,11 @@ package "deap_pettingzoo.policies" {
         + reset() -> None
         + forward(x: np.ndarray) -> np.ndarray
     }
+
+    note right of FeedforwardNeuralPolicy
+      Hidden layers use genome.activation.
+      The final layer uses genome.output_activation.
+    end note
 
     abstract class ActionHead {
         + {abstract} decode(raw_output) -> Any
