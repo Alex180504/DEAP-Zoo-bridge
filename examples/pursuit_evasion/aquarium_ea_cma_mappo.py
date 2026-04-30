@@ -163,8 +163,8 @@ REWARD_SHAPE_ALPHA: float = 0.05
 # ---- EA config -----------------------------------------------------------
 
 EA_POPULATION_SIZE: int = 32
-EA_HIDDEN_SIZE: int = 8              # small net → fewer dims, faster CMA convergence
-EA_EVAL_EPISODES_TRAIN: int = 5     # CRN, 5 eps per genome per gen (reduces noise floor)
+EA_HIDDEN_SIZE: int = 0 
+EA_EVAL_EPISODES_TRAIN: int = 5    # 10 eps → halves noise floor vs 5; ~46 gens at 3M budget
 EA_ELITE_SIZE: int = 3
 EA_MUT_SIGMA: float = 0.3           # increased from 0.1 — helps escape fitness plateaus
 EA_MUT_INDPB: float = 0.3           # increased from 0.2 — more genes perturbed per mutation
@@ -173,7 +173,7 @@ EA_CXPB: float = 0.7
 # ---- CMA-ES config -------------------------------------------------------
 
 CMA_POPULATION_SIZE: int = 24
-CMA_HIDDEN_SIZE: int = 8             # matches EA; ~640 dims vs 2640 — within CMA-ES sweet spot
+CMA_HIDDEN_SIZE: int = 0             # matches EA; ~640 dims — within CMA-ES sweet spot for λ=24
 CMA_EVAL_EPISODES_TRAIN: int = 5
 CMA_SIGMA0: float = 0.3
 
@@ -417,12 +417,14 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
     _section(f"EA  | seed={seed}")
     evaluator = _build_evaluator()
     in_size, out_size = _ea_or_cma_io_sizes(evaluator, seed)
-    print(f"  Pursuer NN: in={in_size} hidden={EA_HIDDEN_SIZE} out={out_size}")
+    _ea_layers = [in_size, out_size] if EA_HIDDEN_SIZE == 0 else [in_size, EA_HIDDEN_SIZE, out_size]
+    _ea_arch = "linear" if EA_HIDDEN_SIZE == 0 else f"hidden={EA_HIDDEN_SIZE}"
+    print(f"  Pursuer NN: in={in_size} {_ea_arch} out={out_size}")
 
     setup_deap_creators()
     init_scale = float(np.sqrt(1.0 / max(in_size, 1)))
     genome_config = {
-        "layer_sizes": [in_size, EA_HIDDEN_SIZE, out_size],
+        "layer_sizes": _ea_layers,
         "activation": "tanh",
         "weight_range": (-init_scale, init_scale),
         "random_seed": seed,
@@ -546,11 +548,14 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             elites = [
                 toolbox.clone(ind) for ind in tools.selBest(population, EA_ELITE_SIZE)
             ]
-            # Keep elite fitness cached — do NOT re-evaluate elites each gen.
-            # Re-evaluating with new random seeds causes the max to regress
-            # (e.g. gen-37 champion scoring 95 looks like 79 on gen-38 seeds),
-            # which destroys selection pressure.  Elites carry their fitness
-            # forward; only crossed/mutated offspring get fresh evaluations.
+            # True CRN: re-evaluate elites on the current gen's seeds so all
+            # individuals are compared on equal footing.  Without this, a
+            # champion that happened to get easy spawn positions in gen-7
+            # persists in the HOF for 20+ gens while offspring are scored on
+            # different seeds — a systematic bias that masks genuine progress.
+            # The HOF preserves the best genome regardless of score fluctuation.
+            for elite in elites:
+                del elite.fitness.values
 
             n_offspring = len(population) - EA_ELITE_SIZE
             offspring = list(map(
@@ -626,13 +631,15 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
     _section(f"CMA-ES | seed={seed}")
     evaluator = _build_evaluator()
     in_size, out_size = _ea_or_cma_io_sizes(evaluator, seed)
-    print(f"  Pursuer NN: in={in_size} hidden={CMA_HIDDEN_SIZE} out={out_size}")
+    _cma_layers = [in_size, out_size] if CMA_HIDDEN_SIZE == 0 else [in_size, CMA_HIDDEN_SIZE, out_size]
+    _cma_arch = "linear" if CMA_HIDDEN_SIZE == 0 else f"hidden={CMA_HIDDEN_SIZE}"
+    print(f"  Pursuer NN: in={in_size} {_cma_arch} out={out_size}")
 
     setup_deap_creators()
     np.random.seed(seed)
 
     genome_config = {
-        "layer_sizes": [in_size, CMA_HIDDEN_SIZE, out_size],
+        "layer_sizes": _cma_layers,
         "activation": "tanh",
         "weight_range": (-1.0, 1.0),
     }
