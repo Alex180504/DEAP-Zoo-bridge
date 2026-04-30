@@ -16,6 +16,7 @@ class TestFixedTopologyGenomeInitialization:
         
         assert genome.layer_sizes == [10, 5]
         assert genome.activation == 'tanh'
+        assert genome.output_activation == 'tanh'
         assert genome.weights is not None
         assert isinstance(genome.weights, np.ndarray)
     
@@ -93,6 +94,27 @@ class TestFixedTopologyGenomeInitialization:
                 random_seed=42
             )
             assert genome.activation == activation
+
+    def test_explicit_output_activation(self):
+        """Test hidden and output activations can differ."""
+        genome = FixedTopologyGenome(
+            layer_sizes=[10, 5],
+            activation='relu',
+            output_activation='linear',
+            random_seed=42
+        )
+
+        assert genome.activation == 'relu'
+        assert genome.output_activation == 'linear'
+
+    def test_invalid_output_activation_raises_error(self):
+        """Test that invalid output activation raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported output activation"):
+            FixedTopologyGenome(
+                layer_sizes=[10, 5],
+                activation='relu',
+                output_activation='invalid'
+            )
 
 
 class TestFixedTopologyGenomeWeightManagement:
@@ -273,6 +295,7 @@ class TestFixedTopologyGenomeCloning:
         genome1 = FixedTopologyGenome(
             layer_sizes=[10, 64, 32, 4],
             activation='relu',
+            output_activation='linear',
             weight_range=(-0.5, 0.5),
             random_seed=42
         )
@@ -281,6 +304,7 @@ class TestFixedTopologyGenomeCloning:
         
         assert genome2.layer_sizes == genome1.layer_sizes
         assert genome2.activation == genome1.activation
+        assert genome2.output_activation == genome1.output_activation
         assert genome2.input_size == genome1.input_size
         assert genome2.output_size == genome1.output_size
 
@@ -301,6 +325,7 @@ class TestFixedTopologyGenomeSerialization:
         assert isinstance(data, dict)
         assert 'layer_sizes' in data
         assert 'activation' in data
+        assert 'output_activation' in data
         assert 'weights' in data
     
     def test_to_dict_contains_all_info(self):
@@ -308,6 +333,7 @@ class TestFixedTopologyGenomeSerialization:
         genome = FixedTopologyGenome(
             layer_sizes=[10, 64, 4],
             activation='relu',
+            output_activation='linear',
             weight_range=(-0.5, 0.5),
             random_seed=42
         )
@@ -316,6 +342,7 @@ class TestFixedTopologyGenomeSerialization:
         
         assert data['layer_sizes'] == [10, 64, 4]
         assert data['activation'] == 'relu'
+        assert data['output_activation'] == 'linear'
         assert 'weights' in data
         assert isinstance(data['weights'], list)  # Serialized as list
     
@@ -332,6 +359,7 @@ class TestFixedTopologyGenomeSerialization:
         
         assert genome2.layer_sizes == genome1.layer_sizes
         assert genome2.activation == genome1.activation
+        assert genome2.output_activation == genome1.output_activation
         np.testing.assert_array_equal(genome2.get_weights(), genome1.get_weights())
     
     def test_serialization_roundtrip(self):
@@ -352,7 +380,23 @@ class TestFixedTopologyGenomeSerialization:
         assert genome1 is not genome2
         assert genome2.layer_sizes == genome1.layer_sizes
         assert genome2.activation == genome1.activation
+        assert genome2.output_activation == genome1.output_activation
         np.testing.assert_array_equal(genome2.get_weights(), genome1.get_weights())
+
+    def test_from_dict_backfills_legacy_output_activation(self):
+        """Test legacy serialized genomes default output activation to activation."""
+        data = {
+            'layer_sizes': [10, 64, 4],
+            'activation': 'relu',
+            'weights': [0.0] * ((10 * 64 + 64) + (64 * 4 + 4)),
+            '_weight_range': (-1.0, 1.0),
+            '_random_seed': 42,
+        }
+
+        genome = FixedTopologyGenome.from_dict(data)
+
+        assert genome.activation == 'relu'
+        assert genome.output_activation == 'relu'
 
 
 class TestFixedTopologyGenomeMutation:
