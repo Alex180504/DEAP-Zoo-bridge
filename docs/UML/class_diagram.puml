@@ -973,6 +973,7 @@ package "deap_pettingzoo.utils.logging" {
     -fps: int
     -fmt: str
     -max_frames_per_episode: Optional[int]
+    -max_dim: Optional[int]
     -episode_prefix: str
     +start_episode(idx)
     +add_frame(rgb)

@@ -30,6 +30,27 @@ class FrameRecorder:
     available the recorder transparently falls back to ``gif`` and emits
     a single warning.
 
+    Parameters
+    ----------
+    run_dir:
+        Output root; frames are written to ``run_dir/frames/``.
+    fps:
+        Playback frame rate written to the video container.
+    fmt:
+        ``"mp4"`` (requires ``imageio[ffmpeg]``) or ``"gif"``.
+    max_frames_per_episode:
+        If set, ``add_frame`` silently drops frames once this many have
+        been buffered, capping both memory use and encode time.
+    max_dim:
+        If set, each frame is downscaled via numpy index subsampling so
+        that its larger dimension is at most ``max_dim`` pixels before
+        buffering.  Useful for large envs (e.g. 6000×6000) that would
+        exceed H.264 macroblock limits or exhaust RAM.
+        No external dependency — pure numpy.
+    episode_prefix:
+        String prepended to each output filename, e.g. ``"ea_"`` →
+        ``frames/ea_episode_0001.mp4``.
+
     Use ``recorder.enabled = False`` to short-circuit recording without
     tearing the recorder down.
     """
@@ -41,6 +62,7 @@ class FrameRecorder:
         fps: int = 20,
         fmt: str = "mp4",
         max_frames_per_episode: Optional[int] = None,
+        max_dim: Optional[int] = None,
         episode_prefix: str = "",
     ) -> None:
         self.run_dir = Path(run_dir)
@@ -49,6 +71,7 @@ class FrameRecorder:
         if self.fmt not in {"mp4", "gif"}:
             raise ValueError(f"FrameRecorder: fmt must be 'mp4' or 'gif', got {fmt!r}")
         self.max_frames_per_episode = max_frames_per_episode
+        self.max_dim = int(max_dim) if max_dim is not None else None
         self.episode_prefix = str(episode_prefix)
         self.enabled: bool = True
         self._frames: List[np.ndarray] = []
@@ -75,6 +98,15 @@ class FrameRecorder:
             return  # silently skip malformed frames
         if arr.dtype != np.uint8:
             arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if self.max_dim is not None:
+            h, w = arr.shape[:2]
+            if max(h, w) > self.max_dim:
+                scale = self.max_dim / max(h, w)
+                nh = max(1, int(h * scale))
+                nw = max(1, int(w * scale))
+                ri = np.linspace(0, h - 1, nh, dtype=int)
+                ci = np.linspace(0, w - 1, nw, dtype=int)
+                arr = arr[np.ix_(ri, ci)]
         self._frames.append(arr)
 
     def end_episode(self) -> Optional[Path]:
