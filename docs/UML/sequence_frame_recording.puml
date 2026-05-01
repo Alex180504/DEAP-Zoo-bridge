@@ -10,11 +10,11 @@ participant "PettingZooWrapper\n(render_mode='rgb_array')" as PZ
 participant "imageio" as IO
 participant "Filesystem\n<run_dir>/frames/" as FS
 
-R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, episode_prefix='')
+R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, max_dim=None, episode_prefix='')
 
 == Recording setup (once per train()) ==
-T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  episode_prefix=cfg.episode_prefix or 'train_')
-EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  episode_prefix='train_')
+T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  max_dim=cfg.max_dim,\n  episode_prefix=cfg.episode_prefix or 'train_')
+EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  max_dim, episode_prefix='train_')
 FR --> EL: recorder
 EL --> T: recorder
 

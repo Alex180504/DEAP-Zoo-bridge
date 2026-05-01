@@ -149,17 +149,19 @@ def _patch_aquarium() -> None:  # pragma: no cover
         return observations
 
     def _fixed_predator_nearby_shark_observations(self, observer) -> List[float]:
-        # Bug: original code has no `else` before the non-FOV loop, so when
+        # Bug 1: original code has no `else` before the non-FOV loop, so when
         # fov_enabled=True both branches run and observations exceed the expected
         # predator_observe_count * obs_size, triggering the assert in
         # get_predator_observations.  Fix: make the non-FOV loop properly `else`.
+        # Bug 2: original FOV branch used self.prey_view_distance / self.prey_fov
+        # (prey sensor params) instead of predator's own sensor params.
         observations: List[float] = []
         if self.fov_enabled:
             for shark in self.predators:
                 if (
                     len(observations) < self.predator_observe_count * self.obs_size
                     and self.torus.check_if_entity_is_in_view_in_torus(
-                        observer, shark, self.prey_view_distance, self.prey_fov
+                        observer, shark, self.predator_view_distance, self.predator_fov
                     )
                 ):
                     observations += self.nearby_animal_observation(observer, shark)
@@ -175,16 +177,18 @@ def _patch_aquarium() -> None:  # pragma: no cover
         return observations
 
     def _fixed_predator_nearby_fish_observations(self, observer) -> List[float]:
-        # Bug: the FOV branch had no cap guard, so if more fish than
+        # Bug 1: the FOV branch had no cap guard, so if more fish than
         # prey_observe_count are in view the list grows beyond the expected
         # size and breaks the assert in get_predator_observations.
+        # Bug 2: original FOV branch used self.prey_view_distance / self.prey_fov
+        # (prey sensor params) instead of predator's own sensor params.
         observations: List[float] = []
         if self.fov_enabled:
             for fish in self.prey:
                 if (
                     len(observations) < self.prey_observe_count * self.obs_size
                     and self.torus.check_if_entity_is_in_view_in_torus(
-                        observer, fish, self.prey_view_distance, self.prey_fov
+                        observer, fish, self.predator_view_distance, self.predator_fov
                     )
                 ):
                     observations += self.nearby_animal_observation(observer, fish)
