@@ -31,8 +31,10 @@ Aquarium observation layout (introspected from
       scaled by the observer's view-distance to ``[0, 1]``;
     * ``sdirection`` is the direction angle (degrees, observer→target,
       torus-aware) in ``[-180, 180]`` mapped via ``(d + 180) / 360`` to
-      ``[0, 1]``.  ``0`` degrees points up, ``+90`` right, ``-90`` left,
-      consistent with the action convention below.
+    ``[0, 1]``.  Encoded by ``get_angle_from_vector`` = ``−atan2(vy, vx)``:
+    ``0°`` = right (east), ``+90°`` = screen-up (north), ``−90°`` =
+    screen-down (south).  **This differs from the action convention** (where
+    ``0°`` = screen-up).
     * ``sspeed`` is the target's speed in ``[0, 1]``.
 
 Aquarium action mapping
@@ -44,16 +46,18 @@ Aquarium action mapping
 
 So action ``0`` heads ``(0, -1)`` ("up" in screen coordinates),
 action ``action_count // 4`` heads ``(+1, 0)`` (right), action
-``action_count // 2`` heads ``(0, +1)`` (down).  Direction angles are
-measured the same way (``0°`` = up, ``+90°`` = right, ``-90°`` = left,
-``±180°`` = down), so the angle reported by the env's ``sdirection``
-field can be quantised by simple ``angle / (360 / action_count)``
-indexing.
+``action_count // 2`` heads ``(0, +1)`` (down).
+
+**Important**: the action angle convention (``0°`` = up) differs from the
+observation ``sdirection`` convention (``0°`` = right).  Do **not**
+quantise ``sdirection`` angles directly to action indices; use
+:func:`_direction_to_unit_vector` followed by :func:`_action_for_heading`.
 """
 
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -68,12 +72,28 @@ class AquariumAPFConfig:
     which is the in-torus distance divided by the prey's view distance.
     """
 
-    k_predator: float = 1.0
+    k_predator: float = 5.0
     """Gain on inverse-square repulsion from each visible predator."""
+
+    k_tangential: float = 3.0
+    """Gain on the tangential (perpendicular-dodge) component added alongside
+    the radial flee force.  Each prey picks a random turn direction at episode
+    start (:meth:`AquariumAPFEvaderPolicy.reset`) and keeps it for the whole
+    episode, breaking the force-cancellation symmetry that arises when
+    predators are evenly distributed around the prey."""
 
     k_prey_separation: float = 0.0
     """Optional gain on inverse-square repulsion from teammate prey
     (default 0 — pure flight policy, no flock cohesion)."""
+
+    separation_cap_ratio: float = 0.3
+    """Maximum magnitude of the prey-separation force as a fraction of the
+    predator-flee force magnitude.  Without this cap, coincident teammates
+    (``sdistance ≈ 0`` saturating the inverse-square term to
+    ``1/softening``) produce a separation force ≫ the predator-flee force,
+    and prey end up fleeing each other instead of the predator.  With this
+    cap, separation is at most a heading nudge that prevents flock collapse,
+    never the dominant force."""
 
     softening: float = 1e-2
     """Constant added to scaled-distance squared to avoid singularities."""
@@ -119,13 +139,17 @@ def aquarium_obs_layout(
 def _direction_to_unit_vector(scaled_direction: float) -> Tuple[float, float]:
     """Convert a ``sdirection ∈ [0, 1]`` field back to a 2D unit vector.
 
-    Uses the same ``Vector(sin(rad), -cos(rad))`` convention as the env's
-    action decoder, so the resulting vector is directly comparable to
-    the action heading vectors.
+    The env encodes directions with :func:`marl_aquarium.env.utils.get_angle_from_vector`,
+    which is ``angle = −atan2(vy, vx) · 180/π``.  Inverting that gives the
+    unit vector ``(cos(rad), −sin(rad))`` — **not** the action-heading
+    convention ``(sin(rad), −cos(rad))``, which is offset by 90°.
+
+    Convention: ``0°`` = right (east), ``+90°`` = screen-up (north),
+    ``−90°`` = screen-down (south), ``±180°`` = left (west).
     """
     angle_deg = float(scaled_direction) * 360.0 - 180.0
     rad = math.radians(angle_deg)
-    return math.sin(rad), -math.cos(rad)
+    return math.cos(rad), -math.sin(rad)
 
 
 def _action_for_heading(target_x: float, target_y: float, action_count: int) -> int:
@@ -177,11 +201,12 @@ class AquariumAPFEvaderPolicy:
         self._layout = aquarium_obs_layout(
             self.predator_observe_count, self.prey_observe_count
         )
+        self._turn_sign: int = 1  # randomised on each reset()
 
     # PolicyProtocol -------------------------------------------------------
 
     def reset(self) -> None:
-        return None
+        self._turn_sign = random.choice((-1, 1))
 
     def get_action(self, observation, deterministic: bool = True) -> int:
         del deterministic  # APF is deterministic by construction.
@@ -194,12 +219,15 @@ class AquariumAPFEvaderPolicy:
         # nearby entry has distance > 0 OR a non-zero position.  The
         # observer-self field (``type, sx, sy, sdir, sspd``) is always
         # populated, so we don't need the same guard there.
-        force_x, force_y = self._compute_force(obs)
+        force_x, force_y, any_visible = self._compute_force(obs)
         magnitude = math.hypot(force_x, force_y)
 
-        if magnitude < self.config.no_op_threshold:
-            # No predators in view → keep current heading.  Fall back to
-            # action 0 if no self-direction is available.
+        if magnitude < self.config.no_op_threshold and not any_visible:
+            # Genuinely no predators in view → keep current heading.  Fall
+            # back to action 0 if no self-direction is available.  When a
+            # predator IS visible but forces cancel, _compute_force has
+            # already substituted a pure radial flee from the closest
+            # threat, so we never want the heading-keep branch in that case.
             self_block = obs[self._layout["self"]]
             if self_block.size >= 4:
                 heading_x, heading_y = _direction_to_unit_vector(self_block[3])
@@ -211,25 +239,68 @@ class AquariumAPFEvaderPolicy:
 
     # Internals ------------------------------------------------------------
 
-    def _compute_force(self, obs: np.ndarray) -> Tuple[float, float]:
+    def _compute_force(self, obs: np.ndarray) -> Tuple[float, float, bool]:
         cfg = self.config
-        fx = 0.0
-        fy = 0.0
+        # Accumulate predator (flee + tangential) and separation forces
+        # separately so we can cap the latter relative to the former.
+        pred_fx = 0.0
+        pred_fy = 0.0
+        any_predator_visible = False
+        # Track the closest visible predator so we can fall back to a pure
+        # radial flee when symmetric configurations cause the accumulated
+        # force to cancel (two predators on opposite sides at equal
+        # distance produce antiparallel radial AND tangential terms,
+        # because ``self._turn_sign`` is constant per-episode).
+        closest: Optional[Tuple[float, float, float]] = None  # (sdistance, ux, uy)
 
-        # Predator block — repulsion (flee).
         pred_block = obs[self._layout["predators"]]
         for entry in self._iter_entries(pred_block, expected_type=0):
             if entry is None:
                 continue
+            any_predator_visible = True
             sdistance, sdirection = entry  # both in [0, 1]
             ux, uy = _direction_to_unit_vector(sdirection)
+            if closest is None or sdistance < closest[0]:
+                closest = (sdistance, ux, uy)
             # ``sdirection`` points observer → predator.  Flee = -unit.
             inv_sq = 1.0 / (sdistance * sdistance + cfg.softening)
-            fx -= cfg.k_predator * ux * inv_sq
-            fy -= cfg.k_predator * uy * inv_sq
+            pred_fx -= cfg.k_predator * ux * inv_sq
+            pred_fy -= cfg.k_predator * uy * inv_sq
+            # Tangential (perpendicular-dodge) component: rotates the flee
+            # vector ~30-45°.  Uses 1/d falloff so it remains effective at
+            # longer range where the inverse-square radial term is weak.
+            # self._turn_sign is fixed per episode to prevent adjacent
+            # predators' tangential forces from cancelling each other.
+            inv_d = 1.0 / (sdistance + math.sqrt(cfg.softening))
+            pred_fx += cfg.k_tangential * (-uy) * inv_d * self._turn_sign
+            pred_fy += cfg.k_tangential * ux * inv_d * self._turn_sign
 
-        # Optional separation from other prey (default off).
-        if cfg.k_prey_separation > 0.0:
+        # Cancellation fallback: if any predator is visible but the net
+        # force is below threshold (symmetric squeeze), override with a
+        # pure radial flee from the closest predator (no tangential).
+        # Without this, prey ``freeze'' between symmetric threats and the
+        # heading-keep branch in ``get_action`` drives them straight
+        # through the line connecting the predators.
+        pred_mag = math.hypot(pred_fx, pred_fy)
+        if (
+            any_predator_visible
+            and pred_mag < cfg.no_op_threshold * 10.0
+            and closest is not None
+        ):
+            sdistance, ux, uy = closest
+            inv_sq = 1.0 / (sdistance * sdistance + cfg.softening)
+            pred_fx = -cfg.k_predator * ux * inv_sq
+            pred_fy = -cfg.k_predator * uy * inv_sq
+
+        # Optional separation from other prey.  Only applied when at least
+        # one predator is visible — separation is a tie-breaker that keeps
+        # the flock from collapsing onto a single safe corridor when under
+        # threat, NOT a flight force on its own.  Its magnitude is capped
+        # to ``separation_cap_ratio * |pred_force|`` so that a cluster of
+        # coincident teammates cannot overwhelm the predator-flee force.
+        if cfg.k_prey_separation > 0.0 and any_predator_visible:
+            sep_fx = 0.0
+            sep_fy = 0.0
             prey_block = obs[self._layout["prey"]]
             for entry in self._iter_entries(prey_block, expected_type=1):
                 if entry is None:
@@ -237,10 +308,19 @@ class AquariumAPFEvaderPolicy:
                 sdistance, sdirection = entry
                 ux, uy = _direction_to_unit_vector(sdirection)
                 inv_sq = 1.0 / (sdistance * sdistance + cfg.softening)
-                fx -= cfg.k_prey_separation * ux * inv_sq
-                fy -= cfg.k_prey_separation * uy * inv_sq
+                sep_fx -= cfg.k_prey_separation * ux * inv_sq
+                sep_fy -= cfg.k_prey_separation * uy * inv_sq
 
-        return fx, fy
+            sep_mag = math.hypot(sep_fx, sep_fy)
+            pred_mag_now = math.hypot(pred_fx, pred_fy)
+            cap = cfg.separation_cap_ratio * pred_mag_now
+            if sep_mag > cap and sep_mag > 0.0:
+                scale = cap / sep_mag
+                sep_fx *= scale
+                sep_fy *= scale
+            return pred_fx + sep_fx, pred_fy + sep_fy, any_predator_visible
+
+        return pred_fx, pred_fy, any_predator_visible
 
     @staticmethod
     def _iter_entries(block: np.ndarray, expected_type: int) -> List[Optional[Tuple[float, float]]]:

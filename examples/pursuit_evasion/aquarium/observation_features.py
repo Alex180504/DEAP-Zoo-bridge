@@ -19,20 +19,25 @@ by the env's scaled distance + direction fields.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Optional
 
 import numpy as np
 from gymnasium import spaces
 
-from .apf_policy import aquarium_obs_layout
+from .apf_policy import _direction_to_unit_vector, aquarium_obs_layout
 
 
 def _scaled_direction_to_unit_vector(scaled_direction: float) -> tuple[float, float]:
-    """Convert aquarium's scaled direction field back to an XY unit vector."""
-    angle_deg = float(scaled_direction) * 360.0 - 180.0
-    rad = math.radians(angle_deg)
-    return math.sin(rad), -math.cos(rad)
+    """Convert aquarium's scaled direction field back to an XY unit vector.
+
+    Delegates to :func:`apf_policy._direction_to_unit_vector` so the
+    decoder cannot drift apart from the scripted-prey controller.  The
+    env encodes ``sdirection`` via
+    ``get_angle_from_vector(v) = -atan2(vy, vx) * 180/pi`` (0° = east),
+    whose inverse is ``(cos(rad), -sin(rad))`` — **not** the action
+    convention ``(sin(rad), -cos(rad))``, which is offset by 90°.
+    """
+    return _direction_to_unit_vector(scaled_direction)
 
 
 def aquarium_feature_size(
