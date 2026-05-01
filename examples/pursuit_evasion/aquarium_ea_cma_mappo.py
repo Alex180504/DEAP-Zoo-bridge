@@ -67,6 +67,7 @@ from deap_pettingzoo.integration import (
     setup_cma_strategy,
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
+from deap_pettingzoo.policies.action_heads import ActionHead, DiscreteHead
 from deap_pettingzoo.utils.logging import ExperimentLogger
 from deap_pettingzoo.utils.logging.replay import FrameRecorder
 from deap_pettingzoo.utils.parallel import make_executor
@@ -80,6 +81,10 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from examples.pursuit_evasion.aquarium.apf_policy import AquariumAPFConfig
+from examples.pursuit_evasion.aquarium.observation_features import (
+    AquariumObservationFeatureWrapper,
+    extract_prey_caught_total,
+)
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
     DictResetEnv,
     register_scripted_aquarium,
@@ -92,9 +97,9 @@ from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
 
 # ---- Toggles --------------------------------------------------------------
 
-RUN_EA: bool = False
+RUN_EA: bool = True
 RUN_CMAES: bool = True
-RUN_MAPPO: bool = False
+RUN_MAPPO: bool = True
 PROBE_ENV: bool = False        # short env smoke test then exit
 RUN_FINAL_ANALYSIS: bool = True
 
@@ -108,10 +113,10 @@ N_WORKERS: int = 0             # 0 = os.cpu_count(); 1 = sequential
 # ---- Shared budget --------------------------------------------------------
 
 # Equal env-steps budget across the three algorithms (Phase 2 of the plan).
-TOTAL_ENV_STEPS: int = 3_000_000
+TOTAL_ENV_STEPS: int = 2_000_000
 EVAL_EPISODES: int = 30
 
-# ---- Aquarium env config (5v5 equal-ability) -----------------------------
+# ---- Aquarium env config (5v5, prey speed advantage) ---------------------
 #
 # Aquarium quirks (see /memories/repo/aquarium_env_quirks.md):
 #   - predator_view_distance=200 default fails the assertion in
@@ -122,48 +127,71 @@ EVAL_EPISODES: int = 30
 #     to enable here.
 #   - render_mode=None is rejected; the wrapper maps it to "rgb_array".
 #
-# Equal-ability: predator and prey share max_velocity, max_acceleration,
-# max_steer_force, view_distance, fov, observe_count.
+# Prey are 20% faster than predators (10 vs 12). With equal max velocity
+# the APF prey flees directly away from the pursuer on a torus, so a
+# diagonal-drifting predator team locks the prey into the same heading
+# and catches them at the wrap boundary regardless of any actual steering
+# (champ_catches up to 11/400 steps in early runs). Mirrors the standard
+# MPE simple_tag asymmetry (prey 33% faster) — forces the optimiser to
+# discover cooperative cornering / interception instead of straight-line
+# herding.
 
 ENV_NAME: str = "aquarium_pursuit_evasion_v0"
 
 ENV_CONFIG: Dict[str, Any] = {
     "predator_count": 5,
-    "prey_count": 15,
-    "max_time_steps": 200,         # episode length cap
-    # Equal-ability physics
-    "predator_max_velocity": 6.0,
-    "prey_max_velocity": 6.0,
-    "predator_max_acceleration": 0.6,
-    "prey_max_acceleration": 0.6,
-    "predator_max_steer_force": 0.4,
-    "prey_max_steer_force": 0.4,
-    "predator_view_distance": 2000,
-    "prey_view_distance": 2000,
+    "prey_count": 10,
+    "max_time_steps": 400,
+    "predator_max_velocity": 12.0,
+    "prey_max_velocity": 14.0,
+    "predator_max_acceleration": 0.8,
+    "prey_max_acceleration": 1.0,
+    "predator_max_steer_force": 2.5,
+    "prey_max_steer_force": 3.5,
+    "predator_view_distance": 1000,
+    "prey_view_distance": 1200,
     "predator_observe_count": 5,
     "prey_observe_count": 5,
-    "fov_enabled": True,           # patched — see builtin._patch_aquarium()
-    "predator_fov": 160,
-    "prey_fov": 160,
+    # Limited predator FOV (120°) forces the policy to actively steer toward
+    # prey — a pursuer moving straight north cannot see prey behind it.
+    # Prey retain 360° awareness so they always know where to flee.
+    "fov_enabled": True,
+    "predator_fov": 120,
+    "prey_fov": 360,
+    # Show FOV cones and steering vectors in recorded frames.
+    "draw_view_cones": False,
+    "draw_action_vectors": False,
     "action_count": 16,
-    "predator_reward": 10,
+    "predator_reward": 20,
     "catch_radius": 50,
-    "keep_prey_count_constant": False,   # prey don't respawn; episode ends when all caught
-    "width": 2000,
-    "height": 2000,
+    # Disable respawn — prevents the "highway" effect where a catch spawns
+    # new prey directly into a linear predator's path.  The episode runs
+    # until all prey are caught or max_time_steps is reached.
+    "keep_prey_count_constant": False,
+    "width": 4000,
+    "height": 4000,
 }
 
-APF_CONFIG = AquariumAPFConfig(k_predator=1.0)    # restore class default; 0.3 was wrongly reduced
+APF_CONFIG = AquariumAPFConfig(
+    k_predator=5.0,
+    k_tangential=3.0,
+    k_prey_separation=0.5,
+)  # tangential dodge breaks force-cancellation; k_prey_separation separates flock
 
-# Distance-based reward shaping: dense proximity signal (0 = off).
-# Adds alpha / (1 + dist/200) per predator per step, giving ~0.05 reward
-# when adjacent and ~0.025 at 200 px distance (world size 2000x2000).
-REWARD_SHAPE_ALPHA: float = 0.05
+# Progress-based reward shaping: dense guidance for closing distance to prey
+# (0 = off). In the wrapper this is applied as ``alpha * (prev_dist -
+# curr_dist) / 200`` per predator per step. With alpha=1.0 the shaping
+# mass over 5 predators * 400 steps dominates the sparse catch bonus, so
+# the optimiser converges on rigid drift headings instead of true pursuit
+# (EA/CMA ran +28..+40 with no visible steering). alpha=0.1 cuts shaping
+# 10x while keeping a faint gradient signal so catches dominate fitness.
+REWARD_SHAPE_ALPHA: float = 0.03
+FOV_SHAPE_ALPHA: float = 0.0  # +0.01 per visible prey per step (3 prey * 400 steps * 0.01 = 12 max; catches still dominate)
 
 # ---- EA config -----------------------------------------------------------
 
 EA_POPULATION_SIZE: int = 32
-EA_HIDDEN_SIZE: int = 0 
+EA_HIDDEN_SIZE: int = 8
 EA_EVAL_EPISODES_TRAIN: int = 5    # 10 eps → halves noise floor vs 5; ~46 gens at 3M budget
 EA_ELITE_SIZE: int = 3
 EA_MUT_SIGMA: float = 0.3           # increased from 0.1 — helps escape fitness plateaus
@@ -173,7 +201,7 @@ EA_CXPB: float = 0.7
 # ---- CMA-ES config -------------------------------------------------------
 
 CMA_POPULATION_SIZE: int = 24
-CMA_HIDDEN_SIZE: int = 0             # matches EA; ~640 dims — within CMA-ES sweet spot for λ=24
+CMA_HIDDEN_SIZE: int = 8             # matches EA; ~640 dims — within CMA-ES sweet spot for λ=24
 CMA_EVAL_EPISODES_TRAIN: int = 5
 CMA_SIGMA0: float = 0.3
 
@@ -187,7 +215,7 @@ MAPPO_GAMMA: float = 0.99
 # ``{"net_config": {"encoder_config": {"hidden_size": [128, 128]}}}``).
 # Empty dict = use AgileRL's defaults.
 MAPPO_EXTRA: Dict[str, Any] = {
-    "ent_coef": 0.05,
+    "ent_coef": 0.005,
     "net_config": {
         "encoder_config": {"hidden_size": [64, 64]},
         "head_config": {"hidden_size": [64]},
@@ -200,7 +228,9 @@ RECORD: bool = True
 RECORD_FPS: int = 20
 RECORD_FMT: str = "mp4"
 RECORD_EVERY_N_EA: int = 5          # EA/CMA generations
-RECORD_EVERY_N_MAPPO: int = 50      # MAPPO iterations
+RECORD_EVERY_N_MAPPO: int = 20      # MAPPO iterations
+RECORD_MAX_FRAMES: Optional[int] = None  # None = record full episode; set e.g. 150 to cap at 7.5 s
+RECORD_MAX_DIM: int = 960           # scale largest dimension to this (4000→960 avoids H.264 level limit)
 
 OUTPUT_DIR: Path = Path("results/aquarium_pursuit_evasion_ea_cma_mappo")
 
@@ -265,9 +295,111 @@ def _empty_scripted_factory(env) -> Dict[str, Any]:
     return {}
 
 
+class SoftmaxSamplingHead(ActionHead):
+    """Stochastic softmax-sampling head for Discrete spaces (EA/CMA only).
+
+    The default :class:`DiscreteHead` returns ``argmax(logits)``, which
+    creates a step-function fitness landscape: small weight perturbations
+    almost never flip the argmax, so gradient-free search crawls. This
+    head samples from ``softmax(logits / temperature)`` for a smooth
+    landscape. Mirrors the working precedent in ``ea_vs_apf.py``.
+    """
+
+    def __init__(self, n: int, temperature: float = 0.2,
+                 rng: Optional[np.random.Generator] = None) -> None:
+        if n < 1:
+            raise ValueError(f"SoftmaxSamplingHead requires n >= 1, got {n}")
+        if temperature <= 0:
+            raise ValueError(
+                f"SoftmaxSamplingHead requires temperature > 0, got {temperature}"
+            )
+        self.n = int(n)
+        self.temperature = float(temperature)
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+    @property
+    def output_size(self) -> int:
+        return self.n
+
+    def decode(self, raw_output: np.ndarray) -> int:
+        arr = np.asarray(raw_output, dtype=np.float64).ravel()
+        if arr.size != self.n:
+            raise ValueError(
+                f"SoftmaxSamplingHead expected output of size {self.n}, "
+                f"got size {arr.size}"
+            )
+        scaled = arr / self.temperature
+        scaled -= scaled.max()
+        exp = np.exp(scaled)
+        probs = exp / exp.sum()
+        return int(self.rng.choice(self.n, p=probs))
+
+
+SOFTMAX_TEMPERATURE: float = 0.1
+"""Softmax temperature for ``SoftmaxSamplingHead`` used during EA/CMA training.
+
+With weights initialised at ``\u00b11/\u221ain_size`` and ReLU activations of
+magnitude \u22480.5, output-layer logits are typically O(\u00b10.3).  At
+temperature=0.5 the resulting softmax differs by only ~1.7\u00d7 between the
+strongest and weakest action \u2014 sampling noise dominates and EA finds it
+easier to bias the *distribution* by inflating one logit (constant-heading
+drift) than to learn an obs\u2192action mapping.  At temperature=0.1 the same
+\u00b10.3 logits give a ~20\u00d7 ratio (near-argmax behaviour), restoring the
+policy as the dominant fitness driver while keeping the landscape smooth
+at decision boundaries (small perturbations still shift the distribution
+continuously)."""
+
+
 def _learner_factory(genome: FixedTopologyGenome, agent_id: str, action_space):
-    """All predators share the same evolved genome (homogeneous team)."""
-    return FeedforwardNeuralPolicy(genome, action_space=action_space)
+    """All predators share the same evolved genome (homogeneous team).
+
+    Uses :class:`SoftmaxSamplingHead` instead of argmax so EA/CMA see a
+    smooth fitness landscape (precedent: ``ea_vs_apf.py``).  The head's
+    RNG is seeded *deterministically from agent_id* so two identical
+    genomes evaluated under the same env seed produce the same action
+    stream \u2014 this preserves CRN at the policy layer.  Without the seed,
+    fitness comparisons include sampling noise that hides genome signal
+    and biases EA toward the linear-drift attractor.
+    """
+    head = SoftmaxSamplingHead(
+        n=int(action_space.n),
+        temperature=SOFTMAX_TEMPERATURE,
+        rng=np.random.default_rng(abs(hash(agent_id)) & 0xFFFF_FFFF),
+    )
+    return FeedforwardNeuralPolicy(genome, head=head)
+
+
+def _run_policy_episode(policy, seed: int) -> Tuple[float, int]:
+    """Roll one predator-team episode and return ``(team_reward, catches)``."""
+    env = build_env(ENV_NAME)
+    try:
+        if hasattr(policy, "reset"):
+            policy.reset()
+
+        obs, infos = env.reset(seed=seed)
+        catches = extract_prey_caught_total(infos)
+        episode_reward = 0.0
+
+        for _ in range(_episode_steps_per_episode()):
+            if not obs:
+                break
+            actions = {}
+            for agent_id, ob in obs.items():
+                try:
+                    actions[agent_id] = policy.get_action(ob)
+                except Exception:
+                    actions[agent_id] = env.action_space(agent_id).sample()
+            obs, rewards, terms, truncs, infos = env.step(actions)
+            episode_reward += sum(float(r) for r in rewards.values())
+            catches = max(catches, extract_prey_caught_total(infos))
+            if (terms and all(terms.values())) or (truncs and all(truncs.values())):
+                break
+        return episode_reward, catches
+    finally:
+        try:
+            env.close()
+        except SystemExit:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -285,18 +417,18 @@ def _record_champion_rollout(
     import os
     import sys
 
-    # On Windows, SDL_VIDEODRIVER=offscreen is not a valid SDL2 driver.
-    # Swap to "dummy" (pure-software surface) so pygame can initialise
-    # headlessly; surfarray.array3d() still returns real pixel data from
-    # the software surface, so recorded frames contain actual content.
+    # On Windows the default SDL2 video drivers (DirectX/GDI) try to create
+    # a real on-screen window, which hangs headlessly and is impossibly slow
+    # at 6000×6000.  Switch to the pure-software "dummy" driver for this
+    # recording env so surfarray.array3d() still returns real pixel data
+    # without any display dependency.
     _sdl_orig = os.environ.get("SDL_VIDEODRIVER")
-    if sys.platform == "win32" and _sdl_orig == "offscreen":
-        print("  [recorder] SDL_VIDEODRIVER=offscreen unsupported on Windows "
-              "— switching to 'dummy' for headless frame capture.")
+    if sys.platform == "win32" and _sdl_orig != "dummy":
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         try:
             import pygame as _pg
-            _pg.display.quit()
+            if _pg.get_init():
+                _pg.display.quit()
         except Exception:
             pass
 
@@ -315,6 +447,7 @@ def _record_champion_rollout(
         except Exception:
             pass
 
+        _cap = recorder.max_frames_per_episode
         for _ in range(_episode_steps_per_episode()):
             if not obs:
                 break
@@ -325,12 +458,16 @@ def _record_champion_rollout(
                 except Exception:
                     actions[agent_id] = env.action_space(agent_id).sample()
             obs, _, terms, truncs, _ = env.step(actions)
-            try:
-                frame = env.render()
-                if frame is not None:
-                    recorder.add_frame(frame)
-            except Exception:
-                pass
+            # Skip render once the frame cap is reached — avoids rendering
+            # the full episode (400 steps) when only 150 frames are wanted.
+            _frames_buffered = len(recorder._frames)
+            if _cap is None or _frames_buffered < _cap:
+                try:
+                    frame = env.render()
+                    if frame is not None:
+                        recorder.add_frame(frame)
+                except Exception:
+                    pass
             if (terms and all(terms.values())) or (truncs and all(truncs.values())):
                 break
     finally:
@@ -425,7 +562,8 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
     init_scale = float(np.sqrt(1.0 / max(in_size, 1)))
     genome_config = {
         "layer_sizes": _ea_layers,
-        "activation": "tanh",
+        "activation": "relu",
+        "output_activation": "linear",
         "weight_range": (-init_scale, init_scale),
         "random_seed": seed,
     }
@@ -474,7 +612,9 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
         },
     )
     recorder = (
-        logger.get_frame_recorder(fps=RECORD_FPS, fmt=RECORD_FMT, episode_prefix="ea_")
+        logger.get_frame_recorder(fps=RECORD_FPS, fmt=RECORD_FMT, episode_prefix="ea_",
+                                   max_frames_per_episode=RECORD_MAX_FRAMES,
+                                   max_dim=RECORD_MAX_DIM)
         if RECORD else None
     )
 
@@ -509,6 +649,7 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
                     eval_episodes=EA_EVAL_EPISODES_TRAIN,
                     layer_sizes=tuple(ind.genome.layer_sizes),
                     activation=ind.genome.activation,
+                    output_activation=getattr(ind.genome, "output_activation", ind.genome.activation),
                 )
                 payloads.append((_individual_to_payload(ind, seed=cur_seed), spec))
             return list(executor.map(_mixed_worker_evaluate, payloads))
@@ -522,6 +663,15 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
         hof.update(population)
         rec = stats.compile(population)
         fitness_history.append({"gen": 0, **rec})
+        # Champion catch probe (1 episode) — true task-success metric.
+        # Uses argmax (DiscreteHead) so the printed catches reflect the
+        # genome's actual capability, not the stochastic head's sampling
+        # noise.  Training fitness still uses SoftmaxSamplingHead for the
+        # smooth landscape (see _learner_factory).
+        _, champ_catches = _run_policy_episode(
+            FeedforwardNeuralPolicy(hof[0].genome, head=DiscreteHead(out_size)),
+            seed=seed * 10_000 + 0,
+        )
         logger.row("metrics", {
             "iteration": 0,
             "env_steps": EA_POPULATION_SIZE * EA_EVAL_EPISODES_TRAIN
@@ -532,8 +682,9 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             "min":  float(rec["min"]),
             "max":  float(rec["max"]),
             "best": float(rec["max"]),
+            "champion_catches": int(champ_catches),
         })
-        print(f"  Gen  0 | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}")
+        print(f"  Gen  0 | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}  champ_catches={champ_catches}")
 
         if recorder is not None and recorder.enabled:
             try:
@@ -564,12 +715,15 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             for c1, c2 in zip(offspring[::2], offspring[1::2]):
                 if rng.random() < EA_CXPB:
                     toolbox.mate(c1, c2)
-                    del c1.fitness.values
-                    del c2.fitness.values
             for m in offspring:
                 if rng.random() < 0.3:
                     toolbox.mutate(m)
-                    del m.fitness.values
+
+            # True CRN: invalidate fitnesses for ALL offspring so unmodified
+            # clones are forcefully re-evaluated on the current generation's seed.
+            for ind in offspring:
+                if ind.fitness.valid:
+                    del ind.fitness.values
 
             invalid = [ind for ind in (elites + offspring) if not ind.fitness.valid]
             for ind, fit in zip(invalid, toolbox.map(toolbox.evaluate, invalid)):
@@ -579,6 +733,10 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
 
             rec = stats.compile(population)
             fitness_history.append({"gen": gen, **rec})
+            _, champ_catches = _run_policy_episode(
+                FeedforwardNeuralPolicy(hof[0].genome, head=DiscreteHead(out_size)),
+                seed=seed * 10_000 + gen,
+            )
             logger.row("metrics", {
                 "iteration": gen,
                 "env_steps": (gen + 1) * EA_POPULATION_SIZE * EA_EVAL_EPISODES_TRAIN
@@ -589,8 +747,9 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
                 "min":  float(rec["min"]),
                 "max":  float(rec["max"]),
                 "best": float(hof[0].fitness.values[0]),
+                "champion_catches": int(champ_catches),
             })
-            print(f"  Gen {gen:>2} | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}")
+            print(f"  Gen {gen:>2} | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}  champ_catches={champ_catches}")
 
             if (recorder is not None and recorder.enabled
                     and gen % RECORD_EVERY_N_EA == 0):
@@ -640,8 +799,9 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
 
     genome_config = {
         "layer_sizes": _cma_layers,
-        "activation": "tanh",
-        "weight_range": (-1.0, 1.0),
+        "activation": "relu",
+        "output_activation": "linear",
+        "weight_range": (-float(np.sqrt(1.0 / max(in_size, 1))), float(np.sqrt(1.0 / max(in_size, 1)))),
     }
     strategy, dimension = setup_cma_strategy(
         genome_config=genome_config,
@@ -675,7 +835,9 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
         },
     )
     recorder = (
-        logger.get_frame_recorder(fps=RECORD_FPS, fmt=RECORD_FMT, episode_prefix="cmaes_")
+        logger.get_frame_recorder(fps=RECORD_FPS, fmt=RECORD_FMT, episode_prefix="cmaes_",
+                                   max_frames_per_episode=RECORD_MAX_FRAMES,
+                                   max_dim=RECORD_MAX_DIM)
         if RECORD else None
     )
 
@@ -706,6 +868,7 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
                     eval_episodes=CMA_EVAL_EPISODES_TRAIN,
                     layer_sizes=tuple(ind.genome.layer_sizes),
                     activation=ind.genome.activation,
+                    output_activation=getattr(ind.genome, "output_activation", ind.genome.activation),
                 )
                 payloads.append((_individual_to_payload(ind, seed=cur_seed), spec))
             return list(executor.map(_mixed_worker_evaluate, payloads))
@@ -721,6 +884,10 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
             hof.update(population)
             rec = stats.compile(population)
             fitness_history.append({"gen": gen, **rec})
+            _, champ_catches = _run_policy_episode(
+                FeedforwardNeuralPolicy(hof[0].genome, head=DiscreteHead(out_size)),
+                seed=seed * 10_000 + gen,
+            )
             logger.row("metrics", {
                 "iteration": gen,
                 "env_steps": (gen + 1) * CMA_POPULATION_SIZE * CMA_EVAL_EPISODES_TRAIN
@@ -731,8 +898,9 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
                 "min":  float(rec["min"]),
                 "max":  float(rec["max"]),
                 "best": float(hof[0].fitness.values[0]),
+                "champion_catches": int(champ_catches),
             })
-            print(f"  Gen {gen:>2} | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}")
+            print(f"  Gen {gen:>2} | mean={rec['avg']:+.2f}  max={rec['max']:+.2f}  champ_catches={champ_catches}")
 
             if (recorder is not None and recorder.enabled
                     and gen % RECORD_EVERY_N_EA == 0):
@@ -826,26 +994,22 @@ def _evaluate_genome(
     seed_base: int,
 ) -> Dict[str, float]:
     """Evaluate an evolved genome against scripted prey for ``n_episodes``."""
-    evaluator = _build_evaluator()
-    setup_deap_creators()
-    individual = creator.Individual()
-    individual.genome = genome
-
     rewards: List[float] = []
     catches: List[int] = []
-    try:
-        for i in range(n_episodes):
-            res = evaluator.run_episode(individual, seed=seed_base + i)
-            rewards.append(float(res.learner_reward))
-            # Aquarium gives +predator_reward per catch as predator-team
-            # reward → catches = round(reward / predator_reward).
-            catches.append(int(round(res.learner_reward / float(ENV_CONFIG["predator_reward"]))))
-    finally:
-        if evaluator.env_wrapper is not None:
+    for i in range(n_episodes):
+        env = build_env(ENV_NAME)
+        try:
+            learner_id = env.possible_agents[0]
+            policy = FeedforwardNeuralPolicy(genome, action_space=env.action_space(learner_id))
+        finally:
             try:
-                evaluator.env_wrapper.close()
+                env.close()
             except SystemExit:
                 pass
+
+        reward, catch_total = _run_policy_episode(policy, seed=seed_base + i)
+        rewards.append(float(reward))
+        catches.append(int(catch_total))
 
     rewards_arr = np.asarray(rewards, dtype=np.float64)
     return {
@@ -869,30 +1033,9 @@ def _evaluate_mappo_policy(
     rewards: List[float] = []
     catches: List[int] = []
     for i in range(n_episodes):
-        env = build_env(ENV_NAME)
-        try:
-            obs, _ = env.reset(seed=seed_base + i)
-            ep_ret = 0.0
-            for _ in range(_episode_steps_per_episode()):
-                if not obs:
-                    break
-                actions = {}
-                for agent_id, ob in obs.items():
-                    try:
-                        actions[agent_id] = policy.get_action(ob)
-                    except Exception:
-                        actions[agent_id] = env.action_space(agent_id).sample()
-                obs, rew, terms, truncs, _ = env.step(actions)
-                ep_ret += sum(float(r) for r in rew.values())
-                if (terms and all(terms.values())) or (truncs and all(truncs.values())):
-                    break
-            rewards.append(ep_ret)
-            catches.append(int(round(ep_ret / float(ENV_CONFIG["predator_reward"]))))
-        finally:
-            try:
-                env.close()
-            except SystemExit:
-                pass
+        ep_ret, catch_total = _run_policy_episode(policy, seed=seed_base + i)
+        rewards.append(ep_ret)
+        catches.append(catch_total)
 
     arr = np.asarray(rewards, dtype=np.float64)
     return {
@@ -963,6 +1106,8 @@ register_scripted_aquarium(
     ENV_CONFIG,
     apf_config=APF_CONFIG,
     reward_shape_alpha=REWARD_SHAPE_ALPHA,
+    fov_shape_alpha=FOV_SHAPE_ALPHA,
+    wrappers=(AquariumObservationFeatureWrapper,),
     overwrite=True,
 )
 

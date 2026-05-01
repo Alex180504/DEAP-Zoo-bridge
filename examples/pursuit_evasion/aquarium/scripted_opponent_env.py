@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import types as _types
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -121,6 +121,7 @@ class ScriptedOpponentEnvWrapper:
         scripted_prefix: str = "prey",
         apf_config: Optional[AquariumAPFConfig] = None,
         reward_shape_alpha: float = 0.0,
+        fov_shape_alpha: float = 0.0,
     ) -> None:
         """
         Args:
@@ -148,6 +149,7 @@ class ScriptedOpponentEnvWrapper:
         self.scripted_prefix = scripted_prefix
         self._apf_config = apf_config or AquariumAPFConfig()
         self.reward_shape_alpha = float(reward_shape_alpha)
+        self.fov_shape_alpha = float(fov_shape_alpha)
 
         # Filter possible_agents to learner-prefixed only.
         self.possible_agents = [
@@ -171,6 +173,7 @@ class ScriptedOpponentEnvWrapper:
         # Per-episode catch counter (sparse fitness signal).
         self.prey_caught: int = 0
         self.last_team_reward: float = 0.0
+        self._prev_min_prey_distances: Dict[str, Optional[float]] = {}
 
         # Navigate to the raw env so we can read ``prey.recently_died``.
         # When aquarium is configured with ``keep_prey_count_constant=True``
@@ -232,6 +235,7 @@ class ScriptedOpponentEnvWrapper:
         # Reset episode counters.
         self.prey_caught = 0
         self.last_team_reward = 0.0
+        self._prev_min_prey_distances = self._compute_min_prey_distances(self.agents)
         return learner_obs, learner_infos
 
     def step(
@@ -318,26 +322,35 @@ class ScriptedOpponentEnvWrapper:
         out_obs = {a: observations[a] for a in learner_keys if a in observations}
         out_rewards = {a: float(rewards.get(a, 0.0)) for a in learner_keys}
 
-        # Distance-based reward shaping: dense proximity signal.
+        # Progress-based reward shaping: reward only when predators close
+        # distance to prey, rather than for merely occupying a stable lane.
         if self.reward_shape_alpha > 0.0 and self._raw_env is not None:
             try:
-                prey_pos = [
-                    (float(p.position.x), float(p.position.y))
-                    for p in self._raw_env.prey
-                ]
-                if prey_pos:
+                prey = list(getattr(self._raw_env, "prey", []))
+                torus = getattr(self._raw_env, "torus", None)
+                if prey and torus is not None:
+                    current_min_dists = self._compute_min_prey_distances(learner_keys)
                     for idx, agent_id in enumerate(learner_keys):
-                        if idx < len(self._raw_env.predators):
-                            pred = self._raw_env.predators[idx]
-                            px = float(pred.position.x)
-                            py = float(pred.position.y)
-                            min_dist = min(
-                                math.hypot(px - fx, py - fy)
-                                for fx, fy in prey_pos
-                            )
-                            out_rewards[agent_id] += self.reward_shape_alpha / (
-                                1.0 + min_dist / 200.0
-                            )
+                        current_min_dist = current_min_dists.get(agent_id)
+                        prev_min_dist = self._prev_min_prey_distances.get(agent_id)
+                        if current_min_dist is None or prev_min_dist is None:
+                            continue
+                        progress = prev_min_dist - current_min_dist
+                        out_rewards[agent_id] += self.reward_shape_alpha * (progress / 200.0)
+                    self._prev_min_prey_distances = current_min_dists
+            except Exception:
+                pass
+
+        # FOV-presence reward shaping: small bonus per prey visible in the
+        # predator's view cone each step.  Unlike proximity shaping this
+        # rewards *steering toward* prey — the policy must actually face a
+        # prey to earn the signal, and the bonus is observation-coherent
+        # (the policy can only observe prey it earns reward for).
+        if self.fov_shape_alpha > 0.0 and self._raw_env is not None:
+            try:
+                for idx, agent_id in enumerate(learner_keys):
+                    n_visible = self._count_fov_visible_prey(idx)
+                    out_rewards[agent_id] += self.fov_shape_alpha * n_visible
             except Exception:
                 pass
 
@@ -347,10 +360,14 @@ class ScriptedOpponentEnvWrapper:
 
         # Inject recently_died-based catch reward and update catch counter.
         if _recently_died > 0:
-            bonus = float(self.predator_reward) * _recently_died
-            out_rewards = {a: out_rewards[a] + bonus for a in learner_keys}
+            team_bonus = float(self.predator_reward) * _recently_died
+            if learner_keys:
+                per_agent_bonus = team_bonus / float(len(learner_keys))
+                out_rewards = {
+                    a: out_rewards[a] + per_agent_bonus for a in learner_keys
+                }
             self.prey_caught += _recently_died
-            team_reward = bonus * len(learner_keys)
+            team_reward = team_bonus
         elif self.predator_reward > 0:
             self.prey_caught += int(round(team_reward / self.predator_reward))
 
@@ -393,6 +410,66 @@ class ScriptedOpponentEnvWrapper:
             if not advanced:
                 break
         return None
+
+    def _count_fov_visible_prey(self, predator_idx: int) -> int:
+        """Return number of live prey visible inside predator's FOV cone."""
+        if self._raw_env is None:
+            return 0
+        predators = list(getattr(self._raw_env, "predators", []))
+        prey = list(getattr(self._raw_env, "prey", []))
+        torus = getattr(self._raw_env, "torus", None)
+        if predator_idx >= len(predators) or not prey or torus is None:
+            return 0
+        # If FOV is disabled, every prey counts as visible.
+        if not getattr(self._raw_env, "fov_enabled", False):
+            return len(prey)
+        pred = predators[predator_idx]
+        view_dist = getattr(self._raw_env, "predator_view_distance", 2000)
+        fov = getattr(self._raw_env, "predator_fov", 360)
+        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
+        if check is None:
+            return len(prey)
+        return sum(1 for p in prey if check(pred, p, view_dist, fov))
+
+    def _compute_min_prey_distances(self, learner_agents: List[str]) -> Dict[str, Optional[float]]:
+        """Return nearest FOV-visible prey torus distance for each learner agent.
+
+        Only prey inside the predator's view cone count.  When no prey is
+        visible the entry is ``None`` so the shaping step skips that agent
+        (no reward for chasing prey you cannot observe).
+        If ``fov_enabled`` is False on the raw env every prey counts as
+        visible (backward-compatible behaviour).
+        """
+        if self._raw_env is None:
+            return {}
+        all_prey = list(getattr(self._raw_env, "prey", []))
+        predators = list(getattr(self._raw_env, "predators", []))
+        torus = getattr(self._raw_env, "torus", None)
+        if not all_prey or torus is None:
+            return {}
+
+        fov_enabled: bool = bool(getattr(self._raw_env, "fov_enabled", False))
+        view_dist = getattr(self._raw_env, "predator_view_distance", 2000)
+        fov = getattr(self._raw_env, "predator_fov", 360)
+        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
+
+        min_dists: Dict[str, Optional[float]] = {}
+        for idx, agent_id in enumerate(learner_agents):
+            if idx >= len(predators):
+                continue
+            pred = predators[idx]
+            if fov_enabled and check is not None:
+                visible = [p for p in all_prey if check(pred, p, view_dist, fov)]
+            else:
+                visible = all_prey
+            if not visible:
+                min_dists[agent_id] = None  # no visible prey — skip shaping
+            else:
+                min_dists[agent_id] = min(
+                    float(torus.get_distance_in_torus(pred.position, p.position))
+                    for p in visible
+                )
+        return min_dists
 
     def render(self, mode: Optional[str] = None):  # pragma: no cover - viz
         try:
@@ -437,10 +514,12 @@ class _ScriptedAquariumFactory:
         env_config: Dict[str, Any],
         apf_config: AquariumAPFConfig,
         reward_shape_alpha: float = 0.0,
+        fov_shape_alpha: float = 0.0,
     ) -> None:
         self.env_config = dict(env_config)
         self.apf_config = apf_config
         self.reward_shape_alpha = float(reward_shape_alpha)
+        self.fov_shape_alpha = float(fov_shape_alpha)
 
     def __call__(self, render_mode: Optional[str] = None, **kwargs):
         from marl_aquarium import aquarium_v0  # local import — optional dep
@@ -463,6 +542,7 @@ class _ScriptedAquariumFactory:
             predator_reward=float(cfg.get("predator_reward", 10)),
             apf_config=self.apf_config,
             reward_shape_alpha=self.reward_shape_alpha,
+            fov_shape_alpha=self.fov_shape_alpha,
         )
 
 
@@ -472,6 +552,8 @@ def register_scripted_aquarium(
     apf_config: Optional[AquariumAPFConfig] = None,
     *,
     reward_shape_alpha: float = 0.0,
+    fov_shape_alpha: float = 0.0,
+    wrappers: Sequence[Callable[[Any], Any]] = (),
     overwrite: bool = True,
 ) -> str:
     """Register a scripted-prey aquarium env in deap-bridge's env registry.
@@ -487,6 +569,8 @@ def register_scripted_aquarium(
             ``prey_observe_count``, ``max_time_steps``, etc.).
         apf_config: APF prey config.  Defaults to
             :class:`AquariumAPFConfig`'s default values.
+        wrappers: Optional ordered wrapper chain applied after the
+            scripted-opponent parallel env is built.
         overwrite: If a previous registration with the same name exists,
             replace it.  Default ``True`` so re-running the experiment
             script in the same Python process is a no-op.
@@ -497,6 +581,7 @@ def register_scripted_aquarium(
         env_config=env_config,
         apf_config=apf_config,
         reward_shape_alpha=reward_shape_alpha,
+        fov_shape_alpha=fov_shape_alpha,
     )
     if is_registered(env_name) and not overwrite:
         return env_name
@@ -511,6 +596,7 @@ def register_scripted_aquarium(
         ),
         tags={"aquarium", "scripted_opponent", "third_party"},
         api="parallel",
+        wrappers=tuple(wrappers),
         overwrite=True,
     )
     return env_name
