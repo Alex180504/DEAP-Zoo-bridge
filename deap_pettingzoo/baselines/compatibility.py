@@ -284,7 +284,7 @@ def check_compatibility(
             "Environment is a turn-based AEC game (api='aec_masked' or "
             "'aec_sequential'), but the algorithm's replay buffer / critic "
             "structure assumes simultaneous-step execution. Use EA, CMA-ES, "
-            "IPPO, or MAPPO for turn-based games."
+            "or IPPO for turn-based games."
         )
 
     # --- Warnings -----------------------------------------------------------

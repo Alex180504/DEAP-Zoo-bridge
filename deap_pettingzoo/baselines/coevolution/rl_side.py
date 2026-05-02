@@ -20,7 +20,7 @@ The crucial difference from EA / CMA / QDax sides:
   yet supported on RL sides — the trainer falls back to serial with a
   one-shot warning.
 
-On-policy algorithms (IPPO / MAPPO / GroupedIPPO) are intentionally
+On-policy algorithms (IPPO / GroupedIPPO) are intentionally
 gated off in this release; their rollout-buffer interface needs an
 opponent-aware adapter that is deferred to a follow-up. Users wanting
 on-policy in the meantime can train an IPPO agent with
@@ -54,7 +54,6 @@ SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "maddpg": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3":  ("agilerl.algorithms.matd3",  "MATD3",  False),
     "ippo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
-    "mappo":  ("agilerl.algorithms.ippo",   "IPPO",   True),
     "grouped_ippo": ("agilerl.algorithms.ippo", "IPPO", True),
     "ippo-grouped": ("agilerl.algorithms.ippo", "IPPO", True),
 }
@@ -94,7 +93,7 @@ class RLSideState(SideState):
 
     * ``algorithm`` (str, **required**) — one of
       ``"maddpg" | "matd3"``. On-policy algorithms (``"ippo"``,
-      ``"mappo"``, ``"grouped_ippo"``) are accepted by name for forward
+      ``"grouped_ippo"``) are accepted by name for forward
       compatibility but currently raise :class:`NotImplementedError`
       from :meth:`initialise`.
     * ``rollout_episodes_per_gen`` (int, default ``4``) — number of

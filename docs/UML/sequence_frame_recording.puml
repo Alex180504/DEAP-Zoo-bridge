@@ -53,11 +53,27 @@ note right of T
   one policy to all agents but per-side obs sizes differ.
 end note
 
-== AgileRL variant (one-shot end) ==
+== AgileRL variant (mid-training + final rollout) ==
 note right of T
-  AgileRLTrainer records exactly **one** rollout
-  after training completes (no per-generation cadence
-  because RL training is rollout-based, not generational).
+  AgileRLTrainer (MADDPG / MATD3 / IPPO /
+  GroupedIPPO) records:
+   • Mid-training champion rollouts at a configurable
+     env-step cadence:
+       - ``RecordingConfig.every_n_steps`` (explicit env steps)
+         takes precedence;
+       - else ``every_n_generations * params['learn_step']``
+         is used as the env-step cadence;
+       - both unset → no mid-training rollouts.
+   • Exactly **one** end-of-training rollout, always emitted
+     when ``recording.enabled`` is set, regardless of cadence.
+  The same ``AgileRLPolicyWrapper`` is built **before**
+  training and reused throughout — it holds a reference to
+  the live agent so weight updates are visible at each
+  recording call without rebuilding the wrapper.
+  The recorder reuses the **same** ``ExperimentLogger``
+  instance that writes ``metrics.csv`` / ``summary.json`` so
+  ``frames/`` and the metric artefacts share a single
+  ``run_dir``.
 end note
 
 == Cleanup ==

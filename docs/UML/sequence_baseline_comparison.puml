@@ -6,7 +6,7 @@ title Baseline Comparison Workflow (EA vs AgileRL)
 actor User
 participant "ComparisonRunner" as Runner
 participant "EATrainer" as EA
-participant "AgileRLTrainer\n(MADDPG/MATD3/IPPO/MAPPO)" as AgileRL
+participant "AgileRLTrainer\n(MADDPG/MATD3/IPPO)" as AgileRL
 participant "UnifiedEvaluator" as Evaluator
 database "Results" as Results
 
@@ -45,7 +45,7 @@ loop for each algorithm in config.algorithms
         EA --> Runner: TrainingResult(policy, metrics)
         deactivate EA
 
-    else algorithm in {'maddpg','matd3','ippo','mappo'}
+    else algorithm in {'maddpg','matd3','ippo'}
         Runner -> AgileRL: train(training_config)
         activate AgileRL
 
@@ -65,7 +65,7 @@ loop for each algorithm in config.algorithms
                     AgileRL -> AgileRL: agent.learn(memory.sample(batch_size))
                 end
             end
-        else on-policy (IPPO, MAPPO)
+        else on-policy (IPPO)
             loop for each rollout window
                 AgileRL -> AgileRL: collect_rollouts(agent, env, n_steps)
                 AgileRL -> AgileRL: agent.learn()
