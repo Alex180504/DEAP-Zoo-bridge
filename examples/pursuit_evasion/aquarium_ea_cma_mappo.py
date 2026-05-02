@@ -8,8 +8,8 @@ against a fixed scripted APF prey controller in the
   (mirrors ``examples/pursuit_evasion/ea_vs_apf.py``).
 * **CMA-ES**: covariance matrix adaptation via DEAP's ``cma.Strategy``
   (mirrors ``examples/pursuit_evasion/cmaes_vs_apf.py``).
-* **MAPPO**: AgileRL's centralised-critic IPPO/MAPPO baseline
-  (:class:`MAPPOTrainer`).
+* **MAPPO**: AgileRL's prefix-grouped IPPO baseline
+  (:class:`GroupedIPPOTrainer`).
 
 All three trainers see the *same* scripted-prey environment via
 :func:`register_scripted_aquarium`, share the same ENV_STEPS budget, and
@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # while still allowing rgb_array frame capture for mp4 recording.
 # Use setdefault so an explicit user-level env var is not overridden.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("SDL_VIDEODRIVER", "offscreen")
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 import numpy as np
@@ -83,6 +83,7 @@ if _REPO_ROOT not in sys.path:
 from examples.pursuit_evasion.aquarium.apf_policy import AquariumAPFConfig
 from examples.pursuit_evasion.aquarium.observation_features import (
     AquariumObservationFeatureWrapper,
+    LazyActionPenaltyWrapper,
     extract_prey_caught_total,
 )
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
@@ -97,8 +98,8 @@ from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
 
 # ---- Toggles --------------------------------------------------------------
 
-RUN_EA: bool = True
-RUN_CMAES: bool = True
+RUN_EA: bool = False
+RUN_CMAES: bool = False
 RUN_MAPPO: bool = True
 PROBE_ENV: bool = False        # short env smoke test then exit
 RUN_FINAL_ANALYSIS: bool = True
@@ -112,7 +113,7 @@ N_WORKERS: int = 0             # 0 = os.cpu_count(); 1 = sequential
 
 # ---- Shared budget --------------------------------------------------------
 
-# Equal env-steps budget across the three algorithms (Phase 2 of the plan).
+# Equal env-steps budget across the three algorithms
 TOTAL_ENV_STEPS: int = 2_000_000
 EVAL_EPISODES: int = 30
 
@@ -127,14 +128,6 @@ EVAL_EPISODES: int = 30
 #     to enable here.
 #   - render_mode=None is rejected; the wrapper maps it to "rgb_array".
 #
-# Prey are 20% faster than predators (10 vs 12). With equal max velocity
-# the APF prey flees directly away from the pursuer on a torus, so a
-# diagonal-drifting predator team locks the prey into the same heading
-# and catches them at the wrap boundary regardless of any actual steering
-# (champ_catches up to 11/400 steps in early runs). Mirrors the standard
-# MPE simple_tag asymmetry (prey 33% faster) — forces the optimiser to
-# discover cooperative cornering / interception instead of straight-line
-# herding.
 
 ENV_NAME: str = "aquarium_pursuit_evasion_v0"
 
@@ -143,13 +136,13 @@ ENV_CONFIG: Dict[str, Any] = {
     "prey_count": 10,
     "max_time_steps": 400,
     "predator_max_velocity": 12.0,
-    "prey_max_velocity": 14.0,
+    "prey_max_velocity": 13.0,
     "predator_max_acceleration": 0.8,
-    "prey_max_acceleration": 1.0,
+    "prey_max_acceleration": 0.8,
     "predator_max_steer_force": 2.5,
-    "prey_max_steer_force": 3.5,
-    "predator_view_distance": 1000,
-    "prey_view_distance": 1200,
+    "prey_max_steer_force": 2.5,
+    "predator_view_distance": 500,
+    "prey_view_distance": 600,
     "predator_observe_count": 5,
     "prey_observe_count": 5,
     # Limited predator FOV (120°) forces the policy to actively steer toward
@@ -160,16 +153,20 @@ ENV_CONFIG: Dict[str, Any] = {
     "prey_fov": 360,
     # Show FOV cones and steering vectors in recorded frames.
     "draw_view_cones": False,
-    "draw_action_vectors": False,
+    "draw_action_vectors": True,
     "action_count": 16,
-    "predator_reward": 20,
+    # Reduced from 200 to 20 to keep value-function regression stable: at
+    # 200 a single catch dwarfs the dense shaping signal by 4 orders of
+    # magnitude, so the MSE value loss fits "did a catch happen?" instead
+    # of state quality.  20 is still ~5x a typical episode's shaping mass.
+    "predator_reward": 100,
     "catch_radius": 50,
     # Disable respawn — prevents the "highway" effect where a catch spawns
     # new prey directly into a linear predator's path.  The episode runs
     # until all prey are caught or max_time_steps is reached.
     "keep_prey_count_constant": False,
-    "width": 4000,
-    "height": 4000,
+    "width": 2000,
+    "height": 2000,
 }
 
 APF_CONFIG = AquariumAPFConfig(
@@ -186,36 +183,91 @@ APF_CONFIG = AquariumAPFConfig(
 # (EA/CMA ran +28..+40 with no visible steering). alpha=0.1 cuts shaping
 # 10x while keeping a faint gradient signal so catches dominate fitness.
 REWARD_SHAPE_ALPHA: float = 0.03
-FOV_SHAPE_ALPHA: float = 0.0  # +0.01 per visible prey per step (3 prey * 400 steps * 0.01 = 12 max; catches still dominate)
+FOV_SHAPE_ALPHA: float = 0.01  # +0.01 per visible prey per step (3 prey * 400 steps * 0.01 = 12 max; catches still dominate)
+
+# ---- Lazy-action entropy penalty -----------------------------------------
+#
+# Punishes predators whose action distribution collapses (e.g. constant
+# heading drift).  Applied once at episode end as a terminal-step reward
+# delta keyed by per-agent *top-1 action frequency* (the share of steps
+# spent on the single most-used action).  Top-1 frequency is robust to
+# the artificial action diversity injected by the softmax sampling head
+# at low temperature, where a policy whose argmax never changes still
+# samples minority actions a few percent of the time and inflates
+# Shannon entropy enough to slip past any reasonable entropy threshold.
+# A genuine pursuit policy alternates headings and rarely sits above
+# ~40–50% top-1; a herding/drifting policy spends 60–100% of steps on
+# the same heading.  Penalty -50 is large vs typical sparse catch
+# rewards (~+20 each) but small enough that two real catches still net
+# positive fitness.  Set LAZY_PENALTY = 0.0 to disable.
+LAZY_PENALTY: float = -10.0
+LAZY_TOP1_THRESHOLD: float = 0.7
+LAZY_MIN_ACTIONS: int = 50
 
 # ---- EA config -----------------------------------------------------------
 
-EA_POPULATION_SIZE: int = 32
-EA_HIDDEN_SIZE: int = 8
-EA_EVAL_EPISODES_TRAIN: int = 5    # 10 eps → halves noise floor vs 5; ~46 gens at 3M budget
+EA_POPULATION_SIZE: int = 48
+EA_HIDDEN_SIZE: int = 16
+EA_EVAL_EPISODES_TRAIN: int = 5    
 EA_ELITE_SIZE: int = 3
-EA_MUT_SIGMA: float = 0.3           # increased from 0.1 — helps escape fitness plateaus
-EA_MUT_INDPB: float = 0.3           # increased from 0.2 — more genes perturbed per mutation
+EA_MUT_SIGMA: float = 0.2           # increased from 0.1 — helps escape fitness plateaus
+EA_MUT_INDPB: float = 0.3          # increased from 0.2 — more genes perturbed per mutation
 EA_CXPB: float = 0.7
+
+# ---- Oracle warm-start config (ported from simple_tag_ea_cma_mappo.py) ----
+# Without an oracle warm-start, gradient-free search at pop=32 cannot find
+# pursuit behaviour from random init in a ~640-weight network: the basin
+# of attraction is far too small.  Half the EA pop is seeded as small
+# perturbations of a hand-coded "chase one randomly chosen prey"
+# controller; CMA-ES' centroid is set to the same controller (un-
+# perturbed).  The aquarium oracle uses 4 hidden units (one per signed
+# axis half) so it produces correct heading logits in *all four
+# quadrants* of the prey-relative position — unlike the 2-hidden-unit
+# simple_tag oracle which loses x or y signal under ReLU when the prey
+# is in the -x and/or -y quadrant.
+ORACLE_FRACTION: float = 0.5      # fraction of EA pop seeded with oracle
+ORACLE_SEED_SIGMA: float = 0.05   # Gaussian noise added per oracle copy
+ORACLE_OUTPUT_GAIN: float = 4.0   # logit gain for cardinal-direction output
 
 # ---- CMA-ES config -------------------------------------------------------
 
-CMA_POPULATION_SIZE: int = 24
-CMA_HIDDEN_SIZE: int = 8             # matches EA; ~640 dims — within CMA-ES sweet spot for λ=24
-CMA_EVAL_EPISODES_TRAIN: int = 5
-CMA_SIGMA0: float = 0.3
+CMA_POPULATION_SIZE: int = 48
+CMA_HIDDEN_SIZE: int = 16   
+CMA_EVAL_EPISODES_TRAIN: int = 5  
+CMA_SIGMA0: float = 0.1
 
 # ---- MAPPO config (AgileRL) ----------------------------------------------
 
-MAPPO_LEARN_STEP: int = 10_240
-MAPPO_BATCH_SIZE: int = 1024
-MAPPO_LR: float = 3e-4
+# learn_step lowered from 10_240 to 2_048 (canonical PPO single-env value):
+# with num_envs=1 and a 400-step episode horizon, 10_240 contiguous steps
+# from one trajectory are extremely correlated and degrade SGD updates.
+# 2_048 = ~5 episodes per learn-call which is what AgileRL's IPPO default
+# assumes.
+MAPPO_LEARN_STEP: int = 2_048
+# batch_size lowered from 1024 to 256 (PPO canonical): with the new
+# learn_step=2048 this gives 8 minibatches × 4 update_epochs = 32 SGD steps
+# per rollout, restoring proper minibatch noise for the value-function
+# regression.
+MAPPO_BATCH_SIZE: int = 256
+MAPPO_LR: float = 3e-4  # canonical PPO LR; 1e-3 was collapsing the policy
+# gamma raised from 0.95 to 0.99 (AgileRL default): the catch reward must
+# propagate ~50–150 steps back to the steering decisions that set it up.
+# At 0.95 the effective horizon is only ~20 steps, so the catch signal is
+# discounted to nothing before it can shape early-episode actions.
 MAPPO_GAMMA: float = 0.99
 # Extra kwargs forwarded to AgileRL's ``IPPO.__init__`` (e.g.
 # ``{"net_config": {"encoder_config": {"hidden_size": [128, 128]}}}``).
 # Empty dict = use AgileRL's defaults.
 MAPPO_EXTRA: Dict[str, Any] = {
-    "ent_coef": 0.005,
+    # ent_coef=0.05 was overwhelming the policy gradient: with 16 actions,
+    # the entropy bonus over a 400-step / 5-predator episode is ~277 "reward"
+    # for staying near-uniform random — comparable to the entire catch signal.
+    # 0.01 is canonical PPO and lets the actor actually commit to headings.
+    "ent_coef": 0.01,
+    # Early-stop PPO update epochs once the policy has moved this far in KL
+    # space.  Standard PPO defensive measure; prevents catastrophic policy
+    # drift on the few rollouts where advantages happen to be skewed.
+    #"target_kl": 0.02,
     "net_config": {
         "encoder_config": {"hidden_size": [64, 64]},
         "head_config": {"hidden_size": [64]},
@@ -228,7 +280,7 @@ RECORD: bool = True
 RECORD_FPS: int = 20
 RECORD_FMT: str = "mp4"
 RECORD_EVERY_N_EA: int = 5          # EA/CMA generations
-RECORD_EVERY_N_MAPPO: int = 20      # MAPPO iterations
+RECORD_EVERY_N_MAPPO: int = 10      # MAPPO iterations
 RECORD_MAX_FRAMES: Optional[int] = None  # None = record full episode; set e.g. 150 to cap at 7.5 s
 RECORD_MAX_DIM: int = 960           # scale largest dimension to this (4000→960 avoids H.264 level limit)
 
@@ -335,7 +387,7 @@ class SoftmaxSamplingHead(ActionHead):
         return int(self.rng.choice(self.n, p=probs))
 
 
-SOFTMAX_TEMPERATURE: float = 0.1
+SOFTMAX_TEMPERATURE: float = 0.3
 """Softmax temperature for ``SoftmaxSamplingHead`` used during EA/CMA training.
 
 With weights initialised at ``\u00b11/\u221ain_size`` and ReLU activations of
@@ -369,8 +421,171 @@ def _learner_factory(genome: FixedTopologyGenome, agent_id: str, action_space):
     return FeedforwardNeuralPolicy(genome, head=head)
 
 
+# ---------------------------------------------------------------------------
+# Oracle warm-start (chase one prey, picked at random per individual)
+# ---------------------------------------------------------------------------
+
+# 4 hidden units encode the four signed half-axes of the prey-relative
+# direction: |dx|+, |dx|-, |dy|+, |dy|-.  ReLU passes only one of each
+# pair.  Output logits are then the dot product of the corresponding
+# action heading with the target prey direction, so the action whose
+# heading best aligns with the prey wins the softmax.
+_ORACLE_HIDDEN_UNITS: int = 4
+
+
+def _aquarium_action_headings(action_count: int) -> np.ndarray:
+    """Return the per-action heading vectors used by the env.
+
+    The aquarium env decodes a discrete action ``k`` to the 2-D unit
+    heading ``(sin(2π k / N), -cos(2π k / N))`` (see ``apf_policy.py``).
+    Returns an array of shape ``(action_count, 2)``.
+    """
+    thetas = 2.0 * np.pi * np.arange(int(action_count)) / float(action_count)
+    return np.stack([np.sin(thetas), -np.cos(thetas)], axis=1)
+
+
+def _build_oracle_weights(
+    layer_sizes: List[int],
+    *,
+    feature_offset_prey: int,
+    prey_observe_count: int,
+    action_count: int,
+    init_scale: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Build a flat weight vector encoding a single-prey-pursuit oracle.
+
+    The featurized predator observation packs each prey slot as
+    ``[present, dx, dy, distance, speed]`` (5 dims) starting at index
+    ``feature_offset_prey``.  The oracle picks one prey slot at random
+    per individual, wires the first 4 hidden units to encode the four
+    signed half-axes ``ReLU(±G·dx)`` / ``ReLU(±G·dy)`` of that prey, and
+    sets the output W2 so each of the ``action_count`` action logits is
+    the dot product of that action's heading with the target's direction.
+    The remaining hidden units stay as small noise so the EA/CMA can
+    grow specialised features without disrupting baseline pursuit.
+    """
+    if len(layer_sizes) != 3:
+        raise ValueError(
+            "oracle warm start currently supports a single hidden layer; "
+            f"got {layer_sizes}"
+        )
+    input_size, hidden_size, output_size = layer_sizes
+    if hidden_size < _ORACLE_HIDDEN_UNITS:
+        raise ValueError(
+            f"hidden_size must be >= {_ORACLE_HIDDEN_UNITS}, got {hidden_size}"
+        )
+    if output_size != int(action_count):
+        raise ValueError(
+            f"oracle expects output_size == action_count={action_count}, "
+            f"got {output_size}"
+        )
+    if prey_observe_count < 1:
+        raise ValueError(f"prey_observe_count must be >= 1, got {prey_observe_count}")
+
+    W1 = rng.uniform(-init_scale, init_scale, size=(hidden_size, input_size))
+    b1 = rng.uniform(-init_scale, init_scale, size=(hidden_size,))
+
+    base = int(feature_offset_prey) + 0 * 5  # pick the first prey slot (closest prey)
+    dx_idx = base + 1
+    dy_idx = base + 2
+    SATURATION_GAIN = 5.0
+
+    # Zero out the four oracle hidden rows, then wire each to one signed
+    # half-axis.  ReLU yields a positive activation only when that half-
+    # axis is active (e.g. h[0] fires iff dx > 0).
+    for h in range(_ORACLE_HIDDEN_UNITS):
+        W1[h, :] = 0.0
+        b1[h] = 0.0
+    W1[0, dx_idx] = +SATURATION_GAIN  # h[0] = ReLU(+G·dx)  -> "right"
+    W1[1, dx_idx] = -SATURATION_GAIN  # h[1] = ReLU(-G·dx)  -> "left"
+    W1[2, dy_idx] = +SATURATION_GAIN  # h[2] = ReLU(+G·dy)  -> "down"
+    W1[3, dy_idx] = -SATURATION_GAIN  # h[3] = ReLU(-G·dy)  -> "up"
+
+    W2 = rng.uniform(-init_scale, init_scale, size=(output_size, hidden_size))
+    b2 = rng.uniform(-init_scale, init_scale, size=(output_size,))
+
+    headings = _aquarium_action_headings(action_count)  # (N, 2)
+    # logit_k = GAIN * (sx_k * (h0 - h1) + sy_k * (h2 - h3))
+    for k in range(output_size):
+        sx, sy = float(headings[k, 0]), float(headings[k, 1])
+        W2[k, 0] = +ORACLE_OUTPUT_GAIN * sx
+        W2[k, 1] = -ORACLE_OUTPUT_GAIN * sx
+        W2[k, 2] = +ORACLE_OUTPUT_GAIN * sy
+        W2[k, 3] = -ORACLE_OUTPUT_GAIN * sy
+    b2[:] = 0.0
+
+    return np.concatenate([W1.ravel(), b1, W2.ravel(), b2])
+
+
+def _make_oracle_seeded_population(
+    toolbox,
+    *,
+    population_size: int,
+    oracle_fraction: float,
+    layer_sizes: List[int],
+    feature_offset_prey: int,
+    prey_observe_count: int,
+    action_count: int,
+    init_scale: float,
+    seed_sigma: float,
+    rng: np.random.Generator,
+) -> List[Any]:
+    """Build a population mixing oracle-seeded and random individuals.
+
+    The first ``round(population_size * oracle_fraction)`` individuals are
+    *perturbed* copies of the oracle weights (oracle + N(0, seed_sigma));
+    the remainder are random per ``toolbox.individual``.  Each oracle
+    copy independently picks a target prey slot, so several copies chase
+    each prey, naturally giving team coverage.
+    """
+    population = toolbox.population(n=population_size)
+    n_oracle = int(round(population_size * oracle_fraction))
+    if n_oracle <= 0:
+        return population
+    for i in range(n_oracle):
+        oracle = _build_oracle_weights(
+            layer_sizes,
+            feature_offset_prey=feature_offset_prey,
+            prey_observe_count=prey_observe_count,
+            action_count=action_count,
+            init_scale=init_scale,
+            rng=rng,
+        )
+        perturbed = oracle + rng.normal(0.0, seed_sigma, size=oracle.size)
+        population[i].genome.set_weights(perturbed.astype(np.float64))
+        if hasattr(population[i], "fitness") and population[i].fitness.valid:
+            del population[i].fitness.values
+    return population
+
+
+def _make_champion_policy(genome: FixedTopologyGenome, out_size: int, seed: int):
+    """Build a champion-rollout policy that *matches the training head*.
+
+    Training uses :class:`SoftmaxSamplingHead` (T=SOFTMAX_TEMPERATURE,
+    stochastic).  Recording with the default :class:`DiscreteHead`
+    (argmax) at small init weights produces near-constant action and
+    gives the false impression that learned policies do nothing.  Use
+    the same head for fair playback.
+    """
+    return FeedforwardNeuralPolicy(
+        genome,
+        head=SoftmaxSamplingHead(
+            n=out_size,
+            temperature=SOFTMAX_TEMPERATURE,
+            rng=np.random.default_rng(seed),
+        ),
+    )
+
+
 def _run_policy_episode(policy, seed: int) -> Tuple[float, int]:
-    """Roll one predator-team episode and return ``(team_reward, catches)``."""
+    """Roll one predator-team episode and return ``(team_reward, catches)``.
+
+    The lazy-action entropy penalty is *not* applied here — it lives in
+    :class:`LazyActionPenaltyWrapper` so it reaches the worker training
+    path automatically.  This helper just sums whatever rewards the env
+    emits.
+    """
     env = build_env(ENV_NAME)
     try:
         if hasattr(policy, "reset"):
@@ -436,7 +651,12 @@ def _record_champion_rollout(
     try:
         learner_id = env.possible_agents[0]
         act_space = env.action_space(learner_id)
-        policy = FeedforwardNeuralPolicy(best_genome, action_space=act_space)
+        # Use the same head as training (SoftmaxSamplingHead at
+        # SOFTMAX_TEMPERATURE).  Recording with DiscreteHead (argmax)
+        # gives a constant action at small init weights and makes
+        # learned policies look idle in playback.
+        out_size = int(act_space.n) if hasattr(act_space, "n") else int(act_space.shape[0])
+        policy = _make_champion_policy(best_genome, out_size=out_size, seed=seed)
 
         obs, _ = env.reset(seed=seed)
         recorder.start_episode(episode_idx)
@@ -581,7 +801,33 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
     print(f"  budget→ gens={n_gens}  pop={EA_POPULATION_SIZE}  workers={n_workers}")
 
     rng = np.random.default_rng(seed)
-    population = toolbox.population(n=EA_POPULATION_SIZE)
+    # Oracle warm-start: half the initial population starts as small
+    # perturbations of a hand-coded "chase one randomly chosen prey"
+    # controller so EA actually has pursuit behaviour in the gene pool
+    # from gen 0.  Without this the search budget is far too small to
+    # discover pursuit from random init in a ~640-weight network.
+    pred_obs_n = int(ENV_CONFIG.get("predator_observe_count", 5))
+    prey_obs_n = int(ENV_CONFIG.get("prey_observe_count", 5))
+    action_n = int(ENV_CONFIG.get("action_count", 16))
+    feature_offset_prey = 3 + 5 * pred_obs_n  # see featurize_aquarium_observation
+    if EA_HIDDEN_SIZE >= _ORACLE_HIDDEN_UNITS and out_size == action_n:
+        population = _make_oracle_seeded_population(
+            toolbox,
+            population_size=EA_POPULATION_SIZE,
+            oracle_fraction=ORACLE_FRACTION,
+            layer_sizes=_ea_layers,
+            feature_offset_prey=feature_offset_prey,
+            prey_observe_count=prey_obs_n,
+            action_count=action_n,
+            init_scale=init_scale,
+            seed_sigma=ORACLE_SEED_SIGMA,
+            rng=rng,
+        )
+        n_oracle = int(round(EA_POPULATION_SIZE * ORACLE_FRACTION))
+        print(f"  oracle warm-start: {n_oracle}/{EA_POPULATION_SIZE} individuals")
+    else:
+        print(f"  oracle warm-start skipped (hidden={EA_HIDDEN_SIZE}, out={out_size}, N={action_n})")
+        population = toolbox.population(n=EA_POPULATION_SIZE)
     hof = tools.HallOfFame(1)
 
     stats = tools.Statistics(lambda ind: ind.fitness.values)
@@ -668,10 +914,14 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
         # genome's actual capability, not the stochastic head's sampling
         # noise.  Training fitness still uses SoftmaxSamplingHead for the
         # smooth landscape (see _learner_factory).
-        _, champ_catches = _run_policy_episode(
-            FeedforwardNeuralPolicy(hof[0].genome, head=DiscreteHead(out_size)),
-            seed=seed * 10_000 + 0,
-        )
+        _champ_catches_list = []
+        for _probe_i in range(3):
+            _, c = _run_policy_episode(
+                FeedforwardNeuralPolicy(hof[0].genome, head=DiscreteHead(out_size)),
+                seed=seed * 10_000 + 0 + _probe_i, 
+            )
+            _champ_catches_list.append(c)
+        champ_catches = float(np.mean(_champ_catches_list))
         logger.row("metrics", {
             "iteration": 0,
             "env_steps": EA_POPULATION_SIZE * EA_EVAL_EPISODES_TRAIN
@@ -803,10 +1053,35 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
         "output_activation": "linear",
         "weight_range": (-float(np.sqrt(1.0 / max(in_size, 1))), float(np.sqrt(1.0 / max(in_size, 1)))),
     }
+    # Oracle centroid warm-start (mirrors the EA path).  CMA-ES from a
+    # zero-mean centroid in ~640 dimensions has effectively zero chance
+    # of finding pursuit in our budget; seeding the centroid with a
+    # single chase-one-prey oracle gives the strategy a sane starting
+    # basin to refine.
+    pred_obs_n = int(ENV_CONFIG.get("predator_observe_count", 5))
+    prey_obs_n = int(ENV_CONFIG.get("prey_observe_count", 5))
+    action_n = int(ENV_CONFIG.get("action_count", 16))
+    feature_offset_prey = 3 + 5 * pred_obs_n
+    init_scale_cma = float(np.sqrt(1.0 / max(in_size, 1)))
+    cma_centroid = None
+    if CMA_HIDDEN_SIZE >= _ORACLE_HIDDEN_UNITS and out_size == action_n:
+        try:
+            cma_centroid = _build_oracle_weights(
+                _cma_layers,
+                feature_offset_prey=feature_offset_prey,
+                prey_observe_count=prey_obs_n,
+                action_count=action_n,
+                init_scale=init_scale_cma,
+                rng=np.random.default_rng(seed),
+            )
+            print(f"  oracle centroid warm-start enabled (chase prey slot, action_count={action_n})")
+        except Exception as exc:  # pragma: no cover - diagnostic fallback
+            print(f"  oracle centroid unavailable: {exc!r}; using zero centroid")
     strategy, dimension = setup_cma_strategy(
         genome_config=genome_config,
         sigma0=CMA_SIGMA0,
         population_size=CMA_POPULATION_SIZE,
+        centroid=cma_centroid,
     )
     ind_init = make_cma_ind_init(genome_config)
     toolbox = register_cma_toolbox(strategy, ind_init, evaluator)
@@ -941,15 +1216,31 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
 def run_mappo(seed: int, run_dir: Path) -> Dict[str, Any]:
     _section(f"MAPPO | seed={seed}")
     # Lazy import — AgileRL pulls in torch.
-    from deap_pettingzoo.baselines.agilerl_trainer import MAPPOTrainer
+    # Use GroupedIPPOTrainer: shares one actor+critic across the homogeneous
+    # predator_* team (~5x sample efficiency vs per-agent IPPO/MAPPO).
+    from deap_pettingzoo.baselines.agilerl_trainer import GroupedIPPOTrainer
     from deap_pettingzoo.baselines.base import (
         BudgetMode,
         RecordingConfig,
         TrainingConfig,
     )
+    
+    register_scripted_aquarium(
+    ENV_NAME + "_mappo",   # different name → different registration
+    ENV_CONFIG,
+    apf_config=APF_CONFIG,
+    reward_shape_alpha=REWARD_SHAPE_ALPHA,
+    fov_shape_alpha=FOV_SHAPE_ALPHA,
+    wrappers=(AquariumObservationFeatureWrapper,),  # no lazy penalty
+    overwrite=True,
+    )
+    
+    from deap_pettingzoo.environments.registry import get_env_spec
+    spec = get_env_spec(ENV_NAME + "_mappo")
+    print(f"  MAPPO env wrappers: {[w.__name__ if hasattr(w,'__name__') else w for w in spec.wrappers]}")
 
     cfg = TrainingConfig(
-        env_name=ENV_NAME,
+        env_name=ENV_NAME + "_mappo",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=TOTAL_ENV_STEPS,
         num_seeds=1,
@@ -971,7 +1262,13 @@ def run_mappo(seed: int, run_dir: Path) -> Dict[str, Any]:
             episode_prefix="mappo_",
         ),
     )
-    trainer = MAPPOTrainer(device=DEVICE)
+    # Diagnostic: confirm whether AgileRL's IPPO accepts shared_critic in this version.
+    import inspect
+    from agilerl.algorithms.ippo import IPPO as _IPPO
+    _sig = inspect.signature(_IPPO.__init__)
+    print(f"  IPPO accepts shared_critic kwarg: {'shared_critic' in _sig.parameters}")
+
+    trainer = GroupedIPPOTrainer(device=DEVICE)
     t0 = time.time()
     result = trainer.train(cfg)
     train_time = time.time() - t0
@@ -1101,13 +1398,30 @@ def _final_analysis(root: Path) -> None:
 # to re-register.  ``overwrite=True`` makes re-running the script in
 # the same Python process safe.
 
+def _lazy_penalty_wrapper(inner):
+    """Factory that wires module-level config into ``LazyActionPenaltyWrapper``.
+
+    Defined at module scope (not a lambda) so it pickles cleanly into
+    the parallel worker processes used by EA/CMA.
+    """
+    return LazyActionPenaltyWrapper(
+        inner,
+        top1_threshold=LAZY_TOP1_THRESHOLD,
+        penalty=LAZY_PENALTY,
+        min_actions=LAZY_MIN_ACTIONS,
+        horizon=int(ENV_CONFIG["max_time_steps"]),
+    )
+
+
 register_scripted_aquarium(
     ENV_NAME,
     ENV_CONFIG,
     apf_config=APF_CONFIG,
     reward_shape_alpha=REWARD_SHAPE_ALPHA,
     fov_shape_alpha=FOV_SHAPE_ALPHA,
-    wrappers=(AquariumObservationFeatureWrapper,),
+    # Order matters: feature wrapper first (transforms obs/space),
+    # lazy-action penalty second (only touches rewards/infos).
+    wrappers=(AquariumObservationFeatureWrapper, _lazy_penalty_wrapper),
     overwrite=True,
 )
 

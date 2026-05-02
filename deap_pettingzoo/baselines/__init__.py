@@ -9,7 +9,6 @@ Supported algorithms:
 - MATD3  (Multi-Agent Twin-Delayed DDPG via AgileRL)
 - IPPO   (Independent PPO via AgileRL)
 - IPPO-Grouped (IPPO with AgileRL prefix-based agent grouping)
-- MAPPO  (Multi-Agent PPO via AgileRL)
 """
 
 from deap_pettingzoo.baselines.base import (
@@ -31,7 +30,6 @@ from deap_pettingzoo.baselines.agilerl_trainer import (
     MADDPGTrainer,
     MATD3Trainer,
     IPPOTrainer,
-    MAPPOTrainer,
     GroupedIPPOTrainer,
 )
 from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
@@ -84,7 +82,6 @@ __all__ = [
     "MADDPGTrainer",
     "MATD3Trainer",
     "IPPOTrainer",
-    "MAPPOTrainer",
     "GroupedIPPOTrainer",
     "AgileRLPolicyWrapper",
     "UnifiedEvaluator",

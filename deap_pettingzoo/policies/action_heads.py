@@ -215,7 +215,7 @@ def required_output_size(action_space: Any) -> int:
         raise NotImplementedError(
             "MultiDiscrete action spaces are not supported by "
             "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
-            "(MADDPG / MATD3 / IPPO / MAPPO) for envs with communication "
+            "(MADDPG / MATD3 / IPPO) for envs with communication "
             "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
         )
     if hasattr(action_space, "shape") and hasattr(action_space, "low"):
@@ -271,7 +271,7 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
         raise NotImplementedError(
             "MultiDiscrete action spaces are not supported by "
             "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
-            "(MADDPG / MATD3 / IPPO / MAPPO) for envs with communication "
+            "(MADDPG / MATD3 / IPPO) for envs with communication "
             "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
         )
     if hasattr(action_space, "low") and hasattr(action_space, "high") and hasattr(

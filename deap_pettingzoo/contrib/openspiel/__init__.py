@@ -19,7 +19,7 @@ Small-action-space games (``tic_tac_toe``, ``connect_four``,
 ``kuhn_poker``, ``matrix_rps``, ``matrix_pd``) are a good fit for
 :class:`FeedforwardNeuralPolicy` + EA / CMA-ES. Large-action games
 like ``chess`` or ``go`` produce huge output layers and are better
-driven by the AgileRL trainers (IPPO / MAPPO).
+driven by the AgileRL trainers (IPPO).
 
 .. _Farama Shimmy: https://shimmy.farama.org/
 """

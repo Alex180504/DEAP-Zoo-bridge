@@ -94,3 +94,29 @@ class TestIPPOLive:
         assert result.algorithm == "ippo"
         assert isinstance(result.policy, AgileRLPolicyWrapper)
         assert result.metadata["on_policy"] is True
+
+    def test_trains_with_vectorized_envs(self):
+        """Smoke test that IPPO runs end-to-end with ``num_envs > 1``.
+
+        Validates the AsyncPettingZooVecEnv plumbing in
+        :func:`agilerl_adapter.build_vec_parallel_env` and the
+        vectorized rollout branch in
+        :meth:`AgileRLTrainer._run_on_policy`.
+        """
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=256,
+            algorithm_params={
+                "seed": 0,
+                "learn_step": 64,
+                "num_envs": 2,
+            },
+        )
+        result = IPPOTrainer().train(config)
+        assert result.algorithm == "ippo"
+        assert isinstance(result.policy, AgileRLPolicyWrapper)
+        assert result.metrics["env_steps"] >= 256
+        # Per-sub-env episode tracking should produce at least one entry
+        # in a 256-step run with 25-step MPE episodes across 2 envs.
+        assert result.metrics["num_episodes"] >= 1

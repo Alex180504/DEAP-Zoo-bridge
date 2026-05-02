@@ -395,9 +395,11 @@ package "deap_pettingzoo.baselines" {
     class RecordingConfig <<dataclass>> {
         + enabled: bool
         + every_n_generations: Optional[int]
+        + every_n_steps: Optional[int]
         + fps: int
         + fmt: str
         + max_frames_per_episode: Optional[int]
+        + max_dim: Optional[int]
         + episode_prefix: str
     }
 
@@ -515,10 +517,6 @@ package "deap_pettingzoo.baselines" {
         # ALGORITHM_NAME = "ippo"
         # ON_POLICY = True
     }
-    class MAPPOTrainer {
-        # ALGORITHM_NAME = "mappo"
-        # ON_POLICY = True
-    }
     class GroupedIPPOTrainer {
         # ALGORITHM_NAME = "ippo-grouped"
         # ON_POLICY = True
@@ -567,7 +565,6 @@ package "deap_pettingzoo.baselines" {
     AgileRLTrainer <|-- MADDPGTrainer
     AgileRLTrainer <|-- MATD3Trainer
     AgileRLTrainer <|-- IPPOTrainer
-    IPPOTrainer <|-- MAPPOTrainer
     IPPOTrainer <|-- GroupedIPPOTrainer
     BaselineEvaluator <|-- UnifiedEvaluator
 
