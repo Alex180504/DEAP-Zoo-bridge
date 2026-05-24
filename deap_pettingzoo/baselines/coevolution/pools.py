@@ -670,12 +670,11 @@ class RLPolicyPool(_BasePool):
     of size 1: every :meth:`sample_opponent` call returns the same
     cached policy object (the RL side updates it once per generation).
 
-    The pool stays serial-only in the current implementation —
-    :meth:`snapshot_opponents` raises because ``AgileRLPolicyWrapper``
-    holds live torch state that does not survive ``spawn``-pickle.
-    Co-evolution runs that include an RL side fall back to serial
-    evaluation on the EA side; see :class:`CoEvolutionConfig` docstring
-    for the runtime warning emitted in that case.
+    :meth:`snapshot_opponents` produces picklable
+    :class:`FrozenRLPolicyWrapper` snapshots via
+    :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+    so EA/CMA learner sides can evaluate against this pool in parallel
+    worker processes.
     """
 
     def __init__(self, policy: PolicyProtocol) -> None:
@@ -709,13 +708,50 @@ class RLPolicyPool(_BasePool):
     def snapshot_opponents(
         self, rng: np.random.Generator, k: int
     ) -> List[OpponentSnapshot]:
-        raise NotImplementedError(
-            "RLPolicyPool.snapshot_opponents: parallel co-evolution with an "
-            "RL side is not yet supported because AgileRLPolicyWrapper "
-            "holds live torch state that does not pickle across spawn. "
-            "Set CoEvolutionConfig.num_workers=1 (or rely on the EA-side "
-            "fallback warning) when an RL side is in play."
-        )
+        """Return *k* picklable snapshots of the current RL policy.
+
+        When the wrapped policy is an
+        :class:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper`,
+        :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+        is called once and *k* references to the same
+        :class:`~deap_pettingzoo.baselines.agilerl_policy.FrozenRLPolicyWrapper`
+        are returned (one per parallel episode).  Workers receive a
+        pickled copy of the snapshot, so they do not share mutable state.
+
+        For non-AgileRL policies already stored in this pool (e.g.
+        pre-trained frozen wrappers), the policy is shipped directly via
+        the existing ``kind="frozen"`` path.  If
+        :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+        raises, a ``RuntimeWarning`` is emitted and the live wrapper is
+        shipped directly (which will fail at pickle time for CUDA agents
+        — the warning advises serial fallback).
+        """
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
+        from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+
+        if isinstance(self._policy, AgileRLPolicyWrapper):
+            import warnings
+            try:
+                frozen = self._policy.make_frozen_cpu_snapshot()
+            except Exception as exc:
+                warnings.warn(
+                    f"RLPolicyPool.snapshot_opponents: "
+                    f"make_frozen_cpu_snapshot failed ({exc}); "
+                    "falling back to live policy reference — workers may "
+                    "fail to pickle this. Use serial evaluation "
+                    "(num_workers=1) to avoid this.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                frozen = self._policy  # type: ignore[assignment]
+        else:
+            frozen = self._policy  # type: ignore[assignment]
+
+        return [
+            OpponentSnapshot(kind="frozen", payload={"policy": frozen})
+            for _ in range(k)
+        ]
 
     def snapshot_sync(self) -> "RLPolicyPool":
         """Return a frozen copy of this pool for the synchronous schedule.
