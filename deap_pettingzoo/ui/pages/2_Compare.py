@@ -34,6 +34,149 @@ def _cached_experiment(run_dir_strs: tuple[str, ...]):
     return load_experiment_cached([Path(p) for p in run_dir_strs])
 
 
+def _pairwise_display_table(tbl):
+    """Render pairwise comparisons as x/y rows under one algorithm column."""
+    if getattr(tbl, "empty", True):
+        return tbl
+    required = {"algo_x", "algo_y", "n_x", "n_y"}
+    if not required.issubset(set(tbl.columns)):
+        return tbl
+
+    import pandas as pd
+
+    rows = []
+    for pair in tbl.to_dict("records"):
+        shared = {
+            key: value
+            for key, value in pair.items()
+            if key not in {"algo_x", "algo_y", "n_x", "n_y"}
+        }
+        rows.append(
+            {
+                "algo": pair["algo_x"],
+                "n": pair["n_x"],
+                **shared,
+            }
+        )
+        rows.append(
+            {
+                "algo": pair["algo_y"],
+                "n": pair["n_y"],
+                **shared,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+_COMPARE_GROUP_OPTIONS = {
+    "Aggregate by algorithm": "algorithm",
+    "Aggregate by parent folder": "folder",
+    "Aggregate by display name": "display_name",
+    "Individual runs": "run",
+}
+
+
+def _display_name(run) -> str | None:
+    label = str(run.manifest.get("display_name") or "").strip()
+    return label or None
+
+
+def _run_label(run) -> str:
+    label = _display_name(run) or run.run_id
+    if run.seed is not None and f"seed={run.seed}" not in label:
+        return f"{label} (seed={run.seed})"
+    return label
+
+
+def _parent_group_label(run, root: Path) -> str:
+    parent = Path(run.run_dir).resolve().parent
+    try:
+        label = parent.relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        label = parent.name
+    if not label or label == ".":
+        label = parent.name or run.algorithm
+    return label
+
+
+def _compare_group_label(run, group_mode: str, root: Path) -> str:
+    if group_mode == "run":
+        return _run_label(run)
+    if group_mode == "display_name":
+        return _display_name(run) or _parent_group_label(run, root)
+    if group_mode == "folder":
+        return _parent_group_label(run, root)
+    return run.algorithm
+
+
+def _default_compare_group_mode(experiment) -> str:
+    if len(experiment.by_algorithm()) > 1:
+        return "algorithm"
+    display_labels = {
+        _display_name(run) for run in experiment if _display_name(run) is not None
+    }
+    if len(display_labels) > 1:
+        return "display_name"
+    folder_labels = {_parent_group_label(run, experiment.root) for run in experiment}
+    if len(folder_labels) > 1:
+        return "folder"
+    return "algorithm"
+
+
+def _build_compare_experiment(experiment, group_mode: str):
+    if group_mode == "algorithm":
+        return experiment
+
+    from dataclasses import replace as _dc_replace
+    from deap_pettingzoo.analysis.loaders import Experiment as _Exp
+
+    proxy_runs = []
+    for run in experiment:
+        label = _compare_group_label(run, group_mode, experiment.root)
+        proxy_runs.append(
+            _dc_replace(run, manifest={**run.manifest, "algorithm": label})
+        )
+    return _Exp(root=experiment.root, runs=proxy_runs)
+
+
+def _grouped_summary_table(experiment, group_mode: str):
+    raw = experiment.summary_table()
+    if getattr(raw, "empty", True):
+        return raw
+
+    raw = raw.copy()
+    raw.insert(
+        0,
+        "group",
+        [
+            _compare_group_label(run, group_mode, experiment.root)
+            for run in experiment
+        ],
+    )
+    if group_mode == "run":
+        return raw
+
+    import pandas as pd
+
+    rows = []
+    for group_label in raw["group"].drop_duplicates().tolist():
+        subset = raw[raw["group"] == group_label]
+        row = {
+            "group": group_label,
+            "n_runs": int(len(subset)),
+            "algorithm": ", ".join(sorted(set(subset["algorithm"].astype(str)))),
+            "env_name": ", ".join(sorted(set(subset["env_name"].astype(str)))),
+        }
+        for column in subset.columns:
+            if column in {"group", "run_id", "algorithm", "env_name"}:
+                continue
+            values = pd.to_numeric(subset[column], errors="coerce").dropna()
+            if not values.empty:
+                row[column] = float(values.mean())
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # Resolve selected run_ids → run_dirs by re-discovering (cheap, cached above).
 from deap_pettingzoo.ui.services.data import discover_runs
 
@@ -112,7 +255,32 @@ with st.sidebar:
     state.n_resamples = st.number_input(
         "Bootstrap resamples", 200, 20000, int(state.n_resamples), step=200
     )
+    _default_group_label = next(
+        label
+        for label, value in _COMPARE_GROUP_OPTIONS.items()
+        if value == _default_compare_group_mode(experiment)
+    )
+    compare_group_label = st.selectbox(
+        "Compare selected runs as",
+        list(_COMPARE_GROUP_OPTIONS.keys()),
+        index=list(_COMPARE_GROUP_OPTIONS.keys()).index(_default_group_label),
+        key="compare_group_mode_label",
+    )
+    st.caption(
+        "Use Browse > Rename to give multiple seed runs the same display name "
+        "and compare them as one experiment."
+    )
 state.persist()
+
+compare_group_mode = _COMPARE_GROUP_OPTIONS[compare_group_label]
+compare_experiment = _build_compare_experiment(experiment, compare_group_mode)
+compare_groups = compare_experiment.by_algorithm()
+compare_group_desc = {
+    "algorithm": "algorithm",
+    "folder": "parent folder",
+    "display_name": "display name",
+    "run": "run",
+}[compare_group_mode]
 
 # Learning curves
 _envs_in_selection = list(experiment.by_env().keys())
@@ -127,57 +295,35 @@ else:
     )
     tab_multitask = None
 
-# When all selected runs share the same algorithm, group by run_id so the
-# user can compare individual runs rather than seeing a single aggregate.
-_algo_groups = experiment.by_algorithm()
-_same_algorithm_mode = len(_algo_groups) == 1
-
 with tab_curves:
     st.subheader(f"{state.statistic.upper()} of `{state.metric}` vs `{x_col}`")
+    st.caption(f"Grouped by {compare_group_desc}.")
     try:
         import plotly.graph_objects as go
-
-        if _same_algorithm_mode:
-            # Individual-run curves — one line per run, no CI band.
-            fig = go.Figure()
-            any_data = False
+        fig = go.Figure()
+        any_data = False
+        if compare_group_mode == "run":
             for run in experiment:
                 if run.metrics is None:
                     continue
                 cols = set(run.metrics.columns)
                 if x_col not in cols or state.metric not in cols:
                     continue
-                df_r = (
-                    run.metrics[[x_col, state.metric]]
-                    .dropna()
-                    .sort_values(x_col)
-                )
+                df_r = run.metrics[[x_col, state.metric]].dropna().sort_values(x_col)
                 if df_r.empty:
                     continue
-                label = run.run_id
-                if run.seed is not None:
-                    label = f"{run.run_id} (seed={run.seed})"
                 fig.add_trace(
                     go.Scatter(
                         x=df_r[x_col],
                         y=df_r[state.metric],
-                        name=label,
+                        name=_compare_group_label(run, "run", experiment.root),
                         mode="lines",
                     )
                 )
                 any_data = True
-            if any_data:
-                fig.update_layout(
-                    xaxis_title=x_col,
-                    yaxis_title=state.metric,
-                    height=400,
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.caption(f"No usable data for `{state.metric}`.")
         else:
-            # Multi-algorithm mode: one CI-band curve per algorithm.
-            for algo, runs in _algo_groups.items():
+            y_col_stat = "iqm" if state.statistic == "iqm" else "mean"
+            for group_label, runs in compare_groups.items():
                 if not runs:
                     continue
                 df = learning_curve_with_ci(
@@ -189,14 +335,12 @@ with tab_curves:
                     ci=float(state.ci_level),
                 )
                 if df is None or df.empty:
-                    st.caption(f"{algo}: no usable data for `{state.metric}`.")
                     continue
-                y_col_stat = "iqm" if state.statistic == "iqm" else "mean"
-                fig = go.Figure()
                 fig.add_trace(
                     go.Scatter(
-                        x=df[x_col], y=df[y_col_stat],
-                        name=f"{algo} ({y_col_stat})",
+                        x=df[x_col],
+                        y=df[y_col_stat],
+                        name=f"{group_label} ({y_col_stat})",
                         mode="lines",
                     )
                 )
@@ -204,16 +348,23 @@ with tab_curves:
                     go.Scatter(
                         x=list(df[x_col]) + list(df[x_col][::-1]),
                         y=list(df["hi"]) + list(df["lo"][::-1]),
-                        fill="toself", showlegend=False, opacity=0.2,
-                        name=f"{algo} CI",
+                        fill="toself",
+                        showlegend=False,
+                        opacity=0.2,
+                        name=f"{group_label} CI",
                         line={"width": 0},
                     )
                 )
-                fig.update_layout(
-                    xaxis_title=x_col, yaxis_title=state.metric,
-                    height=400,
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                any_data = True
+        if any_data:
+            fig.update_layout(
+                xaxis_title=x_col,
+                yaxis_title=state.metric,
+                height=400,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption(f"No usable data for `{state.metric}`.")
     except ImportError:
         st.info("Install `plotly` for interactive charts.")
     except Exception as exc:  # surface library errors but don't crash the page
@@ -222,38 +373,21 @@ with tab_curves:
 with tab_pairwise:
     st.subheader("Pairwise tests on final-fitness")
     try:
-        if _same_algorithm_mode:
-            # Compare runs individually by run_id when all belong to the
-            # same algorithm — build a synthetic Experiment that uses
-            # run_id as the algorithm discriminator.
-            from dataclasses import replace as _dc_replace
-            from deap_pettingzoo.analysis.loaders import Experiment as _Exp
-
-            _proxy_runs = []
-            for _r in experiment:
-                _label = _r.run_id
-                if _r.seed is not None:
-                    _label = f"{_r.run_id} (seed={_r.seed})"
-                _proxy_runs.append(
-                    _dc_replace(_r, manifest={**_r.manifest, "algorithm": _label})
-                )
-            _proxy_exp = _Exp(root=experiment.root, runs=_proxy_runs)
-            if len(_proxy_runs) < 2:
-                st.info("Select at least two runs to enable pairwise tests.")
-            else:
-                tbl = pairwise_table(
-                    _proxy_exp,
-                    metric="final_fitness",
-                    test=state.pairwise_test,
-                )
-                st.dataframe(tbl, use_container_width=True)
+        if len(compare_groups) < 2:
+            st.info(
+                "Select runs spanning at least two comparison groups, or "
+                "switch the grouping mode to `Individual runs`."
+            )
         else:
             tbl = pairwise_table(
-                experiment,
+                compare_experiment,
                 metric="final_fitness",
                 test=state.pairwise_test,
             )
-            st.dataframe(tbl, use_container_width=True)
+            st.dataframe(
+                _pairwise_display_table(tbl),
+                use_container_width=True,
+            )
     except Exception as exc:
         st.error(f"Pairwise table failed: {exc}")
 
@@ -265,7 +399,7 @@ if tab_multitask is not None:
             f"{len(_envs_in_selection)} environments: "
             + ", ".join(f"`{e}`" for e in _envs_in_selection)
         )
-        algos_in_selection = sorted(experiment.by_algorithm().keys())
+        algos_in_selection = sorted(compare_groups.keys())
         norm_mode = st.radio(
             "Normalisation",
             ["auto min-max", "reference algorithm", "off"],
@@ -289,7 +423,7 @@ if tab_multitask is not None:
             from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
 
             matrices, env_names = collect_score_matrices(
-                experiment, metric="final_fitness"
+                compare_experiment, metric="final_fitness"
             )
             if not matrices or len(env_names) < 2:
                 st.info("No multi-task scores available across the selection.")
@@ -339,6 +473,12 @@ if tab_multitask is not None:
 
 with tab_summary:
     try:
-        st.dataframe(experiment.summary_table(), use_container_width=True)
+        st.dataframe(
+            _grouped_summary_table(experiment, compare_group_mode),
+            use_container_width=True,
+        )
+        if compare_group_mode != "run":
+            with st.expander("Raw runs", expanded=False):
+                st.dataframe(experiment.summary_table(), use_container_width=True)
     except Exception as exc:
         st.error(f"Summary table failed: {exc}")
