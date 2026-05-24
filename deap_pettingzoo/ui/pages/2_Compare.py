@@ -223,7 +223,28 @@ _default_y = next(
     (c for c in _preferred_y if c in _seen_y),
     _y_candidates[0] if _y_candidates else "mean",
 )
-_preferred_x = ["env_steps", "iteration", "wall_time"]
+
+# Prefer 'iteration' over 'env_steps' for coevolution runs where env_steps
+# is degenerate (always 0 because coevolution logging doesn't track it).
+_env_steps_degenerate = (
+    "env_steps" in _seen_x
+    and all(
+        r.metrics is not None
+        and "env_steps" in r.metrics.columns
+        and (r.metrics["env_steps"] == 0).all()
+        for r in experiment
+        if r.metrics is not None and "env_steps" in r.metrics.columns
+    )
+    and any(
+        r.metrics is not None and "env_steps" in r.metrics.columns
+        for r in experiment
+    )
+)
+_preferred_x = (
+    ["iteration", "env_steps", "wall_time"]
+    if _env_steps_degenerate
+    else ["env_steps", "iteration", "wall_time"]
+)
 _x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or [
     "env_steps"
 ]

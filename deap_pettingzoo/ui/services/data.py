@@ -120,15 +120,16 @@ def load_experiment_cached(run_dirs: List[Path]) -> "Experiment":
     directly. Keeping the cache decorator inside the page module rather
     than here means this module is import-safe without ``streamlit``.
     """
-    from deap_pettingzoo.analysis.loaders import Experiment, load_run
+    from deap_pettingzoo.analysis.loaders import Experiment, expand_coevolution_run, load_run
 
     runs: List["RunRecord"] = []
     resolved_parents: List[Path] = []
     for run_dir in run_dirs:
         try:
-            runs.append(load_run(run_dir))
+            rec = load_run(run_dir)
         except (FileNotFoundError, ValueError):
             continue
+        runs.extend(expand_coevolution_run(rec))
         resolved_parents.append(Path(run_dir).resolve().parent)
 
     if resolved_parents:

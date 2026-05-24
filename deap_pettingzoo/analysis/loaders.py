@@ -158,7 +158,88 @@ class RunRecord:
                     return float(self.summary[key])
                 except (TypeError, ValueError):
                     continue
+        # Coevolution summary: {"final_best": {side_name: float}, "reporting_side": str}
+        final_best = self.summary.get("final_best")
+        if isinstance(final_best, dict) and final_best:
+            reporting_side = self.summary.get("reporting_side")
+            if reporting_side and reporting_side in final_best:
+                try:
+                    v = final_best[reporting_side]
+                    if v is not None:
+                        return float(v)
+                except (TypeError, ValueError):
+                    pass
+            # Fallback: max across all sides
+            try:
+                valid = [float(v) for v in final_best.values() if v is not None]
+                if valid:
+                    return max(valid)
+            except (TypeError, ValueError):
+                pass
         return None
+
+
+def expand_coevolution_run(record: RunRecord) -> List[RunRecord]:
+    """Expand a coevolution ``RunRecord`` into one ``RunRecord`` per side.
+
+    When ``metrics.csv`` contains a ``side`` discriminator column (written
+    by :class:`CoEvolutionTrainer`) this function returns a list of virtual
+    ``RunRecord`` objects — one per unique side value — so that the analysis
+    tools can treat each side as an independent algorithm without any
+    special-casing.  Each virtual record has:
+
+    * ``algorithm`` set to ``"<base_algo>/<side>"`` (e.g.
+      ``"coevolution/predator_ea"``)
+    * ``metrics`` filtered to that side's rows with the ``side`` column
+      removed
+    * ``summary['final_fitness']`` set to ``final_best[side]`` from the
+      original coevolution summary, so pairwise tables and the Browse page
+      can show a meaningful scalar
+
+    If there is no ``side`` column the original record is returned
+    unchanged (in a one-element list) so call sites can always do
+    ``records = expand_coevolution_run(rec)``.
+    """
+    if record.metrics is None or "side" not in record.metrics.columns:
+        return [record]
+    sides = sorted(record.metrics["side"].dropna().unique().tolist())
+    if len(sides) <= 1:
+        return [record]
+
+    base_algo = record.manifest.get("algorithm", "coevolution")
+    base_run_id = record.run_id
+    final_best: Dict[str, Any] = record.summary.get("final_best") or {}
+
+    result: List[RunRecord] = []
+    for side in sides:
+        side_metrics = (
+            record.metrics[record.metrics["side"] == side]
+            .drop(columns=["side"])
+            .reset_index(drop=True)
+        )
+        new_manifest = dict(record.manifest)
+        new_manifest["algorithm"] = f"{base_algo}/{side}"
+        new_manifest["run_id"] = f"{base_run_id}/{side}"
+
+        side_summary = dict(record.summary)
+        side_final = final_best.get(side)
+        if side_final is not None:
+            try:
+                side_summary["final_fitness"] = float(side_final)
+            except (TypeError, ValueError):
+                pass
+
+        result.append(
+            RunRecord(
+                run_dir=record.run_dir,
+                manifest=new_manifest,
+                metrics=side_metrics,
+                episodes=record.episodes,
+                trajectories=record.trajectories,
+                summary=side_summary,
+            )
+        )
+    return result
 
 
 def load_run(run_dir: str | Path) -> RunRecord:
@@ -331,7 +412,8 @@ def load_experiment(
     runs: List[RunRecord] = []
     for manifest_path in sorted(root.glob(pattern)):
         try:
-            runs.append(load_run(manifest_path.parent))
+            rec = load_run(manifest_path.parent)
+            runs.extend(expand_coevolution_run(rec))
         except (OSError, json.JSONDecodeError):
             continue
     return Experiment(root=root, runs=runs)
