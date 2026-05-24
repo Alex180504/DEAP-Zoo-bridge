@@ -140,7 +140,10 @@ package "deap_pettingzoo.environments" {
         + {static} is_registered(name) -> bool
         + {static} list_envs(tag=None, api=None) -> List[str]
         + {static} build_env(name, env_config, render_mode)
-        -- build_env applies wrappers\n   left-to-right after api coercion --
+        + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
+        + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
+        + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot / replay_registry_snapshot:\n   propagate custom envs into spawn workers --
     }
 
     class builtin <<module>> {
@@ -638,6 +641,15 @@ note bottom of registry
   composing supersuit transforms
   (pad_observations_v0, pad_action_space_v0,
   agent_indicator_v0, ...).
+
+  get_registry_snapshot() + replay_registry_snapshot()
+  propagate custom envs registered in the main
+  process into spawned worker subprocesses:
+  trainers pass them as initializer/initargs
+  to make_executor so every worker re-registers
+  all custom envs before executing any tasks.
+  factory must be a picklable callable
+  (module-level function / class; not a lambda).
 end note
 
 note bottom of openspiel

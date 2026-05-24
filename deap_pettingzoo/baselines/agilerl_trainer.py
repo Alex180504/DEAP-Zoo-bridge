@@ -38,6 +38,95 @@ from deap_pettingzoo.baselines.agilerl_adapter import (
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 
 
+# AgileRL bug-fix: misaligned state/advantage flattening in grouped IPPO
+
+# AgileRL's ``IPPO._learn_individual`` flattens the rollout buffer using two
+# functions with *different* memory layouts:
+#
+#   • ``vectorize_experiences_by_agent(rewards/log_probs/dones/values, dim=1)``
+#     stacks agents on dim-1 then flattens ⟹ order (T, A, E) ⟹ flat index
+#     k = t·(A·E) + a·E + e   (time outermost)
+#
+#   • ``concatenate_experiences_into_batches(states/actions)``
+#     does ``torch.cat(dim=0)`` ⟹ order (A, T, E, obs) ⟹ flat index
+#     k = a·(T·E) + t·E + e   (agent outermost)
+#
+# Example: with A=5 agents the two orderings agree only for the first E=8
+# elements; every subsequent (state, advantage) pair is mismatched.
+# The policy gradient is pure noise and the agent cannot learn.
+#
+# Fix: replace ``concatenate_experiences_into_batches`` with a version that
+# uses ``torch.stack(dim=1)`` → reshape, matching the advantage layout.
+# This is applied once at import time via a module-level monkey-patch so
+# that all ``agent.learn()`` calls in this process see the corrected function.
+def _patched_concatenate_experiences_into_batches(experiences, space, actions=False):
+    """Drop-in replacement for ``agilerl.utils.algo_utils.concatenate_experiences_into_batches``.
+
+    Stacks agent tensors on dim-1 (time outermost) so the flat index order
+    matches ``vectorize_experiences_by_agent(dim=1)`` used for advantages.
+    """
+    try:
+        import torch
+        import numpy as _np
+        import agilerl.utils.algo_utils as _au
+
+        tensors = [_au.experience_to_tensors(experiences[aid], space, actions)
+                   for aid in experiences]
+
+        def _stack_and_flatten(tlist, sp):
+            import gymnasium.spaces as _spaces
+            if isinstance(tlist[0], dict):
+                return {k: _stack_and_flatten([t[k] for t in tlist], sp[k])
+                        for k in tlist[0]}
+            if isinstance(tlist[0], tuple):
+                return tuple(_stack_and_flatten([t[i] for t in tlist], sp[i])
+                             for i in range(len(tlist[0])))
+            # tlist: A tensors of shape (T, E?, *features)
+            # stack dim=1 → (T, A, E?, *features), matching advantage layout.
+            stacked = torch.stack(tlist, dim=1)
+            reshaped = stacked.reshape(-1, *sp.shape)
+            for squeeze_dim in [0, -1]:
+                if reshaped.size(squeeze_dim) == 1:
+                    reshaped = reshaped.squeeze(squeeze_dim)
+            return reshaped
+
+        return _stack_and_flatten(tensors, space)
+    except Exception:
+        # Safety net: if patching fails for any reason, fall back to the original function
+        print("Warning: AgileRL grouping patch failed, falling back to original flattening function. Grouped IPPO may not learn.")
+        import agilerl.utils.algo_utils as _au
+        return _au._orig_concatenate_experiences_into_batches(experiences, space, actions)
+
+
+def _apply_agilerl_grouping_patch() -> bool:
+    """Monkey-patch AgileRL's flattening function.  Returns True on success."""
+    try:
+        import agilerl.utils.algo_utils as _au
+        if getattr(_au, "_grouping_patch_applied", False):
+            return True
+        _au._orig_concatenate_experiences_into_batches = (
+            _au.concatenate_experiences_into_batches
+        )
+        _au.concatenate_experiences_into_batches = (
+            _patched_concatenate_experiences_into_batches
+        )
+        # Also patch the name inside the IPPO module
+        try:
+            import agilerl.algorithms.ippo as _ippo_mod
+            _ippo_mod.concatenate_experiences_into_batches = (
+                _patched_concatenate_experiences_into_batches
+            )
+        except Exception:
+            pass
+        _au._grouping_patch_applied = True
+        return True
+    except Exception:
+        return False
+
+
+_GROUPING_PATCH_APPLIED = _apply_agilerl_grouping_patch()
+
+
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
@@ -124,25 +213,12 @@ class AgileRLTrainer(BaselineTrainer):
         seed = int(params.pop("seed", 0))
         self._seed_everything(seed)
 
-        # ``num_envs`` controls vectorized rollout collection for
-        # on-policy trainers. Off-policy trainers ignore it and always
-        # use a single env. Pop it from ``params`` before splitting into
-        # ctor/loop kwargs because it is a trainer-level concern, not
-        # an algorithm constructor argument.
+        # ``num_envs`` controls vectorized rollout collection.
         num_envs = int(params.pop("num_envs", 1))
         if num_envs < 1:
             raise ValueError(f"num_envs must be >= 1, got {num_envs!r}")
-        if num_envs > 1 and not self.ON_POLICY:
-            # Off-policy replay buffers in AgileRL are built around a
-            # single env; transparently coerce to 1 with a warning.
-            if self.verbose:
-                print(
-                    f"[{self.ALGORITHM_NAME}] num_envs={num_envs} ignored: "
-                    "off-policy trainers only support num_envs=1."
-                )
-            num_envs = 1
 
-        if self.ON_POLICY and num_envs > 1:
+        if num_envs > 1:
             env = build_vec_parallel_env(
                 config.env_name,
                 env_config=config.env_config or None,
@@ -478,6 +554,97 @@ class AgileRLTrainer(BaselineTrainer):
             return None
         return float(np.mean(scalars))
 
+    @staticmethod
+    def _nan_placeholder_for_space(space: Any) -> Any:
+        """Return a float NaN placeholder matching a Gymnasium space shape."""
+        try:
+            from gymnasium import spaces
+        except ImportError:  # pragma: no cover
+            spaces = None
+
+        if spaces is not None and isinstance(space, spaces.Dict):
+            return {
+                key: AgileRLTrainer._nan_placeholder_for_space(subspace)
+                for key, subspace in space.spaces.items()
+            }
+        if spaces is not None and isinstance(space, spaces.Tuple):
+            return tuple(
+                AgileRLTrainer._nan_placeholder_for_space(subspace)
+                for subspace in space.spaces
+            )
+
+        shape = tuple(getattr(space, "shape", ()) or ())
+        if not shape:
+            return np.array([np.nan], dtype=np.float32)
+        return np.full(shape, np.nan, dtype=np.float32)
+
+    @staticmethod
+    def _done_array(
+        terminated: Any,
+        truncated: Any,
+        *,
+        is_vec: bool,
+        num_envs: int,
+    ) -> np.ndarray:
+        """Convert termination/truncation payloads to AgileRL-style done arrays."""
+        if is_vec:
+            term = np.asarray(terminated, dtype=np.float32).reshape(num_envs)
+            trunc = np.asarray(truncated, dtype=np.float32).reshape(num_envs)
+            valid_mask = ~(np.isnan(term) | np.isnan(trunc))
+            done = np.full(num_envs, np.nan, dtype=np.float32)
+            done[valid_mask] = np.logical_or(
+                term[valid_mask].astype(bool),
+                trunc[valid_mask].astype(bool),
+            ).astype(np.float32)
+            return done
+
+        return np.array([float(bool(terminated) or bool(truncated))], dtype=np.float32)
+
+    @classmethod
+    def _build_done_dict(
+        cls,
+        terminations: Dict[str, Any],
+        truncations: Dict[str, Any],
+        agent_ids: List[str],
+        *,
+        is_vec: bool,
+        num_envs: int,
+    ) -> Dict[str, np.ndarray]:
+        """Build per-agent done arrays, preserving NaN inactive markers for vec envs."""
+        if is_vec:
+            missing_term: Any = np.full(num_envs, np.nan, dtype=np.float32)
+            missing_trunc: Any = np.full(num_envs, np.nan, dtype=np.float32)
+        else:
+            missing_term = True
+            missing_trunc = False
+
+        return {
+            agent_id: cls._done_array(
+                terminations.get(agent_id, missing_term),
+                truncations.get(agent_id, missing_trunc),
+                is_vec=is_vec,
+                num_envs=num_envs,
+            )
+            for agent_id in agent_ids
+        }
+
+    @staticmethod
+    def _completed_env_mask(
+        done_dict: Dict[str, np.ndarray],
+        agent_ids: List[str],
+        num_envs: int,
+    ) -> np.ndarray:
+        """Return the per-env episode-complete mask (all agents done or inactive)."""
+        if not agent_ids:
+            return np.ones(num_envs, dtype=bool)
+
+        stacked = np.stack(
+            [np.asarray(done_dict[agent_id], dtype=np.float32).reshape(num_envs)
+             for agent_id in agent_ids],
+            axis=0,
+        )
+        return np.all(np.isnan(stacked) | stacked.astype(bool), axis=0)
+
     # Training loops
 
     def _run_off_policy(
@@ -496,20 +663,19 @@ class AgileRLTrainer(BaselineTrainer):
 
         Note:
             AgileRL's ``get_action`` returns a ``(actions, raw_actions)``
-            tuple.  The two dicts serve different purposes and must each
-            be squeezed independently:
+            tuple. The two dicts serve different purposes:
 
-            * ``actions`` — sent to ``env.step``.  Discrete spaces expect
-              Python ints; Box spaces expect 1-D arrays.
-            * ``raw_actions`` — stored in the replay buffer.  Always the
-              continuous representation the critic was built for.
+            * ``actions`` — sent to ``env.step``. Discrete spaces expect
+              Python ints for a single env, while vec envs expect batched
+              ``(num_envs, ...)`` actions.
+            * ``raw_actions`` — stored in the replay buffer. These must
+              keep their leading vec axis in the vectorized path because
+              ``MultiAgentReplayBuffer.save_to_memory(...,
+              is_vectorised=True)`` reorganizes one transition per worker.
 
-            Storing ``raw_actions`` with its leading vec-dim intact
-            (shape ``(1, act_dim)``) next to unbatched obs
-            (shape ``(features,)``) caused a 2-vs-3 ndim mismatch inside
-            ``MADDPG.learn()``.  Using ``actions`` for the buffer instead
-            would silently break discrete envs where ``actions`` are scalar
-            ints but the critic expects the continuous representation.
+            For the single-env path we still squeeze the leading size-1
+            axis before storing raw actions; otherwise ``MADDPG.learn()`` /
+            ``MATD3.learn()`` see 3-D actions next to 2-D observations.
         """
         from agilerl.components.multi_agent_replay_buffer import (  # noqa: WPS433
             MultiAgentReplayBuffer,
@@ -524,68 +690,174 @@ class AgileRLTrainer(BaselineTrainer):
         batch_size = int(params["batch_size"])
         learning_delay = int(params["learning_delay"])
         learn_step = max(1, int(params.get("learn_step", 1)))
-        progress_interval = max(1, budget_steps // 20) if self.verbose else 0
+        num_envs = int(getattr(env, "num_envs", 1))
+        is_vec = num_envs > 1
+        progress_interval = max(1, budget_steps // 300) if self.verbose else 0
         loop_start = time.time()
 
         obs, info = env.reset(seed=seed)
         episode_rewards: List[float] = []
-        ep_reward = 0.0
-        ep_len = 0
+        ep_reward = np.zeros(num_envs, dtype=np.float64)
         losses: List[float] = []
+        steps_done = 0
 
-        for step in range(budget_steps):
+        def _expand_placeholder(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: _expand_placeholder(subvalue)
+                    for key, subvalue in value.items()
+                }
+            if isinstance(value, tuple):
+                return tuple(_expand_placeholder(subvalue) for subvalue in value)
+
+            arr = np.asarray(value)
+            return np.repeat(arr[None, ...], num_envs, axis=0)
+
+        def _placeholder_for_space(space: Any) -> Any:
+            placeholder = self._nan_placeholder_for_space(space)
+            if not is_vec:
+                return placeholder
+            return _expand_placeholder(placeholder)
+
+        def _complete_obs_dict(observation_dict: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                agent_id: observation_dict.get(
+                    agent_id,
+                    _placeholder_for_space(env.observation_space(agent_id)),
+                )
+                for agent_id in agent_ids
+            }
+
+        def _complete_action_dict(action_dict: Dict[str, Any]) -> Dict[str, Any]:
+            completed: Dict[str, Any] = {}
+            for agent_id in agent_ids:
+                if agent_id in action_dict:
+                    arr = np.asarray(action_dict[agent_id])
+                    if not is_vec and arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                    completed[agent_id] = arr
+                else:
+                    completed[agent_id] = _placeholder_for_space(
+                        env.action_space(agent_id)
+                    )
+            return completed
+
+        def _complete_reward_dict(reward_dict: Dict[str, Any]) -> Dict[str, Any]:
+            if is_vec:
+                return {
+                    agent_id: np.asarray(
+                        reward_dict.get(
+                            agent_id,
+                            np.full(num_envs, np.nan, dtype=np.float32),
+                        ),
+                        dtype=np.float32,
+                    ).reshape(num_envs)
+                    for agent_id in agent_ids
+                }
+
+            return {
+                agent_id: float(reward_dict[agent_id])
+                if agent_id in reward_dict else np.nan
+                for agent_id in agent_ids
+            }
+
+        def _sum_rewards_per_env(reward_dict: Dict[str, Any]) -> np.ndarray:
+            if not is_vec:
+                return np.array(
+                    [float(np.nansum(list(reward_dict.values())))],
+                    dtype=np.float64,
+                )
+
+            total = np.zeros(num_envs, dtype=np.float64)
+            for agent_id in agent_ids:
+                rewards_a = np.asarray(
+                    reward_dict.get(
+                        agent_id,
+                        np.full(num_envs, np.nan, dtype=np.float32),
+                    ),
+                    dtype=np.float64,
+                ).reshape(num_envs)
+                total += np.where(np.isnan(rewards_a), 0.0, rewards_a)
+            return total
+
+        while steps_done < budget_steps:
+            prev_steps = steps_done
             action_result = agent.get_action(obs, infos=info)
             actions, raw_actions = (
                 action_result if isinstance(action_result, tuple) else (action_result, action_result)
             )
-            env_actions = self._unwrap_actions_for_env(actions)
-            buffer_actions: Dict[str, Any] = {}
-            for aid, act in raw_actions.items():
-                arr = np.asarray(act)
-                if arr.ndim > 0 and arr.shape[0] == 1:
-                    arr = arr[0]
-                buffer_actions[aid] = arr
+            env_actions = actions if is_vec else self._unwrap_actions_for_env(actions)
             next_obs, reward, termination, truncation, info = env.step(env_actions)
 
-            memory.save_to_memory(
-                obs, buffer_actions, reward, next_obs, termination
+            full_obs = _complete_obs_dict(obs)
+            full_actions = _complete_action_dict(raw_actions)
+            full_reward = _complete_reward_dict(reward)
+            full_next_obs = _complete_obs_dict(next_obs)
+            next_done = self._build_done_dict(
+                termination,
+                truncation,
+                agent_ids,
+                is_vec=is_vec,
+                num_envs=num_envs,
             )
 
-            ep_reward += float(sum(reward.values()))
-            ep_len += 1
+            memory.save_to_memory(
+                full_obs,
+                full_actions,
+                full_reward,
+                full_next_obs,
+                next_done,
+                is_vectorised=is_vec,
+            )
 
-            if (
-                step >= learning_delay
-                and len(memory) >= batch_size
-                and (step - learning_delay) % learn_step == 0
-            ):
-                experiences = memory.sample(batch_size)
-                try:
-                    loss = agent.learn(experiences)
-                    mean_loss = self._mean_loss(loss)
-                    if mean_loss is not None:
-                        losses.append(mean_loss)
-                except Exception as exc:  # pragma: no cover - version drift
-                    if self.verbose:
-                        print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+            ep_reward += _sum_rewards_per_env(full_reward)
+            steps_done += num_envs if is_vec else 1
 
-            done = any(termination.values()) or any(truncation.values())
-            if done:
-                episode_rewards.append(ep_reward)
-                ep_reward = 0.0
-                ep_len = 0
+            if len(memory) >= batch_size:
+                learn_calls_this_step = 0
+                for env_step in range(prev_steps, steps_done):
+                    if (
+                        env_step >= learning_delay
+                        and (env_step - learning_delay) % learn_step == 0
+                    ):
+                        learn_calls_this_step += 1
+
+                for _ in range(learn_calls_this_step):
+                    experiences = memory.sample(batch_size)
+                    try:
+                        loss = agent.learn(experiences)
+                        mean_loss = self._mean_loss(loss)
+                        if mean_loss is not None:
+                            losses.append(mean_loss)
+                    except Exception as exc:  # pragma: no cover - version drift
+                        if self.verbose:
+                            print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+
+            env_done = self._completed_env_mask(next_done, agent_ids, num_envs)
+            for i, finished in enumerate(env_done):
+                if finished:
+                    episode_rewards.append(float(ep_reward[i]))
+                    ep_reward[i] = 0.0
+
+            if not is_vec and bool(env_done[0]):
                 obs, info = env.reset()
             else:
                 obs = next_obs
 
-            if progress_interval and (step + 1) % progress_interval == 0:
+            progress_steps = min(steps_done, budget_steps)
+            if progress_interval and (
+                progress_steps // progress_interval > prev_steps // progress_interval
+                or progress_steps >= budget_steps
+            ):
                 elapsed = time.time() - loop_start
-                pct = 100.0 * (step + 1) / budget_steps
+                pct = 100.0 * progress_steps / budget_steps
+                mean_r = np.mean(episode_rewards[-10:]) if episode_rewards else 0.0
                 last_r = episode_rewards[-1] if episode_rewards else float("nan")
                 print(
-                    f"[{self.ALGORITHM_NAME}] step {step + 1}/{budget_steps} "
+                    f"[{self.ALGORITHM_NAME}] step {progress_steps}/{budget_steps} "
                     f"({pct:5.1f}%) | episodes={len(episode_rewards)} | "
-                    f"last_reward={last_r:.2f} | learn_calls={len(losses)} | "
+                    f"mean_rew={mean_r:.2f} | last_reward={last_r:.2f} | "
+                    f"learn_calls={len(losses)} | "
                     f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
@@ -597,17 +869,25 @@ class AgileRLTrainer(BaselineTrainer):
             if (
                 record_callback is not None
                 and record_every_n_steps
-                and (step + 1) % record_every_n_steps == 0
             ):
-                record_callback()
+                crossed_record_boundaries = (
+                    progress_steps // record_every_n_steps
+                    - prev_steps // record_every_n_steps
+                )
+                for _ in range(max(0, crossed_record_boundaries)):
+                    record_callback()
 
-        if ep_len > 0:
-            episode_rewards.append(ep_reward)
+        if not episode_rewards:
+            episode_rewards.append(float(ep_reward.sum()))
+        else:
+            for i in range(num_envs):
+                if abs(ep_reward[i]) > 0.0:
+                    episode_rewards.append(float(ep_reward[i]))
 
         return {
             "episode_rewards": episode_rewards,
             "num_episodes": len(episode_rewards),
-            "env_steps": budget_steps,
+            "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
         }
 
@@ -653,6 +933,7 @@ class AgileRLTrainer(BaselineTrainer):
         episode_rewards: List[float] = []
         losses: List[float] = []
         steps_done = 0
+        step_size = num_envs if is_vec else 1
 
         # Per-(sub-)env running episode-reward accumulator. For the
         # single-env case this is a scalar in a length-1 array; for the
@@ -662,7 +943,9 @@ class AgileRLTrainer(BaselineTrainer):
 
         obs, info = env.reset(seed=seed)
         # Per-agent done flags: shape ``(num_envs,)`` — zero at episode 0.
-        done: Dict[str, Any] = {a: np.zeros(num_envs, dtype=np.int8) for a in agent_ids}
+        done: Dict[str, Any] = {
+            a: np.zeros(num_envs, dtype=np.float32) for a in agent_ids
+        }
 
         # Helper: ensure obs has a leading num_envs axis. Vec envs
         # already provide it; single envs return ``(obs_dim,)``.
@@ -670,31 +953,41 @@ class AgileRLTrainer(BaselineTrainer):
             arr = np.asarray(o)
             return arr if is_vec else arr[None, ...]
 
+        # Grouped IPPO expects a fixed ``(num_envs, ...)`` batch per agent.
+        # When PettingZoo workers mark an agent inactive they emit all-NaN
+        # placeholders; pass zeros to ``get_action`` and the stored state tensor
+        # while preserving NaN rewards/dones to mark inactivity downstream.
+        def _sanitize_obs(o: Any) -> np.ndarray:
+            arr = np.asarray(o, dtype=np.float32)
+            if not np.isnan(arr).any():
+                return arr
+
+            clean = np.array(arr, copy=True)
+            if clean.ndim <= 1:
+                if np.isnan(clean).all():
+                    clean[...] = 0.0
+                return clean
+
+            inactive_mask = np.isnan(clean).all(axis=tuple(range(1, clean.ndim)))
+            clean[inactive_mask] = 0.0
+            return clean
+
         # Helper: per-sub-env reward summed across agents, shape (num_envs,).
         def _sum_rewards_per_env(reward_dict: Dict[str, Any]) -> np.ndarray:
+            if not is_vec:
+                return np.array(
+                    [float(np.nansum([reward_dict.get(a, np.nan) for a in agent_ids]))],
+                    dtype=np.float64,
+                )
+
             total = np.zeros(num_envs, dtype=np.float64)
             for a in agent_ids:
-                if a not in reward_dict:
-                    continue
-                r = reward_dict[a]
-                if is_vec:
-                    total += np.asarray(r, dtype=np.float64).reshape(num_envs)
-                else:
-                    total += float(r)
+                rewards_a = np.asarray(
+                    reward_dict.get(a, np.full(num_envs, np.nan, dtype=np.float32)),
+                    dtype=np.float64,
+                ).reshape(num_envs)
+                total += np.where(np.isnan(rewards_a), 0.0, rewards_a)
             return total
-
-        # Helper: per-sub-env "any agent done" bool, shape (num_envs,).
-        def _env_done_mask(term: Dict[str, Any], trunc: Dict[str, Any]) -> np.ndarray:
-            mask = np.zeros(num_envs, dtype=bool)
-            for a in agent_ids:
-                t = term.get(a, False)
-                u = trunc.get(a, False)
-                if is_vec:
-                    mask |= np.asarray(t, dtype=bool).reshape(num_envs)
-                    mask |= np.asarray(u, dtype=bool).reshape(num_envs)
-                else:
-                    mask |= bool(t) or bool(u)
-            return mask
 
         print(
             f"[{self.ALGORITHM_NAME}] Training: {budget_steps:,} steps, "
@@ -703,7 +996,9 @@ class AgileRLTrainer(BaselineTrainer):
         )
 
         while steps_done < budget_steps:
-            collect_n = min(learn_step, budget_steps - steps_done)
+            remaining_steps = budget_steps - steps_done
+            collect_target = min(learn_step, remaining_steps)
+            collect_n = max(1, (collect_target + step_size - 1) // step_size)
 
             # Per-step rollout buffers (lists of per-agent values).
             states:       Dict[str, List] = {a: [] for a in agent_ids}
@@ -714,7 +1009,10 @@ class AgileRLTrainer(BaselineTrainer):
             values_buf:   Dict[str, List] = {a: [] for a in agent_ids}
 
             for _ in range(collect_n):
-                action_result = agent.get_action(obs, infos=info)
+                action_obs = {
+                    a: _sanitize_obs(obs_a) for a, obs_a in obs.items()
+                }
+                action_result = agent.get_action(action_obs, infos=info)
                 # AgileRL's IPPO/PPO contract is a 4-tuple
                 # ``(action, log_prob, entropy, value)``.  Anything else is
                 # an API breakage — silently substituting zeros for log_prob
@@ -746,7 +1044,14 @@ class AgileRLTrainer(BaselineTrainer):
                 # Per-sub-env reward / done bookkeeping.
                 step_rew = _sum_rewards_per_env(reward)
                 ep_reward += step_rew
-                env_done = _env_done_mask(termination, truncation)
+                next_done = self._build_done_dict(
+                    termination,
+                    truncation,
+                    agent_ids,
+                    is_vec=is_vec,
+                    num_envs=num_envs,
+                )
+                env_done = self._completed_env_mask(next_done, agent_ids, num_envs)
 
                 # Emit completed-episode rewards. For the vec path
                 # ``env_done[i]`` triggers the worker's auto-reset; for
@@ -756,84 +1061,63 @@ class AgileRLTrainer(BaselineTrainer):
                         episode_rewards.append(float(ep_reward[i]))
                         ep_reward[i] = 0.0
 
-                # next_done per agent, shape (num_envs,) int8.
-                next_done: Dict[str, Any] = {}
-                for a in agent_ids:
-                    t = termination.get(a, False)
-                    u = truncation.get(a, False)
-                    if is_vec:
-                        nd = (np.asarray(t, dtype=bool).reshape(num_envs)
-                              | np.asarray(u, dtype=bool).reshape(num_envs))
-                    else:
-                        nd = np.array([int(bool(t) or bool(u))], dtype=np.int8)
-                    next_done[a] = nd.astype(np.int8)
-
                 # AgileRL's ``learn()`` expects every per-step tensor to
                 # carry an explicit vectorization axis of size
                 # ``num_envs``. Vec envs already provide this; single
                 # envs need ``[None, ...]`` to inject a singleton axis.
-                obs_fallback = (
-                    np.zeros_like(next(iter(obs.values()))) if obs else None
-                )
-                for a in agent_ids:
-                    obs_a = obs.get(a, obs_fallback)
-                    states[a].append(_batch_obs(obs_a))
+                for a, obs_a in obs.items():
+                    states[a].append(_batch_obs(_sanitize_obs(obs_a)))
 
                     # Action / log_prob / value already carry the
                     # ``num_envs`` axis from AgileRL's get_action.
                     act_a = action.get(a)
                     actions_buf[a].append(
                         np.asarray(act_a) if act_a is not None
-                        else np.zeros((num_envs,))
+                        else np.array([np.nan], dtype=np.float32)
                     )
                     lp_a = log_prob.get(a)
                     log_probs_buf[a].append(
                         np.asarray(lp_a) if lp_a is not None
-                        else np.zeros((num_envs,))
+                        else np.array([np.nan], dtype=np.float32)
                     )
                     v_a = value.get(a)
                     values_buf[a].append(
                         np.asarray(v_a) if v_a is not None
-                        else np.zeros((num_envs,))
+                        else np.array([np.nan], dtype=np.float32)
                     )
 
                     if is_vec:
                         rewards_buf[a].append(
-                            np.asarray(reward.get(a, np.zeros(num_envs)),
+                            np.asarray(reward.get(a, np.full(num_envs, np.nan, dtype=np.float32)),
                                        dtype=np.float32).reshape(num_envs)
                         )
                     else:
                         rewards_buf[a].append(
-                            np.array([float(reward.get(a, 0.0))], dtype=np.float32)
+                            np.array([float(reward.get(a, np.nan))], dtype=np.float32)
                         )
                     dones_buf[a].append(np.asarray(done[a]))
 
                 obs = next_obs
                 done = next_done
-                steps_done += 1
+                steps_done += step_size
 
                 # For the single-env path, manually auto-reset at episode
-                # end. The just-stored ``dones_buf[T]`` is the *previous*
-                # step's done; the next iteration stores ``done =
-                # next_done`` (terminal flag = 1) marking the new-episode
-                # start. Zeroing here would lose the boundary and let GAE
-                # bootstrap rewards across episode resets.
-                #
-                # The vec-env path skips this block: AsyncPettingZooVecEnv
-                # workers reset terminated sub-envs internally and
-                # ``next_obs`` already reflects the new episode's first
-                # state.
+                # end. Vec env workers auto-reset internally; the single-env
+                # path mirrors AgileRL's reference loop and explicitly resets
+                # the environment plus the carried ``done`` flags.
                 if not is_vec and bool(env_done[0]):
                     obs, info = env.reset()
+                    done = {
+                        a: np.zeros(num_envs, dtype=np.float32)
+                        for a in agent_ids
+                    }
 
             # Bootstrap obs for GAE: AgileRL's learn() expects the same
             # ``(num_envs, obs_dim)`` shape as the stored states.
-            bootstrap_obs = {}
-            for a in agent_ids:
-                obs_a = obs.get(
-                    a, np.zeros_like(next(iter(obs.values())))
-                ) if obs else None
-                bootstrap_obs[a] = _batch_obs(obs_a)
+            bootstrap_obs = {
+                a: _batch_obs(_sanitize_obs(obs_a))
+                for a, obs_a in obs.items()
+            }
 
             # Learn from the collected rollout.
             experiences = (
@@ -849,9 +1133,10 @@ class AgileRLTrainer(BaselineTrainer):
             except Exception as exc:
                 print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
 
+            progress_steps = min(steps_done, budget_steps)
             loss_str = f" | mean_loss={losses[-1]:.4f}" if losses else ""
             print(
-                f"[{self.ALGORITHM_NAME}] {steps_done:,}/{budget_steps:,} steps"
+                f"[{self.ALGORITHM_NAME}] {progress_steps:,}/{budget_steps:,} steps"
                 f" | episodes={len(episode_rewards)}"
                 f" | mean_rew={np.mean(episode_rewards[-10:]) if episode_rewards else 0.0:.2f}"
                 + loss_str
@@ -867,9 +1152,9 @@ class AgileRLTrainer(BaselineTrainer):
             if (
                 record_callback is not None
                 and record_every_n_steps
-                and steps_done % record_every_n_steps < learn_step
-                and (steps_done // record_every_n_steps)
-                > ((steps_done - learn_step) // record_every_n_steps)
+                and progress_steps % record_every_n_steps < learn_step
+                and (progress_steps // record_every_n_steps)
+                > ((max(progress_steps - learn_step, 0)) // record_every_n_steps)
             ):
                 record_callback()
 
@@ -888,7 +1173,7 @@ class AgileRLTrainer(BaselineTrainer):
         return {
             "episode_rewards": episode_rewards,
             "num_episodes": len(episode_rewards),
-            "env_steps": steps_done,
+            "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
         }
 

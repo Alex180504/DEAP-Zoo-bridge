@@ -7,7 +7,7 @@ Adds a fourth runtime-state class to the
 against opponents drawn from the *other* sides' current
 :class:`OpponentPool`s.
 
-The crucial difference from EA / CMA / QDax sides:
+The difference from EA / CMA / QDax sides:
 
 * there is **no population of individuals** — the side owns one
   algorithm object whose internal networks improve continuously across
@@ -20,14 +20,7 @@ The crucial difference from EA / CMA / QDax sides:
   yet supported on RL sides — the trainer falls back to serial with a
   one-shot warning.
 
-On-policy algorithms (IPPO / GroupedIPPO) are intentionally
-gated off in this release; their rollout-buffer interface needs an
-opponent-aware adapter that is deferred to a follow-up. Users wanting
-on-policy in the meantime can train an IPPO agent with
-:class:`IPPOTrainer`, then drop the resulting
-:class:`AgileRLPolicyWrapper` into a
-:class:`FrozenSideState` (which is a unidirectional but supported
-fallback).
+#TODO: implement oponnent-aware adapters for on-policy algorithms (IPPO and variants) so the RL side can also use those.
 """
 
 from __future__ import annotations
@@ -46,10 +39,6 @@ from deap_pettingzoo.evaluators.mixed_policy import _invoke_get_action
 from .pools import OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
-
-#: Mapping ``algorithm_key -> (module_path, class_name, on_policy)``.
-#: Used for the lazy AgileRL import; matches the corresponding entries
-#: in :mod:`deap_pettingzoo.baselines.agilerl_trainer`.
 SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "maddpg": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3":  ("agilerl.algorithms.matd3",  "MATD3",  False),
@@ -303,7 +292,7 @@ class RLSideState(SideState):
         if isinstance(evaluator, _RLDriverContext):
             self._bootstrap_ctx = evaluator
 
-    def evaluate_population(self) -> None:
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
         """One warm-up rollout to seed the replay buffer.
 
         Trainer contract: called from :meth:`_bootstrap_populations`
@@ -329,6 +318,8 @@ class RLSideState(SideState):
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:
         ctx = evaluator_factory(self)
         if not isinstance(ctx, _RLDriverContext):

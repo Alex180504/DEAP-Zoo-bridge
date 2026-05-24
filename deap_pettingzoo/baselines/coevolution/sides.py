@@ -396,12 +396,17 @@ class EASideState(SideState):
         self.toolbox.unregister("evaluate")
         self.toolbox.register("evaluate", _evaluate_with, evaluator=evaluator)
 
-    def evaluate_population(self) -> None:
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
         """Re-evaluate every individual under the current toolbox.evaluate."""
         if self.toolbox is None:  # pragma: no cover
             raise RuntimeError("EASideState.initialise() must be called first.")
-        for ind in self.population:
-            ind.fitness.values = self.toolbox.evaluate(ind)
+        if batch_eval_fn is not None:
+            fitnesses = batch_eval_fn(self.population)
+            for ind, fit in zip(self.population, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                ind.fitness.values = self.toolbox.evaluate(ind)
         self.hof.update(self.population)
         if len(self.hof) > 0:
             self.best_fitness = float(self.hof[0].fitness.values[0])
@@ -409,11 +414,17 @@ class EASideState(SideState):
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:
         assert self.toolbox is not None
         self.generation += 1
         evaluator = evaluator_factory(self)
         self.rebind_evaluator(evaluator)
+
+        # Invalidate all current individuals so parents are always re-evaluated against the current generation's opponents.
+        for ind in self.population:
+            del ind.fitness.values
 
         # Simple (mu, lambda)=(N, N) generational loop with full replacement - matches EATrainer's "simple" strategy.
         global_state_before: Optional[Any] = None
@@ -437,17 +448,29 @@ class EASideState(SideState):
             np.random.set_state(global_state_before)
 
         # Evaluate invalid individuals.
-        for ind in offspring:
-            if not ind.fitness.valid:
+        invalid = [ind for ind in offspring if not ind.fitness.valid]
+        if batch_eval_fn is not None and invalid:
+            fitnesses = batch_eval_fn(invalid)
+            for ind, fit in zip(invalid, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in invalid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # Selection → next generation (tournament/roulette/... over the union of parents + offspring for elitism).
-        combined = self.population + offspring
-        self.population = self.toolbox.select(combined, self.population_size)
+        # (mu, lambda) selection: choose next generation from offspring ONLY.
+        # In competitive coevolution, (mu+lambda) elitism is harmful because
+        # parent fitness values were earned against *previous* opponents; stale
+        # high-scoring parents will dominate tournament selection over offspring
+        # that are correctly evaluated against today's (harder) opponents,
+        # causing the population to freeze at a local optimum forever.
+        self.population = self.toolbox.select(offspring, self.population_size)
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
-        self.best_fitness = float(self.hof[0].fitness.values[0])
+        # Track running max of current-gen bests (not HoF, whose fitness is
+        # stale — evaluated against a past opponent pool and not comparable
+        # to current-gen offspring evaluated against current opponents).
+        self.best_fitness = max(self.best_fitness, best)
 
         stats = GenerationStats(
             generation=self.generation,
@@ -456,7 +479,7 @@ class EASideState(SideState):
             std=float(np.std(fitnesses)),
             min=float(np.min(fitnesses)),
             max=best,
-            best_fitness=self.best_fitness,
+            best_fitness=best,  # current-gen best, not stale HoF value
         )
         self.history.append(stats)
         return stats
@@ -598,10 +621,15 @@ class CMAESSideState(SideState):
         self.toolbox.unregister("evaluate")
         self.toolbox.register("evaluate", _evaluate_with, evaluator=evaluator)
 
-    def evaluate_population(self) -> None:
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
         assert self.toolbox is not None
-        for ind in self.population:
-            ind.fitness.values = self.toolbox.evaluate(ind)
+        if batch_eval_fn is not None:
+            fitnesses = batch_eval_fn(self.population)
+            for ind, fit in zip(self.population, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                ind.fitness.values = self.toolbox.evaluate(ind)
         self.hof.update(self.population)
         if len(self.hof) > 0:
             self.best_fitness = float(self.hof[0].fitness.values[0])
@@ -609,18 +637,32 @@ class CMAESSideState(SideState):
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:
         assert self.toolbox is not None
         self.generation += 1
         evaluator = evaluator_factory(self)
         self.rebind_evaluator(evaluator)
 
+        # Invalidate all current individuals so they are re-evaluated against
+        # *this* generation's opponents (not the bootstrap pool).  Without this,
+        # gen 1 silently reuses bootstrap-era fitness values for the CMA update.
+        for ind in self.population:
+            del ind.fitness.values
+
         # Re-use the currently-seeded population for this generation's
         # evaluation (it was generated during initialise() or the
         # previous update step), then update the strategy and resample.
-        for ind in self.population:
-            if not ind.fitness.valid:
-                ind.fitness.values = self.toolbox.evaluate(ind)
+        invalid_pop = [ind for ind in self.population if not ind.fitness.valid]
+        if batch_eval_fn is not None and invalid_pop:
+            fitnesses = batch_eval_fn(invalid_pop)
+            for ind, fit in zip(invalid_pop, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                if not ind.fitness.valid:
+                    ind.fitness.values = self.toolbox.evaluate(ind)
 
         global_state_before: Optional[Any] = None
         if self._np_state is not None:
@@ -638,7 +680,10 @@ class CMAESSideState(SideState):
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
-        self.best_fitness = float(self.hof[0].fitness.values[0])
+        # Track running max of current-gen bests (not HoF, whose fitness is
+        # stale — evaluated against a past opponent pool and not comparable
+        # to current-gen offspring evaluated against current opponents).
+        self.best_fitness = max(self.best_fitness, best)
 
         # Pre-sample next generation's population so current_pool() is
         # populated even before evaluation begins.
@@ -651,7 +696,7 @@ class CMAESSideState(SideState):
             std=float(np.std(fitnesses)),
             min=float(np.min(fitnesses)),
             max=best,
-            best_fitness=self.best_fitness,
+            best_fitness=best,  # current-gen best, not stale HoF value
         )
         self.history.append(stats)
         return stats

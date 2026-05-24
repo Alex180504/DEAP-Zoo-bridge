@@ -434,6 +434,82 @@ def _reject_if_aec(env, name: str, *, declared: str) -> None:
         )
 
 
+def build_env_from_spec(
+    spec: "EnvSpec",
+    env_config: Optional[Dict[str, Any]] = None,
+    render_mode: Optional[str] = None,
+):
+    """Build a parallel-API environment directly from a resolved :class:`EnvSpec`.
+
+    Identical to :func:`build_env` but takes a pre-resolved ``spec``
+    instead of looking up a name in the main-process registry.  This
+    makes it safe to call from worker subprocesses (e.g.
+    ``AsyncPettingZooVecEnv`` workers) that do not inherit the
+    main-process registry state: the caller resolves the spec once in
+    the main process, pickles it into the factory closure, and each
+    worker calls this function directly.
+
+    Args:
+        spec: Pre-resolved :class:`EnvSpec` (picklable).
+        env_config: Optional kwargs forwarded to the factory.
+        render_mode: Optional render mode.
+
+    Returns:
+        A PettingZoo parallel environment with all wrapper chain applied.
+
+    Raises:
+        TypeError: If the constructed env doesn't match the declared
+            ``api``.
+    """
+    name = spec.name
+    factory = spec.factory
+    kwargs = dict(env_config or {})
+
+    if spec.api == "parallel":
+        if callable(getattr(factory, "parallel_env", None)):
+            env = factory.parallel_env(render_mode=render_mode, **kwargs)
+        elif callable(getattr(factory, "env", None)) or callable(
+            getattr(factory, "raw_env", None)
+        ):
+            raise TypeError(
+                f"Env '{name}' declared api='parallel' but factory exposes "
+                "'env'/'raw_env' (AEC shape) without a 'parallel_env' "
+                "attribute. Re-register with api='aec' to enable automatic "
+                "conversion."
+            )
+        elif callable(factory):
+            env = factory(render_mode=render_mode, **kwargs)
+        else:
+            raise TypeError(
+                f"Env '{name}' registered with api='parallel' but factory "
+                "exposes no callable parallel_env and isn't callable."
+            )
+        _reject_if_aec(env, name, declared="parallel")
+    elif spec.api in ("aec_masked", "aec_sequential"):
+        raw = _instantiate_factory(factory, render_mode, kwargs, preferred="env")
+        env = _coerce_turn_based(raw, name, mode=spec.api)
+    elif spec.api == "jax_parallel":
+        if callable(factory):
+            raw = factory(**kwargs)
+        else:
+            raise TypeError(
+                f"Env '{name}' registered with api='jax_parallel' but "
+                "factory is not callable."
+            )
+        from deap_pettingzoo.environments.jax_parallel import (
+            JaxEnvToPettingZooAdapter,
+        )
+        env = JaxEnvToPettingZooAdapter(raw, env_name=name, render_mode=render_mode)
+    else:
+        preferred = "env" if spec.api == "aec" else "parallel_env"
+        raw = _instantiate_factory(factory, render_mode, kwargs, preferred=preferred)
+        env = _coerce_to_parallel(raw, name, declared=spec.api)
+
+    for wrapper in spec.wrappers:
+        env = wrapper(env)
+    return env
+
+
 def build_env(
     name: str,
     env_config: Optional[Dict[str, Any]] = None,
@@ -460,65 +536,7 @@ def build_env(
             ``AECEnv``).
     """
     spec = get_env_spec(name)
-    factory = spec.factory
-    kwargs = dict(env_config or {})
-
-    if spec.api == "parallel":
-        # Legacy fast path: factory must supply a parallel env.
-        if callable(getattr(factory, "parallel_env", None)):
-            env = factory.parallel_env(render_mode=render_mode, **kwargs)
-        elif callable(getattr(factory, "env", None)) or callable(
-            getattr(factory, "raw_env", None)
-        ):
-            raise TypeError(
-                f"Env '{name}' declared api='parallel' but factory exposes "
-                "'env'/'raw_env' (AEC shape) without a 'parallel_env' "
-                "attribute. Re-register with api='aec' to enable automatic "
-                "conversion."
-            )
-        elif callable(factory):
-            env = factory(render_mode=render_mode, **kwargs)
-        else:
-            raise TypeError(
-                f"Env '{name}' registered with api='parallel' but factory "
-                "exposes no callable parallel_env and isn't callable."
-            )
-        _reject_if_aec(env, name, declared="parallel")
-    elif spec.api in ("aec_masked", "aec_sequential"):
-        # Turn-based AEC — wrap in our own adapter, skip aec_to_parallel
-        # and the simultaneity guard entirely.
-        raw = _instantiate_factory(factory, render_mode, kwargs, preferred="env")
-        env = _coerce_turn_based(raw, name, mode=spec.api)
-    elif spec.api == "jax_parallel":
-        # JAX-native env — build raw JaxMARL-style env then wrap in the
-        # numpy-boundary adapter.  Import lazily so the core registry
-        # does not pull JAX into its dependency closure.
-        if callable(factory):
-            raw = factory(**kwargs)
-        else:
-            raise TypeError(
-                f"Env '{name}' registered with api='jax_parallel' but "
-                "factory is not callable. Pass a callable that returns "
-                "a JaxMARL-style env (reset(key), step(key, state, "
-                "actions))."
-            )
-        from deap_pettingzoo.environments.jax_parallel import (
-            JaxEnvToPettingZooAdapter,
-        )
-
-        env = JaxEnvToPettingZooAdapter(raw, env_name=name, render_mode=render_mode)
-    else:
-        # AEC or auto: construct then convert if needed.
-        preferred = "env" if spec.api == "aec" else "parallel_env"
-        raw = _instantiate_factory(factory, render_mode, kwargs, preferred=preferred)
-        env = _coerce_to_parallel(raw, name, declared=spec.api)
-
-    # Apply the user's wrapper chain left-to-right. Wrappers run after
-    # api coercion so they always see the parallel-shaped env the rest
-    # of the stack expects.
-    for wrapper in spec.wrappers:
-        env = wrapper(env)
-    return env
+    return build_env_from_spec(spec, env_config=env_config, render_mode=render_mode)
 
 
 def clear_registry() -> None:
@@ -526,8 +544,97 @@ def clear_registry() -> None:
     _REGISTRY.clear()
 
 
+def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
+    """Return a picklable snapshot of all currently registered environments.
+
+    The snapshot is a plain list of ``(name, EnvSpec)`` tuples; both
+    strings and :class:`EnvSpec` dataclass instances are picklable as
+    long as the ``factory`` attribute is picklable (i.e. it is a named
+    module, a top-level callable, or a picklable class instance — *not*
+    a lambda or a locally-defined closure).
+
+    Intended use: call this in the **main process** immediately before
+    creating a :class:`~concurrent.futures.ProcessPoolExecutor`, then
+    pass the result to :func:`replay_registry_snapshot` as the worker
+    ``initializer`` argument.  This propagates custom
+    :func:`register_env` calls to each spawned worker, which would
+    otherwise start with only the built-in registrations::
+
+        from deap_pettingzoo.environments.registry import (
+            get_registry_snapshot,
+            replay_registry_snapshot,
+        )
+        snapshot = get_registry_snapshot()
+        with make_executor(
+            n_workers,
+            backend="process",
+            initializer=replay_registry_snapshot,
+            initargs=(snapshot,),
+        ) as executor:
+            ...
+
+    .. note::
+        SCOOP and Dask backends do not expose a per-worker
+        ``initializer`` hook.  :func:`make_executor` accepts but
+        silently ignores ``initializer``/``initargs`` for those
+        backends.  Custom environments will therefore *not* be
+        available in SCOOP/Dask workers unless the environment package
+        is imported at module level in the worker script.
+
+    .. note::
+        Entries whose ``factory`` is not picklable (e.g. built-in envs
+        registered with a bare module object) are silently omitted from
+        the snapshot.  Built-in environments (MPE2, aquarium) are
+        auto-registered in every worker process at import time via
+        :mod:`deap_pettingzoo.environments.builtin`, so they do not
+        need to be propagated through the snapshot.
+    """
+    import pickle
+
+    result = []
+    for name, spec in _REGISTRY.items():
+        try:
+            pickle.dumps(spec)
+            result.append((name, spec))
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
+def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
+    """Re-register environments in a worker process from a snapshot.
+
+    This function is designed to be used as the ``initializer`` argument
+    to :class:`~concurrent.futures.ProcessPoolExecutor` (via
+    :func:`~deap_pettingzoo.utils.parallel.make_executor`).  It is
+    called **once per worker process** at startup and re-populates
+    ``_REGISTRY`` with every entry from ``snapshot``.
+
+    Entries that the worker already knows about (e.g. built-ins
+    auto-registered at import time) are overwritten safely using
+    ``overwrite=True``, so the function is fully idempotent.
+
+    Args:
+        snapshot: The list returned by :func:`get_registry_snapshot`
+            in the main process.
+    """
+    for name, spec in snapshot:
+        register_env(
+            name,
+            spec.factory,
+            default_episode_len=spec.default_episode_len,
+            continuous_default=spec.continuous_default,
+            notes=spec.notes,
+            tags=set(spec.tags),
+            api=spec.api,
+            wrappers=spec.wrappers,
+            overwrite=True,
+        )
+
+
 __all__ = [
     "EnvSpec",
+    "build_env_from_spec",
     "EnvApi",
     "DEFAULT_EPISODE_LEN_FALLBACK",
     "register_env",
@@ -537,4 +644,6 @@ __all__ = [
     "list_envs",
     "build_env",
     "clear_registry",
+    "get_registry_snapshot",
+    "replay_registry_snapshot",
 ]

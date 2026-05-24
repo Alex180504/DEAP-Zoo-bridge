@@ -63,7 +63,8 @@ def resolve_num_workers(requested: Optional[int]) -> int:
         requested: ``None``, ``0``, or any ``int``.
 
     Returns:
-        * ``1`` for ``None``, ``0``, or ``1`` (serial).
+        * ``1`` for ``None`` or ``1`` (serial).
+        * ``os.cpu_count()`` for ``0`` ("use all available cores").
         * Otherwise the requested value, capped at
           ``os.cpu_count()`` (with a :class:`UserWarning` when
           capped).
@@ -78,9 +79,11 @@ def resolve_num_workers(requested: Optional[int]) -> int:
         raise ValueError(
             f"num_workers must be >= 0 (or None), got {requested!r}."
         )
-    if n <= 1:
-        return 1
     cpu = os.cpu_count() or 1
+    if n == 0:
+        return cpu
+    if n == 1:
+        return 1
     if n > cpu:
         warnings.warn(
             f"num_workers={n} exceeds os.cpu_count()={cpu}; capping to {cpu}.",
