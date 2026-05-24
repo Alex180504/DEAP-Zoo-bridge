@@ -208,6 +208,11 @@ class TrainingResult:
     seed: Optional[int] = None
     training_time: Optional[float] = None
 
+    @property
+    def best_policy(self) -> PolicyProtocol:
+        """Alias for :attr:`policy` (backwards-compatible name)."""
+        return self.policy
+
 
 @dataclass
 class EvalResult:

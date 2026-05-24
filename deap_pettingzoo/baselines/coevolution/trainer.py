@@ -64,6 +64,32 @@ from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
 
 
+# ---------------------------------------------------------------------------
+# Worker initializer
+# ---------------------------------------------------------------------------
+
+def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
+    """ProcessPoolExecutor worker initializer.
+
+    1. Pre-warm the full ``agilerl.networks`` / ``torch._inductor`` import
+       chain so that later ``pickle.loads`` calls inside
+       ``FrozenRLPolicyWrapper.__setstate__`` find every module already in
+       ``sys.modules``.  (On Windows spawn workers these modules are never
+       pre-loaded; a race in ``_apply_agilerl_grouping_patch`` can leave
+       ``torch._inductor`` partially initialised, causing the actor
+       deserialisation to crash.)
+    2. Call the real :func:`~deap_pettingzoo.environments.registry.replay_registry_snapshot`
+       to register environment factories in this worker process.
+    """
+    from deap_pettingzoo.baselines.agilerl_policy import _ensure_agilerl_imports
+
+    _ensure_agilerl_imports()
+
+    from deap_pettingzoo.environments.registry import replay_registry_snapshot
+
+    replay_registry_snapshot(snapshot)
+
+
 # QDax-specific evaluator
 
 class _QDaxPolicyEvaluator:
@@ -422,22 +448,21 @@ class CoEvolutionTrainer(BaselineTrainer):
         if has_rl_side and resolved_workers > 1:
             warnings.warn(
                 "CoEvolutionConfig: num_workers="
-                f"{coev_cfg.num_workers} but an RL side is present; "
-                "parallel co-evolution is not yet supported with RL "
-                "sides (AgileRLPolicyWrapper holds live torch state "
-                "that does not pickle across spawn). Falling back to "
-                "num_workers=1 for this run.",
+                f"{coev_cfg.num_workers} but an RL side is present. "
+                "EA/CMA learner sides will evaluate against RL opponents "
+                "in parallel via FrozenRLPolicyWrapper CPU snapshots. "
+                "The RL learner itself still collects rollouts serially "
+                "(parallel RL rollout collection is Phase 2).",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            resolved_workers = 1
 
         self._resolved_workers = resolved_workers
 
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
-            initializer=replay_registry_snapshot,
+            initializer=_prewarm_and_replay,
             initargs=(get_registry_snapshot(),),
         ) as executor:
             self._executor = executor
@@ -1088,6 +1113,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             pool_snapshot=pool_snapshot,
         )
         if learner_state.side.optimizer == "rl":
+            # Phase-2: pass executor + env identity so RLSideState can
+            # dispatch rollout episodes to worker processes in parallel.
+            # The executor is only handed over when resolved_workers > 1;
+            # for serial runs None keeps the existing _collect_episode path.
+            rl_executor = (
+                self._executor if self._resolved_workers > 1 else None
+            )
             return _RLDriverContext(
                 env_wrapper=env,
                 learner_role_prefixes=learner_state.side.role_prefixes,
@@ -1096,14 +1128,22 @@ class CoEvolutionTrainer(BaselineTrainer):
                 rng=np.random.default_rng(
                     self._rng.integers(0, 2**63 - 1)
                 ),
+                executor=rl_executor,
+                env_name=self._env_name,
+                env_config=self._env_config,
             )
         assert (
             learner_state.side.optimizer != "frozen"
         ), "frozen sides never become learners."
         learner_optimizer = learner_state.side.optimizer
+        # Only hand the executor to EA/CMA evaluators — the RL learner's
+        # own rollout collection is still serial (Phase 2 will add
+        # executor-based parallel rollout dispatch for RL sides).
+        # resolved_workers > 1 guard avoids handing a _SerialExecutor
+        # wrapper to the parallel path when the user set num_workers=1.
         executor_for_side = (
             self._executor
-            if learner_optimizer in {"ea", "cma"}
+            if learner_optimizer in {"ea", "cma"} and self._resolved_workers > 1
             else None
         )
 

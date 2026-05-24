@@ -535,6 +535,23 @@ package "deap_pettingzoo.baselines" {
         --
         + get_action(obs) -> Any
         + reset() -> None
+        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper
+    }
+
+    class FrozenRLPolicyWrapper {
+        - _actors: list[nn.Module]
+        - _agent_ids: list[str]
+        - _full_roster: list[str]
+        - _algorithm_name: str
+        - _is_discrete: bool
+        - _call_index: int
+        - _obs_cache: dict
+        --
+        + get_action(obs, **kwargs) -> Any
+        + reset() -> None
+        + agent_ids: list[str]
+        + algorithm_name: str
+        + is_discrete: bool
     }
 
     class UnifiedEvaluator {
@@ -580,6 +597,8 @@ package "deap_pettingzoo.baselines" {
 
     AgileRLTrainer --> AgileRLPolicyWrapper : produces
     AgileRLPolicyWrapper ..|> PolicyProtocol : implements
+    AgileRLPolicyWrapper --> FrozenRLPolicyWrapper : make_frozen_cpu_snapshot()
+    FrozenRLPolicyWrapper ..|> PolicyProtocol : implements
 
     comparison_mod ..> BaselineTrainer : registry
     comparison_mod --> UnifiedEvaluator : uses
@@ -807,7 +826,43 @@ package "deap_pettingzoo.baselines.coevolution" {
     + update(policy)
     + sample_opponent(rng): PolicyProtocol
     + snapshot_sync(): RLPolicyPool
-    + snapshot_opponents(rng, k): "raises NotImplementedError"
+    + snapshot_opponents(rng, k): list[OpponentSnapshot]
+  }
+
+  class "_RLDriverContext\n(dataclass)" as RLDriverContext {
+    + env_wrapper: PettingZooWrapper
+    + learner_role_prefixes: tuple
+    + opponent_sides: list
+    + max_steps: int
+    + rng: np.random.Generator
+    + executor: Optional[Executor]
+    + env_name: Optional[str]
+    + env_config: Optional[dict]
+  }
+
+  class "_RLRolloutPayload\n(dataclass, picklable)" as RLRolloutPayload {
+    + env_name: str
+    + env_config: Optional[dict]
+    + max_steps: int
+    + episode_seed: int
+    + frozen_rl_snapshot: FrozenRLPolicyWrapper
+    + rl_agent_ids: list[str]
+    + rl_role_prefixes: tuple
+    + opponent_snapshots: dict
+    + side_role_prefixes: dict
+  }
+
+  class "_RLTrajectory\n(dataclass)" as RLTrajectory {
+    + steps: list[_RLStepData]
+    + episode_return: float
+  }
+
+  class "_RLStepData\n(dataclass)" as RLStepData {
+    + obs: dict
+    + actions: dict
+    + rewards: dict
+    + next_obs: dict
+    + done: dict
   }
 
   class RLSideState {
@@ -823,6 +878,11 @@ package "deap_pettingzoo.baselines.coevolution" {
 
   RLPolicyPool ..|> OpponentPool
   RLSideState  --|> SideState
+  RLSideState ..> RLDriverContext : step_generation receives
+  RLDriverContext --> RLRolloutPayload : builds (parallel path)
+  RLRolloutPayload --> FrozenRLPolicyWrapper : carries snapshot
+  RLRolloutPayload --> RLTrajectory : worker returns
+  RLTrajectory *-- RLStepData : steps
 
   class QDaxRepertoirePool {
     - repertoire
