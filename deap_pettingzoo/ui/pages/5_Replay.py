@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 
@@ -75,4 +76,10 @@ choice = st.selectbox("Episode", video_files, format_func=lambda p: p.name)
 if choice.suffix == ".mp4":
     st.video(str(choice))
 else:
-    st.image(str(choice))
+    # st.image() strips animation data when decoding through Pillow.
+    # Embed the GIF as a base64 data-URI so the browser animates it.
+    b64 = base64.b64encode(choice.read_bytes()).decode()
+    st.markdown(
+        f'<img src="data:image/gif;base64,{b64}" style="max-width:100%;height:auto">',
+        unsafe_allow_html=True,
+    )

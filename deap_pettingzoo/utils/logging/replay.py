@@ -130,8 +130,8 @@ class FrameRecorder:
             if fmt == "mp4":
                 imageio.mimsave(path, self._frames, fps=self.fps, macro_block_size=1)
             else:
-                # imageio gif uses 'duration' (seconds per frame).
-                imageio.mimsave(path, self._frames, duration=1.0 / max(self.fps, 1))
+                # imageio gif uses 'duration' (milliseconds per frame, Pillow convention).
+                imageio.mimsave(path, self._frames, duration=1000.0 / max(self.fps, 1))
         except Exception:
             # Fallback to GIF on ffmpeg-related failures.
             if fmt == "mp4":
@@ -149,7 +149,7 @@ class FrameRecorder:
                 path = self._frames_dir / f"{self.episode_prefix}episode_{ep:04d}.gif"
                 try:
                     imageio.mimsave(
-                        path, self._frames, duration=1.0 / max(self.fps, 1)
+                        path, self._frames, duration=1000.0 / max(self.fps, 1)
                     )
                 except Exception:
                     path = None  # type: ignore[assignment]
