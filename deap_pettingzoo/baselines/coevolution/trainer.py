@@ -49,6 +49,10 @@ from deap_pettingzoo.baselines.base import (
     TrainingResult,
 )
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
+from deap_pettingzoo.environments.registry import (
+    get_registry_snapshot,
+    replay_registry_snapshot,
+)
 from deap_pettingzoo.utils.parallel import (
     SUPPORTED_BACKENDS,
     make_executor,
@@ -428,11 +432,26 @@ class CoEvolutionTrainer(BaselineTrainer):
             )
             resolved_workers = 1
 
+        self._resolved_workers = resolved_workers
+
         with make_executor(
-            resolved_workers, backend=coev_cfg.parallel_backend
+            resolved_workers,
+            backend=coev_cfg.parallel_backend,
+            initializer=replay_registry_snapshot,
+            initargs=(get_registry_snapshot(),),
         ) as executor:
             self._executor = executor
+            print(
+                f"[CoEv] bootstrapping {len(states)} sides "
+                f"({sum(1 for s in states.values() if s.side.optimizer != 'frozen')} active)",
+                flush=True,
+            )
+            _bootstrap_t0 = time.time()
             self._bootstrap_populations(env, states, coev_cfg)
+            print(
+                f"[CoEv] bootstrap done in {time.time() - _bootstrap_t0:.1f}s",
+                flush=True,
+            )
 
             # Generation loop.
             per_side_history: Dict[str, List[GenerationStats]] = {
@@ -445,10 +464,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             recording_cfg = config.recording
             recording_cadence = self._resolve_recording_every_n(config)
             self._recording_recorder = None
+            self._recording_max_steps: int = int(
+                config.algorithm_params.get("max_steps_per_episode", 100)
+            )
             if recording_cfg.enabled:
-                rec_max_steps = int(
-                    config.algorithm_params.get("max_steps_per_episode", 100)
-                )
                 recorder = self._recording_log.get_frame_recorder(
                     fps=recording_cfg.fps,
                     fmt=recording_cfg.fmt,
@@ -457,7 +476,6 @@ class CoEvolutionTrainer(BaselineTrainer):
                 )
                 if recorder.enabled:
                     self._recording_recorder = recorder
-                    self._recording_max_steps = rec_max_steps
 
             def _record_champion_if_due(gen: int) -> None:
                 """Render one multi-policy rollout using each side's
@@ -477,15 +495,32 @@ class CoEvolutionTrainer(BaselineTrainer):
                     self._record_coevolution_rollout(
                         config, coev_cfg, states, gen
                     )
-                except Exception:
-                    pass
+                except Exception as _rec_exc:
+                    warnings.warn(
+                        f"[CoEvolution] Frame recording failed at gen {gen}: "
+                        f"{type(_rec_exc).__name__}: {_rec_exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
             if coev_cfg.schedule == "synchronous":
                 for _g in range(num_generations):
+                    _gt = time.time()
                     self._run_synchronous_generation(
                         env, states, coev_cfg, per_side_history
                     )
                     _record_champion_if_due(_g + 1)
+                    _side_info = "  ".join(
+                        f"{n}: best={h[-1].best_fitness:.3f} mean={h[-1].mean:.3f}"
+                        for n, h in per_side_history.items()
+                        if h
+                    )
+                    print(
+                        f"[CoEv] gen {_g + 1}/{num_generations}  "
+                        f"{_side_info}  "
+                        f"({time.time()-_gt:.1f}s)",
+                        flush=True,
+                    )
             else:  # alternating
                 total = 0
                 rotation = list(states)
@@ -494,11 +529,23 @@ class CoEvolutionTrainer(BaselineTrainer):
                         for _inner in range(coev_cfg.alternating_generations):
                             if total >= num_generations:
                                 break
+                            _gt = time.time()
                             self._run_alternating_step(
                                 env, states, coev_cfg, per_side_history, name
                             )
                             total += 1
                             _record_champion_if_due(total)
+                            _side_info = "  ".join(
+                                f"{n}: best={h[-1].best_fitness:.3f} mean={h[-1].mean:.3f}"
+                                for n, h in per_side_history.items()
+                                if h
+                            )
+                            print(
+                                f"[CoEv] step {total}/{num_generations} ({name})  "
+                                f"{_side_info}  "
+                                f"({time.time()-_gt:.1f}s)",
+                                flush=True,
+                            )
 
             # Build reporting-side policy *inside* the executor scope
             # in case best_policy() ever needs to evaluate (it does
@@ -889,6 +936,93 @@ class CoEvolutionTrainer(BaselineTrainer):
             opp.append((name, state.side.role_prefixes, pool))
         return opp
 
+    def _make_batch_eval_fn(self, evaluator: Any) -> Optional[Any]:
+        """Return a population-level parallel batch-evaluation function.
+
+        When ``self._resolved_workers <= 1`` or the evaluator is not a
+        :class:`CoEvolutionEvaluator`, returns ``None`` so callers fall
+        back to the serial ``toolbox.evaluate`` path.
+
+        The returned callable accepts a list of DEAP individuals and
+        dispatches ``N × k_opponents`` :class:`_EpisodePayload` s via
+        ``self._executor`` in a single ``executor.map`` call — giving
+        true population-level parallelism instead of the episode-level
+        dispatch that was previously wired inside the evaluator.
+
+        All opponent sampling happens on the driver before any worker is
+        launched, so pool RNGs mutate exactly once per batch call.
+        """
+        from .evaluator import CoEvolutionEvaluator, _EpisodePayload, _episode_rollout
+
+        if self._resolved_workers <= 1:
+            return None
+        if not isinstance(evaluator, CoEvolutionEvaluator):
+            return None
+
+        env_name = self._env_name
+        env_config = self._env_config
+        executor = self._executor
+        rng = self._rng
+        k = evaluator.k_opponents
+        aggregation = evaluator.aggregation
+        max_steps = evaluator.max_steps
+        learner_role_prefixes = evaluator.learner_role_prefixes
+        learner_masked = evaluator._learner_masked
+        opponent_sides = list(evaluator.opponent_sides)  # snapshot at creation time
+
+        def _batch_eval(individuals: List[Any]) -> List[tuple]:
+            n = len(individuals)
+            if n == 0:
+                return []
+            # Sample all N×k opponents on the driver (preserves pool RNG state).
+            per_side_snapshots: Dict[str, List[Any]] = {}
+            side_role_prefixes: Dict[str, tuple] = {}
+            for side_name, prefixes, pool in opponent_sides:
+                per_side_snapshots[side_name] = pool.snapshot_opponents(rng, k * n)
+                side_role_prefixes[side_name] = tuple(prefixes)
+            # Build N×k payloads.
+            payloads: List[_EpisodePayload] = []
+            for i, ind in enumerate(individuals):
+                for ep_i in range(k):
+                    global_ep = i * k + ep_i
+                    snaps = {
+                        name: per_side_snapshots[name][global_ep]
+                        for name in per_side_snapshots
+                    }
+                    payloads.append(
+                        _EpisodePayload(
+                            env_name=env_name,
+                            env_config=env_config,
+                            learner_genome=ind.genome,
+                            learner_role_prefixes=learner_role_prefixes,
+                            learner_masked=learner_masked,
+                            opponent_snapshots=snaps,
+                            side_role_prefixes=side_role_prefixes,
+                            episode_seed=None,
+                            max_steps=max_steps,
+                        )
+                    )
+            # Dispatch all N×k episodes in parallel.
+            results = list(executor.map(_episode_rollout, payloads))
+            # Aggregate per individual.
+            fitnesses: List[tuple] = []
+            for i in range(n):
+                ep_results = results[i * k : (i + 1) * k]
+                learner_rewards = [r.learner_total for r in ep_results]
+                arr = np.asarray(learner_rewards)
+                if aggregation == "mean":
+                    fit = float(arr.mean())
+                elif aggregation == "min":
+                    fit = float(arr.min())
+                elif aggregation == "max":
+                    fit = float(arr.max())
+                else:  # "sum"
+                    fit = float(arr.sum())
+                fitnesses.append((fit,))
+            return fitnesses
+
+        return _batch_eval
+
     def _bootstrap_populations(
         self,
         env: PettingZooWrapper,
@@ -911,7 +1045,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             evaluator = self._build_evaluator(env, state, states, coev_cfg)
             # Set toolbox.evaluate then evaluate the population.
             state.rebind_evaluator(evaluator)  # type: ignore[attr-defined]
-            state.evaluate_population()  # type: ignore[attr-defined]
+            batch_fn = self._make_batch_eval_fn(evaluator)
+            state.evaluate_population(batch_eval_fn=batch_fn)  # type: ignore[call-arg]
             # Snapshot initial best into HoF if configured.
             if state.side.hof is not None and coev_cfg.snapshot_every >= 1:
                 state.snapshot_best()
@@ -1051,7 +1186,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             evaluator = self._build_evaluator(
                 env, state, states, coev_cfg, pool_snapshot=pool_snapshot
             )
-            stats = state.step_generation(lambda _s, _ev=evaluator: _ev)
+            batch_fn = self._make_batch_eval_fn(evaluator)
+            stats = state.step_generation(lambda _s, _ev=evaluator: _ev, batch_eval_fn=batch_fn)
             history[name].append(stats)
             if (
                 state.side.hof is not None
@@ -1071,7 +1207,8 @@ class CoEvolutionTrainer(BaselineTrainer):
         if state.side.optimizer == "frozen":
             return
         evaluator = self._build_evaluator(env, state, states, coev_cfg)
-        stats = state.step_generation(lambda _s, _ev=evaluator: _ev)
+        batch_fn = self._make_batch_eval_fn(evaluator)
+        stats = state.step_generation(lambda _s, _ev=evaluator: _ev, batch_eval_fn=batch_fn)
         history[name].append(stats)
         if (
             state.side.hof is not None

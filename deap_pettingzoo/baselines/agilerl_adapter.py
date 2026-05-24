@@ -5,7 +5,8 @@ Provides helpers to:
 - Build a raw PettingZoo parallel environment compatible with AgileRL's
   multi-agent training APIs (reset -> (obs, info), step -> 5-tuple).
 - Build a vectorized PettingZoo environment via AgileRL's
-  :class:`AsyncPettingZooVecEnv` for on-policy trainers (IPPO).
+    :class:`AsyncPettingZooVecEnv` for AgileRL trainers that opt into
+    ``num_envs > 1``.
 - Extract per-agent observation/action spaces as the list-aligned structure
   AgileRL constructors expect (works for both single and vec envs).
 - Translate a :class:`BudgetMode` to an environment-step budget.
@@ -21,6 +22,7 @@ from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 from deap_pettingzoo.environments.registry import (
     DEFAULT_EPISODE_LEN_FALLBACK,
     build_env,
+    build_env_from_spec,
     get_env_spec,
     is_registered,
 )
@@ -96,9 +98,11 @@ def build_vec_parallel_env(
         ) from exc
 
     cfg = dict(env_config) if env_config else None
+    # Resolve the EnvSpec in the main process so each subprocess worker can call build_env_from_spec(spec, ...) directly
+    spec = get_env_spec(env_name)
 
     def _factory():
-        return build_env(env_name, env_config=cfg, render_mode=render_mode)
+        return build_env_from_spec(spec, env_config=cfg, render_mode=render_mode)
 
     return AsyncPettingZooVecEnv([_factory for _ in range(int(num_envs))])
 

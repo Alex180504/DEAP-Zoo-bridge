@@ -45,6 +45,10 @@ from deap_pettingzoo.integration.deap_integration import (
     evaluate_population_parallel,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
+from deap_pettingzoo.environments.registry import (
+    get_registry_snapshot,
+    replay_registry_snapshot,
+)
 from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
@@ -238,7 +242,10 @@ class CMAESTrainer(BaselineTrainer):
         )
 
         with make_executor(
-            effective_workers, backend=backend
+            effective_workers,
+            backend=backend,
+            initializer=replay_registry_snapshot,
+            initargs=(get_registry_snapshot(),),
         ) as executor:
             base_eval_seed = config.algorithm_params.get("seed")
             _eval_counter = [0]
