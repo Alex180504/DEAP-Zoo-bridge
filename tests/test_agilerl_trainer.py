@@ -8,6 +8,7 @@ without actually running AgileRL. Live-training behavior is covered by
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,7 +22,6 @@ from deap_pettingzoo.baselines import (
     BudgetMode,
     IPPOTrainer,
     MADDPGTrainer,
-    MAPPOTrainer,
     MATD3Trainer,
     TrainingConfig,
     get_trainer,
@@ -29,6 +29,7 @@ from deap_pettingzoo.baselines import (
 )
 from deap_pettingzoo.baselines.agilerl_adapter import (
     build_parallel_env,
+    build_vec_parallel_env,
     extract_space_metadata,
     translate_budget_to_env_steps,
 )
@@ -57,11 +58,6 @@ class TestCapabilities:
         assert caps["on_policy"] is True
         assert caps["needs_global_state"] is False
 
-    def test_mappo_capabilities(self):
-        caps = MAPPOTrainer().get_capabilities()
-        assert caps["on_policy"] is True
-        assert caps["needs_global_state"] is True
-
     def test_supports_env_steps_and_eval_episodes(self):
         trainer = MADDPGTrainer()
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
@@ -76,7 +72,6 @@ class TestRegistry:
             ("maddpg", MADDPGTrainer),
             ("matd3", MATD3Trainer),
             ("ippo", IPPOTrainer),
-            ("mappo", MAPPOTrainer),
         ],
     )
     def test_builtin_agilerl_registered(self, name, cls):
@@ -103,6 +98,46 @@ class TestAdapter:
     def test_build_parallel_env_rejects_unknown(self):
         with pytest.raises(ValueError, match="Unsupported"):
             build_parallel_env("nonexistent_env_v99")
+
+    def test_build_vec_parallel_env_rejects_zero(self):
+        with pytest.raises(ValueError, match="num_envs must be"):
+            build_vec_parallel_env("simple_spread_v3", num_envs=0)
+
+    @pytest.mark.parametrize("trainer_cls", [MADDPGTrainer, MATD3Trainer])
+    def test_off_policy_train_uses_vec_env_when_num_envs_gt_1(self, trainer_cls):
+        pytest.importorskip(
+            "agilerl",
+            reason="AgileRL required for vec-env construction.",
+        )
+
+        trainer = trainer_cls(verbose=False)
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=4,
+            algorithm_params={"seed": 0, "num_envs": 2},
+        )
+
+        captured = {}
+
+        class DummyLogger:
+            def row(self, *_args, **_kwargs):
+                return None
+
+        def fake_run_off_policy(env, *_args, **_kwargs):
+            captured["num_envs"] = getattr(env, "num_envs", 1)
+            return {"episode_rewards": [], "num_episodes": 0, "env_steps": 4}
+
+        with patch.object(trainer, "_import_algorithm", return_value=object()), \
+             patch.object(trainer, "_build_agent", return_value=SimpleNamespace()), \
+             patch.object(trainer, "_run_off_policy", side_effect=fake_run_off_policy), \
+             patch("deap_pettingzoo.baselines._logging_helpers.build_logger", return_value=nullcontext(DummyLogger())), \
+             patch("deap_pettingzoo.baselines._logging_helpers.write_summary"), \
+             patch("deap_pettingzoo.utils.logging.save_agilerl_agent"):
+            result = trainer.train(config)
+
+        assert captured["num_envs"] == 2
+        assert result.metrics["env_steps"] == 4
 
     def test_extract_space_metadata_shapes(self):
         env = build_parallel_env("simple_spread_v3")
@@ -212,7 +247,7 @@ class TestAgileRLPolicyWrapper:
 
 
 # ---------------------------------------------------------------------------
-# Lazy-import / install-guard behavior
+# Lazy-import / install-guard behaviour
 # ---------------------------------------------------------------------------
 
 

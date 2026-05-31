@@ -32,6 +32,7 @@ around the QD loop).
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
@@ -58,8 +59,11 @@ class _RolloutSpec:
       (pickleable). The factories in
       :mod:`deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion`
       return such callables (closures over numeric constants only).
-    * ``extract_state_fn`` — same pickle constraint; default is the
-      numpy extractor in this module.
+        * ``extract_state_fn`` — same pickle constraint; default is the
+            numpy extractor in this module.
+        * ``worker_imports`` — optional module names imported in the worker
+            before env construction so import-time ``register_env(...)`` side
+            effects are replayed under ``spawn``.
     """
 
     env_name: str
@@ -69,7 +73,9 @@ class _RolloutSpec:
     episode_length: int
     descriptor_fn: Callable
     action_type: str
+    eval_episodes: int = 1
     extract_state_fn: Optional[Callable] = None
+    worker_imports: tuple[str, ...] = field(default_factory=tuple)
 
 
 # Module-global cache populated lazily on each worker. Same pattern
@@ -86,6 +92,12 @@ def _extract_positions_velocities_np(obs_dict, agents):
     vels = np.stack([np.asarray(obs_dict[a])[0:2] for a in agents], axis=0)
     poses = np.stack([np.asarray(obs_dict[a])[2:4] for a in agents], axis=0)
     return poses, vels
+
+
+def _import_worker_modules(module_names: Sequence[str]) -> None:
+    """Import helper modules that replay env-registration side effects."""
+    for module_name in module_names:
+        importlib.import_module(str(module_name))
 
 
 def _ensure_worker_context(spec: _RolloutSpec):
@@ -110,6 +122,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
         if spec.extract_state_fn is not None
         else None
     )
+    _worker_imports = tuple(str(name) for name in (spec.worker_imports or ()))
     sig = (
         spec.env_name,
         _env_cfg_frozen,
@@ -118,6 +131,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
         spec.activation,
         spec.action_type,
         _extract_key,
+        _worker_imports,
     )
     if cached_sig == sig:
         # Refresh callable handles so the cached ones match the
@@ -130,6 +144,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
     from deap_pettingzoo.environments import PettingZooWrapper
 
+    _import_worker_modules(_worker_imports)
     module = make_flax_mlp(spec.layer_sizes, activation=spec.activation)
     env = PettingZooWrapper(spec.env_name, env_config=spec.env_config or {})
     extract = spec.extract_state_fn or _extract_positions_velocities_np
@@ -145,24 +160,49 @@ def _ensure_worker_context(spec: _RolloutSpec):
     return _NUMPY_WORKER_CACHE
 
 
-def _numpy_rollout(args):
-    """Worker entry point: one (flat_params, seed) → (fitness, descriptor).
+def _pad_agent_state(positions, velocities, agent_count: int):
+    """Pad per-agent state arrays so descriptor inputs keep a fixed shape."""
+    import numpy as np
 
-    Args:
-        args: ``(spec, flat_params, seed)`` tuple. ``spec`` is a
-            :class:`_RolloutSpec`; ``flat_params`` is a flat numpy
-            weight vector; ``seed`` is an int.
+    if positions.shape[0] >= agent_count:
+        return positions, velocities
 
-    Returns:
-        ``(fitness: float, descriptor: np.ndarray)``.
+    pad = agent_count - positions.shape[0]
+    return (
+        np.concatenate(
+            [positions, np.zeros((pad, positions.shape[1]), dtype=positions.dtype)],
+            axis=0,
+        ),
+        np.concatenate(
+            [
+                velocities,
+                np.zeros((pad, velocities.shape[1]), dtype=velocities.dtype),
+            ],
+            axis=0,
+        ),
+    )
+
+
+def _rollout_once(
+    spec: _RolloutSpec,
+    flat_params,
+    seed: int,
+    *,
+    ctx: Optional[dict] = None,
+):
+    """Run one rollout episode and return ``(fitness, descriptor)``.
+
+    ``ctx`` is the lazily-built worker context returned by
+    :func:`_ensure_worker_context`; passing it lets a caller average multiple
+    episodes without rebuilding the env/module cache.
     """
     import jax.numpy as jnp
     import numpy as np
 
     from deap_pettingzoo.contrib.qdax.policy import flat_to_pytree
 
-    spec, flat_params, seed = args
-    ctx = _ensure_worker_context(spec)
+    if ctx is None:
+        ctx = _ensure_worker_context(spec)
     module = ctx["module"]
     env = ctx["env"]
     extract = ctx["extract"]
@@ -193,15 +233,7 @@ def _numpy_rollout(args):
         obs, rewards, terms, truncs, _infos = env.step(actions)
         total_reward += float(sum(rewards.values()))
         if env.agents:
-            p, v = extract(obs, list(env.agents))
-            if p.shape[0] < len(agents):
-                pad = len(agents) - p.shape[0]
-                p = np.concatenate(
-                    [p, np.zeros((pad, p.shape[1]))], axis=0
-                )
-                v = np.concatenate(
-                    [v, np.zeros((pad, v.shape[1]))], axis=0
-                )
+            p, v = _pad_agent_state(*extract(obs, list(env.agents)), len(agents))
             pos_hist.append(p)
             vel_hist.append(v)
         done = all(terms.values()) or all(truncs.values())
@@ -217,6 +249,43 @@ def _numpy_rollout(args):
     }
     descriptor = np.asarray(descriptor_fn(trajectory))
     return float(total_reward), descriptor
+
+
+def _numpy_rollout(args):
+    """Worker entry point: one genotype → averaged fitness/descriptor.
+
+    Args:
+        args: ``(spec, flat_params, seed)`` tuple. ``spec`` is a
+            :class:`_RolloutSpec`; ``flat_params`` is a flat numpy
+            weight vector; ``seed`` is an int.
+
+    Returns:
+        ``(fitness: float, descriptor: np.ndarray)`` averaged over
+        ``spec.eval_episodes`` rollouts.
+    """
+    import numpy as np
+
+    spec, flat_params, seed = args
+    ctx = _ensure_worker_context(spec)
+    eval_episodes = max(1, int(spec.eval_episodes))
+    fitnesses = []
+    descriptors = []
+    base_seed = int(seed)
+
+    for episode_idx in range(eval_episodes):
+        fitness, descriptor = _rollout_once(
+            spec,
+            flat_params,
+            base_seed + episode_idx,
+            ctx=ctx,
+        )
+        fitnesses.append(float(fitness))
+        descriptors.append(np.asarray(descriptor, dtype=np.float32))
+
+    return (
+        float(np.mean(np.asarray(fitnesses, dtype=np.float64))),
+        np.mean(np.stack(descriptors, axis=0), axis=0),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -235,6 +304,8 @@ def make_numpy_scoring_function(
     activation: str = "tanh",
     num_workers: int = 1,
     parallel_backend: str = "process",
+    eval_episodes: int = 1,
+    worker_imports: Sequence[str] = (),
 ) -> Callable:
     """Build a QDax-shaped scoring function backed by a PettingZoo env.
 
@@ -254,6 +325,8 @@ def make_numpy_scoring_function(
         action_type: ``"discrete"`` (argmax) or ``"continuous"`` (tanh).
         extract_state_fn: Optional observation → (positions, velocities)
             extractor. Must be picklable when ``num_workers > 1``.
+        eval_episodes: Number of rollout episodes to average per genotype.
+            Descriptors are averaged elementwise across those rollouts.
         num_workers: Number of worker processes for per-individual
             rollouts. ``0`` / ``1`` → serial in-process. ``>1`` spawns
             a persistent :class:`ProcessPoolExecutor` on first call
@@ -263,6 +336,10 @@ def make_numpy_scoring_function(
             ``try / finally``.
         parallel_backend: One of ``"process"``, ``"scoop"``, ``"dask"``.
             See :mod:`deap_pettingzoo.utils.parallel` for details.
+        worker_imports: Optional module names imported inside each worker
+            before env construction. Use this when the env is registered by
+            importing a module for side effects rather than being part of the
+            built-in registry.
 
     Returns:
         A callable ``scoring_function(batched_params, key) ->
@@ -273,6 +350,8 @@ def make_numpy_scoring_function(
         * ``scoring_function._executor`` — lazily-created executor ref
           (``None`` until first parallel call; the actual executor
           object thereafter; reset to ``None`` after ``close()``).
+                * ``scoring_function._last_batch_fitness`` — last fitness batch
+                    scored by the numpy path, or ``None`` before the first call.
     """
     import jax
     import jax.numpy as jnp
@@ -291,9 +370,11 @@ def make_numpy_scoring_function(
         layer_sizes=tuple(int(x) for x in layer_sizes),
         activation=str(activation),
         episode_length=int(episode_length),
+        eval_episodes=max(1, int(eval_episodes)),
         descriptor_fn=descriptor_fn,
         action_type=action_type,
         extract_state_fn=extract_state_fn,
+        worker_imports=tuple(str(name) for name in worker_imports),
     )
 
     # Local (in-process) fallback for the serial path — avoids the
@@ -347,6 +428,9 @@ def make_numpy_scoring_function(
 
         fitnesses = [r[0] for r in results]
         descriptors = [r[1] for r in results]
+        scoring_function._last_batch_fitness = np.asarray(  # type: ignore[attr-defined]
+            fitnesses, dtype=np.float64
+        )
         return (
             jnp.asarray(fitnesses, dtype=jnp.float32),
             jnp.asarray(np.stack(descriptors), dtype=jnp.float32),
@@ -362,10 +446,13 @@ def make_numpy_scoring_function(
                 state["executor"] = None
                 state["ctx"] = None
                 scoring_function._executor = None  # type: ignore[attr-defined]
+                scoring_function._last_batch_fitness = None  # type: ignore[attr-defined]
 
     scoring_function.close = _close  # type: ignore[attr-defined]
     scoring_function._executor = None  # type: ignore[attr-defined]
+    scoring_function._last_batch_fitness = None  # type: ignore[attr-defined]
     scoring_function._num_workers = effective_workers  # type: ignore[attr-defined]
+    scoring_function._num_eval_episodes = rollout_spec.eval_episodes  # type: ignore[attr-defined]
     scoring_function._parallel_backend = parallel_backend  # type: ignore[attr-defined]
     return scoring_function
 

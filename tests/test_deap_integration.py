@@ -68,6 +68,25 @@ class TestIndividualCreation:
         assert hasattr(individual, 'fitness')
         assert isinstance(individual.genome, FixedTopologyGenome)
         assert individual.genome.activation == activation
+
+    def test_create_deap_individual_with_output_activation(self):
+        """Test individual creation forwards output activation."""
+        if hasattr(creator, "FitnessMax"):
+            del creator.FitnessMax
+        if hasattr(creator, "Individual"):
+            del creator.Individual
+
+        setup_deap_creators()
+
+        individual = create_deap_individual(
+            layer_sizes=[4, 8, 2],
+            activation='relu',
+            output_activation='linear',
+            random_seed=42
+        )
+
+        assert individual.genome.activation == 'relu'
+        assert individual.genome.output_activation == 'linear'
     
     def test_individuals_have_different_weights(self):
         """Test different seeds create different individuals."""
@@ -146,6 +165,29 @@ class TestToolboxCreation:
         
         assert len(pop) == 10
         assert all(hasattr(ind, 'genome') for ind in pop)
+
+    def test_toolbox_propagates_output_activation(self, evaluator):
+        """Test toolbox-created genomes preserve explicit output activation."""
+        if hasattr(creator, "FitnessMax"):
+            del creator.FitnessMax
+        if hasattr(creator, "Individual"):
+            del creator.Individual
+
+        setup_deap_creators()
+
+        toolbox = create_toolbox(
+            genome_config={
+                'layer_sizes': [14, 16, 5],
+                'activation': 'relu',
+                'output_activation': 'linear',
+            },
+            evaluator=evaluator
+        )
+
+        individual = toolbox.individual()
+
+        assert individual.genome.activation == 'relu'
+        assert individual.genome.output_activation == 'linear'
     
     def test_create_toolbox_with_all_operators(self, evaluator):
         """Test that toolbox has all required operators and they function."""

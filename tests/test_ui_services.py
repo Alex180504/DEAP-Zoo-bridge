@@ -1,9 +1,7 @@
 """Tests for ``deap_pettingzoo.ui.services`` modules.
 
 These intentionally avoid importing ``streamlit`` so the suite stays
-runnable without the ``[ui]`` extra installed. Page modules
-(``deap_pettingzoo/ui/pages/*.py``) do import ``streamlit`` and are
-covered separately by Phase 6 smoke tests.
+runnable without the ``[ui]`` extra installed.
 """
 
 from __future__ import annotations
@@ -199,3 +197,56 @@ def test_uisettings_results_root_exists_flag(tmp_path: Path):
     assert s.results_root_exists is True
     s2 = UISettings(results_root=tmp_path / "missing")
     assert s2.results_root_exists is False
+
+
+# ---------------------------------------------------------------------------
+# RunSummary — started_at and display_name fields
+# ---------------------------------------------------------------------------
+
+
+def test_run_summary_started_at_populated(tmp_path: Path):
+    """discover_runs() populates started_at from the manifest ISO timestamp."""
+    from datetime import datetime
+
+    rd = _write_run(tmp_path, algorithm="ea", seed=0)
+    # ExperimentLogger writes started_at automatically; just verify it round-trips.
+    summaries = discover_runs(tmp_path)
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert s.started_at is not None
+    assert isinstance(s.started_at, datetime)
+
+
+def test_run_summary_started_at_none_if_missing(tmp_path: Path):
+    """If manifest.json has no started_at key, field is None (not an error)."""
+    import json
+
+    rd = _write_run(tmp_path, algorithm="ea", seed=1)
+    mf = rd / "manifest.json"
+    data = json.loads(mf.read_text())
+    data.pop("started_at", None)
+    mf.write_text(json.dumps(data))
+
+    summaries = discover_runs(tmp_path)
+    assert summaries[0].started_at is None
+
+
+def test_run_summary_display_name_populated(tmp_path: Path):
+    """discover_runs() populates display_name when present in manifest."""
+    import json
+
+    rd = _write_run(tmp_path, algorithm="ea", seed=2)
+    mf = rd / "manifest.json"
+    data = json.loads(mf.read_text())
+    data["display_name"] = "My cool run"
+    mf.write_text(json.dumps(data))
+
+    summaries = discover_runs(tmp_path)
+    assert summaries[0].display_name == "My cool run"
+
+
+def test_run_summary_display_name_none_if_absent(tmp_path: Path):
+    """If manifest.json has no display_name, field is None."""
+    rd = _write_run(tmp_path, algorithm="ea", seed=3)
+    summaries = discover_runs(tmp_path)
+    assert summaries[0].display_name is None

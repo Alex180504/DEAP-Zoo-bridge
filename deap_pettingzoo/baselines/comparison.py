@@ -227,7 +227,7 @@ def _register_builtins():
 
     Importing the AgileRL trainer module does NOT require AgileRL to be
     installed — the ``import agilerl`` call is deferred until ``train()``
-    is invoked.  That means we can always register the class; only calling
+    is invoked.  That means the user can always register the class; only calling
     ``train()`` without the ``[rl-baselines]`` extra will raise ImportError.
     """
     try:
@@ -247,13 +247,11 @@ def _register_builtins():
             MADDPGTrainer,
             MATD3Trainer,
             IPPOTrainer,
-            MAPPOTrainer,
             GroupedIPPOTrainer,
         )
         register_trainer('maddpg', MADDPGTrainer)
         register_trainer('matd3', MATD3Trainer)
         register_trainer('ippo', IPPOTrainer)
-        register_trainer('mappo', MAPPOTrainer)
         register_trainer('ippo-grouped', GroupedIPPOTrainer)
     except ImportError:
         pass

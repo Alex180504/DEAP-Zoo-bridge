@@ -6,7 +6,8 @@ title AgileRL Training Workflow (in-process)
 actor Caller
 participant "AgileRLTrainer\n(concrete subclass)" as Trainer
 participant "agilerl_adapter" as Adapter
-participant "PettingZoo\nParallelEnv" as Env
+participant "registry" as Registry
+participant "PettingZoo\nParallelEnv or\nAsyncPettingZooVecEnv" as Env
 participant "agilerl.algorithms.*\n(MADDPG/MATD3/IPPO)" as Agent
 participant "MultiAgentReplayBuffer\n(off-policy only)" as Memory
 participant "AgileRLPolicyWrapper" as Wrapper
@@ -19,11 +20,22 @@ activate Trainer
 Trainer -> Trainer: _import_algorithm()
 note right: Lazy ``importlib.import_module``;\nraises ImportError with install\nhint if extras missing.
 
-Trainer -> Adapter: build_parallel_env(env_name)
-activate Adapter
-Adapter -> Env **: parallel_env(**env_config)
-Adapter --> Trainer: env
-deactivate Adapter
+alt num_envs > 1
+    Trainer -> Adapter: build_vec_parallel_env(env_name, num_envs=N)
+    activate Adapter
+    Adapter -> Registry: get_env_spec(env_name)
+    note right: Resolves EnvSpec in main process\nbefore spawning workers.
+    Registry --> Adapter: spec
+    Adapter -> Env **: AsyncPettingZooVecEnv([_factory × N])\nnote: each worker calls\nbuild_env_from_spec(spec, ...)
+    Adapter --> Trainer: vec_env
+    deactivate Adapter
+else single env (num_envs == 1)
+    Trainer -> Adapter: build_parallel_env(env_name)
+    activate Adapter
+    Adapter -> Env **: parallel_env(**env_config)
+    Adapter --> Trainer: env
+    deactivate Adapter
+end
 
 Trainer -> Adapter: extract_space_metadata(env)
 Adapter --> Trainer: (obs_spaces, act_spaces, agent_ids)
@@ -52,7 +64,8 @@ loop for step in [0, budget_steps)
     Env --> Trainer: (next_obs, reward, term, trunc, info)
 
     alt off-policy
-        Trainer -> Memory: save_to_memory(obs, raw_actions, reward, next_obs, term)
+        Trainer -> Memory: save_to_memory(obs, raw_actions, reward, next_obs, done, is_vectorised)
+        note right: Vec path preserves the leading\n`num_envs` axis and inserts\none replay entry per worker.
         opt step ≥ learning_delay AND len(memory) ≥ batch_size
             Trainer -> Memory: sample(batch_size)
             Memory --> Trainer: experiences

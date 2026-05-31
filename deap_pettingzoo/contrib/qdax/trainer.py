@@ -31,6 +31,11 @@ from deap_pettingzoo.baselines.base import (
     TrainingResult,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
+from deap_pettingzoo.contrib.qdax.progress import (
+    format_qdax_progress_fields,
+    summarise_fitness_batch,
+    summarise_qdax_archive,
+)
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
 
@@ -74,7 +79,10 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "hidden_sizes": (32, 32),
     "activation": "tanh",
     "init_batch_size": 64,
+    "init_mode": "flax_perturb",
+    "init_sigma": 0.01,
     "batch_size": 32,
+    "eval_episodes": 1,
     "grid_shape": (10, 10),
     "num_centroids": None,  # if set, use CVT centroids instead of grid
     "iso_sigma": 0.005,
@@ -86,6 +94,9 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "worker_imports": (),
+    "verbose": True,
+    "progress_every": 1,
 }
 
 _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
@@ -93,6 +104,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "hidden_sizes": (16, 16),
     "activation": "tanh",
     "batch_size": 32,
+    "eval_episodes": 1,
     "grid_shape": (10, 10),
     "num_centroids": None,
     "sigma_g": 0.1,
@@ -104,6 +116,9 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "worker_imports": (),
+    "verbose": True,
+    "progress_every": 1,
 }
 
 
@@ -189,17 +204,128 @@ def _compute_centroids(min_bd, max_bd, grid_shape, num_centroids, key):
     ), key
 
 
+def _sample_initial_leaf(leaf, key, *, batch_size: int, mode: str, sigma: float):
+    """Sample one batched parameter leaf for the MAP-Elites init population."""
+    import jax
+
+    noise = sigma * jax.random.normal(
+        key,
+        (batch_size, *leaf.shape),
+        dtype=leaf.dtype,
+    )
+    if mode == "gaussian":
+        return noise
+    if mode == "flax_perturb":
+        return leaf[None, ...] + noise
+    raise ValueError(
+        "algorithm_params['init_mode'] must be one of "
+        "{'flax_perturb', 'gaussian'}; got "
+        f"{mode!r}."
+    )
+
+
+def _build_initial_genotypes(
+    init_params,
+    *,
+    key,
+    init_batch_size: int,
+    init_mode: str,
+    init_sigma: float,
+):
+    """Return a batched pytree of MAP-Elites init genotypes."""
+    import jax
+
+    leaves, treedef = jax.tree_util.tree_flatten(init_params)
+    leaf_keys = jax.random.split(key, len(leaves))
+    batched_leaves = [
+        _sample_initial_leaf(
+            leaf,
+            leaf_key,
+            batch_size=init_batch_size,
+            mode=init_mode,
+            sigma=init_sigma,
+        )
+        for leaf, leaf_key in zip(leaves, leaf_keys)
+    ]
+    return jax.tree_util.tree_unflatten(treedef, batched_leaves)
+
+
 def _budget_to_iterations(config: TrainingConfig, params: Dict[str, Any]) -> int:
     """Translate ``config.budget_value`` into a QDax iteration count."""
     batch = int(params["batch_size"])
     ep_len = int(params["episode_length"])
+    eval_episodes = max(1, int(params.get("eval_episodes", 1)))
     if config.budget_mode == BudgetMode.ENV_STEPS:
-        return max(1, config.budget_value // (batch * ep_len))
+        return max(1, config.budget_value // (batch * ep_len * eval_episodes))
     if config.budget_mode == BudgetMode.EVAL_EPISODES:
-        return max(1, config.budget_value // batch)
+        return max(1, config.budget_value // (batch * eval_episodes))
     raise ValueError(
         f"QDax trainers support BudgetMode.ENV_STEPS and "
         f"BudgetMode.EVAL_EPISODES; got {config.budget_mode}."
+    )
+
+
+def _print_qdax_plan(
+    label: str,
+    *,
+    init_batch_size: int,
+    batch_size: int,
+    eval_episodes: int,
+    episode_length: int,
+    num_iters: int,
+    num_workers: int,
+) -> None:
+    print(
+        f"[{label}] init_batch={init_batch_size}  batch={batch_size}  "
+        f"eval_eps={eval_episodes}  ep_len={episode_length}  "
+        f"iters={num_iters}  workers={num_workers}",
+        flush=True,
+    )
+
+
+def _validate_jax_parallel_settings(num_workers: int, eval_episodes: int) -> None:
+    """Reject QDax settings that the JAX fast path cannot honor."""
+    if num_workers > 1:
+        raise ValueError(
+            "algorithm_params['num_workers'] > 1 is not supported on "
+            "the JAX fast path (env.api='jax_parallel'). The fast "
+            "path already batches the whole population through a "
+            "single jax.vmap; use 'batch_size' to scale instead. "
+            "To use process-pool parallelism, register the env "
+            "without the jax_parallel adapter (numpy scoring path)."
+        )
+
+    if eval_episodes > 1:
+        raise ValueError(
+            "algorithm_params['eval_episodes'] > 1 is not supported on "
+            "the JAX fast path (env.api='jax_parallel'). Use the numpy "
+            "scoring path for multi-rollout averaging."
+        )
+
+
+def _print_qdax_metrics(
+    label: str,
+    stage: str,
+    repertoire: Any,
+    elapsed: float,
+    batch_fitness: Optional[Any] = None,
+) -> None:
+    archive_best, qd_score, coverage, filled_niches, total_niches = (
+        summarise_qdax_archive(repertoire.fitnesses)
+    )
+    batch_best, batch_mean = summarise_fitness_batch(batch_fitness)
+    summary = format_qdax_progress_fields(
+        archive_best=archive_best,
+        qd_score=qd_score,
+        coverage=coverage,
+        filled_niches=filled_niches,
+        total_niches=total_niches,
+        batch_best=batch_best,
+        batch_mean=batch_mean,
+    )
+    print(
+        f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)",
+        flush=True,
     )
 
 
@@ -231,18 +357,11 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
+    eval_episodes = max(1, int(params.get("eval_episodes", 1)))
 
     spec = get_env_spec(config.env_name)
     if spec.api == "jax_parallel":
-        if num_workers > 1:
-            raise ValueError(
-                "algorithm_params['num_workers'] > 1 is not supported on "
-                "the JAX fast path (env.api='jax_parallel'). The fast "
-                "path already batches the whole population through a "
-                "single jax.vmap; use 'batch_size' to scale instead. "
-                "To use process-pool parallelism, register the env "
-                "without the jax_parallel adapter (numpy scoring path)."
-            )
+        _validate_jax_parallel_settings(num_workers, eval_episodes)
         # Raw JAX env for fast scoring.
         if getattr(spec, "wrappers", None):
             warnings.warn(
@@ -301,6 +420,8 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
+            eval_episodes=eval_episodes,
+            worker_imports=params.get("worker_imports", ()),
         )
 
     init_params = init_flax_mlp_params(
@@ -320,7 +441,21 @@ def _save_repertoire(repertoire, output_dir: Path) -> Path:
     return target
 
 
-def _extract_champion(repertoire, module, layer_sizes):
+def _resolve_shared_action_space(env: PettingZooWrapper):
+    """Return the shared action space across all agents in ``env``."""
+    agents = list(env.possible_agents)
+    reference = env.action_space(agents[0])
+    divergent = [a for a in agents[1:] if env.action_space(a) != reference]
+    if divergent:
+        raise ValueError(
+            "QDax trainers require a single shared action space across all "
+            "agents (homogeneous-team policies). Agents diverging from "
+            f"{agents[0]!r}'s action space: {divergent}."
+        )
+    return reference
+
+
+def _extract_champion(repertoire, module, *, action_space=None):
     """Pick the highest-fitness genotype from ``repertoire`` as a policy."""
     import jax
     import numpy as _np
@@ -333,7 +468,10 @@ def _extract_champion(repertoire, module, layer_sizes):
     champion_params = jax.tree_util.tree_map(
         lambda leaf: leaf[best_idx], repertoire.genotypes
     )
-    return FlaxPolicyAdapter(module, champion_params), float(fitnesses[best_idx])
+    return (
+        FlaxPolicyAdapter(module, champion_params, action_space=action_space),
+        float(fitnesses[best_idx]),
+    )
 
 
 class MAPElitesTrainer(BaselineTrainer):
@@ -360,7 +498,6 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
-        _warn_recording_unsupported_once(config)
 
         import jax
         from qdax.core.map_elites import MAPElites
@@ -381,22 +518,17 @@ class MAPElitesTrainer(BaselineTrainer):
             min_bd, max_bd, params["grid_shape"], params.get("num_centroids"), key
         )
 
-        # Build a population of size init_batch_size by sampling small
-        # Gaussian perturbations around init_params (standard QDax pattern).
+        # Build the initial repertoire population. Default preserves the old
+        # QDax-style "Flax init + small perturbation" behaviour, but callers
+        # can opt into a zero-mean Gaussian init to match CMA-like startup.
         key, sub = jax.random.split(key)
-
-        def _perturb(seed_key):
-            leaves, treedef = jax.tree_util.tree_flatten(init_params)
-
-            def _one(k, leaf):
-                return leaf + 0.01 * jax.random.normal(k, leaf.shape)
-
-            sub_keys = jax.random.split(seed_key, len(leaves))
-            new_leaves = [_one(k, leaf) for k, leaf in zip(sub_keys, leaves)]
-            return jax.tree_util.tree_unflatten(treedef, new_leaves)
-
-        init_keys = jax.random.split(sub, int(params["init_batch_size"]))
-        init_genotypes = jax.vmap(_perturb)(init_keys)
+        init_genotypes = _build_initial_genotypes(
+            init_params,
+            key=sub,
+            init_batch_size=int(params["init_batch_size"]),
+            init_mode=str(params.get("init_mode", "flax_perturb")),
+            init_sigma=float(params.get("init_sigma", 0.01)),
+        )
 
         variation_fn = lambda x1, x2, k: isoline_variation(  # noqa: E731
             x1,
@@ -422,21 +554,55 @@ class MAPElitesTrainer(BaselineTrainer):
             metrics_function=metrics_fn,
         )
 
+        num_iters = _budget_to_iterations(config, params)
+        verbose = bool(params.get("verbose", True))
+        progress_every = max(1, int(params.get("progress_every", 1)))
+        if verbose:
+            _print_qdax_plan(
+                "MAP-Elites",
+                init_batch_size=int(params["init_batch_size"]),
+                batch_size=int(params["batch_size"]),
+                eval_episodes=max(1, int(params.get("eval_episodes", 1))),
+                episode_length=int(params["episode_length"]),
+                num_iters=num_iters,
+                num_workers=int(params.get("num_workers", 1)),
+            )
+
         try:
+            init_start = time.time()
             key, sub = jax.random.split(key)
             repertoire, emitter_state, init_metrics = map_elites.init(
                 init_genotypes, centroids, sub
             )
+            if verbose:
+                _print_qdax_metrics(
+                    "MAP-Elites",
+                    "init",
+                    repertoire,
+                    time.time() - init_start,
+                    getattr(scoring_fn, "_last_batch_fitness", None),
+                )
 
-            num_iters = _budget_to_iterations(config, params)
             history: list = [init_metrics]
             start = time.time()
-            for _ in range(num_iters):
+            for iter_idx in range(1, num_iters + 1):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                if verbose and (
+                    iter_idx == 1
+                    or iter_idx == num_iters
+                    or iter_idx % progress_every == 0
+                ):
+                    _print_qdax_metrics(
+                        "MAP-Elites",
+                        f"iter {iter_idx}/{num_iters}",
+                        repertoire,
+                        time.time() - start,
+                        getattr(scoring_fn, "_last_batch_fitness", None),
+                    )
             elapsed = time.time() - start
         finally:
             # Tear down the scoring function's worker pool, if any.
@@ -445,7 +611,9 @@ class MAPElitesTrainer(BaselineTrainer):
                 closer()
 
         champion_policy, champion_fitness = _extract_champion(
-            repertoire, module, layer_sizes
+            repertoire,
+            module,
+            action_space=_resolve_shared_action_space(env),
         )
 
         metadata: Dict[str, Any] = {
@@ -453,6 +621,10 @@ class MAPElitesTrainer(BaselineTrainer):
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
+            "init_batch_size": int(params["init_batch_size"]),
+            "init_mode": str(params.get("init_mode", "flax_perturb")),
+            "init_sigma": float(params.get("init_sigma", 0.01)),
+            "eval_episodes": max(1, int(params.get("eval_episodes", 1))),
             "num_workers": int(params.get("num_workers", 1)),
             "parallel_backend": str(params.get("parallel_backend", "process")),
         }
@@ -477,6 +649,8 @@ class MAPElitesTrainer(BaselineTrainer):
             summary=metrics_out,
             training_time=elapsed,
             extra_summary={"descriptor": params["descriptor"]},
+            champion_policy=champion_policy,
+            recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
             if "repertoire_path" in metadata
             else None,
@@ -516,7 +690,6 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
-        _warn_recording_unsupported_once(config)
 
         import jax
         import jax.numpy as jnp
@@ -527,10 +700,11 @@ class CMAMETrainer(BaselineTrainer):
         from deap_pettingzoo.contrib.qdax.policy import (
             flat_count,
             flat_to_pytree,
+            FlaxPolicyAdapter,
         )
 
         params = {**_DEFAULT_CMA_ME_PARAMS, **(config.algorithm_params or {})}
-        env, module, layer_sizes, descriptor_fn, scoring_fn, init_params = (
+        env, module, layer_sizes, descriptor_fn, scoring_fn, _ = (
             _build_env_and_scoring(config, params)
         )
 
@@ -574,25 +748,59 @@ class CMAMETrainer(BaselineTrainer):
             metrics_function=metrics_fn,
         )
 
+        num_iters = _budget_to_iterations(config, params)
+        verbose = bool(params.get("verbose", True))
+        progress_every = max(1, int(params.get("progress_every", 1)))
+        if verbose:
+            _print_qdax_plan(
+                "CMA-ME",
+                init_batch_size=batch_size,
+                batch_size=batch_size,
+                eval_episodes=max(1, int(params.get("eval_episodes", 1))),
+                episode_length=int(params["episode_length"]),
+                num_iters=num_iters,
+                num_workers=int(params.get("num_workers", 1)),
+            )
+
         # Initial batch: Gaussian around zero.
         key, sub = jax.random.split(key)
         init_genotypes = 0.01 * jax.random.normal(sub, (batch_size, genotype_dim))
 
         try:
+            init_start = time.time()
             key, sub = jax.random.split(key)
             repertoire, emitter_state, init_metrics = map_elites.init(
                 init_genotypes, centroids, sub
             )
+            if verbose:
+                _print_qdax_metrics(
+                    "CMA-ME",
+                    "init",
+                    repertoire,
+                    time.time() - init_start,
+                    getattr(scoring_fn, "_last_batch_fitness", None),
+                )
 
-            num_iters = _budget_to_iterations(config, params)
             history = [init_metrics]
             start = time.time()
-            for _ in range(num_iters):
+            for iter_idx in range(1, num_iters + 1):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                if verbose and (
+                    iter_idx == 1
+                    or iter_idx == num_iters
+                    or iter_idx % progress_every == 0
+                ):
+                    _print_qdax_metrics(
+                        "CMA-ME",
+                        f"iter {iter_idx}/{num_iters}",
+                        repertoire,
+                        time.time() - start,
+                        getattr(scoring_fn, "_last_batch_fitness", None),
+                    )
             elapsed = time.time() - start
         finally:
             closer = getattr(scoring_fn, "close", None)
@@ -605,10 +813,12 @@ class CMAMETrainer(BaselineTrainer):
             np.argmax(np.where(np.isfinite(fitnesses), fitnesses, -np.inf))
         )
         flat_champion = np.asarray(repertoire.genotypes[best_idx])
-        from deap_pettingzoo.contrib.qdax.policy import FlaxPolicyAdapter
-
         champion_params = flat_to_pytree(flat_champion, layer_sizes)
-        champion_policy = FlaxPolicyAdapter(module, champion_params)
+        champion_policy = FlaxPolicyAdapter(
+            module,
+            champion_params,
+            action_space=_resolve_shared_action_space(env),
+        )
 
         metadata: Dict[str, Any] = {
             "descriptor": params["descriptor"],
@@ -616,6 +826,7 @@ class CMAMETrainer(BaselineTrainer):
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
             "genotype_dim": genotype_dim,
+            "eval_episodes": max(1, int(params.get("eval_episodes", 1))),
             "num_workers": int(params.get("num_workers", 1)),
             "parallel_backend": str(params.get("parallel_backend", "process")),
         }
@@ -639,6 +850,8 @@ class CMAMETrainer(BaselineTrainer):
             summary=metrics_out,
             training_time=elapsed,
             extra_summary={"descriptor": params["descriptor"]},
+            champion_policy=champion_policy,
+            recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
             if "repertoire_path" in metadata
             else None,
@@ -662,6 +875,50 @@ __all__ = ["MAPElitesTrainer", "CMAMETrainer"]
 # ---------------------------------------------------------------------------
 
 
+def _maybe_record_qdax_champion(
+    log,
+    config: TrainingConfig,
+    *,
+    champion_policy,
+    recording_max_steps: Optional[int],
+) -> None:
+    """Record one final champion rollout when recording is enabled."""
+    if champion_policy is None:
+        return
+
+    recording_cfg = config.recording
+    if not recording_cfg.enabled:
+        return
+
+    from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+
+    recorder = log.get_frame_recorder(
+        fps=recording_cfg.fps,
+        fmt=recording_cfg.fmt,
+        max_frames_per_episode=recording_cfg.max_frames_per_episode,
+        max_dim=recording_cfg.max_dim,
+        episode_prefix=recording_cfg.episode_prefix or "train_",
+    )
+    if not recorder.enabled:
+        return
+
+    evaluator = UnifiedEvaluator(
+        max_steps=int(recording_max_steps or 500),
+        frame_recorder=recorder,
+    )
+    try:
+        rollout_seed = config.algorithm_params.get("seed")
+        evaluator.evaluate(
+            policy=champion_policy,
+            env_name=config.env_name,
+            num_episodes=1,
+            seed=int(rollout_seed) if rollout_seed is not None else None,
+            env_config=dict(config.env_config) if config.env_config else None,
+        )
+    except Exception:
+        pass
+
+
 def _persist_qdax_results(
     config: TrainingConfig,
     *,
@@ -670,6 +927,8 @@ def _persist_qdax_results(
     summary: Dict[str, Any],
     training_time: float,
     extra_summary: Optional[Dict[str, Any]] = None,
+    champion_policy=None,
+    recording_max_steps: Optional[int] = None,
     repertoire_path: Optional[Path] = None,
 ) -> None:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
@@ -709,6 +968,14 @@ def _persist_qdax_results(
                 except (TypeError, ValueError):
                     continue
             log.row("metrics", row)
+
+        _maybe_record_qdax_champion(
+            log,
+            config,
+            champion_policy=champion_policy,
+            recording_max_steps=recording_max_steps,
+        )
+
         full_summary = {"algorithm": algorithm, **summary}
         if extra_summary:
             full_summary.update(extra_summary)

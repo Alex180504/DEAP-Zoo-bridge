@@ -13,16 +13,18 @@ from __future__ import annotations
 
 from .registry import is_registered, register_env
 
+"""
+MPE2 registration metadata.
 
-# ---------------------------------------------------------------------------
-# MPE2 (required dependency as of deap-bridge's pyproject.toml, but still
-# wrapped in try/except so environments/__init__.py never hard-crashes).
-# ---------------------------------------------------------------------------
+MPE2 is currently a required dependency in deap-bridge's ``pyproject.toml``,
+but registration stays wrapped in ``try/except`` so
+``environments/__init__.py`` never hard-crashes.
 
-# Per-env notes.  Keys that may be truly heterogeneous across agents or use
-# non-Box/Discrete action spaces are flagged so downstream code (policies,
-# compatibility checks, tests) can surface meaningful errors instead of
-# obscure shape mismatches.
+``_MPE_NOTES`` flags environments that may be heterogeneous across agents or
+use non-Box/Discrete action spaces, allowing downstream policies,
+compatibility checks, and tests to raise clear errors instead of obscure shape
+mismatches.
+"""
 _MPE_NOTES = {
     "simple_v3": "",
     "simple_adversary_v3": (
@@ -94,12 +96,126 @@ def _try_register_mpe2() -> None:
         )
 
 
+def _patch_aquarium() -> None:  # pragma: no cover
+    """Monkey-patch a bug in ``marl_aquarium.env.aquarium.raw_env``.
+
+    ``prey_nearby_sharks_observations`` uses a wrong padding formula when
+    fewer sharks than ``predator_observe_count`` are in view::
+
+        # BUGGY (operator-precedence error):
+        observations += [0] * self.obs_size * (n_nearest_shark - len(observations))
+
+        # CORRECT (matches the sibling prey_nearby_fish_observations):
+        observations += [0] * (n_nearest_shark * self.obs_size - len(observations))
+
+    The FOV branch also lacked the per-observation cap guard present in the
+    fish sibling.  Both issues cause an ``AssertionError`` whenever
+    ``fov_enabled=True`` and fewer sharks are visible than
+    ``predator_observe_count``.
+
+    This patch is applied once at import time so it affects every
+    ``raw_env`` instance created afterwards.
+    """
+    try:
+        from marl_aquarium.env.aquarium import raw_env  # type: ignore
+    except ImportError:
+        return
+
+    from typing import List, Sequence
+
+    def _fixed_prey_nearby_sharks_observations(
+        self, observer, all_sharks: Sequence, n_nearest_shark: int
+    ) -> List[float]:
+        observations: List[float] = []
+        if self.fov_enabled:
+            for shark in all_sharks:
+                if (
+                    len(observations) < n_nearest_shark * self.obs_size
+                    and self.torus.check_if_entity_is_in_view_in_torus(
+                        observer, shark, self.prey_view_distance, self.prey_fov
+                    )
+                ):
+                    observations += self.nearby_animal_observation(observer, shark)
+        else:
+            for shark in self.prey_get_n_closest_animals(
+                observer, all_sharks, self.predator_observe_count
+            ):
+                observations += self.nearby_animal_observation(observer, shark)
+
+        if len(observations) < n_nearest_shark * self.obs_size:
+            observations += [0] * (n_nearest_shark * self.obs_size - len(observations))
+
+        assert len(observations) == n_nearest_shark * self.obs_size
+        return observations
+
+    def _fixed_predator_nearby_shark_observations(self, observer) -> List[float]:
+        # Bug 1: original code has no `else` before the non-FOV loop, so when
+        # fov_enabled=True both branches run and observations exceed the expected
+        # predator_observe_count * obs_size, triggering the assert in
+        # get_predator_observations.  Fix: make the non-FOV loop properly `else`.
+        # Bug 2: original FOV branch used self.prey_view_distance / self.prey_fov
+        # (prey sensor params) instead of predator's own sensor params.
+        observations: List[float] = []
+        if self.fov_enabled:
+            for shark in self.predators:
+                if (
+                    len(observations) < self.predator_observe_count * self.obs_size
+                    and self.torus.check_if_entity_is_in_view_in_torus(
+                        observer, shark, self.predator_view_distance, self.predator_fov
+                    )
+                ):
+                    observations += self.nearby_animal_observation(observer, shark)
+        else:
+            for shark in self.predators:
+                if shark is not observer:
+                    observations += self.nearby_animal_observation(observer, shark)
+
+        if len(observations) < self.predator_observe_count * self.obs_size:
+            observations += [0] * (
+                self.predator_observe_count * self.obs_size - len(observations)
+            )
+        return observations
+
+    def _fixed_predator_nearby_fish_observations(self, observer) -> List[float]:
+        # Bug 1: the FOV branch had no cap guard, so if more fish than
+        # prey_observe_count are in view the list grows beyond the expected
+        # size and breaks the assert in get_predator_observations.
+        # Bug 2: original FOV branch used self.prey_view_distance / self.prey_fov
+        # (prey sensor params) instead of predator's own sensor params.
+        observations: List[float] = []
+        if self.fov_enabled:
+            for fish in self.prey:
+                if (
+                    len(observations) < self.prey_observe_count * self.obs_size
+                    and self.torus.check_if_entity_is_in_view_in_torus(
+                        observer, fish, self.predator_view_distance, self.predator_fov
+                    )
+                ):
+                    observations += self.nearby_animal_observation(observer, fish)
+        else:
+            closest_fish = self.predator_get_n_closest_fish(observer)
+            for fish in closest_fish:
+                if fish is not observer:
+                    observations += self.nearby_animal_observation(observer, fish)
+
+        if len(observations) < self.prey_observe_count * self.obs_size:
+            observations += [0] * (
+                self.prey_observe_count * self.obs_size - len(observations)
+            )
+        return observations
+
+    raw_env.prey_nearby_sharks_observations = _fixed_prey_nearby_sharks_observations
+    raw_env.predator_nearby_shark_observations = _fixed_predator_nearby_shark_observations
+    raw_env.predator_nearby_fish_observations = _fixed_predator_nearby_fish_observations
+
+
 def _try_register_aquarium() -> None:
     """Register ``aquarium_v0`` if ``marl-aquarium`` is installed."""
     try:  # pragma: no cover - depends on optional extra
         from marl_aquarium import aquarium_v0  # type: ignore
     except ImportError:  # pragma: no cover
         return
+    _patch_aquarium()  # pragma: no cover
     if is_registered("aquarium_v0"):  # pragma: no cover
         return
     register_env(  # pragma: no cover

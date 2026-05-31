@@ -12,11 +12,6 @@ The policy satisfies :class:`~deap_pettingzoo.baselines.base.PolicyProtocol`
 and is therefore a drop-in for any deap-bridge evaluator.  It carries no
 trainable state — it is a scripted, non-learning controller, which makes
 it suitable as a stable benchmark target for RL vs EA comparisons.
-
-Reference implementation inspiration: *snktshrma/artificial-potential-field-
-path-planning* (MIT).  The algorithm here is re-derived from first principles
-for the specific partial-observability multi-agent setting described in the
-research methodology; it is not a port of that repository.
 """
 
 from __future__ import annotations
@@ -105,9 +100,7 @@ class APFEvaderPolicy:
         self.layout = layout
         self.config = config or APFConfig()
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(self, observation: np.ndarray, deterministic: bool = True) -> int:
         """Return a discrete action index in ``{0, 1, 2, 3, 4}``.
@@ -124,9 +117,7 @@ class APFEvaderPolicy:
         """No-op; the APF controller is memoryless."""
         return None
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
 
     def _compute_force(self, obs: np.ndarray) -> np.ndarray:
         """Sum repulsive force contributions from visible entities and borders."""

@@ -34,13 +34,26 @@ class RecordingConfig:
         every_n_generations: Recording cadence in generations / iterations.
             ``None`` defers to the trainer's class-level
             ``_default_recording_every_n`` (1 for EA / CMA-ES / Coevolution,
-            10 for AgileRL family).
+            10 for AgileRL family). For AgileRL trainers this is interpreted
+            as "every N learn iterations" (i.e. every
+            ``every_n_generations * learn_step`` env steps); use
+            :attr:`every_n_steps` for explicit env-step cadence.
+        every_n_steps: AgileRL-only. When set, record one champion-rollout
+            episode every ``every_n_steps`` env steps during training (in
+            addition to the always-emitted end-of-training rollout). Takes
+            precedence over :attr:`every_n_generations` for AgileRL. Ignored
+            by EA / CMA-ES / Coevolution trainers, which use generation
+            cadence.
         fps: Frames-per-second for the encoded artefact.
         fmt: Container format. ``"mp4"`` (requires ``imageio[ffmpeg]``) or
             ``"gif"`` (base ``imageio``). ``mp4`` falls back to ``gif`` if
             ffmpeg is unavailable.
         max_frames_per_episode: Hard cap on captured frames per episode
             (``None`` = no cap).
+        max_dim: When set, frames are downscaled (preserving aspect ratio)
+            so that their longer dimension is at most ``max_dim`` pixels.
+            Useful for very large render surfaces (e.g. 2000×2000 aquarium)
+            that exceed H.264 level limits.
         episode_prefix: Filename prefix written before ``episode_NNNN``;
             trainers default to ``"train_"`` so they don't collide with
             future ``"live_"`` rollout captures sharing the same
@@ -48,9 +61,11 @@ class RecordingConfig:
     """
     enabled: bool = False
     every_n_generations: Optional[int] = None
+    every_n_steps: Optional[int] = None
     fps: int = 20
     fmt: str = "mp4"
     max_frames_per_episode: Optional[int] = None
+    max_dim: Optional[int] = None
     episode_prefix: str = ""
 
     def __post_init__(self) -> None:
@@ -58,6 +73,11 @@ class RecordingConfig:
             raise ValueError(
                 "RecordingConfig.every_n_generations must be positive or None, "
                 f"got {self.every_n_generations}"
+            )
+        if self.every_n_steps is not None and self.every_n_steps <= 0:
+            raise ValueError(
+                "RecordingConfig.every_n_steps must be positive or None, "
+                f"got {self.every_n_steps}"
             )
         if self.fps <= 0:
             raise ValueError(f"RecordingConfig.fps must be positive, got {self.fps}")
@@ -74,6 +94,11 @@ class RecordingConfig:
             raise ValueError(
                 "RecordingConfig.max_frames_per_episode must be positive or None, "
                 f"got {self.max_frames_per_episode}"
+            )
+        if self.max_dim is not None and self.max_dim <= 0:
+            raise ValueError(
+                "RecordingConfig.max_dim must be positive or None, "
+                f"got {self.max_dim}"
             )
 
 
@@ -121,8 +146,7 @@ class TrainingConfig:
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
-        # Resolve the ``continuous`` shortcut against any explicit
-        # ``env_config["continuous_actions"]`` the caller supplied.
+        # Resolve the ``continuous`` shortcut against any explicit ``env_config["continuous_actions"]`` the caller supplied.
         existing = self.env_config.get("continuous_actions")
         if self.continuous:
             if existing is False:
@@ -132,8 +156,6 @@ class TrainingConfig:
                 )
             self.env_config["continuous_actions"] = True
         elif existing is True:
-            # Keep env_config authoritative but reflect it on the flag
-            # so downstream introspection stays consistent.
             self.continuous = True
 
 
@@ -185,6 +207,11 @@ class TrainingResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     seed: Optional[int] = None
     training_time: Optional[float] = None
+
+    @property
+    def best_policy(self) -> PolicyProtocol:
+        """Alias for :attr:`policy` (backwards-compatible name)."""
+        return self.policy
 
 
 @dataclass
@@ -265,13 +292,13 @@ class BaselineTrainer(ABC):
     
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
+    
+    Note:
+        Default recording cadence (in generations / iterations) used when ``TrainingConfig.recording.every_n_generations`` is ``None``.
+        EA / CMA-ES / Coevolution leave this at 1 (record every generation);
+        AgileRL-family trainers override to 10 since they iterate hundreds of times per run.
     """
-
-    #: Default recording cadence (in generations / iterations) used when
-    #: ``TrainingConfig.recording.every_n_generations`` is ``None``.
-    #: EA / CMA-ES / Coevolution leave this at 1 (record every generation);
-    #: AgileRL-family trainers override to 10 since they iterate hundreds of
-    #: times per run.
+    
     _default_recording_every_n: ClassVar[int] = 1
 
     def _resolve_recording_every_n(self, config: TrainingConfig) -> int:

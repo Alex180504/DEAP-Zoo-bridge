@@ -16,9 +16,13 @@ state Home {
 Home --> Browse : root selected
 
 state Browse {
-    Browse : Filter by algo / env / seed / date
-    Browse : Sort summary table
+    Browse : Filter by algo / env / date range
+    Browse : Sort by any column (asc / desc)
     Browse : Toggle run-row checkboxes
+    Browse : Rename selected runs (display label)
+    Browse : Delete selected runs (with confirmation)
+    Browse : Create subfolders
+    Browse : Move selected runs into a subfolder
 }
 
 Browse --> Compare : ≥ 2 runs selected

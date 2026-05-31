@@ -51,6 +51,8 @@ class FeedforwardNeuralPolicy:
                 Ignored when ``head`` is supplied explicitly.
 
         Raises:
+            ValueError: If ``genome`` is ``None``.
+            TypeError: If ``genome`` is not a :class:`FixedTopologyGenome`.
             NotImplementedError: If ``action_space`` is :class:`MultiDiscrete`,
                 :class:`Tuple`, or :class:`Dict` (unsupported by this
                 policy; use AgileRL trainers instead).
@@ -136,12 +138,14 @@ class FeedforwardNeuralPolicy:
         # Get weights and layer structure
         weights = self.genome.get_weights()
         layer_ranges = self.genome.get_weight_ranges()
-        activation = self.genome.activation
+        hidden_activation = self.genome.activation
+        output_activation = getattr(self.genome, 'output_activation', hidden_activation)
         
         # Start with input
         current_activation = observation
         
         # Forward through each layer
+        final_layer_idx = len(layer_ranges) - 1
         for i, (start_idx, end_idx) in enumerate(layer_ranges):
             # Get layer dimensions
             input_dim = self.genome.layer_sizes[i]
@@ -157,8 +161,10 @@ class FeedforwardNeuralPolicy:
             # Linear transformation
             current_activation = W @ current_activation + b
             
-            # Apply activation function
-            current_activation = self._apply_activation(current_activation, activation)
+            # Hidden layers use the genome activation; the final layer can opt out
+            # or use a different activation for action logits.
+            layer_activation = output_activation if i == final_layer_idx else hidden_activation
+            current_activation = self._apply_activation(current_activation, layer_activation)
         
         return current_activation
     
@@ -180,8 +186,11 @@ class FeedforwardNeuralPolicy:
 
         Args:
             observation: Input observation vector.
-            deterministic: If False, add Gaussian noise for exploration
-                before decoding.
+            deterministic: If False, add Gaussian noise (std=0.1) to the
+                raw network output before decoding.  Not meaningful for
+                EA workflows — exploration in evolutionary search happens
+                via DEAP mutation operators. Present for interface parity with RL-based policies
+                that share the same call sites.
             action_mask: Optional legal-action mask. Forwarded to the
                 head's ``decode`` when the head declares
                 ``supports_mask=True`` (i.e.
@@ -200,6 +209,7 @@ class FeedforwardNeuralPolicy:
 
         if not deterministic:
             # Add small Gaussian noise for exploration
+            # Note: this should not be used with DEAP, which has its own mutation operators
             noise = np.random.normal(0, 0.1, size=action.shape)
             action = action + noise
 

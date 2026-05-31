@@ -59,9 +59,9 @@ def setup_cma_strategy(
 
     Args:
         genome_config: Dict with ``layer_sizes`` (required), plus the
-            optional keys ``activation`` and ``weight_range`` used to
-            compute the weight dimensionality and to seed the centroid
-            when it is not supplied explicitly.
+            optional keys ``activation``, ``output_activation``, and
+            ``weight_range`` used to compute the weight dimensionality and
+            to seed the centroid when it is not supplied explicitly.
         sigma0: Initial step size.
         population_size: Override ``lambda_``. Defaults to DEAP's
             ``4 + int(3 * log(N))``.
@@ -83,6 +83,9 @@ def setup_cma_strategy(
     probe = FixedTopologyGenome(
         layer_sizes=genome_config["layer_sizes"],
         activation=genome_config.get("activation", "tanh"),
+        output_activation=genome_config.get(
+            "output_activation", genome_config.get("activation", "tanh")
+        ),
         weight_range=genome_config.get("weight_range", (-1.0, 1.0)),
         random_seed=0,
     )
@@ -118,7 +121,7 @@ def make_cma_ind_init(
     length ``N``) and returns a fresh ``creator.CMAIndividual`` whose
     element values are the weights **and** whose ``.genome`` attribute is
     a matching :class:`FixedTopologyGenome`. Downstream evaluators consume
-    ``individual.genome`` per the project contract.
+    ``individual.genome``.
 
     Args:
         genome_config: Same schema as :func:`setup_cma_strategy`.
@@ -131,6 +134,7 @@ def make_cma_ind_init(
 
     layer_sizes = list(genome_config["layer_sizes"])
     activation = genome_config.get("activation", "tanh")
+    output_activation = genome_config.get("output_activation", activation)
     weight_range = genome_config.get("weight_range", (-1.0, 1.0))
 
     def _ind_init(weights: Iterable[float]) -> Any:
@@ -138,6 +142,7 @@ def make_cma_ind_init(
         genome = FixedTopologyGenome(
             layer_sizes=layer_sizes,
             activation=activation,
+            output_activation=output_activation,
             weight_range=weight_range,
             random_seed=0,
         )
@@ -222,6 +227,13 @@ def setup_cma_one_plus_lambda_strategy(
     Raises:
         ValueError: If ``layer_sizes`` is missing or ``parent`` has the
             wrong shape.
+    
+    Notes:
+        DEAP requires the parent to be an Individual with an initialized fitness
+        before the first ``update`` call. This function wraps the parent vector as
+        ``creator.CMAIndividual``, attaches a probe genome, and seeds
+        ``parent.fitness.values`` with ``(-inf,)`` so first-generation offspring
+        can be accepted without requiring an immediate external parent evaluation.
     """
     if "layer_sizes" not in genome_config:
         raise ValueError("genome_config must contain 'layer_sizes'")
@@ -247,14 +259,6 @@ def setup_cma_one_plus_lambda_strategy(
     if population_size is not None:
         kwargs["lambda_"] = int(population_size)
 
-    # DEAP's StrategyOnePlusLambda expects ``parent`` to be an
-    # Individual whose ``.fitness`` attribute is already populated — the
-    # first call to :meth:`update` does ``self.parent.fitness <= ind.fitness``.
-    # We wrap the raw vector as a CMAIndividual and seed its fitness with
-    # ``-inf`` so the first generation's offspring are all counted as
-    # "improvements" (the canonical DEAP pattern is to evaluate the
-    # parent up-front, but callers only have access to the evaluator via
-    # the trainer; deferring that to the trainer would leak state).
     _setup_cma_creators()
     parent_ind = creator.CMAIndividual(parent.tolist())
     probe.set_weights(parent)

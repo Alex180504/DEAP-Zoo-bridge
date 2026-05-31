@@ -1,13 +1,13 @@
 """Parallel evaluation plumbing for DEAP and QDax trainers.
 
-This module provides a thin, unified interface over
+This module provides a unified interface over the following execution backends:
 
 * a ``_SerialExecutor`` that mimics :class:`concurrent.futures.Executor`
   for the ``num_workers <= 1`` case, so trainer call sites stay
   single-path.
 * :class:`concurrent.futures.ProcessPoolExecutor` for real
   multi-process parallelism.
-* optional SCOOP and Dask backends (:ref:`Phase 7`) — both are
+* optional SCOOP and Dask backends — both are
   soft-imported; importing this module never pulls them in.
 
 All executors implement the same minimal protocol:
@@ -78,9 +78,11 @@ def resolve_num_workers(requested: Optional[int]) -> int:
         raise ValueError(
             f"num_workers must be >= 0 (or None), got {requested!r}."
         )
-    if n <= 1:
-        return 1
     cpu = os.cpu_count() or 1
+    if n == 0:
+        return 1
+    if n == 1:
+        return 1
     if n > cpu:
         warnings.warn(
             f"num_workers={n} exceeds os.cpu_count()={cpu}; capping to {cpu}.",
@@ -202,8 +204,7 @@ class _DaskExecutor:
         fn: Callable[..., Any],
         *iterables: Iterable[Any],
     ) -> Iterator[Any]:
-        # Materialise to preserve ordering semantics; client.map + gather
-        # returns results in submission order.
+        # Materialise to preserve ordering semantics; client.map + gather returns results in submission order.
         materialised = [list(it) for it in iterables]
         futures = self._client.map(fn, *materialised, pure=False)
         results = self._client.gather(futures)
@@ -247,8 +248,7 @@ def make_executor(
         )
 
     n = resolve_num_workers(num_workers)
-    # Serial fast-path applies regardless of backend: there's no point
-    # importing scoop / starting a Dask Client just to run inline.
+    # Serial fast-path applies regardless of backend choice.
     if n <= 1:
         return _SerialExecutor()
 

@@ -1,6 +1,6 @@
 """Tests for FrameRecorder integration in :class:`UnifiedEvaluator`.
 
-Covers Phase 1 of the recording feature:
+Covers the recording feature:
 - ``frame_recorder`` is wired through ``__init__`` and exercised per
   episode (start/add/end lifecycle).
 - ``record_episode_offset`` advances across calls so successive

@@ -9,12 +9,13 @@ package "deap_pettingzoo.genomes" {
     class FixedTopologyGenome {
         + layer_sizes: List[int]
         + activation: str
+    + output_activation: str
         + input_size: int
         + output_size: int
         + hidden_layers: List[int]
         + weight_range: tuple[float, float]
         --
-        + __init__(layer_sizes, activation, weight_range: tuple[float, float], random_seed)
+    + __init__(layer_sizes, activation, output_activation, weight_range: tuple[float, float], random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
         + get_weights() -> np.ndarray
@@ -32,7 +33,8 @@ package "deap_pettingzoo.policies" {
         - genome: FixedTopologyGenome
         - layers: List[np.ndarray]
         - biases: List[np.ndarray]
-        - activation_fn: callable
+        - hidden_activation_fn: callable
+        - output_activation_fn: callable
         - head: Optional[ActionHead]
         --
         + __init__(genome, action_space=None, head=None)
@@ -40,6 +42,11 @@ package "deap_pettingzoo.policies" {
         + reset() -> None
         + forward(x: np.ndarray) -> np.ndarray
     }
+
+    note right of FeedforwardNeuralPolicy
+      Hidden layers use genome.activation.
+      The final layer uses genome.output_activation.
+    end note
 
     abstract class ActionHead {
         + {abstract} decode(raw_output) -> Any
@@ -133,7 +140,10 @@ package "deap_pettingzoo.environments" {
         + {static} is_registered(name) -> bool
         + {static} list_envs(tag=None, api=None) -> List[str]
         + {static} build_env(name, env_config, render_mode)
-        -- build_env applies wrappers\n   left-to-right after api coercion --
+        + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
+        + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
+        + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot / replay_registry_snapshot:\n   propagate custom envs into spawn workers --
     }
 
     class builtin <<module>> {
@@ -388,9 +398,11 @@ package "deap_pettingzoo.baselines" {
     class RecordingConfig <<dataclass>> {
         + enabled: bool
         + every_n_generations: Optional[int]
+        + every_n_steps: Optional[int]
         + fps: int
         + fmt: str
         + max_frames_per_episode: Optional[int]
+        + max_dim: Optional[int]
         + episode_prefix: str
     }
 
@@ -508,10 +520,6 @@ package "deap_pettingzoo.baselines" {
         # ALGORITHM_NAME = "ippo"
         # ON_POLICY = True
     }
-    class MAPPOTrainer {
-        # ALGORITHM_NAME = "mappo"
-        # ON_POLICY = True
-    }
     class GroupedIPPOTrainer {
         # ALGORITHM_NAME = "ippo-grouped"
         # ON_POLICY = True
@@ -527,6 +535,23 @@ package "deap_pettingzoo.baselines" {
         --
         + get_action(obs) -> Any
         + reset() -> None
+        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper
+    }
+
+    class FrozenRLPolicyWrapper {
+        - _actors: list[nn.Module]
+        - _agent_ids: list[str]
+        - _full_roster: list[str]
+        - _algorithm_name: str
+        - _is_discrete: bool
+        - _call_index: int
+        - _obs_cache: dict
+        --
+        + get_action(obs, **kwargs) -> Any
+        + reset() -> None
+        + agent_ids: list[str]
+        + algorithm_name: str
+        + is_discrete: bool
     }
 
     class UnifiedEvaluator {
@@ -560,7 +585,6 @@ package "deap_pettingzoo.baselines" {
     AgileRLTrainer <|-- MADDPGTrainer
     AgileRLTrainer <|-- MATD3Trainer
     AgileRLTrainer <|-- IPPOTrainer
-    IPPOTrainer <|-- MAPPOTrainer
     IPPOTrainer <|-- GroupedIPPOTrainer
     BaselineEvaluator <|-- UnifiedEvaluator
 
@@ -573,6 +597,8 @@ package "deap_pettingzoo.baselines" {
 
     AgileRLTrainer --> AgileRLPolicyWrapper : produces
     AgileRLPolicyWrapper ..|> PolicyProtocol : implements
+    AgileRLPolicyWrapper --> FrozenRLPolicyWrapper : make_frozen_cpu_snapshot()
+    FrozenRLPolicyWrapper ..|> PolicyProtocol : implements
 
     comparison_mod ..> BaselineTrainer : registry
     comparison_mod --> UnifiedEvaluator : uses
@@ -634,6 +660,15 @@ note bottom of registry
   composing supersuit transforms
   (pad_observations_v0, pad_action_space_v0,
   agent_indicator_v0, ...).
+
+  get_registry_snapshot() + replay_registry_snapshot()
+  propagate custom envs registered in the main
+  process into spawned worker subprocesses:
+  trainers pass them as initializer/initargs
+  to make_executor so every worker re-registers
+  all custom envs before executing any tasks.
+  factory must be a picklable callable
+  (module-level function / class; not a lambda).
 end note
 
 note bottom of openspiel
@@ -791,7 +826,43 @@ package "deap_pettingzoo.baselines.coevolution" {
     + update(policy)
     + sample_opponent(rng): PolicyProtocol
     + snapshot_sync(): RLPolicyPool
-    + snapshot_opponents(rng, k): "raises NotImplementedError"
+    + snapshot_opponents(rng, k): list[OpponentSnapshot]
+  }
+
+  class "_RLDriverContext\n(dataclass)" as RLDriverContext {
+    + env_wrapper: PettingZooWrapper
+    + learner_role_prefixes: tuple
+    + opponent_sides: list
+    + max_steps: int
+    + rng: np.random.Generator
+    + executor: Optional[Executor]
+    + env_name: Optional[str]
+    + env_config: Optional[dict]
+  }
+
+  class "_RLRolloutPayload\n(dataclass, picklable)" as RLRolloutPayload {
+    + env_name: str
+    + env_config: Optional[dict]
+    + max_steps: int
+    + episode_seed: int
+    + frozen_rl_snapshot: FrozenRLPolicyWrapper
+    + rl_agent_ids: list[str]
+    + rl_role_prefixes: tuple
+    + opponent_snapshots: dict
+    + side_role_prefixes: dict
+  }
+
+  class "_RLTrajectory\n(dataclass)" as RLTrajectory {
+    + steps: list[_RLStepData]
+    + episode_return: float
+  }
+
+  class "_RLStepData\n(dataclass)" as RLStepData {
+    + obs: dict
+    + actions: dict
+    + rewards: dict
+    + next_obs: dict
+    + done: dict
   }
 
   class RLSideState {
@@ -807,6 +878,11 @@ package "deap_pettingzoo.baselines.coevolution" {
 
   RLPolicyPool ..|> OpponentPool
   RLSideState  --|> SideState
+  RLSideState ..> RLDriverContext : step_generation receives
+  RLDriverContext --> RLRolloutPayload : builds (parallel path)
+  RLRolloutPayload --> FrozenRLPolicyWrapper : carries snapshot
+  RLRolloutPayload --> RLTrajectory : worker returns
+  RLTrajectory *-- RLStepData : steps
 
   class QDaxRepertoirePool {
     - repertoire
@@ -966,6 +1042,7 @@ package "deap_pettingzoo.utils.logging" {
     -fps: int
     -fmt: str
     -max_frames_per_episode: Optional[int]
+    -max_dim: Optional[int]
     -episode_prefix: str
     +start_episode(idx)
     +add_frame(rgb)
@@ -1173,11 +1250,20 @@ package "deap_pettingzoo.ui" {
         + seed: int | None
         + wall_time_s: float | None
         + final_summary: dict
+        + started_at: datetime | None
+        + display_name: str | None
     }
 
     class data <<module>> {
         + discover_runs(root: Path) -> list[RunSummary]
         + load_experiment_cached(run_dirs) -> Experiment
+    }
+
+    class management <<module>> {
+        + rename_run(run_dir: Path, display_name: str) -> None
+        + delete_run(run_dir: Path) -> None
+        + create_folder(parent: Path, name: str) -> Path
+        + move_run(run_dir: Path, target_dir: Path) -> None
     }
 
     class config <<module>> {

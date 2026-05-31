@@ -34,8 +34,7 @@ def test_setup_one_plus_lambda_helper_returns_correct_dim():
         sigma0=0.3,
         population_size=4,
     )
-    # Sanity: dimension matches a freshly-built strategy from the
-    # standard helper.
+    # Sanity: dimension matches a freshly-built strategy from the standard helper.
     _, dim_ref = setup_cma_strategy(genome_config, sigma0=0.3)
     assert dim == dim_ref
     assert hasattr(strategy, "generate")

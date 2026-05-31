@@ -1,4 +1,4 @@
-"""Phase 8 — parallel co-evolution tests.
+"""Parallel co-evolution tests.
 
 Exercises the new :func:`_episode_rollout` worker entry-point,
 the :class:`OpponentSnapshot` round-trip on every concrete pool, the
@@ -266,7 +266,7 @@ class TestTrainerParallelWiring:
 
 
 # ---------------------------------------------------------------------------
-# Serial vs parallel parity (the central correctness claim of Phase 8)
+# Serial vs parallel parity tests
 # ---------------------------------------------------------------------------
 
 

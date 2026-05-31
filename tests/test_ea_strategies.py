@@ -40,7 +40,14 @@ def test_defaults_mu_lambda_to_population_size():
     "strategy", ["simple", "mu_plus_lambda", "mu_comma_lambda"],
 )
 def test_strategy_smoke_train(strategy):
-    """Each strategy produces a working policy and populated history."""
+    """
+    Each strategy produces a working policy and populated history.
+   
+    Notes:
+    the best fitness observed across all recorded generations (`best_ever`) must be >= gen 0's maximum fitness.
+    Equality is acceptable for tiny runs where performance may plateau.
+    A strict decrease indicates a regression bug.
+    """
     trainer = EATrainer(
         hidden_size=8,
         population_size=6,
@@ -56,10 +63,6 @@ def test_strategy_smoke_train(strategy):
     assert len(history) >= 2
     assert result.metadata["ea_config"]["strategy"] == strategy
 
-    # Optimisation actually happened: best-ever max across all
-    # generations beats (or matches) gen-0 max. ``>=`` because
-    # tiny pop_size=6 + 2 gens can plateau on simple_spread; a
-    # genuine regression (best-ever < gen0) is still a bug.
     best_ever = max(rec["max"] for rec in history)
     assert best_ever >= history[0]["max"], (
         f"best-ever fitness regressed for strategy={strategy!r}: "
@@ -68,15 +71,11 @@ def test_strategy_smoke_train(strategy):
 
 
 def test_method_kwargs_propagate_to_metadata():
+    """Verify that explicitly selected EA operator methods are preserved in training metadata."""
     trainer = EATrainer(
         hidden_size=8,
         population_size=4,
         strategy="simple",
-        # ``roulette`` would explode here because the pursuit-evasion
-        # evaluator returns negative episode rewards (see the safe-guard
-        # in ``_register_selection``); use ``tournament`` since this test
-        # only checks that operator method kwargs round-trip into the
-        # result metadata.
         selection_method="tournament",
         crossover_method="sbx",
         mutation_method="polynomial_bounded",

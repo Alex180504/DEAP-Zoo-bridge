@@ -5,6 +5,7 @@ actor "User" as U
 participant "Streamlit\nBrowse page" as B
 participant "Streamlit\nCompare page" as C
 participant "services.data" as DS
+participant "services.management" as MGT
 participant "Experiment" as EX
 participant "analysis.aggregate" as AG
 participant "analysis.compare" as CMP
@@ -12,16 +13,39 @@ participant "analysis.rliable_bridge" as RLB
 participant "analysis.plots" as PL
 
 U -> B: open Browse, set root_dir
-B -> DS: load_experiment(root, max_mtime)
-note right of DS: @cache_resource\nkeyed by (root, max_mtime)
-DS --> B: Experiment
+B -> DS: discover_runs(root, mtime_bucket)
+note right of DS: @cache_resource\nkeyed by (root, mtime_bucket)
+DS --> B: list[RunSummary] (incl. started_at, display_name)
 
-U -> B: apply filters (algo, env, date)
-B -> EX: filter(...).summary_table()
-EX --> B: DataFrame
+U -> B: apply filters (algo, env, date range)
+U -> B: choose sort column + order
+B -> B: filter + sort filtered list in memory
+B --> U: render table with name / started_at columns
 
 U -> B: tick checkboxes → select N runs
 B -> B: session_state["selected_run_ids"] = [...]
+
+== Manage selected runs ==
+U -> B: enter display name → click Rename
+B -> MGT: rename_run(run_dir, display_name)
+note right of MGT: atomic .tmp-then-replace\nwrites display_name into manifest.json
+B -> B: st.cache_resource.clear() + st.rerun()
+
+U -> B: click Delete → confirm dialog
+B --> U: st.warning with Confirm / Cancel buttons
+U -> B: click Confirm
+B -> MGT: delete_run(run_dir) for each selected
+note right of MGT: requires manifest.json\nshutil.rmtree(run_dir)
+B -> B: clear selection, clear cache, st.rerun()
+
+== Directory management (sidebar) ==
+U -> B: enter folder name → click Create
+B -> MGT: create_folder(root, name)
+note right of MGT: rejects unsafe names\nmkdir(exist_ok=True)
+U -> B: select target folder → click Move
+B -> MGT: move_run(run_dir, target_dir) for each selected
+note right of MGT: requires manifest.json\nshutil.move()
+B -> B: clear selection, clear cache, st.rerun()
 
 U -> C: navigate to Compare
 C -> EX: filter(run_ids=selected)

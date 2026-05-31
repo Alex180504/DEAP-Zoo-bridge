@@ -22,11 +22,9 @@ from deap_pettingzoo.environments.registry import (
     unregister_env,
 )
 
-
 # ---------------------------------------------------------------------------
-# Fixtures: a throwaway fake env that exposes the PettingZoo parallel API
+# Scaffolding: a mock env that exposes the PettingZoo parallel API
 # ---------------------------------------------------------------------------
-
 
 class _FakeParallelEnv:
     """Minimal stand-in — tests only need it to be a distinguishable object."""

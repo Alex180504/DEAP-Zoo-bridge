@@ -17,6 +17,7 @@ from deap_pettingzoo.integration import (
 GENOME_CONFIG = {
     "layer_sizes": [4, 8, 2],
     "activation": "tanh",
+    "output_activation": "linear",
     "weight_range": (-1.0, 1.0),
 }
 
@@ -67,6 +68,8 @@ class TestCMAIndInit:
         assert isinstance(ind.genome, FixedTopologyGenome)
         assert np.allclose(ind.genome.get_weights(), vec)
         assert ind.genome.layer_sizes == GENOME_CONFIG["layer_sizes"]
+        assert ind.genome.activation == GENOME_CONFIG["activation"]
+        assert ind.genome.output_activation == GENOME_CONFIG["output_activation"]
 
     def test_ind_init_propagates_list_values(self):
         ind_init = make_cma_ind_init(GENOME_CONFIG)

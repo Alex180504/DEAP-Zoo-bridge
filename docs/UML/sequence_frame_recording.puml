@@ -10,11 +10,11 @@ participant "PettingZooWrapper\n(render_mode='rgb_array')" as PZ
 participant "imageio" as IO
 participant "Filesystem\n<run_dir>/frames/" as FS
 
-R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, episode_prefix='')
+R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, max_dim=None, episode_prefix='')
 
 == Recording setup (once per train()) ==
-T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  episode_prefix=cfg.episode_prefix or 'train_')
-EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  episode_prefix='train_')
+T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  max_dim=cfg.max_dim,\n  episode_prefix=cfg.episode_prefix or 'train_')
+EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  max_dim, episode_prefix='train_')
 FR --> EL: recorder
 EL --> T: recorder
 
@@ -53,11 +53,27 @@ note right of T
   one policy to all agents but per-side obs sizes differ.
 end note
 
-== AgileRL variant (one-shot end) ==
+== AgileRL variant (mid-training + final rollout) ==
 note right of T
-  AgileRLTrainer records exactly **one** rollout
-  after training completes (no per-generation cadence
-  because RL training is rollout-based, not generational).
+  AgileRLTrainer (MADDPG / MATD3 / IPPO /
+  GroupedIPPO) records:
+   • Mid-training champion rollouts at a configurable
+     env-step cadence:
+       - ``RecordingConfig.every_n_steps`` (explicit env steps)
+         takes precedence;
+       - else ``every_n_generations * params['learn_step']``
+         is used as the env-step cadence;
+       - both unset → no mid-training rollouts.
+   • Exactly **one** end-of-training rollout, always emitted
+     when ``recording.enabled`` is set, regardless of cadence.
+  The same ``AgileRLPolicyWrapper`` is built **before**
+  training and reused throughout — it holds a reference to
+  the live agent so weight updates are visible at each
+  recording call without rebuilding the wrapper.
+  The recorder reuses the **same** ``ExperimentLogger``
+  instance that writes ``metrics.csv`` / ``summary.json`` so
+  ``frames/`` and the metric artefacts share a single
+  ``run_dir``.
 end note
 
 == Cleanup ==

@@ -23,14 +23,23 @@ class _DeapLikeIndividual:
 
 
 class _RandomPolicy:
+    """Deterministic-per-episode random policy for testing.
+
+    Uses a seeded :class:`numpy.random.Generator` that is reset to the
+    same state at the start of every episode (via :meth:`reset`).  This
+    ensures every evaluation run sees identical opponent action sequences
+    regardless of how many prior episodes advanced external RNG state.
+    """
+
     def __init__(self, action_space):
         self.sp = action_space
+        self._rng = np.random.default_rng(0)
 
     def get_action(self, observation, action_mask=None):
-        return self.sp.sample()
+        return int(self._rng.integers(0, self.sp.n))
 
     def reset(self):
-        pass
+        self._rng = np.random.default_rng(0)
 
 
 def _build_env_and_genome():
