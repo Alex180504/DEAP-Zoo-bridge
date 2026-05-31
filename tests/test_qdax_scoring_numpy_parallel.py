@@ -62,7 +62,7 @@ def _scoring_setup():
     return layer_sizes, module, descriptor_fn
 
 
-def _make_fn(setup, *, num_workers: int):
+def _make_fn(setup, *, num_workers: int, eval_episodes: int = 1):
     layer_sizes, module, descriptor_fn = setup
     return make_numpy_scoring_function(
         _ENV,
@@ -72,6 +72,7 @@ def _make_fn(setup, *, num_workers: int):
         action_type="discrete",
         activation="tanh",
         num_workers=num_workers,
+        eval_episodes=eval_episodes,
     )
 
 
@@ -102,17 +103,19 @@ class TestNumpyScoringParallel:
         geno = _build_genotypes(module, layer_sizes, batch=4)
         key = jax.random.PRNGKey(123)
 
-        serial_fn = _make_fn(_scoring_setup, num_workers=1)
+        serial_fn = _make_fn(_scoring_setup, num_workers=1, eval_episodes=2)
         try:
+            assert serial_fn._num_eval_episodes == 2
             sf, sd, _ = serial_fn(geno, key)
             sf = np.asarray(sf)
             sd = np.asarray(sd)
         finally:
             close_scoring_function(serial_fn)
 
-        parallel_fn = _make_fn(_scoring_setup, num_workers=2)
+        parallel_fn = _make_fn(_scoring_setup, num_workers=2, eval_episodes=2)
         try:
             assert parallel_fn._num_workers == 2
+            assert parallel_fn._num_eval_episodes == 2
             pf, pd, _ = parallel_fn(geno, key)
             pf = np.asarray(pf)
             pd = np.asarray(pd)
