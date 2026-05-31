@@ -97,3 +97,64 @@ def test_capabilities_flags_on_policy():
     assert caps["discrete_action"] is True
     assert caps["continuous_action"] is True
     assert caps["needs_global_state"] is False
+
+
+# --- AgileRL grouping monkey-patch regression guards (review S2) -----------
+
+agilerl_algo_utils = pytest.importorskip("agilerl.utils.algo_utils")
+
+
+def test_agilerl_patch_target_exists_with_expected_signature():
+    """The function we monkey-patch must exist with the expected leading
+    parameters. If a dependency bump renames/re-signatures it, this test
+    fails loudly instead of grouped IPPO silently training without the fix.
+    """
+    import inspect
+
+    from deap_pettingzoo.baselines.agilerl_trainer import (
+        _AGILERL_TARGET_NAME,
+        _AGILERL_TARGET_PARAMS,
+    )
+
+    target = getattr(agilerl_algo_utils, _AGILERL_TARGET_NAME, None)
+    assert callable(target), (
+        f"agilerl.utils.algo_utils.{_AGILERL_TARGET_NAME} missing or not "
+        "callable; the grouping patch target has drifted."
+    )
+    params = tuple(inspect.signature(target).parameters)
+    assert params[: len(_AGILERL_TARGET_PARAMS)] == _AGILERL_TARGET_PARAMS
+
+
+def test_apply_grouping_patch_is_idempotent_and_installs():
+    """Applying the patch installs the corrected function and is a no-op on
+    repeat calls (guarded by the ``_grouping_patch_applied`` flag).
+    """
+    from deap_pettingzoo.baselines import agilerl_trainer as at
+
+    at._apply_agilerl_grouping_patch()
+    assert getattr(agilerl_algo_utils, "_grouping_patch_applied", False) is True
+    assert (
+        agilerl_algo_utils.concatenate_experiences_into_batches
+        is at._patched_concatenate_experiences_into_batches
+    )
+    # Second call must not raise and must keep the patch installed.
+    at._apply_agilerl_grouping_patch()
+    assert (
+        agilerl_algo_utils.concatenate_experiences_into_batches
+        is at._patched_concatenate_experiences_into_batches
+    )
+
+
+def test_apply_grouping_patch_raises_on_missing_target(monkeypatch):
+    """If the target function disappears, the patch raises a clear error
+    rather than silently leaving grouped IPPO unpatched.
+    """
+    from deap_pettingzoo.baselines import agilerl_trainer as at
+
+    monkeypatch.setattr(agilerl_algo_utils, "_grouping_patch_applied", False, raising=False)
+    monkeypatch.delattr(
+        agilerl_algo_utils, at._AGILERL_TARGET_NAME, raising=False
+    )
+    with pytest.raises(RuntimeError, match="missing"):
+        at._apply_agilerl_grouping_patch()
+

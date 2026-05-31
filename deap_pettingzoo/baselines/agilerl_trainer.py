@@ -18,7 +18,9 @@ that ``import deap_pettingzoo.baselines`` does not require the optional
 from __future__ import annotations
 
 import importlib
+import inspect
 import time
+import warnings
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -57,8 +59,23 @@ from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 #
 # Fix: replace ``concatenate_experiences_into_batches`` with a version that
 # uses ``torch.stack(dim=1)`` → reshape, matching the advantage layout.
-# This is applied once at import time via a module-level monkey-patch so
-# that all ``agent.learn()`` calls in this process see the corrected function.
+# The patch is applied **lazily** the first time a ``GroupedIPPOTrainer`` is
+# built (see ``_build_agent``), not at import time, and it fails loudly if the
+# AgileRL function it targets has been renamed or re-signatured by a version
+# bump — so a drifting dependency surfaces immediately instead of silently
+# letting grouped IPPO train without the fix.
+
+#: Name of the AgileRL function we monkey-patch.
+_AGILERL_TARGET_NAME = "concatenate_experiences_into_batches"
+#: Expected leading positional parameter names of that function. Verified
+#: against AgileRL 2.6.1; a mismatch raises (and the regression test in
+#: tests/test_agilerl_grouping_patch.py asserts the same contract).
+_AGILERL_TARGET_PARAMS = ("experiences", "space", "actions")
+#: AgileRL version range this patch was written and tested against
+#: (see ``agilerl~=2.6`` in pyproject.toml).
+_AGILERL_TESTED_VERSION = "2.6.x"
+
+
 def _patched_concatenate_experiences_into_batches(experiences, space, actions=False):
     """Drop-in replacement for ``agilerl.utils.algo_utils.concatenate_experiences_into_batches``.
 
@@ -91,40 +108,79 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
             return reshaped
 
         return _stack_and_flatten(tensors, space)
-    except Exception:
-        # Safety net: if patching fails for any reason, fall back to the original function
-        print("Warning: AgileRL grouping patch failed, falling back to original flattening function. Grouped IPPO may not learn.")
+    except Exception as exc:
+        # Runtime safety net: never crash a long training run if the
+        # corrected flattening hits an unexpected layout. Emit a loud,
+        # *capturable* warning (not a bare print) so the degraded state is
+        # visible in logs/tests; grouped IPPO may not learn this update.
+        warnings.warn(
+            "AgileRL grouping patch failed at run time "
+            f"({type(exc).__name__}: {exc}); falling back to the original "
+            "flattening function. Grouped IPPO may not learn this update.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         import agilerl.utils.algo_utils as _au
         return _au._orig_concatenate_experiences_into_batches(experiences, space, actions)
 
 
-def _apply_agilerl_grouping_patch() -> bool:
-    """Monkey-patch AgileRL's flattening function.  Returns True on success."""
+def _apply_agilerl_grouping_patch() -> None:
+    """Idempotently monkey-patch AgileRL's flattening function.
+
+    Called lazily from :meth:`GroupedIPPOTrainer._build_agent` rather than at
+    import time, so importing this module never has side effects on AgileRL.
+    Installs the patch on first call and is a no-op on subsequent calls.
+
+    Raises:
+        RuntimeError: If ``agilerl`` is not installed, or if the target
+            function is missing / has an unexpected signature — i.e. the
+            installed AgileRL drifted from the tested
+            :data:`_AGILERL_TESTED_VERSION` series. Failing loudly here is
+            deliberate: a silently-unpatched grouped IPPO "runs but does not
+            learn", which is worse than a clear error.
+    """
     try:
         import agilerl.utils.algo_utils as _au
-        if getattr(_au, "_grouping_patch_applied", False):
-            return True
-        _au._orig_concatenate_experiences_into_batches = (
-            _au.concatenate_experiences_into_batches
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "GroupedIPPOTrainer requires the optional 'agilerl' dependency. "
+            "Install the 'rl-baselines' extra."
+        ) from exc
+
+    if getattr(_au, "_grouping_patch_applied", False):
+        return
+
+    target = getattr(_au, _AGILERL_TARGET_NAME, None)
+    if not callable(target):
+        raise RuntimeError(
+            f"AgileRL grouping-patch target '{_AGILERL_TARGET_NAME}' is missing "
+            "from agilerl.utils.algo_utils. The installed AgileRL has drifted "
+            f"from the tested {_AGILERL_TESTED_VERSION} series; update the patch "
+            "in deap_pettingzoo/baselines/agilerl_trainer.py."
         )
-        _au.concatenate_experiences_into_batches = (
+    actual_params = tuple(inspect.signature(target).parameters)
+    if actual_params[: len(_AGILERL_TARGET_PARAMS)] != _AGILERL_TARGET_PARAMS:
+        raise RuntimeError(
+            f"AgileRL '{_AGILERL_TARGET_NAME}' signature changed: expected "
+            f"leading parameters {_AGILERL_TARGET_PARAMS}, got {actual_params}. "
+            f"The installed AgileRL has drifted from the tested "
+            f"{_AGILERL_TESTED_VERSION} series; update the grouping patch in "
+            "deap_pettingzoo/baselines/agilerl_trainer.py."
+        )
+
+    _au._orig_concatenate_experiences_into_batches = target
+    _au.concatenate_experiences_into_batches = (
+        _patched_concatenate_experiences_into_batches
+    )
+    # Also patch the name already bound inside the IPPO module.
+    try:
+        import agilerl.algorithms.ippo as _ippo_mod
+        _ippo_mod.concatenate_experiences_into_batches = (
             _patched_concatenate_experiences_into_batches
         )
-        # Also patch the name inside the IPPO module
-        try:
-            import agilerl.algorithms.ippo as _ippo_mod
-            _ippo_mod.concatenate_experiences_into_batches = (
-                _patched_concatenate_experiences_into_batches
-            )
-        except Exception:
-            pass
-        _au._grouping_patch_applied = True
-        return True
-    except Exception:
-        return False
-
-
-_GROUPING_PATCH_APPLIED = _apply_agilerl_grouping_patch()
+    except ImportError:  # pragma: no cover - IPPO module always present in 2.6
+        pass
+    _au._grouping_patch_applied = True
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1412,9 @@ class GroupedIPPOTrainer(IPPOTrainer):
         no extra kwarg required — so all we do here is the pre-flight
         consistency check.
         """
+        # Apply the grouped-IPPO advantage/state flattening fix exactly when
+        # grouped IPPO is actually used. Raises loudly if AgileRL drifted.
+        _apply_agilerl_grouping_patch()
         validation_obs_spaces = (
             dict(zip(agent_ids, obs_spaces))
             if isinstance(obs_spaces, (list, tuple))
