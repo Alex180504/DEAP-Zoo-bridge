@@ -477,6 +477,24 @@ class ScriptedOpponentEnvWrapper:
         except SystemExit:
             return None
 
+    @property
+    def unwrapped(self):
+        """Gymnasium-style unwrap hook used by AgileRL's vec env.
+
+        ``AsyncPettingZooVecEnv.__init__`` reads
+        ``dummy_env.unwrapped.render_mode`` to decide whether to forward
+        ``render`` calls into the worker subprocesses.  This wrapper *is*
+        the outermost public-API layer (the inner aquarium env exposes
+        prey agents that we hide), so we return ``self`` rather than
+        the raw env to keep ``possible_agents`` / spaces consistent.
+        """
+        return self
+
+    @property
+    def render_mode(self):
+        """Surface the inner env's ``render_mode`` for the vec-env probe."""
+        return getattr(self.inner, "render_mode", None)
+
     def close(self) -> None:
         try:
             self.inner.close()
