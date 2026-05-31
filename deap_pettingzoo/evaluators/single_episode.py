@@ -16,7 +16,6 @@ class SingleEpisodeEvaluator(BaseEvaluator):
     padding wrappers (``pad_observations_v0`` +
     ``pad_action_space_v0``) via :attr:`EnvSpec.wrappers`, or evolve
     per-role with :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`.
-    See ``docs/known_issues.md`` for migration guidance.
     """
     
     VALID_AGGREGATIONS = ['sum', 'mean', 'min', 'max', 'team']
@@ -72,7 +71,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             Tuple containing single fitness value (DEAP format)
             
         Raises:
-            ValueError: If individual or genome is None/invalid
+            ValueError: If individual or genome is None/invalid.
+            RuntimeError: If an exception occurs during the episode rollout
+                (wraps the original exception with context).
         """
         # Validate inputs
         if individual is None:
@@ -202,7 +203,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             cumulative_rewards: Dict mapping agent_id to reward
             
         Returns:
-            Team fitness (difference between team totals)
+            Difference between the first and second team's total reward
+            when two or more teams are present; plain sum when only one
+            team is found (e.g. no ``team_mapping`` was provided).
         """
         if not self.team_mapping:
             # Fallback to sum if no team mapping provided
@@ -214,7 +217,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             team_rewards[team] = team_rewards.get(team, 0.0) + reward
         
         # For competitive scenarios, return difference between teams
-        # Assumes two teams; customize as needed
+        # Assumes two teams, customize as needed
         team_values = list(team_rewards.values())
         if len(team_values) >= 2:
             return float(team_values[0] - team_values[1])

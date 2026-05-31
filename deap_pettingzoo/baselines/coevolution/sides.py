@@ -58,9 +58,7 @@ from .pools import (
 from .samplers import Sampler, uniform_sampler
 
 
-# ---------------------------------------------------------------------------
 # Side declaration
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -138,9 +136,7 @@ class Side:
             )
 
 
-# ---------------------------------------------------------------------------
 # Runtime state — base class
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -154,6 +150,11 @@ class GenerationStats:
     min: float
     max: float
     best_fitness: float
+    qd_score: Optional[float] = None
+    coverage: Optional[float] = None
+    archive_best_fitness: Optional[float] = None
+    filled_niches: Optional[int] = None
+    total_niches: Optional[int] = None
 
 
 class SideState:
@@ -161,6 +162,12 @@ class SideState:
 
     Subclasses must implement :meth:`initialise`, :meth:`step_generation`,
     :meth:`current_pool`, and :meth:`best_policy`.
+    
+    Notes:
+        Subclasses that use ``np.random.*`` operators set this after
+        seeding in :meth:`initialise` (via the trainer). When set,
+        :meth:`step_generation` wraps operator calls in a save/set/restore
+        block so each side advances its own RNG stream independently.
     """
 
     def __init__(self, side: Side) -> None:
@@ -168,16 +175,10 @@ class SideState:
         self.generation = 0
         self.best_fitness: float = -np.inf
         self.history: List[GenerationStats] = []
-        #: Per-side global numpy RNG state for EA/CMA operator isolation.
-        #: Subclasses that use ``np.random.*`` operators set this after
-        #: seeding in :meth:`initialise` (via the trainer). When set,
-        #: :meth:`step_generation` wraps operator calls in a save/set/restore
-        #: block so each side advances its own RNG stream independently.
+
         self._np_state: Optional[Any] = None
 
-    # ------------------------------------------------------------------
     # Lifecycle hooks — subclasses override
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -189,6 +190,8 @@ class SideState:
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -209,9 +212,7 @@ class SideState:
         self.side.hof.add(self.best_snapshot(), float(self.best_fitness))
 
 
-# ---------------------------------------------------------------------------
 # EA side
-# ---------------------------------------------------------------------------
 
 
 def _make_feedforward_policy_factory(
@@ -402,12 +403,17 @@ class EASideState(SideState):
         self.toolbox.unregister("evaluate")
         self.toolbox.register("evaluate", _evaluate_with, evaluator=evaluator)
 
-    def evaluate_population(self) -> None:
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
         """Re-evaluate every individual under the current toolbox.evaluate."""
         if self.toolbox is None:  # pragma: no cover
             raise RuntimeError("EASideState.initialise() must be called first.")
-        for ind in self.population:
-            ind.fitness.values = self.toolbox.evaluate(ind)
+        if batch_eval_fn is not None:
+            fitnesses = batch_eval_fn(self.population)
+            for ind, fit in zip(self.population, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                ind.fitness.values = self.toolbox.evaluate(ind)
         self.hof.update(self.population)
         if len(self.hof) > 0:
             self.best_fitness = float(self.hof[0].fitness.values[0])
@@ -415,23 +421,19 @@ class EASideState(SideState):
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:
         assert self.toolbox is not None
         self.generation += 1
         evaluator = evaluator_factory(self)
         self.rebind_evaluator(evaluator)
 
-        # Simple (mu, lambda)=(N, N) generational loop with full
-        # replacement — matches EATrainer's "simple" strategy. All
-        # stochastic decisions use the per-side Generator so one
-        # side's RNG draws do not influence another side.
-        #
-        # Genetic operators (crossover_blend, mutate_gaussian) call
-        # np.random.* (global RNG). To keep each side's operators on its
-        # own seeded stream and independent of other sides, we save the
-        # current global state, switch to this side's stored stream, run
-        # all operators, then save the resulting state and restore the
-        # original global state.
+        # Invalidate all current individuals so parents are always re-evaluated against the current generation's opponents.
+        for ind in self.population:
+            del ind.fitness.values
+
+        # Simple (mu, lambda)=(N, N) generational loop with full replacement - matches EATrainer's "simple" strategy.
         global_state_before: Optional[Any] = None
         if self._np_state is not None:
             global_state_before = np.random.get_state()
@@ -453,18 +455,29 @@ class EASideState(SideState):
             np.random.set_state(global_state_before)
 
         # Evaluate invalid individuals.
-        for ind in offspring:
-            if not ind.fitness.valid:
+        invalid = [ind for ind in offspring if not ind.fitness.valid]
+        if batch_eval_fn is not None and invalid:
+            fitnesses = batch_eval_fn(invalid)
+            for ind, fit in zip(invalid, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in invalid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # Selection → next generation (tournament/roulette/... over the
-        # union of parents + offspring for elitism).
-        combined = self.population + offspring
-        self.population = self.toolbox.select(combined, self.population_size)
+        # (mu, lambda) selection: choose next generation from offspring ONLY.
+        # In competitive coevolution, (mu+lambda) elitism is harmful because
+        # parent fitness values were earned against *previous* opponents; stale
+        # high-scoring parents will dominate tournament selection over offspring
+        # that are correctly evaluated against today's (harder) opponents,
+        # causing the population to freeze at a local optimum forever.
+        self.population = self.toolbox.select(offspring, self.population_size)
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
-        self.best_fitness = float(self.hof[0].fitness.values[0])
+        # Track running max of current-gen bests (not HoF, whose fitness is
+        # stale — evaluated against a past opponent pool and not comparable
+        # to current-gen offspring evaluated against current opponents).
+        self.best_fitness = max(self.best_fitness, best)
 
         stats = GenerationStats(
             generation=self.generation,
@@ -473,7 +486,7 @@ class EASideState(SideState):
             std=float(np.std(fitnesses)),
             min=float(np.min(fitnesses)),
             max=best,
-            best_fitness=self.best_fitness,
+            best_fitness=best,  # current-gen best, not stale HoF value
         )
         self.history.append(stats)
         return stats
@@ -514,9 +527,8 @@ def _evaluate_with(individual: Any, evaluator: Any) -> Tuple[float, ...]:
     return evaluator.evaluate(individual)
 
 
-# ---------------------------------------------------------------------------
+# 
 # CMA-ES side
-# ---------------------------------------------------------------------------
 
 
 class CMAESSideState(SideState):
@@ -566,8 +578,7 @@ class CMAESSideState(SideState):
         output_size = required_output_size(self._action_space)
 
         # If a per-side rng is provided, derive a CMA seed from it so
-        # multiple CMA sides stay independent under a single trainer
-        # seed. Otherwise fall back to the side's explicit seed.
+        # multiple CMA sides stay independent under a single trainer seed.
         if rng is not None:
             cma_seed = int(rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
             np.random.seed(cma_seed)
@@ -606,7 +617,7 @@ class CMAESSideState(SideState):
 
         self.toolbox = register_cma_toolbox(self.strategy, self._ind_init, _NoopEvaluator())
         # Seed the population — needed so other sides can sample from
-        # this side before we've completed our first step_generation.
+        # this side before first step_generation is completed.
         self.population = self.toolbox.generate()
         self._policy_factory = _make_feedforward_policy_factory(
             self._action_space, masked=self.masked
@@ -617,10 +628,15 @@ class CMAESSideState(SideState):
         self.toolbox.unregister("evaluate")
         self.toolbox.register("evaluate", _evaluate_with, evaluator=evaluator)
 
-    def evaluate_population(self) -> None:
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
         assert self.toolbox is not None
-        for ind in self.population:
-            ind.fitness.values = self.toolbox.evaluate(ind)
+        if batch_eval_fn is not None:
+            fitnesses = batch_eval_fn(self.population)
+            for ind, fit in zip(self.population, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                ind.fitness.values = self.toolbox.evaluate(ind)
         self.hof.update(self.population)
         if len(self.hof) > 0:
             self.best_fitness = float(self.hof[0].fitness.values[0])
@@ -628,23 +644,33 @@ class CMAESSideState(SideState):
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:
         assert self.toolbox is not None
         self.generation += 1
         evaluator = evaluator_factory(self)
         self.rebind_evaluator(evaluator)
 
+        # Invalidate all current individuals so they are re-evaluated against
+        # *this* generation's opponents (not the bootstrap pool).  Without this,
+        # gen 1 silently reuses bootstrap-era fitness values for the CMA update.
+        for ind in self.population:
+            del ind.fitness.values
+
         # Re-use the currently-seeded population for this generation's
         # evaluation (it was generated during initialise() or the
         # previous update step), then update the strategy and resample.
-        for ind in self.population:
-            if not ind.fitness.valid:
-                ind.fitness.values = self.toolbox.evaluate(ind)
+        invalid_pop = [ind for ind in self.population if not ind.fitness.valid]
+        if batch_eval_fn is not None and invalid_pop:
+            fitnesses = batch_eval_fn(invalid_pop)
+            for ind, fit in zip(invalid_pop, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                if not ind.fitness.valid:
+                    ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # DEAP's CMA strategy calls np.random.* (global RNG) during
-        # toolbox.update() and toolbox.generate(). To keep this side's
-        # CMA on its own seeded stream and independent of other sides,
-        # save/set/restore the global numpy state around these calls.
         global_state_before: Optional[Any] = None
         if self._np_state is not None:
             global_state_before = np.random.get_state()
@@ -661,7 +687,10 @@ class CMAESSideState(SideState):
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
-        self.best_fitness = float(self.hof[0].fitness.values[0])
+        # Track running max of current-gen bests (not HoF, whose fitness is
+        # stale — evaluated against a past opponent pool and not comparable
+        # to current-gen offspring evaluated against current opponents).
+        self.best_fitness = max(self.best_fitness, best)
 
         # Pre-sample next generation's population so current_pool() is
         # populated even before evaluation begins.
@@ -674,7 +703,7 @@ class CMAESSideState(SideState):
             std=float(np.std(fitnesses)),
             min=float(np.min(fitnesses)),
             max=best,
-            best_fitness=self.best_fitness,
+            best_fitness=best,  # current-gen best, not stale HoF value
         )
         self.history.append(stats)
         return stats
@@ -708,9 +737,7 @@ class CMAESSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # Frozen side
-# ---------------------------------------------------------------------------
 
 
 class FrozenSideState(SideState):
@@ -767,9 +794,7 @@ class FrozenSideState(SideState):
         return self._policies[0]
 
 
-# ---------------------------------------------------------------------------
 # Factory
-# ---------------------------------------------------------------------------
 
 
 def make_side_state(side: Side) -> SideState:
@@ -791,9 +816,6 @@ def make_side_state(side: Side) -> SideState:
             ) from exc
         return QDaxSideState(side)
     if side.optimizer == "rl":
-        # Imported lazily so the AgileRL dependency stays optional —
-        # users without `pip install 'deap-pettingzoo[rl-baselines]'`
-        # only hit the ImportError if they actually configure an RL side.
         from .rl_side import RLSideState
 
         return RLSideState(side)

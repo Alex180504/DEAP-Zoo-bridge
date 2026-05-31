@@ -1,7 +1,7 @@
-"""Plug a third-party PettingZoo-like env into the registry and drive it
-through :class:`PettingZooWrapper`.  This exercises the *open* nature of
-the registry: users of deap-bridge can run the EA / AgileRL pipelines on
-environments outside the auto-registered MPE2 / aquarium set.
+"""
+Plug a third-party PettingZoo-like env into the registry and drive it through :class:`PettingZooWrapper`.  
+This tests the enviroment compatibility of the the registry.
+Users of deap-bridge can run the EA / AgileRL pipelines on environments outside the auto-registered enviroment set.
 """
 
 from __future__ import annotations

@@ -70,7 +70,7 @@ class EnvironmentInfo:
     act_dim: Optional[int]
     action_low: Optional[np.ndarray]
     action_high: Optional[np.ndarray]
-    #: Whether the env is a strictly turn-based AEC wrapped via
+    #: Whether the env is a strictly turn-based AEC wrapped via:
     #: :class:`MaskedSimultaneousAdapter` or
     #: :class:`SequentialTurnAdapter`. Used to gate MADDPG/MATD3.
     is_turn_based: bool = False
@@ -209,8 +209,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
     except ValueError:  # pragma: no cover - env_name always registered here
         pass
 
-    # Use the wrapper's close() which guards against SystemExit raised by
-    # some third-party envs (e.g. marl-aquarium's aquarium_v0).
+    # Use the wrapper's close() which guards against SystemExit raised by some third-party envs (e.g. marl-aquarium's aquarium_v0).
     wrapper.close()
 
     return EnvironmentInfo(
@@ -256,7 +255,7 @@ def check_compatibility(
     issues: List[str] = []
     warnings: List[str] = []
 
-    # --- Fatal checks -------------------------------------------------------
+    # Critical checks
 
     # Action space compatibility
     if env_info.has_continuous_actions and not caps.get('continuous_action', False):
@@ -278,15 +277,14 @@ def check_compatibility(
             "does not expose a state() method."
         )
 
-    # Turn-based carve-out: algos that assume simultaneous execution
-    # (replay buffer / centralized critic keyed by all-agents-per-step)
-    # cannot train on turn-based AEC adapters.
+    # Turn-based carve-out: algorithms that assume simultaneous execution
+    # (replay buffer / centralized critic keyed by all-agents-per-step) cannot train on turn-based AEC adapters.
     if env_info.is_turn_based and not caps.get('supports_turn_based', True):
         issues.append(
             "Environment is a turn-based AEC game (api='aec_masked' or "
             "'aec_sequential'), but the algorithm's replay buffer / critic "
             "structure assumes simultaneous-step execution. Use EA, CMA-ES, "
-            "IPPO, or MAPPO for turn-based games."
+            "or IPPO for turn-based games."
         )
 
     # --- Warnings -----------------------------------------------------------

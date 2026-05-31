@@ -74,12 +74,12 @@ class UnifiedEvaluator(BaselineEvaluator):
             
         Returns:
             EvalResult with reward statistics.
+        
+        Notes:
+            ``human`` mode pops a window but returns None. 
+            ``rgb_array`` takes precedence over ``human`` when both are requested.
         """
-        # Build a hashable cache key that includes env_config and render_mode.
-        # When a FrameRecorder is attached we need ``rgb_array`` (so render
-        # actually returns a frame); ``human`` mode pops a window but
-        # returns None. ``rgb_array`` takes precedence over ``human`` when
-        # both are requested.
+
         if self.frame_recorder is not None and self.frame_recorder.enabled:
             render_mode: Optional[str] = 'rgb_array'
         elif render:

@@ -20,7 +20,6 @@ from deap_pettingzoo.baselines import (
     MADDPGTrainer,
     MATD3Trainer,
     IPPOTrainer,
-    MAPPOTrainer,
     UnifiedEvaluator,
     compare_baselines,
     register_trainer,
@@ -226,7 +225,6 @@ class TestTrainerRegistry:
         assert isinstance(get_trainer('maddpg'), MADDPGTrainer)
         assert isinstance(get_trainer('matd3'), MATD3Trainer)
         assert isinstance(get_trainer('ippo'), IPPOTrainer)
-        assert isinstance(get_trainer('mappo'), MAPPOTrainer)
     
     def test_get_unknown_trainer(self):
         """Test getting unknown trainer raises error."""
@@ -295,11 +293,6 @@ class TestComparisonWorkflow:
             # Check results file was created
             results_file = Path(tmpdir) / 'results' / 'comparison_results.json'
             assert results_file.exists()
-
-
-# ===========================================================================
-# Phase 5: Extensibility — compatibility module
-# ===========================================================================
 
 from deap_pettingzoo.baselines.compatibility import (
     EnvironmentInfo,

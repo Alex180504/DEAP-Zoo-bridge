@@ -74,7 +74,14 @@ class TestCMAESTrainerRegistry:
 class TestCMAESTrainerTraining:
     @pytest.mark.slow
     def test_training_smoke(self):
-        """Tiny end-to-end run: verifies train() produces a usable policy."""
+        """
+        Tiny end-to-end run: verifies train() produces a usable policy.
+        
+        Notes:
+            The budget is intentionally tiny so the test runs quickly in CI; 
+            use ``>=`` rather than ``>`` when comparing fitness values because such a small budget 
+            may cause the optimiser to plateau naturally without it being a bug.
+        """
         trainer = CMAESTrainer(hidden_size=16, population_size=6, sigma0=0.3)
 
         config = TrainingConfig(
@@ -97,10 +104,6 @@ class TestCMAESTrainerTraining:
         for record in result.metrics["fitness_history"]:
             assert {"generation", "mean", "std", "min", "max"} <= record.keys()
 
-        # Optimisation actually happened: best-ever fitness improved
-        # end-vs-start. Uses ``>=`` because tiny budgets can plateau
-        # on this env, but the regression case (CMA never improves
-        # at all) would still trip a strict ``>`` later if needed.
         history = result.metrics["fitness_history"]
         assert len(history) >= 2, (
             "need at least two generations to assess improvement"

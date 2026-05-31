@@ -34,7 +34,7 @@ deactivate Genome
 Policy -> Policy : parse architecture
 Policy -> Policy : split weights into\nlayers and biases
 Policy -> Policy : construct network layers
-Policy -> Policy : set activation function
+Policy -> Policy : set hidden/output activations
 Policy -> Env : get_action_space(agent_id)
 activate Env
 Env --> Policy : action_space
@@ -67,20 +67,32 @@ loop for each step until done
     Policy -> Policy : _process_observation(obs)
     note right
       Normalize, flatten,
-      or reshape observation
-      to match input layer
+      or reshape observation.
+      Aquarium experiment may
+      project raw obs to local
+      relative features first.
     end note
     
     Policy -> Policy : forward(processed_obs)
     
-    loop for each layer
+    loop for each hidden layer
         Policy -> Policy : layer_output = weights @ input + bias
         Policy -> Policy : _apply_activation(layer_output)
         note right
           Apply ReLU, tanh,
-          or sigmoid activation
+          sigmoid, or linear
+          hidden activation
         end note
     end loop
+
+    Policy -> Policy : final_output = weights @ hidden + bias
+    Policy -> Policy : _apply_activation(final_output, output_activation)
+    note right
+      Final layer can use a
+      different activation,
+      e.g. linear logits for
+      discrete argmax heads.
+    end note
     
     Policy -> Policy : _process_output(network_output)
     note right

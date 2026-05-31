@@ -43,9 +43,7 @@ class NormalizationSpec:
     low: Mapping[str, float]
     high: Mapping[str, float]
 
-    # ------------------------------------------------------------------
     # Factories
-    # ------------------------------------------------------------------
 
     @classmethod
     def from_dict(

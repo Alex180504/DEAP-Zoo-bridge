@@ -1,4 +1,4 @@
-"""Tests for multi-task aggregation pipeline (Phase A–D)."""
+"""Tests for multi-task aggregation pipeline"""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def multi_task_experiment(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Phase A — collect_score_matrices / final_score_table
+# Collect_score_matrices / final_score_table
 # ---------------------------------------------------------------------------
 
 
@@ -122,7 +122,7 @@ def test_final_score_table_long_form(multi_task_experiment):
 
 
 # ---------------------------------------------------------------------------
-# Phase A — NormalizationSpec / normalize_score_matrices
+# NormalizationSpec / normalize_score_matrices
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +176,7 @@ def test_normalize_preserves_nans():
 
 
 # ---------------------------------------------------------------------------
-# Phase B — rliable bridge multi-task
+# Rliable bridge multi-task
 # ---------------------------------------------------------------------------
 
 
@@ -239,7 +239,7 @@ def test_rliable_single_task_back_compat():
 
 
 # ---------------------------------------------------------------------------
-# Phase C — plots smoke
+# Plots smoke tests
 # ---------------------------------------------------------------------------
 
 
@@ -279,7 +279,7 @@ def test_plot_normalized_performance_profile_smoke():
 
 
 # ---------------------------------------------------------------------------
-# Phase D — report end-to-end
+# End-to-end report generation smoke test
 # ---------------------------------------------------------------------------
 
 

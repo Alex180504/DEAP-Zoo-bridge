@@ -79,8 +79,7 @@ def test_ea_vs_frozen_runs_and_reports_ea_policy():
             algorithm_params={"coevolution": cfg},
         )
     )
-    # Frozen side reports None fitness (no evolution); EA side has a
-    # concrete float.
+    # Frozen side reports None fitness (no evolution); EA side has a concrete float.
     assert result.metrics["final_best"]["evaders"] is None
     assert isinstance(result.metrics["final_best"]["pursuers"], float)
     # Reporting policy comes from the EA side.

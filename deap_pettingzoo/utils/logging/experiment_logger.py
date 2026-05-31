@@ -240,6 +240,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         fps: int = 20,
         fmt: str = "mp4",
         max_frames_per_episode: Optional[int] = None,
+        max_dim: Optional[int] = None,
         episode_prefix: str = "",
     ) -> FrameRecorder:
         """Lazily build and cache a :class:`FrameRecorder` rooted at the run dir.
@@ -255,6 +256,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
                 fps=fps,
                 fmt=fmt,
                 max_frames_per_episode=max_frames_per_episode,
+                max_dim=max_dim,
                 episode_prefix=episode_prefix,
             )
         return self._frame_recorder

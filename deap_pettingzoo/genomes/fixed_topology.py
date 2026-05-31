@@ -7,11 +7,13 @@ class FixedTopologyGenome:
     Fixed-topology neural network genome.
     
     Encodes a feedforward neural network with fixed architecture as a flat
-    vector of weights and biases. Compatible with DEAP's genetic operators.
+    vector of weights and biases. Compatible with DEAP's genetic operators and CMA-ES via cma_integration.py.
+    Used as a template for Qdax weight-compatible Flax policy.
     
     Attributes:
         layer_sizes: List of integers defining network architecture [input, hidden..., output]
-        activation: Activation function name ('relu', 'tanh', 'sigmoid', 'linear')
+        activation: Hidden-layer activation function name ('relu', 'tanh', 'sigmoid', 'linear')
+        output_activation: Output-layer activation function name
         weights: Flat numpy array of all network weights and biases
         input_size: Number of input units
         output_size: Number of output units
@@ -24,6 +26,7 @@ class FixedTopologyGenome:
         self,
         layer_sizes: List[int],
         activation: str = 'tanh',
+        output_activation: Optional[str] = None,
         weight_range: Tuple[float, float] = (-1.0, 1.0),
         random_seed: Optional[int] = None
     ) -> None:
@@ -32,7 +35,9 @@ class FixedTopologyGenome:
         
         Args:
             layer_sizes: Network architecture [input, hidden1, hidden2, ..., output]
-            activation: Activation function ('relu', 'tanh', 'sigmoid', 'linear')
+            activation: Hidden-layer activation function
+            output_activation: Output-layer activation function. When omitted,
+                preserves the historical behavior by matching ``activation``.
             weight_range: (min, max) for weight initialization
             random_seed: Seed for reproducible initialization
             
@@ -61,9 +66,17 @@ class FixedTopologyGenome:
                 f"Unsupported activation function '{activation}'. "
                 f"Supported: {self.SUPPORTED_ACTIVATIONS}"
             )
+        if output_activation is None:
+            output_activation = activation
+        if output_activation not in self.SUPPORTED_ACTIVATIONS:
+            raise ValueError(
+                f"Unsupported output activation function '{output_activation}'. "
+                f"Supported: {self.SUPPORTED_ACTIVATIONS}"
+            )
         
         self.layer_sizes = layer_sizes
         self.activation = activation
+        self.output_activation = output_activation
         self._weight_range = weight_range
         self._random_seed = random_seed
         
@@ -193,8 +206,9 @@ class FixedTopologyGenome:
         cloned_genome = FixedTopologyGenome(
             layer_sizes=self.layer_sizes,
             activation=self.activation,
+            output_activation=self.output_activation,
             weight_range=self._weight_range,
-            random_seed=None  # Let the clone have its own independent RNG stream
+            random_seed=None  # Allows the clone have its own independent RNG stream
         )
         cloned_genome.set_weights(self.get_weights().copy())
         # Keep the clone's own freshly seeded RNG so it produces an independent stream
@@ -210,6 +224,7 @@ class FixedTopologyGenome:
         return {
             'layer_sizes': self.layer_sizes,
             'activation': self.activation,
+            'output_activation': self.output_activation,
             'weights': self.weights.tolist(),  # Convert to list for JSON compatibility
             '_weight_range': self._weight_range,
             '_random_seed': self._random_seed,
@@ -229,6 +244,7 @@ class FixedTopologyGenome:
         genome = FixedTopologyGenome(
             layer_sizes=data['layer_sizes'],
             activation=data['activation'],
+            output_activation=data.get('output_activation', data['activation']),
             weight_range=data.get('_weight_range', (-1.0, 1.0)),
             random_seed=data.get('_random_seed', None)
         )

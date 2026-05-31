@@ -54,6 +54,7 @@ def setup_deap_creators() -> None:
 def create_deap_individual(
     layer_sizes: List[int],
     activation: str = 'tanh',
+    output_activation: Optional[str] = None,
     weight_range: tuple = (-1.0, 1.0),
     random_seed: Optional[int] = None
 ) -> Any:
@@ -62,7 +63,9 @@ def create_deap_individual(
     
     Args:
         layer_sizes: Network architecture [input, hidden..., output]
-        activation: Activation function ('tanh', 'relu', 'sigmoid', 'linear')
+        activation: Hidden-layer activation function
+        output_activation: Output-layer activation function. Defaults to
+            ``activation`` for backward compatibility.
         weight_range: (min, max) for weight initialization
         random_seed: Seed for reproducibility
         
@@ -78,6 +81,7 @@ def create_deap_individual(
     genome = FixedTopologyGenome(
         layer_sizes=layer_sizes,
         activation=activation,
+        output_activation=output_activation,
         weight_range=weight_range,
         random_seed=random_seed
     )
@@ -136,7 +140,8 @@ def create_toolbox(
     Args:
         genome_config: Configuration for genome creation
             - layer_sizes: List[int] - Network architecture
-            - activation: str (optional) - Activation function
+            - activation: str (optional) - Hidden-layer activation function
+            - output_activation: str (optional) - Output-layer activation
             - weight_range: tuple (optional) - Weight initialization range
             - random_seed: int (optional) - Seed for reproducibility
         evaluator: Evaluator for fitness calculation
@@ -191,6 +196,7 @@ def create_toolbox(
     # Extract config values
     layer_sizes = genome_config['layer_sizes']
     activation = genome_config.get('activation', 'tanh')
+    output_activation = genome_config.get('output_activation', activation)
     weight_range = genome_config.get('weight_range', (-1.0, 1.0))
     base_seed = genome_config.get('random_seed', None)
 
@@ -211,6 +217,7 @@ def create_toolbox(
         return create_deap_individual(
             layer_sizes=layer_sizes,
             activation=activation,
+            output_activation=output_activation,
             weight_range=weight_range,
             random_seed=seed
         )
@@ -247,13 +254,8 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
             tournsize=cfg.get("tournament_size", 3),
         )
     elif method == "roulette":
-        # ``tools.selRoulette`` samples proportionally to fitness values and
-        # is mathematically only defined for non-negative fitnesses. Several
-        # PettingZoo evaluators in this project return summed episode
-        # rewards that can be negative, which silently produces invalid
-        # sampling (or a ZeroDivisionError) inside DEAP. Wrap the operator
-        # so a bad fitness sign fails loudly at selection time with an
-        # actionable message instead of corrupting the run.
+        # DEAP's selRoulette does not check for negative fitness values, which can lead to silent errors.
+        # This wrapper adds a check and raises a clear error if invalid fitnesses are present.
         def _safe_roulette(individuals, k):
             for ind in individuals:
                 fit = ind.fitness.values[0]
@@ -365,9 +367,6 @@ def _register_mutation(
             indpb=cfg.get("indpb", 0.1),
         )
         return
-    # TODO: ``tools.mutESLogNormal`` requires individuals to carry a
-    # per-gene strategy vector (ES self-adaptation). Supporting it would
-    # need a new genome variant; deferred.
     raise ValueError(
         f"Unknown mutation method {method!r}. "
         f"Supported: {SUPPORTED_MUTATION_METHODS}"
@@ -519,7 +518,8 @@ class _GenomePayload:
     Attributes:
         weights: Flat numpy weight vector (``genome.get_weights()``).
         layer_sizes: Network topology.
-        activation: Activation function name.
+        activation: Hidden-layer activation function name.
+        output_activation: Output-layer activation function name.
         weight_range: ``(lo, hi)`` tuple (kept for genome
             round-tripping; evaluation is unaffected).
         seed: Optional per-individual seed forwarded to
@@ -529,6 +529,7 @@ class _GenomePayload:
     weights: np.ndarray
     layer_sizes: Tuple[int, ...]
     activation: str
+    output_activation: str
     weight_range: Tuple[float, float]
     seed: Optional[int] = None
 
@@ -550,10 +551,7 @@ class _EvalWorkerSpec:
     team_mapping: Optional[Dict[str, str]] = None
 
 
-# Module-global cache populated lazily on each worker. Using a lazy
-# init pattern (instead of ``ProcessPoolExecutor(initializer=...)``)
-# keeps a single code path for the process backend, SCOOP, and Dask —
-# only the process backend supports ``initializer``.
+# Module-global cache populated lazily on each worker. 
 _WORKER_CACHE: Dict[str, Any] = {}
 
 
@@ -564,8 +562,7 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     if evaluator is not None and cached_spec == spec:
         return evaluator
 
-    # First call on this worker, or spec changed (should not happen in
-    # a well-formed train() call but is safe to rebuild on mismatch).
+    # Rebuild if first call on this worker, or spec changed since last build.
     from deap_pettingzoo.environments import PettingZooWrapper
     from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 
@@ -607,7 +604,7 @@ def _worker_evaluate(
         payload_and_spec: ``(_GenomePayload, _EvalWorkerSpec)`` tuple.
             We pack both so every call carries enough context to
             rebuild the evaluator — necessary because SCOOP / Dask do
-            not give us an init hook.
+            not expose an init hook.
 
     Returns:
         Fitness tuple from the evaluator, ready for
@@ -619,6 +616,7 @@ def _worker_evaluate(
     genome = FixedTopologyGenome(
         layer_sizes=list(payload.layer_sizes),
         activation=payload.activation,
+        output_activation=payload.output_activation,
         weight_range=tuple(payload.weight_range),
         random_seed=None,
     )
@@ -643,6 +641,9 @@ def _individual_to_payload(
         weights=np.asarray(genome.get_weights(), dtype=float).copy(),
         layer_sizes=tuple(genome.layer_sizes),
         activation=str(genome.activation),
+        output_activation=str(
+            getattr(genome, "output_activation", genome.activation)
+        ),
         weight_range=tuple(getattr(genome, "_weight_range", (-1.0, 1.0))),
         seed=seed,
     )
@@ -714,7 +715,7 @@ def evaluate_population_parallel(
 
 
 # --------------------------------------------------------------------------
-# MixedPolicyEvaluator parallel evaluation plumbing
+# MixedPolicyEvaluator parallel evaluation code
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -737,7 +738,8 @@ class _MixedWorkerSpec:
         max_steps: Episode step cap.
         eval_episodes: Number of episodes to average per call.
         layer_sizes: NN topology ``[in, hidden…, out]``.
-        activation: Activation name.
+        activation: Hidden-layer activation name.
+        output_activation: Output-layer activation name.
     """
 
     env_factory_qualname: str
@@ -748,6 +750,7 @@ class _MixedWorkerSpec:
     eval_episodes: int
     layer_sizes: Tuple[int, ...]
     activation: str
+    output_activation: str
 
 
 _MIXED_WORKER_CACHE: Dict[str, Any] = {}
@@ -799,14 +802,14 @@ def _mixed_worker_evaluate(
     genome = FixedTopologyGenome(
         layer_sizes=list(spec.layer_sizes),
         activation=spec.activation,
+        output_activation=spec.output_activation,
         weight_range=tuple(payload.weight_range),
         random_seed=None,
     )
     genome.set_weights(np.asarray(payload.weights, dtype=float))
 
     # Resolve factories and build the evaluator once per worker process.
-    # The cache key includes all fields that influence evaluator construction
-    # so that a single worker correctly handles spec changes across runs.
+    # The cache key includes all fields that influence evaluator construction so that a single worker correctly handles spec changes across runs.
     cache_key = (
         spec.env_factory_qualname,
         spec.scripted_factory_qualname,
@@ -889,8 +892,11 @@ def make_mixed_parallel_evaluate_map(
         ``pmap`` callable compatible with ``toolbox.register("map", pmap)``.
 
     Raises:
-        ValueError: If the evaluator was not built with the factory path.
-        ValueError: If factories are not importable (not module-level).
+        TypeError: If ``evaluator`` is not a :class:`MixedPolicyEvaluator`.
+        ValueError: If the evaluator was not built with the factory path
+            (``env_factory`` or ``scripted_policy_factory`` is ``None``).
+        ValueError: If factories are not importable (not module-level
+            callables — e.g. lambdas or closures).
     """
     from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
 
@@ -918,15 +924,19 @@ def make_mixed_parallel_evaluate_map(
         return f"{mod}.{name}"
 
     # Sample genome from the evaluator's env to discover topology.
-    sample_env = evaluator.env_wrapper
-    pursuer_id = next(
-        a for a in sample_env.possible_agents
-        if a.startswith(evaluator.learner_agent_prefixes)
-    )
-    obs = sample_env.reset(seed=0)
-    input_size = int(obs[pursuer_id].shape[0])
-    act_space = sample_env.action_space(pursuer_id)
-    output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+    temp_env = evaluator.env_wrapper if evaluator.env_wrapper is not None else evaluator.env_factory()
+    try:
+        pursuer_id = next(
+            a for a in temp_env.possible_agents
+            if a.startswith(evaluator.learner_agent_prefixes)
+        )
+        obs = temp_env.reset(seed=0)
+        input_size = int(obs[pursuer_id].shape[0])
+        act_space = temp_env.action_space(pursuer_id)
+        output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+    finally:
+        if evaluator.env_wrapper is None:
+            temp_env.close()
 
     spec = _MixedWorkerSpec(
         env_factory_qualname=_qualname(evaluator.env_factory),
@@ -937,6 +947,7 @@ def make_mixed_parallel_evaluate_map(
         eval_episodes=eval_episodes,
         layer_sizes=(input_size, output_size),  # placeholder; overridden per-genome
         activation="tanh",  # placeholder; overridden per-genome
+        output_activation="tanh",  # placeholder; overridden per-genome
     )
 
     def _pmap(_evaluate_ignored, individuals):
@@ -953,6 +964,7 @@ def make_mixed_parallel_evaluate_map(
                 eval_episodes=spec.eval_episodes,
                 layer_sizes=tuple(genome.layer_sizes),
                 activation=genome.activation,
+                output_activation=getattr(genome, "output_activation", genome.activation),
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
         return list(executor.map(_mixed_worker_evaluate, payloads))

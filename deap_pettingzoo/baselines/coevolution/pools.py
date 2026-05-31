@@ -5,7 +5,7 @@ protocol with a single required method::
 
     sample_opponent(rng: np.random.Generator) -> PolicyProtocol
 
-Any object that can produce a policy-like thing on demand can satisfy
+Any object that can produce a policy-like object on demand can satisfy
 this protocol: DEAP populations, Hall-of-Fame archives, static
 pre-trained policies (scripted or frozen RL), or — in the future — a
 QDax :class:`MapElitesRepertoire` wrapped by a thin adapter.
@@ -38,17 +38,12 @@ from .archive import HallOfFame
 from .samplers import Sampler, uniform_sampler
 
 
-#: A *policy factory* maps a pool's stored item (opaque type) to a
-#: :class:`PolicyProtocol` instance. Pools hold items (e.g. cloned
-#: genomes, snapshots) without knowing how to turn them into executable
-#: policies; the factory bridges that gap.
+#: A *policy factory* maps a pool's stored item (opaque type) to a class:`PolicyProtocol` instance. 
+#: Pools hold items (e.g. cloned genomes, snapshots) without knowing how to turn them into executable policies; the factory bridges that gap.
 PolicyFactory = Callable[[Any], PolicyProtocol]
 
 
-# ---------------------------------------------------------------------------
-# Picklable opponent snapshots (Phase 8 — co-evolution parallelism)
-# ---------------------------------------------------------------------------
-
+# Picklable opponent snapshots
 
 @dataclass
 class OpponentSnapshot:
@@ -89,11 +84,7 @@ class OpponentSnapshot:
     payload: Dict[str, Any]
 
 
-# Module-global registry for non-picklable frozen policies (e.g. torch /
-# AgileRL wrappers). Populate in the **worker bootstrap** (e.g. via a
-# ``-W`` import side effect, or a cheap module import that re-runs in
-# every worker process). Values are zero-arg factories so workers can
-# rebuild lazily.
+# Module-global registry for non-picklable frozen policies (e.g. torch/AgileRL wrappers).
 _FROZEN_POLICY_REGISTRY: Dict[str, Callable[[], PolicyProtocol]] = {}
 
 
@@ -145,9 +136,9 @@ def _resolve_frozen_policy(name: str) -> PolicyProtocol:
     return factory()
 
 
-# Worker-side cache for QDax module objects keyed on (layer_sizes,
-# activation). Rebuilding the Flax module is cheap but not free; cache
-# avoids redoing it for every opponent snapshot in every episode.
+# Worker-side cache for QDax module objects keyed on (layer_sizes, activation).
+# Rebuilding the Flax module is cheap but not free;
+# cache avoids redoing it for every opponent snapshot in every episode.
 _QDAX_MODULE_CACHE: Dict[Tuple[Tuple[int, ...], str], Any] = {}
 
 
@@ -242,7 +233,7 @@ class OpponentPool(Protocol):
     ) -> List[OpponentSnapshot]:
         """Sample ``k`` picklable opponent payloads for parallel evaluation.
 
-        Phase 8 contract — sampling happens on the **driver** so any
+        Sampling happens on the **driver** so any
         pool RNG / archive cursors mutate exactly once per evaluation,
         regardless of how many worker processes consume the result.
         Workers rebuild policies via :func:`rebuild_opponent_policy`.
@@ -255,9 +246,7 @@ class OpponentPool(Protocol):
         ...
 
 
-# ---------------------------------------------------------------------------
 # Helpers shared by concrete pools
-# ---------------------------------------------------------------------------
 
 
 def _default_sample_opponents(
@@ -280,9 +269,8 @@ def _snapshot_for_item(
     lives in one place rather than spread across pool classes.
     """
     if kind == "feedforward":
-        # Accept either a DEAP individual (with .genome) or a bare
-        # genome. Clone so that subsequent population mutation cannot
-        # poison the shipped snapshot.
+        # Accept either a DEAP individual (with .genome) or a bare genome.
+        # Clone so that subsequent population mutation cannot affect the shipped snapshot.
         genome = item.genome if hasattr(item, "genome") else item
         cloned = genome.clone() if hasattr(genome, "clone") else genome
         payload: Dict[str, Any] = {"genome": cloned}
@@ -348,9 +336,7 @@ class _BasePool:
         return len(self) == 0
 
 
-# ---------------------------------------------------------------------------
 # Concrete pools
-# ---------------------------------------------------------------------------
 
 
 class PopulationPool(_BasePool):
@@ -381,10 +367,7 @@ class PopulationPool(_BasePool):
         self._policy_factory = policy_factory
         self._sampler = sampler
         self._population: List[Any] = []
-        # Snapshot configuration — see :func:`rebuild_opponent_policy`
-        # for the kind→payload contract. Defaults match the canonical
-        # ``_make_feedforward_policy_factory`` setup used by EA/CMA
-        # sides; override only if you wire a non-MLP factory.
+        # Defaults set to prams used by EA/CMA; override only if you wire a non-MLP factory.
         self._snapshot_kind = snapshot_kind
         self._snapshot_metadata: Dict[str, Any] = dict(snapshot_metadata or {})
         self.update(population_like)
@@ -525,11 +508,6 @@ class FrozenPolicyPool(_BasePool):
         registry_names: Optional[Sequence[str]] = None,
     ) -> None:
         self._policies: List[PolicyProtocol] = list(policies)
-        # Optional parallel registry — when provided, snapshots ship
-        # ``{"name": registry_names[idx]}`` instead of trying to pickle
-        # the policy object directly. Required for non-picklable
-        # policies (torch/AgileRL wrappers). See
-        # :func:`register_frozen_policy`.
         if registry_names is not None:
             reg_list = list(registry_names)
             if len(reg_list) != len(self._policies):
@@ -561,9 +539,7 @@ class FrozenPolicyPool(_BasePool):
         self._policies = list(population_like) if population_like is not None else []
         # Size-change invalidates any stale fitness cache.
         self._fitnesses = None
-        # Conservative: the user is responsible for re-supplying
-        # registry_names via a fresh constructor if they were using
-        # the registry path.
+        # The user is responsible for re-supplying registry_names via a fresh constructor if they were using the registry path.
         self._registry_names = None
 
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
@@ -590,10 +566,9 @@ class FrozenPolicyPool(_BasePool):
                     )
                 )
             else:
-                # Try to ship the policy object directly. Fails fast
-                # with a clear PicklingError if the user supplied a
-                # non-picklable wrapper — they should switch to the
-                # registry path (see ``registry_names=`` ctor kwarg).
+                # Try to ship the policy object directly. 
+                # Fails fast with a clear PicklingError if the user supplied a non-picklable wrapper.
+                # In this case, switch to the registry path (see ``registry_names=`` ctor kwarg).
                 snaps.append(
                     OpponentSnapshot(
                         kind="frozen", payload={"policy": self._policies[idx]}
@@ -669,8 +644,7 @@ class CompositePool(_BasePool):
         effective = self._weights * mask
         total = effective.sum()
         if total <= 0:
-            # All non-empty pools happen to have zero weight — fall back
-            # to uniform over non-empty pools for robustness.
+            # All non-empty pools happen to have zero weight — fall back to uniform over non-empty pools for robustness.
             effective = mask.astype(np.float64)
             total = effective.sum()
         probs = effective / total
@@ -685,10 +659,7 @@ class CompositePool(_BasePool):
         return self._pools
 
 
-# ---------------------------------------------------------------------------
 # RL pool (degenerate size-1; wraps a live AgileRLPolicyWrapper)
-# ---------------------------------------------------------------------------
-
 
 class RLPolicyPool(_BasePool):
     """Single-element opponent pool wrapping a live RL policy snapshot.
@@ -699,12 +670,11 @@ class RLPolicyPool(_BasePool):
     of size 1: every :meth:`sample_opponent` call returns the same
     cached policy object (the RL side updates it once per generation).
 
-    The pool stays serial-only in the current implementation —
-    :meth:`snapshot_opponents` raises because ``AgileRLPolicyWrapper``
-    holds live torch state that does not survive ``spawn``-pickle.
-    Co-evolution runs that include an RL side fall back to serial
-    evaluation on the EA side; see :class:`CoEvolutionConfig` docstring
-    for the runtime warning emitted in that case.
+    :meth:`snapshot_opponents` produces picklable
+    :class:`FrozenRLPolicyWrapper` snapshots via
+    :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+    so EA/CMA learner sides can evaluate against this pool in parallel
+    worker processes.
     """
 
     def __init__(self, policy: PolicyProtocol) -> None:
@@ -738,13 +708,50 @@ class RLPolicyPool(_BasePool):
     def snapshot_opponents(
         self, rng: np.random.Generator, k: int
     ) -> List[OpponentSnapshot]:
-        raise NotImplementedError(
-            "RLPolicyPool.snapshot_opponents: parallel co-evolution with an "
-            "RL side is not yet supported because AgileRLPolicyWrapper "
-            "holds live torch state that does not pickle across spawn. "
-            "Set CoEvolutionConfig.num_workers=1 (or rely on the EA-side "
-            "fallback warning) when an RL side is in play."
-        )
+        """Return *k* picklable snapshots of the current RL policy.
+
+        When the wrapped policy is an
+        :class:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper`,
+        :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+        is called once and *k* references to the same
+        :class:`~deap_pettingzoo.baselines.agilerl_policy.FrozenRLPolicyWrapper`
+        are returned (one per parallel episode).  Workers receive a
+        pickled copy of the snapshot, so they do not share mutable state.
+
+        For non-AgileRL policies already stored in this pool (e.g.
+        pre-trained frozen wrappers), the policy is shipped directly via
+        the existing ``kind="frozen"`` path.  If
+        :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`
+        raises, a ``RuntimeWarning`` is emitted and the live wrapper is
+        shipped directly (which will fail at pickle time for CUDA agents
+        — the warning advises serial fallback).
+        """
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
+        from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+
+        if isinstance(self._policy, AgileRLPolicyWrapper):
+            import warnings
+            try:
+                frozen = self._policy.make_frozen_cpu_snapshot()
+            except Exception as exc:
+                warnings.warn(
+                    f"RLPolicyPool.snapshot_opponents: "
+                    f"make_frozen_cpu_snapshot failed ({exc}); "
+                    "falling back to live policy reference — workers may "
+                    "fail to pickle this. Use serial evaluation "
+                    "(num_workers=1) to avoid this.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                frozen = self._policy  # type: ignore[assignment]
+        else:
+            frozen = self._policy  # type: ignore[assignment]
+
+        return [
+            OpponentSnapshot(kind="frozen", payload={"policy": frozen})
+            for _ in range(k)
+        ]
 
     def snapshot_sync(self) -> "RLPolicyPool":
         """Return a frozen copy of this pool for the synchronous schedule.
@@ -777,11 +784,7 @@ class RLPolicyPool(_BasePool):
 
         try:
             frozen = copy.deepcopy(self._policy)
-        except Exception as exc:  # pragma: no cover — torch deepcopy edge cases
-            # Fallback: reuse the live policy. Emit a warning so callers can
-            # detect that the synchronous-schedule isolation guarantee does
-            # not hold for this RL side — opponents may see post-learn
-            # weights from within the same generation.
+        except Exception as exc:  # pragma: no cover
             warnings.warn(
                 f"RLPolicyPool.snapshot_sync: deep-copy of RL policy failed "
                 f"({exc!r}); falling back to the live policy reference. "
