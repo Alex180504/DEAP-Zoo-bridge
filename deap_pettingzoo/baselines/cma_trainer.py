@@ -197,6 +197,7 @@ class CMAESTrainer(BaselineTrainer):
                 fps=recording_cfg.fps,
                 fmt=recording_cfg.fmt,
                 max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                max_dim=recording_cfg.max_dim,
                 episode_prefix=recording_cfg.episode_prefix or "train_",
             )
             if recorder.enabled:
