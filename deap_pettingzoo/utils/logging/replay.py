@@ -108,9 +108,10 @@ class FrameRecorder:
                 ci = np.linspace(0, w - 1, nw, dtype=int)
                 arr = arr[np.ix_(ri, ci)]
         # H.264/yuv420p requires even width and height; trim 1 px if needed.
-        if arr.shape[0] % 2 != 0:
+        # Guard against trimming a 1-pixel dimension to zero.
+        if arr.shape[0] % 2 != 0 and arr.shape[0] > 1:
             arr = arr[:-1]
-        if arr.shape[1] % 2 != 0:
+        if arr.shape[1] % 2 != 0 and arr.shape[1] > 1:
             arr = arr[:, :-1]
         self._frames.append(arr)
 
@@ -137,8 +138,8 @@ class FrameRecorder:
                     path, self._frames, fps=self.fps, macro_block_size=1, quality=9
                 )
             else:
-                # imageio gif uses 'duration' (milliseconds per frame, Pillow convention).
-                imageio.mimsave(path, self._frames, duration=1000.0 / max(self.fps, 1))
+                # imageio.v2 gif uses 'duration' in seconds per frame.
+                imageio.mimsave(path, self._frames, duration=1.0 / max(self.fps, 1))
         except Exception:
             # Fallback to GIF on ffmpeg-related failures.
             if fmt == "mp4":
@@ -156,7 +157,7 @@ class FrameRecorder:
                 path = self._frames_dir / f"{self.episode_prefix}episode_{ep:04d}.gif"
                 try:
                     imageio.mimsave(
-                        path, self._frames, duration=1000.0 / max(self.fps, 1)
+                        path, self._frames, duration=1.0 / max(self.fps, 1)
                     )
                 except Exception:
                     path = None  # type: ignore[assignment]

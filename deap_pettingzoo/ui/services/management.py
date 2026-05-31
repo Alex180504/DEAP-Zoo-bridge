@@ -84,7 +84,7 @@ def create_folder(parent: Path, name: str) -> Path:
     Raises:
         ValueError: If ``name`` contains unsafe characters.
     """
-    if not _SAFE_NAME_RE.fullmatch(name):
+    if not _SAFE_NAME_RE.fullmatch(name) or name in {".", ".."}:
         raise ValueError(
             f"Folder name {name!r} contains invalid characters. "
             "Use only letters, digits, hyphens, underscores, and dots."

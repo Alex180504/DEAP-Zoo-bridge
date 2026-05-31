@@ -71,9 +71,9 @@ class _RolloutSpec:
     layer_sizes: tuple
     activation: str
     episode_length: int
-    eval_episodes: int
     descriptor_fn: Callable
     action_type: str
+    eval_episodes: int = 1
     extract_state_fn: Optional[Callable] = None
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
 
