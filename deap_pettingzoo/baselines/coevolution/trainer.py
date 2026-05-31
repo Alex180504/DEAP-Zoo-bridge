@@ -464,52 +464,11 @@ class CoEvolutionTrainer(BaselineTrainer):
                 RuntimeWarning,
                 stacklevel=2,
             )
-
-        if coev_cfg.seed is not None:
-            np.random.seed(int(coev_cfg.seed))
-        self._rng = np.random.default_rng(coev_cfg.seed)
-
-        states: Dict[str, SideState] = {
-            s.name: make_side_state(s) for s in coev_cfg.sides
-        }
-        for state in states.values():
-            side_rng = np.random.default_rng(
-                self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
-            )
-            previous_np_state = np.random.get_state()
-            try:
-                state.initialise(env, rng=side_rng)
-            except Exception:
-                np.random.set_state(previous_np_state)
-                raise
-            state._np_state = np.random.get_state()
-            np.random.set_state(previous_np_state)
-
-        rl_cuda_sides = [
-            name for name, s in states.items()
-            if isinstance(s, RLSideState)
-            and torch_uses_cuda(s.resolved_device)
-        ]
-        qdax_sides = [
-            name for name, s in states.items()
-            if s.side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
-        ]
-        warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
-
-        has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
-        if has_rl_side and resolved_workers > 1:
-            warnings.warn(
-                "CoEvolutionConfig: num_workers="
-                f"{coev_cfg.num_workers} but an RL side is present. "
-                "EA/CMA learner sides will evaluate against RL opponents "
-                "in parallel via FrozenRLPolicyWrapper CPU snapshots. "
-                "The RL learner itself still collects rollouts serially "
-                "(parallel RL rollout collection is Phase 2).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-
         self._resolved_workers = resolved_workers
+
+        # Seed RNGs and construct/initialise every side (sets _np_state
+        # per side and emits GPU/RL parallelism warnings).
+        states = self._initialize_sides(env, coev_cfg, resolved_workers)
 
         with make_executor(
             resolved_workers,
@@ -530,111 +489,21 @@ class CoEvolutionTrainer(BaselineTrainer):
                 flush=True,
             )
 
-            # Generation loop.
             per_side_history: Dict[str, List[GenerationStats]] = {
                 name: [] for name in states
             }
-
-            from deap_pettingzoo.baselines._logging_helpers import build_logger
-
-            self._recording_log = build_logger(config, algorithm="coevolution")
-            recording_cfg = config.recording
-            recording_cadence = self._resolve_recording_every_n(config)
-            self._recording_recorder = None
-            self._recording_max_steps: int = int(
-                config.algorithm_params.get("max_steps_per_episode", 100)
-            )
-            if recording_cfg.enabled:
-                recorder = self._recording_log.get_frame_recorder(
-                    fps=recording_cfg.fps,
-                    fmt=recording_cfg.fmt,
-                    max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                    max_dim=recording_cfg.max_dim,
-                    episode_prefix=recording_cfg.episode_prefix or "train_",
-                )
-                if recorder.enabled:
-                    self._recording_recorder = recorder
-
-            def _record_champion_if_due(gen: int) -> None:
-                """Render one multi-policy rollout using each side's
-                current best policy, mapped per role prefix.
-
-                Coevolution is heterogeneous, so we cannot reuse
-                :class:`UnifiedEvaluator` (which broadcasts a single
-                policy to every agent). Instead we drive the env
-                directly and dispatch each agent's observation to the
-                side that owns its role prefix.
-                """
-                if self._recording_recorder is None:
-                    return
-                if gen % recording_cadence != 0:
-                    return
-                try:
-                    self._record_coevolution_rollout(
-                        config, coev_cfg, states, gen
-                    )
-                except Exception as _rec_exc:
-                    warnings.warn(
-                        f"[CoEvolution] Frame recording failed at gen {gen}: "
-                        f"{type(_rec_exc).__name__}: {_rec_exc}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+            recording_cadence = self._setup_recording(config)
 
             if coev_cfg.schedule == "synchronous":
-                for _g in range(num_generations):
-                    _gt = time.time()
-                    self._run_synchronous_generation(
-                        env, states, coev_cfg, per_side_history
-                    )
-                    _record_champion_if_due(_g + 1)
-                    if coev_cfg.generation_callback is not None:
-                        try:
-                            coev_cfg.generation_callback(_g + 1, states)
-                        except Exception as _cb_exc:
-                            warnings.warn(
-                                f"[CoEvolution] generation_callback failed at "
-                                f"gen {_g + 1}: "
-                                f"{type(_cb_exc).__name__}: {_cb_exc}",
-                                RuntimeWarning,
-                                stacklevel=2,
-                            )
-                    _side_info = "  ".join(
-                        _format_progress_entry(h[-1])
-                        for n, h in per_side_history.items()
-                        if h
-                    )
-                    print(
-                        f"[CoEv] gen {_g + 1}/{num_generations}  "
-                        f"{_side_info}  "
-                        f"({time.time()-_gt:.1f}s)",
-                        flush=True,
-                    )
+                self._run_synchronous_loop(
+                    env, states, coev_cfg, config,
+                    num_generations, per_side_history, recording_cadence,
+                )
             else:  # alternating
-                total = 0
-                rotation = list(states)
-                while total < num_generations:
-                    for name in rotation:
-                        for _inner in range(coev_cfg.alternating_generations):
-                            if total >= num_generations:
-                                break
-                            _gt = time.time()
-                            self._run_alternating_step(
-                                env, states, coev_cfg, per_side_history, name
-                            )
-                            total += 1
-                            _record_champion_if_due(total)
-                            _side_info = "  ".join(
-                                _format_progress_entry(h[-1])
-                                for n, h in per_side_history.items()
-                                if h
-                            )
-                            print(
-                                f"[CoEv] step {total}/{num_generations} ({name})  "
-                                f"{_side_info}  "
-                                f"({time.time()-_gt:.1f}s)",
-                                flush=True,
-                            )
+                self._run_alternating_loop(
+                    env, states, coev_cfg, config,
+                    num_generations, per_side_history, recording_cadence,
+                )
 
             # Build reporting-side policy *inside* the executor scope
             # in case best_policy() ever needs to evaluate (it does
@@ -703,6 +572,218 @@ class CoEvolutionTrainer(BaselineTrainer):
             seed=coev_cfg.seed,
             training_time=training_time,
         )
+
+    # Setup helpers
+
+    def _initialize_sides(
+        self,
+        env: PettingZooWrapper,
+        coev_cfg: CoEvolutionConfig,
+        resolved_workers: int,
+    ) -> Dict[str, SideState]:
+        """Seed RNGs and construct/initialise every side's state.
+
+        The global NumPy RNG and the per-trainer ``default_rng`` are
+        seeded *before* any side's ``initialise()`` so results are
+        reproducible regardless of side-iteration order. Each side's
+        resulting global NumPy state is captured into ``state._np_state``
+        (and the previous global state restored afterwards) so
+        ``step_generation`` resumes from the same deterministic stream.
+        Emits GPU-contention and RL-parallelism warnings.
+        """
+        if coev_cfg.seed is not None:
+            np.random.seed(int(coev_cfg.seed))
+        self._rng = np.random.default_rng(coev_cfg.seed)
+
+        states: Dict[str, SideState] = {
+            s.name: make_side_state(s) for s in coev_cfg.sides
+        }
+        for state in states.values():
+            side_rng = np.random.default_rng(
+                self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
+            )
+            previous_np_state = np.random.get_state()
+            try:
+                state.initialise(env, rng=side_rng)
+            except Exception:
+                np.random.set_state(previous_np_state)
+                raise
+            state._np_state = np.random.get_state()
+            np.random.set_state(previous_np_state)
+
+        rl_cuda_sides = [
+            name for name, s in states.items()
+            if isinstance(s, RLSideState)
+            and torch_uses_cuda(s.resolved_device)
+        ]
+        qdax_sides = [
+            name for name, s in states.items()
+            if s.side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
+        ]
+        warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
+
+        has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
+        if has_rl_side and resolved_workers > 1:
+            warnings.warn(
+                "CoEvolutionConfig: num_workers="
+                f"{coev_cfg.num_workers} but an RL side is present. "
+                "EA/CMA learner sides will evaluate against RL opponents "
+                "in parallel via FrozenRLPolicyWrapper CPU snapshots. "
+                "The RL learner itself still collects rollouts serially "
+                "(parallel RL rollout collection is Phase 2).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return states
+
+    def _setup_recording(self, config: TrainingConfig) -> int:
+        """Build the run logger and optional frame recorder.
+
+        Stores ``self._recording_log``, ``self._recording_recorder``
+        (``None`` when disabled), and ``self._recording_max_steps`` for
+        the generation loop, and returns the champion-recording cadence
+        (in generations).
+        """
+        from deap_pettingzoo.baselines._logging_helpers import build_logger
+
+        self._recording_log = build_logger(config, algorithm="coevolution")
+        recording_cfg = config.recording
+        recording_cadence = self._resolve_recording_every_n(config)
+        self._recording_recorder = None
+        self._recording_max_steps: int = int(
+            config.algorithm_params.get("max_steps_per_episode", 100)
+        )
+        if recording_cfg.enabled:
+            recorder = self._recording_log.get_frame_recorder(
+                fps=recording_cfg.fps,
+                fmt=recording_cfg.fmt,
+                max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                max_dim=recording_cfg.max_dim,
+                episode_prefix=recording_cfg.episode_prefix or "train_",
+            )
+            if recorder.enabled:
+                self._recording_recorder = recorder
+        return recording_cadence
+
+    # Generation-loop helpers
+
+    def _record_champion_if_due(
+        self,
+        config: TrainingConfig,
+        coev_cfg: CoEvolutionConfig,
+        states: Dict[str, SideState],
+        gen: int,
+        cadence: int,
+    ) -> None:
+        """Render one multi-policy rollout from each side's current best.
+
+        Coevolution is heterogeneous, so we cannot reuse
+        :class:`UnifiedEvaluator` (which broadcasts a single policy to
+        every agent). Instead we drive the env directly and dispatch each
+        agent's observation to the side that owns its role prefix.
+        Best-effort: any failure is reported as a ``RuntimeWarning`` and
+        never interrupts training.
+        """
+        if self._recording_recorder is None:
+            return
+        if gen % cadence != 0:
+            return
+        try:
+            self._record_coevolution_rollout(config, coev_cfg, states, gen)
+        except Exception as _rec_exc:
+            warnings.warn(
+                f"[CoEvolution] Frame recording failed at gen {gen}: "
+                f"{type(_rec_exc).__name__}: {_rec_exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _invoke_generation_callback(
+        self,
+        coev_cfg: CoEvolutionConfig,
+        gen: int,
+        states: Dict[str, SideState],
+    ) -> None:
+        """Call the user-supplied generation callback, isolating errors."""
+        if coev_cfg.generation_callback is None:
+            return
+        try:
+            coev_cfg.generation_callback(gen, states)
+        except Exception as _cb_exc:
+            warnings.warn(
+                f"[CoEvolution] generation_callback failed at gen {gen}: "
+                f"{type(_cb_exc).__name__}: {_cb_exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _run_synchronous_loop(
+        self,
+        env: PettingZooWrapper,
+        states: Dict[str, SideState],
+        coev_cfg: CoEvolutionConfig,
+        config: TrainingConfig,
+        num_generations: int,
+        history: Dict[str, List[GenerationStats]],
+        cadence: int,
+    ) -> None:
+        """Drive the synchronous schedule: every side advances each gen."""
+        for _g in range(num_generations):
+            _gt = time.time()
+            self._run_synchronous_generation(env, states, coev_cfg, history)
+            self._record_champion_if_due(
+                config, coev_cfg, states, _g + 1, cadence
+            )
+            self._invoke_generation_callback(coev_cfg, _g + 1, states)
+            _side_info = "  ".join(
+                _format_progress_entry(h[-1])
+                for n, h in history.items()
+                if h
+            )
+            print(
+                f"[CoEv] gen {_g + 1}/{num_generations}  "
+                f"{_side_info}  "
+                f"({time.time()-_gt:.1f}s)",
+                flush=True,
+            )
+
+    def _run_alternating_loop(
+        self,
+        env: PettingZooWrapper,
+        states: Dict[str, SideState],
+        coev_cfg: CoEvolutionConfig,
+        config: TrainingConfig,
+        num_generations: int,
+        history: Dict[str, List[GenerationStats]],
+        cadence: int,
+    ) -> None:
+        """Drive the alternating schedule: one side advances at a time."""
+        total = 0
+        rotation = list(states)
+        while total < num_generations:
+            for name in rotation:
+                for _inner in range(coev_cfg.alternating_generations):
+                    if total >= num_generations:
+                        break
+                    _gt = time.time()
+                    self._run_alternating_step(
+                        env, states, coev_cfg, history, name
+                    )
+                    total += 1
+                    self._record_champion_if_due(
+                        config, coev_cfg, states, total, cadence
+                    )
+                    _side_info = "  ".join(
+                        _format_progress_entry(h[-1])
+                        for n, h in history.items()
+                        if h
+                    )
+                    print(
+                        f"[CoEv] step {total}/{num_generations} ({name})  "
+                        f"{_side_info}  "
+                        f"({time.time()-_gt:.1f}s)",
+                        flush=True,
+                    )
 
     # Logging helpers
 
@@ -1269,6 +1350,38 @@ class CoEvolutionTrainer(BaselineTrainer):
         evaluator.evaluate = _evaluate_with_trainer_rng  # type: ignore[assignment]
         return evaluator
 
+    def _step_one_side(
+        self,
+        env: PettingZooWrapper,
+        state: SideState,
+        states: Dict[str, SideState],
+        coev_cfg: CoEvolutionConfig,
+        history: Dict[str, List[GenerationStats]],
+        pool_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Advance a single non-frozen side by one generation.
+
+        Shared body for both schedules: build the side's evaluator
+        (against a frozen ``pool_snapshot`` when supplied), run one
+        ``step_generation``, append stats, and snapshot the best
+        individual on the configured cadence. Frozen sides are skipped.
+        """
+        if state.side.optimizer == "frozen":
+            return
+        evaluator = self._build_evaluator(
+            env, state, states, coev_cfg, pool_snapshot=pool_snapshot
+        )
+        batch_fn = self._make_batch_eval_fn(evaluator)
+        stats = state.step_generation(
+            lambda _s, _ev=evaluator: _ev, batch_eval_fn=batch_fn
+        )
+        history[state.side.name].append(stats)
+        if (
+            state.side.hof is not None
+            and stats.generation % coev_cfg.snapshot_every == 0
+        ):
+            state.snapshot_best()
+
     def _run_synchronous_generation(
         self,
         env: PettingZooWrapper,
@@ -1300,19 +1413,10 @@ class CoEvolutionTrainer(BaselineTrainer):
                 pool = snap()
             pool_snapshot[name] = pool
         for name, state in states.items():
-            if state.side.optimizer == "frozen":
-                continue
-            evaluator = self._build_evaluator(
-                env, state, states, coev_cfg, pool_snapshot=pool_snapshot
+            self._step_one_side(
+                env, state, states, coev_cfg, history,
+                pool_snapshot=pool_snapshot,
             )
-            batch_fn = self._make_batch_eval_fn(evaluator)
-            stats = state.step_generation(lambda _s, _ev=evaluator: _ev, batch_eval_fn=batch_fn)
-            history[name].append(stats)
-            if (
-                state.side.hof is not None
-                and stats.generation % coev_cfg.snapshot_every == 0
-            ):
-                state.snapshot_best()
 
     def _run_alternating_step(
         self,
@@ -1322,18 +1426,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         history: Dict[str, List[GenerationStats]],
         name: str,
     ) -> None:
-        state = states[name]
-        if state.side.optimizer == "frozen":
-            return
-        evaluator = self._build_evaluator(env, state, states, coev_cfg)
-        batch_fn = self._make_batch_eval_fn(evaluator)
-        stats = state.step_generation(lambda _s, _ev=evaluator: _ev, batch_eval_fn=batch_fn)
-        history[name].append(stats)
-        if (
-            state.side.hof is not None
-            and stats.generation % coev_cfg.snapshot_every == 0
-        ):
-            state.snapshot_best()
+        self._step_one_side(env, states[name], states, coev_cfg, history)
 
 
 def _build_learner_factory(

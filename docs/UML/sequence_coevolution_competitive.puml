@@ -16,15 +16,23 @@ participant "HallOfFame\n(evaders)" as HB
 
 User -> T : train(TrainingConfig)
 T -> C : validate __post_init__
+T -> T : _initialize_sides(env, coev_cfg, workers)
 T -> SA : initialise(env, evaluator, rng)
 T -> SB : initialise(env, evaluator, rng)
 T -> SA : current_pool() -> PA
 T -> SB : current_pool() -> PB
 
+note over T
+  train() is a slim orchestrator (review S1): it calls
+  _initialize_sides, then dispatches to
+  _run_synchronous_loop, which calls the shared
+  _step_one_side(...) helper per side each generation.
+end note
+
 note over T: bootstrap evaluation\n(fresh population, no HoF yet)
 
-loop for each generation
-    par synchronous: evaluate both sides against opponents
+loop for each generation (_run_synchronous_loop)
+    par synchronous: _step_one_side per side (frozen pool_snapshot)
         T -> SA : step_generation(evaluator, rng, opponents={evaders: PB})
         loop for each candidate in pursuers population
             SA -> EV : evaluate(candidate, side="pursuers",\n  pools={evaders: PB}, k_opponents=3)

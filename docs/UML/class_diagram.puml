@@ -276,6 +276,7 @@ package "deap_pettingzoo.evaluators" {
         - _aggregate_fitness(rewards: dict) -> float
         - _aggregate_team_fitness(rewards: dict) -> float
         -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
+        -- 'team' aggregation: exactly two teams,\n   ordered by sorted team name\n   (first - second); 1 team / no mapping\n   -> sum; >=3 teams -> ValueError (review S3) --
     }
 
     class SelfPlayEvaluator {
@@ -526,6 +527,7 @@ package "deap_pettingzoo.baselines" {
         --
         + {static} _group_prefix(agent_id) -> str
         + {static} _validate_grouping(agent_ids, obs, act) -> dict
+        - _build_agent(...) : applies AgileRL grouping patch lazily
     }
 
     class AgileRLPolicyWrapper {
@@ -931,6 +933,14 @@ package "deap_pettingzoo.baselines.coevolution" {
 
   class CoEvolutionTrainer {
     +train(config): TrainingResult
+    -- decomposed orchestration (review S1): --
+    -_initialize_sides(env, coev_cfg, workers): Dict[str, SideState]
+    -_run_synchronous_loop(...): None
+    -_run_alternating_loop(...): None
+    -_step_one_side(env, state, states, coev_cfg, history, pool_snapshot=None): None
+    -_setup_recording(config): int
+    -_record_champion_if_due(...): None
+    -_invoke_generation_callback(...): None
   }
 
   PopulationPool ..|> OpponentPool
@@ -972,6 +982,11 @@ note bottom of CoEvolutionTrainer
   competitive_2pop, self_play_hof, cooperative.
   Schedule: synchronous | alternating.
   Reports reporting_side's best policy.
+  train() is a slim orchestrator: validate ->
+  _initialize_sides -> with executor: bootstrap
+  -> _run_synchronous_loop | _run_alternating_loop
+  -> persist. _step_one_side is the shared per-side
+  body for both schedules (review S1).
 end note
 
 ' ---------------- experiment logging ----------------

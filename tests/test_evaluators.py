@@ -127,6 +127,56 @@ class TestSingleEpisodeEvaluator:
                 aggregation_method='invalid_method'
             )
 
+    def test_team_aggregation_two_teams_is_order_independent(self, wrapper):
+        """Two-team difference is deterministic (teams ordered by name)."""
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper,
+            aggregation_method='team',
+            team_mapping={
+                'adversary_0': 'red',
+                'adversary_1': 'red',
+                'agent_0': 'blue',
+            },
+        )
+        # 'blue' sorts before 'red': result = blue_total - red_total.
+        rewards = {'adversary_0': 1.0, 'adversary_1': 2.0, 'agent_0': 10.0}
+        result = evaluator._aggregate_team_fitness(rewards)
+        assert result == pytest.approx(10.0 - 3.0)
+
+        # Reordering the dict must not change the result.
+        reordered = {'agent_0': 10.0, 'adversary_1': 2.0, 'adversary_0': 1.0}
+        assert evaluator._aggregate_team_fitness(reordered) == pytest.approx(result)
+
+    def test_team_aggregation_three_teams_raises(self, wrapper):
+        """Three or more teams is undefined and must fail loudly."""
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper,
+            aggregation_method='team',
+            team_mapping={'a': 'red', 'b': 'blue', 'c': 'green'},
+        )
+        rewards = {'a': 1.0, 'b': 2.0, 'c': 3.0}
+        with pytest.raises(ValueError, match="two teams"):
+            evaluator._aggregate_team_fitness(rewards)
+
+    def test_team_aggregation_single_team_sums(self, wrapper):
+        """A single resolved team falls back to the plain sum."""
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper,
+            aggregation_method='team',
+            team_mapping={'a': 'red', 'b': 'red'},
+        )
+        rewards = {'a': 1.5, 'b': 2.5}
+        assert evaluator._aggregate_team_fitness(rewards) == pytest.approx(4.0)
+
+    def test_team_aggregation_no_mapping_sums(self, wrapper):
+        """No team_mapping falls back to the plain sum of all rewards."""
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper,
+            aggregation_method='team',
+        )
+        rewards = {'a': 1.0, 'b': 2.0, 'c': 3.0}
+        assert evaluator._aggregate_team_fitness(rewards) == pytest.approx(6.0)
+
     def test_heterogeneous_obs_raises_value_error(self):
         """Evaluator rejects envs with role-dependent observation sizes."""
         pytest.importorskip("mpe2")

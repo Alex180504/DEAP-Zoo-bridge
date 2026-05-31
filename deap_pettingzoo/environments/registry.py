@@ -74,14 +74,6 @@ Attributes:
         ``jit``'d; use :mod:`deap_pettingzoo.contrib.qdax.scoring_jax` for
         the fast JAX path.
 """
-EnvApi = Literal[
-    "parallel",
-    "aec",
-    "auto",
-    "aec_masked",
-    "aec_sequential",
-    "jax_parallel",
-]
 
 
 @dataclass

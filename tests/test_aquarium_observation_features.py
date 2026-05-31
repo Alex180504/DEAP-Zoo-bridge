@@ -3,6 +3,7 @@ from gymnasium import spaces
 
 from examples.pursuit_evasion.aquarium.observation_features import (
     AquariumObservationFeatureWrapper,
+    LazyActionPenaltyWrapper,
     aquarium_feature_size,
     extract_prey_caught_total,
     featurize_aquarium_observation,
@@ -124,3 +125,42 @@ def test_feature_wrapper_appends_agent_one_hot_by_default():
     np.testing.assert_array_equal(obs["predator_0"][-3:], np.array([1.0, 0.0, 0.0], dtype=np.float32))
     np.testing.assert_array_equal(obs["predator_1"][-3:], np.array([0.0, 1.0, 0.0], dtype=np.float32))
     np.testing.assert_array_equal(obs["predator_2"][-3:], np.array([0.0, 0.0, 1.0], dtype=np.float32))
+
+
+def test_lazy_penalty_uses_heading_concentration_for_adjacent_bins():
+    env = LazyActionPenaltyWrapper(
+        _StubAquariumEnv(),
+        concentration_threshold=0.7,
+        penalty=-8.0,
+        min_actions=4,
+        mode="terminal",
+    )
+    env._history["predator_0"] = [0, 1, 0, 1]
+
+    rewards = {"predator_0": 1.0}
+    infos = {"predator_0": {}}
+    env._apply_terminal_penalty(rewards, infos)
+
+    assert rewards["predator_0"] == -7.0
+    assert env.last_penalised["predator_0"] is True
+    assert env.last_heading_concentration["predator_0"] > 0.9
+    assert infos["predator_0"]["lazy_heading_concentration"] > 0.9
+
+
+def test_lazy_penalty_does_not_fire_for_spread_headings():
+    env = LazyActionPenaltyWrapper(
+        _StubAquariumEnv(),
+        concentration_threshold=0.7,
+        penalty=-8.0,
+        min_actions=4,
+        mode="terminal",
+    )
+    env._history["predator_0"] = [0, 4, 8, 12]
+
+    rewards = {"predator_0": 1.0}
+    infos = {"predator_0": {}}
+    env._apply_terminal_penalty(rewards, infos)
+
+    assert rewards["predator_0"] == 1.0
+    assert env.last_penalised["predator_0"] is False
+    assert env.last_heading_concentration["predator_0"] < 0.1
