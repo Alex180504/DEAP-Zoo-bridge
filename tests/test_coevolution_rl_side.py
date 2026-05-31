@@ -167,7 +167,10 @@ class TestRLvsRL:
 
 
 class TestParallelFallback:
-    def test_num_workers_gt_1_with_rl_side_warns_and_falls_back(self):
+    def test_num_workers_gt_1_with_rl_side_warns_but_does_not_fall_back(self):
+        """num_workers > 1 with an RL side now emits an informational
+        RuntimeWarning (EA runs in parallel against frozen RL snapshots)
+        but does NOT force num_workers back to 1."""
         cfg = CoEvolutionConfig(
             mode="competitive_2pop",
             sides=[
@@ -183,13 +186,13 @@ class TestParallelFallback:
             warnings.simplefilter("always")
             result = CoEvolutionTrainer().train(_tcfg(cfg))
 
-        # Fallback warning must fire.
+        # Informational warning must fire.
         msgs = [str(w.message) for w in caught if w.category is RuntimeWarning]
         assert any("RL side is present" in m for m in msgs), (
-            f"Expected RL fallback RuntimeWarning, got: {msgs}"
+            f"Expected RL-side RuntimeWarning, got: {msgs}"
         )
-        # Metadata reflects the clamped worker count.
-        assert result.metadata["coevolution_num_workers"] == 1
+        # Worker count is NOT clamped back to 1 any more.
+        assert result.metadata["coevolution_num_workers"] == 2
 
 
 class TestPoolSurface:

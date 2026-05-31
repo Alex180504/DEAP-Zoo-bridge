@@ -47,3 +47,49 @@ def test_formation_spread_raises_on_empty_teams() -> None:
         pe.formation_spread_and_mean_distance(num_pursuers=0, num_evaders=1)
     with pytest.raises(ValueError):
         pe.with_capture_efficiency(num_pursuers=1, num_evaders=0)
+
+
+def test_norm_scale_default_matches_mpe_diagonal() -> None:
+    """Default norm (2*sqrt(2)) should normalise MPE-world positions into [0,1]."""
+    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    import math
+
+    fn_default = pe.formation_spread_and_mean_distance(num_pursuers=2, num_evaders=1)
+    fn_explicit = pe.formation_spread_and_mean_distance(
+        num_pursuers=2, num_evaders=1, norm_scale=2.0 * math.sqrt(2.0)
+    )
+    positions = _positions(10, 2, 1)
+    d_default = np.asarray(fn_default({"positions": positions}))
+    d_explicit = np.asarray(fn_explicit({"positions": positions}))
+    np.testing.assert_allclose(d_default, d_explicit, atol=1e-5)
+
+
+def test_norm_scale_large_arena_saturates_less() -> None:
+    """A large norm_scale should yield smaller (unsaturated) descriptor values."""
+    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+
+    # Positions with pursuer spread ~1 unit: with default MPE norm ~0.35
+    fn_mpe = pe.formation_spread_and_mean_distance(num_pursuers=2, num_evaders=1)
+    fn_big = pe.formation_spread_and_mean_distance(
+        num_pursuers=2, num_evaders=1, norm_scale=3000.0
+    )
+    positions = _positions(10, 2, 1)
+    d_mpe = np.asarray(fn_mpe({"positions": positions}))
+    d_big = np.asarray(fn_big({"positions": positions}))
+    # With a 3000-unit norm the same physical spread produces much smaller values.
+    assert float(d_big[0]) < float(d_mpe[0]) or float(d_big[1]) < float(d_mpe[1])
+
+
+def test_with_capture_efficiency_norm_scale_propagates() -> None:
+    """norm_scale should propagate through with_capture_efficiency's base descriptor."""
+    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    import math
+
+    fn = pe.with_capture_efficiency(
+        num_pursuers=2, num_evaders=1, norm_scale=2.0 * math.sqrt(2.0)
+    )
+    positions = _positions(8, 2, 1)
+    d = np.asarray(fn({"positions": positions}))
+    assert d.shape == (3,)
+    assert np.all(d >= 0.0 - 1e-6)
+    assert np.all(d <= 1.0 + 1e-6)

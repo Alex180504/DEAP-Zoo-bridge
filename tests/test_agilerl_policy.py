@@ -112,3 +112,225 @@ def test_reset_clears_rotation_and_cache():
     wrapper.reset()
     assert wrapper._call_index == 0
     assert wrapper._obs_cache == {}
+
+
+# ---------------------------------------------------------------------------
+# FrozenRLPolicyWrapper tests (torch-free, using nn.Linear stubs)
+# ---------------------------------------------------------------------------
+
+
+class _TinyLinear:
+    """Minimal nn.Module stand-in that does a deterministic linear transform."""
+
+    def __init__(self, in_f: int, out_f: int):
+        np.random.seed(0)
+        self._W = np.random.randn(out_f, in_f).astype(np.float32)
+        self._b = np.zeros(out_f, dtype=np.float32)
+        self.training = False
+
+    def __call__(self, x_tensor):
+        # x_tensor assumed to be a (1, in_f) numpy array mimic.
+        return (x_tensor @ self._W.T) + self._b
+
+    def eval(self):
+        self.training = False
+        return self
+
+    def cpu(self):
+        return self
+
+    def requires_grad_(self, flag: bool):
+        return self
+
+
+def _make_frozen_wrapper(n_agents: int = 2, is_discrete: bool = False):
+    """Construct a FrozenRLPolicyWrapper backed by _TinyLinear actors."""
+    import importlib
+    import sys
+
+    # Provide a minimal torch stand-in so FrozenRLPolicyWrapper can import
+    # without the real torch installed in test environments.
+    # We mock torch.no_grad as a context manager.
+    import contextlib
+
+    class _FakeTorch:
+        class Tensor:
+            def __init__(self, arr):
+                self._arr = np.asarray(arr, dtype=np.float32)
+
+            def unsqueeze(self, dim):
+                return _FakeTorch.Tensor(np.expand_dims(self._arr, axis=dim))
+
+            def detach(self):
+                return self
+
+            def numpy(self):
+                return self._arr
+
+        @staticmethod
+        @contextlib.contextmanager
+        def no_grad():
+            yield
+
+        @staticmethod
+        def tensor(arr, dtype=None):
+            return _FakeTorch.Tensor(np.asarray(arr, dtype=np.float32))
+
+        float32 = np.float32
+
+    # Only inject the fake if torch is not already importable.
+    _torch_was_missing = "torch" not in sys.modules
+    if _torch_was_missing:
+        sys.modules["torch"] = _FakeTorch()  # type: ignore[assignment]
+        sys.modules["torch.nn"] = type(sys)("torch.nn")  # type: ignore
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    if _torch_was_missing:
+        # Clean up so other tests are not affected.
+        del sys.modules["torch"]
+        if "torch.nn" in sys.modules:
+            del sys.modules["torch.nn"]
+
+    actors = [_TinyLinear(4, 2) for _ in range(n_agents)]
+    agent_ids = [f"agent_{i}" for i in range(n_agents)]
+    return FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=agent_ids,
+        full_roster=agent_ids,
+        algorithm_name="matd3",
+        is_discrete=is_discrete,
+    )
+
+
+try:
+    import pickle
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    _FROZEN_AVAILABLE = True
+except ImportError:
+    _FROZEN_AVAILABLE = False
+
+_skip_frozen = pytest.mark.skipif(
+    not _FROZEN_AVAILABLE,
+    reason="FrozenRLPolicyWrapper not importable (torch missing?)",
+)
+
+
+@_skip_frozen
+def test_frozen_wrapper_properties():
+    import pickle
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+    import torch
+    import torch.nn as nn
+
+    actors = [nn.Linear(4, 2) for _ in range(2)]
+    agent_ids = ["a_0", "a_1"]
+    fw = FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=agent_ids,
+        full_roster=agent_ids,
+        algorithm_name="matd3",
+        is_discrete=False,
+    )
+    assert fw.algorithm_name == "matd3"
+    assert fw.agent_ids == agent_ids
+    assert not fw.is_discrete
+
+
+@_skip_frozen
+def test_frozen_wrapper_get_action_continuous():
+    """Continuous actions: get_action must return an ndarray (1-D)."""
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    actors = [nn.Linear(4, 2) for _ in range(1)]
+    fw = FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=["a_0"],
+        full_roster=["a_0"],
+        algorithm_name="maddpg",
+        is_discrete=False,
+    )
+    obs = np.zeros(4, dtype=np.float32)
+    act = fw.get_action(obs)
+    arr = np.asarray(act)
+    assert arr.ndim == 1
+
+
+@_skip_frozen
+def test_frozen_wrapper_get_action_discrete():
+    """Discrete actions: get_action must return a Python int (argmax)."""
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    actors = [nn.Linear(4, 3) for _ in range(1)]
+    fw = FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=["a_0"],
+        full_roster=["a_0"],
+        algorithm_name="matd3",
+        is_discrete=True,
+    )
+    obs = np.zeros(4, dtype=np.float32)
+    act = fw.get_action(obs)
+    assert isinstance(act, int)
+
+
+@_skip_frozen
+def test_frozen_wrapper_reset():
+    """reset() must clear call_index and obs_cache."""
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    actors = [nn.Linear(4, 2) for _ in range(2)]
+    agent_ids = ["a_0", "a_1"]
+    fw = FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=agent_ids,
+        full_roster=agent_ids,
+        algorithm_name="matd3",
+        is_discrete=False,
+    )
+    obs = np.zeros(4, dtype=np.float32)
+    fw.get_action(obs)
+    fw.get_action(obs)
+    assert fw._call_index == 2
+
+    fw.reset()
+    assert fw._call_index == 0
+    assert fw._obs_cache == {}
+
+
+@_skip_frozen
+def test_frozen_wrapper_picklable():
+    """FrozenRLPolicyWrapper with CPU actors must survive pickle round-trip."""
+    import pickle
+
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    actors = [nn.Linear(4, 2) for _ in range(2)]
+    fw = FrozenRLPolicyWrapper(
+        actors=actors,
+        agent_ids=["a_0", "a_1"],
+        full_roster=["a_0", "a_1"],
+        algorithm_name="matd3",
+        is_discrete=False,
+    )
+    data = pickle.dumps(fw)
+    fw2 = pickle.loads(data)
+    assert fw2.algorithm_name == "matd3"
+    obs = np.zeros(4, dtype=np.float32)
+    act = fw2.get_action(obs)
+    assert act is not None

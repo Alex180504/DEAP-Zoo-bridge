@@ -42,6 +42,31 @@ def _base_tcfg(cfg: CoEvolutionConfig, budget: int = 40) -> TrainingConfig:
     )
 
 
+def test_translate_budget_counts_qdax_batch_size() -> None:
+    cfg = CoEvolutionConfig(
+        mode="competitive_2pop",
+        sides=[
+            Side(
+                "pursuers",
+                ("adversary",),
+                "qdax_map_elites",
+                {"batch_size": 8},
+            ),
+            Side("evaders", ("agent",), "ea", {"population_size": 4}),
+        ],
+        k_opponents=2,
+        max_steps_per_episode=10,
+    )
+    train_cfg = TrainingConfig(
+        env_name="simple_tag_v3",
+        budget_mode=BudgetMode.ENV_STEPS,
+        budget_value=720,
+        algorithm_params={"coevolution": cfg},
+    )
+
+    assert CoEvolutionTrainer()._translate_budget(train_cfg, cfg) == 3
+
+
 class TestCompetitive2Pop:
     def test_end_to_end_synchronous(self):
         cfg = CoEvolutionConfig(

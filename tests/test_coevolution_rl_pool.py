@@ -62,11 +62,31 @@ class TestRLPolicyPool:
         pool = RLPolicyPool(_StubPolicy())
         assert len(pool) == 1
 
-    def test_snapshot_opponents_raises(self):
-        """Parallel co-evolution with RL is not supported in v1."""
+    def test_snapshot_opponents_returns_frozen_snapshots(self):
+        """snapshot_opponents() must succeed for non-AgileRL policies and
+        return k OpponentSnapshot objects with kind='frozen'."""
+        from deap_pettingzoo.baselines.coevolution.pools import OpponentSnapshot
+
         pool = RLPolicyPool(_StubPolicy())
-        with pytest.raises(NotImplementedError, match="not yet supported"):
-            pool.snapshot_opponents(np.random.default_rng(0), 2)
+        rng = np.random.default_rng(0)
+        snaps = pool.snapshot_opponents(rng, 3)
+        assert len(snaps) == 3
+        for s in snaps:
+            assert isinstance(s, OpponentSnapshot)
+            assert s.kind == "frozen"
+            assert "policy" in s.payload
+
+    def test_snapshot_opponents_rejects_zero_k(self):
+        pool = RLPolicyPool(_StubPolicy())
+        with pytest.raises(ValueError, match="k must be >= 1"):
+            pool.snapshot_opponents(np.random.default_rng(0), 0)
+
+    def test_snapshot_opponents_policy_is_shipped_directly(self):
+        """Non-AgileRL policies are shipped as-is in the frozen snapshot."""
+        p = _StubPolicy("rl_frozen")
+        pool = RLPolicyPool(p)
+        snaps = pool.snapshot_opponents(np.random.default_rng(0), 2)
+        assert all(s.payload["policy"] is p for s in snaps)
 
     def test_snapshot_sync_returns_independent_pool(self):
         """snapshot_sync() must produce a pool whose contents do not
