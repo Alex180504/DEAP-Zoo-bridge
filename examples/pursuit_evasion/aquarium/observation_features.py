@@ -193,7 +193,7 @@ class AquariumObservationFeatureWrapper:
 
 
 class LazyActionPenaltyWrapper:
-    """Penalize agents whose action distribution collapses (entropy-based).
+    """Penalize agents whose headings collapse into a narrow cone.
 
     Symptom this targets: with a shared homogeneous genome, EA/CMA can
     discover a "constant heading" attractor where the network ignores
@@ -202,21 +202,19 @@ class LazyActionPenaltyWrapper:
 
     Mechanism: per-agent action history is tracked across the episode.
     When the episode ends (terminated/truncated/horizon), the wrapper
-    computes the *top-1 frequency* of each agent's action distribution
-    — the share of steps spent on the single most-used action.  If
-    ``top1 > top1_threshold``, a fixed negative reward is injected into
-    the terminal step's rewards dict, where it flows through to
+    converts those discrete actions into equally spaced unit heading
+    vectors on the aquarium action circle and computes the circular
+    *heading concentration* — the norm of the mean heading vector.
+    If ``concentration > concentration_threshold``, a fixed negative
+    reward is injected into the terminal step's rewards dict, where it flows through to
     ``MixedPolicyEvaluator`` (which sums ``rewards.values()`` each step).
 
-    Why top-1 frequency, not Shannon entropy: with a stochastic
-    softmax-sampling head (used by EA/CMA), a policy whose argmax never
-    changes still samples minority actions a few percent of the time.
-    That artificial sampling spread inflates entropy enough to slip a
-    visually-lazy policy under any reasonable entropy threshold.  Top-1
-    frequency measures the *dominant* action directly and is robust to
-    that sampling noise: a policy that genuinely chases prey alternates
-    headings and rarely sits above ~40–50% top-1, while a herding /
-    drifting policy spends 60–100% of steps on the same heading.
+    Why heading concentration instead of top-1 action frequency: a
+    visually straight trajectory can dither between *adjacent* headings
+    without repeating any single action often enough to trip a top-1
+    threshold.  Circular concentration measures whether the agent keeps
+    moving in nearly the same direction even when it jitters between
+    neighboring bins, which matches the actual failure mode better.
 
     Notes
     -----
@@ -232,16 +230,22 @@ class LazyActionPenaltyWrapper:
         self,
         inner,
         *,
-        top1_threshold: float = 0.5,
-        penalty: float = -25.0,
+        concentration_threshold: float = 0.7,
+        penalty: float = 0.0,
         min_actions: int = 50,
         horizon: Optional[int] = None,
+        mode: str = "terminal",
+        window_size: int = 50,
     ) -> None:
+        if mode not in ("terminal", "per_step"):
+            raise ValueError(
+                f"LazyActionPenaltyWrapper.mode must be 'terminal' or 'per_step', got {mode!r}"
+            )
         self.inner = inner
         self.possible_agents = list(getattr(inner, "possible_agents", []))
         self.agents = list(getattr(inner, "agents", self.possible_agents))
         self.metadata = getattr(inner, "metadata", {})
-        self.top1_threshold = float(top1_threshold)
+        self.concentration_threshold = float(concentration_threshold)
         self.penalty = float(penalty)
         self.min_actions = int(min_actions)
         # Step horizon for terminal-penalty detection.  The upstream
@@ -250,13 +254,29 @@ class LazyActionPenaltyWrapper:
         # the next reset.  We need our own counter so the penalty fires
         # on the final step the trainer actually executes.
         self.horizon = int(horizon) if horizon is not None else None
+        # ``mode='terminal'`` (default): apply the full ``penalty`` once
+        # at episode end, keyed on full-episode heading concentration.  Cheap
+        # and works fine for EA/CMA which only see episode return, but
+        # gives off-policy TD learning a brutal credit-assignment cliff.
+        #
+        # ``mode='per_step'``: at every step after the rolling window is
+        # filled, compute concentration over the last ``window_size``
+        # actions and inject ``penalty / eligible_steps`` into that step's
+        # reward whenever the agent is currently in lazy mode.
+        # ``eligible_steps`` = ``horizon - window_size + 1`` so a
+        # fully-lazy episode sums to ~``penalty`` total — matching the
+        # terminal-mode signal that EA/CMA learnt to avoid, while giving
+        # RL a dense per-step gradient pointing away from the lazy
+        # attractor.
+        self.mode = str(mode)
+        self.window_size = int(window_size)
         # Inferred from action_space at first reset.
         self._action_n: Optional[int] = None
         self._history: Dict[str, list] = {a: [] for a in self.possible_agents}
         self._step_count: int = 0
-        # Diagnostic: last episode's per-agent top-1 frequencies and
+        # Diagnostic: last episode's per-agent heading concentrations and
         # whether each was penalised.  Useful for logging / debugging.
-        self.last_top1: Dict[str, float] = {}
+        self.last_heading_concentration: Dict[str, float] = {}
         self.last_penalised: Dict[str, bool] = {}
 
     def __getattr__(self, name: str):
@@ -274,12 +294,22 @@ class LazyActionPenaltyWrapper:
             self._action_n = int(getattr(space, "n", 0)) or 1
         return int(self._action_n or 1)
 
+    def _heading_concentration(self, history: list[int]) -> float:
+        action_n = self._infer_action_n()
+        if action_n <= 0 or not history:
+            return 0.0
+        actions = np.mod(np.asarray(history, dtype=np.int64), action_n)
+        angles = 2.0 * np.pi * np.arange(action_n, dtype=np.float64) / float(action_n)
+        headings = np.stack([np.sin(angles), -np.cos(angles)], axis=1)
+        mean_heading = headings[actions].mean(axis=0)
+        return float(np.linalg.norm(mean_heading))
+
     def reset(self, seed=None, options=None):
         out = self.inner.reset(seed=seed, options=options)
         self.agents = list(getattr(self.inner, "agents", self.possible_agents))
         self._history = {a: [] for a in self.possible_agents}
         self._step_count = 0
-        self.last_top1 = {}
+        self.last_heading_concentration = {}
         self.last_penalised = {}
         return out
 
@@ -291,35 +321,65 @@ class LazyActionPenaltyWrapper:
         self.agents = list(getattr(self.inner, "agents", []))
         self._step_count += 1
 
+        if self.mode == "per_step" and self.penalty != 0.0:
+            self._apply_per_step_penalty(rewards, infos)
+
         episode_done = (
             (terminations and all(terminations.values()))
             or (truncations and all(truncations.values()))
             or (not self.agents)
             or (self.horizon is not None and self._step_count >= self.horizon)
         )
-        if episode_done and self.penalty != 0.0:
+        if episode_done and self.mode == "terminal" and self.penalty != 0.0:
             self._apply_terminal_penalty(rewards, infos)
 
         return observations, rewards, terminations, truncations, infos
 
+    def _per_step_amount(self) -> float:
+        """Per-step penalty magnitude in 'per_step' mode.
+
+        Scaled so a fully-lazy agent (above threshold every step after
+        warmup) accumulates ~``self.penalty`` over the episode — i.e.
+        EA/CMA see the same episode-return signal as in terminal mode.
+        """
+        horizon = int(self.horizon) if self.horizon is not None else 1
+        eligible = max(1, horizon - self.window_size + 1)
+        return self.penalty / float(eligible)
+
+    def _apply_per_step_penalty(
+        self, rewards: Dict[str, float], infos: Dict[str, Any]
+    ) -> None:
+        per_step = self._per_step_amount()
+        for agent, history in self._history.items():
+            if len(history) < self.window_size:
+                continue
+            window = history[-self.window_size:]
+            concentration = self._heading_concentration(window)
+            self.last_heading_concentration[agent] = concentration
+            if concentration > self.concentration_threshold:
+                rewards[agent] = float(rewards.get(agent, 0.0)) + per_step
+                self.last_penalised[agent] = True
+                if isinstance(infos, dict):
+                    info = infos.setdefault(agent, {})
+                    if isinstance(info, dict):
+                        info["lazy_penalty_applied"] = True
+                        info["lazy_heading_concentration"] = concentration
+            else:
+                self.last_penalised[agent] = False
+
     def _apply_terminal_penalty(self, rewards: Dict[str, float], infos: Dict[str, Any]) -> None:
-        action_n = self._infer_action_n()
         for agent, history in self._history.items():
             if len(history) < self.min_actions:
                 continue
-            counts = np.bincount(np.asarray(history, dtype=np.int64), minlength=action_n)
-            total = int(counts.sum())
-            if total <= 0:
-                continue
-            top1 = float(counts.max()) / float(total)
-            self.last_top1[agent] = top1
-            if top1 > self.top1_threshold:
+            concentration = self._heading_concentration(history)
+            self.last_heading_concentration[agent] = concentration
+            if concentration > self.concentration_threshold:
                 rewards[agent] = float(rewards.get(agent, 0.0)) + self.penalty
                 self.last_penalised[agent] = True
                 if isinstance(infos, dict):
                     info = infos.setdefault(agent, {})
                     if isinstance(info, dict):
                         info["lazy_penalty_applied"] = True
-                        info["lazy_action_top1"] = top1
+                        info["lazy_heading_concentration"] = concentration
             else:
                 self.last_penalised[agent] = False
