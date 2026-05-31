@@ -81,6 +81,10 @@ class TestCMAIndInit:
 class TestCMAToolboxLoop:
     def test_generate_update_cycle(self):
         """One full generate → evaluate → update cycle must not raise and must move the centroid."""
+        # DEAP's CMA ``generate()`` samples from the global NumPy RNG. Seed it
+        # so the directional drift assertion below is deterministic and does
+        # not depend on RNG state left behind by previously-run tests.
+        np.random.seed(0)
         setup_deap_creators()
         strategy, _ = setup_cma_strategy(GENOME_CONFIG, sigma0=0.5, population_size=12)
         ind_init = make_cma_ind_init(GENOME_CONFIG)

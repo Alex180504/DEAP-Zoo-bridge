@@ -217,6 +217,7 @@ class TestPayloadPickleability:
             layer_sizes=(14, 8, 5),
             activation="tanh",
             episode_length=25,
+            eval_episodes=1,
             descriptor_fn=descriptor,
             action_type="discrete",
             extract_state_fn=None,
