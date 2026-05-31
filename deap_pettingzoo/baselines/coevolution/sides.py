@@ -150,6 +150,11 @@ class GenerationStats:
     min: float
     max: float
     best_fitness: float
+    qd_score: Optional[float] = None
+    coverage: Optional[float] = None
+    archive_best_fitness: Optional[float] = None
+    filled_niches: Optional[int] = None
+    total_niches: Optional[int] = None
 
 
 class SideState:
@@ -185,6 +190,8 @@ class SideState:
     def step_generation(
         self,
         evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
     ) -> GenerationStats:  # pragma: no cover - abstract
         raise NotImplementedError
 

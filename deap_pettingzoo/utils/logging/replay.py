@@ -107,6 +107,11 @@ class FrameRecorder:
                 ri = np.linspace(0, h - 1, nh, dtype=int)
                 ci = np.linspace(0, w - 1, nw, dtype=int)
                 arr = arr[np.ix_(ri, ci)]
+        # H.264/yuv420p requires even width and height; trim 1 px if needed.
+        if arr.shape[0] % 2 != 0:
+            arr = arr[:-1]
+        if arr.shape[1] % 2 != 0:
+            arr = arr[:, :-1]
         self._frames.append(arr)
 
     def end_episode(self) -> Optional[Path]:
@@ -128,7 +133,9 @@ class FrameRecorder:
 
         try:
             if fmt == "mp4":
-                imageio.mimsave(path, self._frames, fps=self.fps, macro_block_size=1)
+                imageio.mimsave(
+                    path, self._frames, fps=self.fps, macro_block_size=1, quality=9
+                )
             else:
                 # imageio gif uses 'duration' (milliseconds per frame, Pillow convention).
                 imageio.mimsave(path, self._frames, duration=1000.0 / max(self.fps, 1))

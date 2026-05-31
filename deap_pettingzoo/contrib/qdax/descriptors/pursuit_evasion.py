@@ -40,7 +40,12 @@ class _FormationSpreadAndMeanDistance:
     min_bd: Tuple[float, ...] = (0.0, 0.0)
     max_bd: Tuple[float, ...] = (1.0, 1.0)
 
-    def __init__(self, num_pursuers: int, num_evaders: int) -> None:
+    def __init__(
+        self,
+        num_pursuers: int,
+        num_evaders: int,
+        norm_scale: float = None,
+    ) -> None:
         n_p = int(num_pursuers)
         n_e = int(num_evaders)
         if n_p <= 0 or n_e <= 0:
@@ -50,13 +55,16 @@ class _FormationSpreadAndMeanDistance:
             )
         self.n_p = n_p
         self.n_e = n_e
+        self.norm_scale: float = (
+            float(norm_scale) if norm_scale is not None else 2.0 * (2.0 ** 0.5)
+        )
 
     def __call__(self, trajectory):
         import jax.numpy as jnp
 
         n_p = self.n_p
         n_e = self.n_e
-        norm = 2.0 * jnp.sqrt(2.0)
+        norm = self.norm_scale
 
         positions = trajectory["positions"]  # (T, N, 2)
         pursuer_pos = positions[:, :n_p, :]  # (T, n_p, 2)
@@ -79,24 +87,102 @@ class _FormationSpreadAndMeanDistance:
         )
 
 
+class _SingleTeamFormation:
+    """Picklable 2-D descriptor for a single homogeneous team.
+
+    Useful when the environment only exposes one role (e.g. evader-only
+    training where pursuers are scripted and absent from
+    ``env.possible_agents``).  The two axes are:
+
+    * **spread** — mean distance of each agent from the team centroid
+      (averaged over time), normalised by ``norm_scale``.
+    * **pairwise** — mean pairwise inter-agent distance (averaged over
+      time), normalised by ``norm_scale``.
+
+    Both axes are clipped to ``[0, 1]``.
+    """
+
+    output_shape: int = 2
+    min_bd: Tuple[float, ...] = (0.0, 0.0)
+    max_bd: Tuple[float, ...] = (1.0, 1.0)
+
+    def __init__(self, num_agents: int, norm_scale: float = 1.0) -> None:
+        if int(num_agents) <= 0:
+            raise ValueError(
+                f"num_agents must be positive, got {num_agents}."
+            )
+        self.n = int(num_agents)
+        self.norm_scale = float(norm_scale)
+
+    def __call__(self, trajectory):
+        import jax.numpy as jnp
+
+        positions = trajectory["positions"]  # (T, N, 2)
+        pos = positions[:, : self.n, :]  # (T, n, 2)
+        norm = self.norm_scale
+
+        centroid = jnp.mean(pos, axis=1, keepdims=True)  # (T, 1, 2)
+        spread = jnp.mean(jnp.linalg.norm(pos - centroid, axis=-1))
+
+        # Mean pairwise distance; guard n==1 to avoid division by zero.
+        diff = pos[:, :, None, :] - pos[:, None, :, :]  # (T, n, n, 2)
+        dists = jnp.linalg.norm(diff, axis=-1)  # (T, n, n)
+        n_pairs = self.n * (self.n - 1)
+        mean_pair = (
+            jnp.sum(dists) / (n_pairs * positions.shape[0])
+            if n_pairs > 0
+            else jnp.zeros(())
+        )
+
+        return jnp.stack(
+            [
+                jnp.clip(spread / norm, 0.0, 1.0),
+                jnp.clip(mean_pair / norm, 0.0, 1.0),
+            ]
+        )
+
+
+def single_team_formation(num_agents: int, norm_scale: float = 1.0) -> Callable:
+    """Return a 2-D descriptor ``(centroid_spread, mean_pairwise_dist)``.
+
+    Use this when the env only exposes a single agent role (no
+    pursuer/evader split in ``env.possible_agents``), e.g. evader-only
+    training where the opposing team is scripted.
+
+    Args:
+        num_agents: Number of agents expected in ``positions``.
+        norm_scale: Divisor to normalise distances to ``[0, 1]``.
+            Set to the arena diagonal for aquarium envs.
+    """
+    return _SingleTeamFormation(num_agents, norm_scale=norm_scale)
+
+
 def formation_spread_and_mean_distance(
     num_pursuers: int,
     num_evaders: int,
+    norm_scale: float = None,
 ) -> Callable:
     """Return a 2-D descriptor ``(formation_spread, mean_dist_to_evader)``.
 
     ``formation_spread`` is the mean distance of each pursuer to the
     pursuer centroid (averaged over time). ``mean_dist_to_evader`` is
     the mean distance from every pursuer to every evader (averaged
-    over time). Both are normalised to ``[0, 1]`` by a divisor of
-    ``2 * sqrt(2)`` (the diagonal of a 2x2 MPE world).
+    over time). Both are normalised to ``[0, 1]`` by dividing by
+    ``norm_scale``.
+
+    Args:
+        norm_scale: Divisor used to normalise spread and distance into
+            ``[0, 1]``. Defaults to ``2 * sqrt(2)`` (the diagonal of
+            the 2×2 MPE world). Set to the arena diagonal length for
+            non-MPE environments (e.g. ``3606.0`` for a 2000×3000
+            pixel aquarium).
 
     The returned object is a picklable
     :class:`_FormationSpreadAndMeanDistance` instance, so it survives
     cross-process transport via :mod:`pickle` (used by the parallel
     scoring path).
     """
-    return _FormationSpreadAndMeanDistance(num_pursuers, num_evaders)
+    return _FormationSpreadAndMeanDistance(num_pursuers, num_evaders, norm_scale=norm_scale)
 
 
 class _WithCaptureEfficiency:
@@ -111,8 +197,11 @@ class _WithCaptureEfficiency:
         num_pursuers: int,
         num_evaders: int,
         capture_radius: float = 0.1,
+        norm_scale: float = None,
     ) -> None:
-        self.base = _FormationSpreadAndMeanDistance(num_pursuers, num_evaders)
+        self.base = _FormationSpreadAndMeanDistance(
+            num_pursuers, num_evaders, norm_scale=norm_scale
+        )
         self.n_p = int(num_pursuers)
         self.n_e = int(num_evaders)
         self.r = float(capture_radius)
@@ -139,6 +228,7 @@ def with_capture_efficiency(
     num_pursuers: int,
     num_evaders: int,
     capture_radius: float = 0.1,
+    norm_scale: float = None,
 ) -> Callable:
     """Return a 3-D descriptor: 2-D base + capture efficiency.
 
@@ -146,11 +236,15 @@ def with_capture_efficiency(
     least one pursuer is within ``capture_radius`` of any evader
     (i.e. an empirical capture-rate proxy).
 
+    Args:
+        norm_scale: Divisor for normalising spread and distance axes.
+            See :func:`formation_spread_and_mean_distance` for details.
+
     Returned object is a picklable :class:`_WithCaptureEfficiency`
     instance.
     """
     return _WithCaptureEfficiency(
-        num_pursuers, num_evaders, capture_radius=capture_radius
+        num_pursuers, num_evaders, capture_radius=capture_radius, norm_scale=norm_scale
     )
 
 

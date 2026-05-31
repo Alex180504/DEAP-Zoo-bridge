@@ -38,7 +38,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -48,6 +48,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
 )
+from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 from deap_pettingzoo.environments.registry import (
     get_registry_snapshot,
@@ -90,6 +91,33 @@ def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     replay_registry_snapshot(snapshot)
 
 
+def _format_progress_entry(stats: GenerationStats) -> str:
+    """Format one side's progress entry for the console line."""
+    if stats.qd_score is None or stats.coverage is None:
+        return (
+            f"{stats.side_name}: best={stats.best_fitness:.3f} "
+            f"mean={stats.mean:.3f}"
+        )
+
+    archive_best = (
+        stats.archive_best_fitness
+        if stats.archive_best_fitness is not None
+        else stats.best_fitness
+    )
+    summary = format_qdax_progress_fields(
+        batch_best=stats.best_fitness,
+        batch_mean=stats.mean,
+        archive_best=archive_best,
+        qd_score=stats.qd_score,
+        coverage=stats.coverage,
+        filled_niches=stats.filled_niches,
+        total_niches=stats.total_niches,
+    )
+    return (
+        f"{stats.side_name}: {summary}"
+    )
+
+
 # QDax-specific evaluator
 
 class _QDaxPolicyEvaluator:
@@ -104,7 +132,8 @@ class _QDaxPolicyEvaluator:
     """
 
     def __init__(self, env_wrapper, learner_role_prefixes, opponent_sides,
-                 k_opponents, aggregation, max_steps, rng_factory):
+                 k_opponents, aggregation, max_steps, rng_factory,
+                 executor=None, env_name=None, env_config=None):
         self._env = env_wrapper
         self._learner_prefixes = learner_role_prefixes
         self._opponent_sides = opponent_sides
@@ -112,6 +141,12 @@ class _QDaxPolicyEvaluator:
         self._aggregation = aggregation
         self._max_steps = max_steps
         self._rng_factory = rng_factory  # callable () -> Generator
+        self._executor = executor        # ProcessPoolExecutor or None
+        self._env_name = env_name
+        self._env_config = env_config
+        # Optional hook called at each episode step with (obs_dict, env_wrapper).
+        # Set by QDaxSideState._evaluate_one_genotype to collect trajectory data.
+        self.trajectory_hook = None  # type: ignore[assignment]
 
         self._learner_agents = [
             a for a in env_wrapper.possible_agents
@@ -160,6 +195,11 @@ class _QDaxPolicyEvaluator:
         total = 0.0
         steps = 0
         while steps < self._max_steps and observations:
+            if self.trajectory_hook is not None:
+                try:
+                    self.trajectory_hook(observations, self._env)
+                except Exception:
+                    pass
             infos = getattr(self._env, "last_infos", {}) or {}
             actions: Dict[str, Any] = {}
             for agent, obs in observations.items():
@@ -233,6 +273,18 @@ class CoEvolutionConfig:
     seed: Optional[int] = None
     num_workers: int = 1
     parallel_backend: str = "process"
+    generation_callback: Optional[Callable[[int, Dict[str, Any]], None]] = field(
+        default=None, repr=False, compare=False
+    )
+    """Optional callable invoked after each generation with ``(gen, states)``.
+
+    ``gen`` is the 1-based generation number.  ``states`` is a
+    ``{side_name: SideState}`` dict — callers can read
+    ``state.best_fitness`` or call ``state.best_policy(None)`` to obtain
+    the current champion for each side.  Exceptions raised by the
+    callback are silently swallowed (a ``RuntimeWarning`` is emitted)
+    so they cannot interrupt training.
+    """
 
     def __post_init__(self) -> None:
         """Validate config fields and enforce mode-specific invariants.
@@ -497,6 +549,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                     fps=recording_cfg.fps,
                     fmt=recording_cfg.fmt,
                     max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                    max_dim=recording_cfg.max_dim,
                     episode_prefix=recording_cfg.episode_prefix or "train_",
                 )
                 if recorder.enabled:
@@ -535,8 +588,19 @@ class CoEvolutionTrainer(BaselineTrainer):
                         env, states, coev_cfg, per_side_history
                     )
                     _record_champion_if_due(_g + 1)
+                    if coev_cfg.generation_callback is not None:
+                        try:
+                            coev_cfg.generation_callback(_g + 1, states)
+                        except Exception as _cb_exc:
+                            warnings.warn(
+                                f"[CoEvolution] generation_callback failed at "
+                                f"gen {_g + 1}: "
+                                f"{type(_cb_exc).__name__}: {_cb_exc}",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
                     _side_info = "  ".join(
-                        f"{n}: best={h[-1].best_fitness:.3f} mean={h[-1].mean:.3f}"
+                        _format_progress_entry(h[-1])
                         for n, h in per_side_history.items()
                         if h
                     )
@@ -561,7 +625,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                             total += 1
                             _record_champion_if_due(total)
                             _side_info = "  ".join(
-                                f"{n}: best={h[-1].best_fitness:.3f} mean={h[-1].mean:.3f}"
+                                _format_progress_entry(h[-1])
                                 for n, h in per_side_history.items()
                                 if h
                             )
@@ -911,6 +975,11 @@ class CoEvolutionTrainer(BaselineTrainer):
                 ep_per_gen += int(
                     s.optimizer_config.get("rollout_episodes_per_gen", 4)
                 )
+            elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("batch_size", 20))
+                    * coev_cfg.k_opponents
+                )
             else:
                 ep_per_gen += (
                     int(s.optimizer_config.get("population_size", 20))
@@ -1057,12 +1126,20 @@ class CoEvolutionTrainer(BaselineTrainer):
         """Initial fitness evaluation for every evolving side.
 
         Note:
-            QDax-backed sides already evaluated their initial repertoire
-            inside ``map_elites.init()`` during ``initialise()``; they
-            expose no ``rebind_evaluator`` / ``evaluate_population``
-            interface and are therefore skipped.
+            QDax-backed sides build a temporary repertoire during
+            ``initialise()`` so other sides can sample an initial opponent
+            pool. They are bootstrapped first here so that temporary
+            repertoire is replaced with real coevolution evaluations before
+            EA/CMA sides evaluate against it.
         """
-        for name, state in states.items():
+        ordered_states = sorted(
+            states.items(),
+            key=lambda item: (
+                0 if item[1].side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
+                else 1
+            ),
+        )
+        for name, state in ordered_states:
             if state.side.optimizer == "frozen":
                 continue
             if not hasattr(state, "rebind_evaluator"):
@@ -1136,14 +1213,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             learner_state.side.optimizer != "frozen"
         ), "frozen sides never become learners."
         learner_optimizer = learner_state.side.optimizer
-        # Only hand the executor to EA/CMA evaluators — the RL learner's
-        # own rollout collection is still serial (Phase 2 will add
-        # executor-based parallel rollout dispatch for RL sides).
-        # resolved_workers > 1 guard avoids handing a _SerialExecutor
-        # wrapper to the parallel path when the user set num_workers=1.
+        # Hand the executor to EA/CMA/QDax evaluators whose parallel path is
+        # implemented.  The resolved_workers > 1 guard avoids handing a
+        # _SerialExecutor wrapper when the user set num_workers=1.
         executor_for_side = (
             self._executor
-            if learner_optimizer in {"ea", "cma"} and self._resolved_workers > 1
+            if learner_optimizer in {"ea", "cma", "qdax_map_elites", "qdax_cma_me"}
+            and self._resolved_workers > 1
             else None
         )
 
@@ -1161,6 +1237,9 @@ class CoEvolutionTrainer(BaselineTrainer):
                 aggregation=coev_cfg.aggregation,
                 max_steps=coev_cfg.max_steps_per_episode,
                 rng_factory=_qdax_rng_factory,
+                executor=executor_for_side,
+                env_name=getattr(self, "_env_name", None),
+                env_config=getattr(self, "_env_config", None),
             )
 
         evaluator = CoEvolutionEvaluator(
