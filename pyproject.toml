@@ -59,7 +59,11 @@ analysis = [
     "jinja2>=3.1",
 ]
 rl-baselines = [
-    "agilerl>=2.0.0",
+    # The GroupedIPPO advantage/state flattening monkey-patch in
+    # deap_pettingzoo/baselines/agilerl_trainer.py targets AgileRL's
+    # internal `concatenate_experiences_into_batches`. It is verified
+    # against the 2.6.x series and fails loudly on signature drift.
+    "agilerl>=2.6,<3",
     "torch>=2.0.0",
 ]
 aquarium = [
