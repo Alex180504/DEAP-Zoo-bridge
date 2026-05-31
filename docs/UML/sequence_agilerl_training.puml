@@ -43,6 +43,12 @@ Adapter --> Trainer: (obs_spaces, act_spaces, agent_ids)
 Trainer -> Trainer: _seed_everything(seed)
 
 Trainer -> Agent **: AlgCls(observation_spaces, action_spaces, agent_ids, device, ...)
+note right
+  GroupedIPPOTrainer._build_agent applies the AgileRL
+  grouped-IPPO flattening monkey-patch **lazily here**
+  (not at import), validating the target signature and
+  raising RuntimeError on AgileRL drift (review S2).
+end note
 
 alt off-policy (MADDPG/MATD3)
     Trainer -> Memory **: MultiAgentReplayBuffer(memory_size, agent_ids)

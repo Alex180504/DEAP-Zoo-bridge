@@ -197,29 +197,50 @@ class SingleEpisodeEvaluator(BaseEvaluator):
     
     def _aggregate_team_fitness(self, cumulative_rewards: Dict[str, float]) -> float:
         """
-        Aggregate fitness for team-based competitive scenarios.
-        
+        Aggregate fitness for two-team competitive scenarios.
+
+        Teams are resolved from :attr:`team_mapping` and ordered by team
+        name (sorted) so the result is deterministic and independent of
+        agent/dict insertion order.
+
         Args:
             cumulative_rewards: Dict mapping agent_id to reward
-            
+
         Returns:
-            Difference between the first and second team's total reward
-            when two or more teams are present; plain sum when only one
-            team is found (e.g. no ``team_mapping`` was provided).
+            For exactly two teams: the first team's total reward minus the
+            second team's, with teams ordered by sorted team name. For a
+            single team (or when no ``team_mapping`` was provided): the plain
+            sum of all rewards.
+
+        Raises:
+            ValueError: If ``team_mapping`` resolves to three or more teams.
+                Team aggregation is defined only for the two-team
+                (zero-sum-style) case; supporting more teams would require a
+                well-defined multi-team rule that this evaluator does not
+                assume. Use a different ``aggregation_method`` or a
+                ``team_mapping`` that yields at most two teams.
         """
         if not self.team_mapping:
             # Fallback to sum if no team mapping provided
             return float(np.sum(list(cumulative_rewards.values())))
-        
-        team_rewards = {}
+
+        team_rewards: Dict[str, float] = {}
         for agent, reward in cumulative_rewards.items():
             team = self.team_mapping.get(agent, 'default')
             team_rewards[team] = team_rewards.get(team, 0.0) + reward
-        
-        # For competitive scenarios, return difference between teams
-        # Assumes two teams, customize as needed
-        team_values = list(team_rewards.values())
-        if len(team_values) >= 2:
-            return float(team_values[0] - team_values[1])
-        
-        return float(sum(team_values))
+
+        if len(team_rewards) > 2:
+            raise ValueError(
+                "Team aggregation is defined only for two teams, but "
+                f"team_mapping produced {len(team_rewards)} teams: "
+                f"{sorted(team_rewards)}. Use a team_mapping that yields at "
+                "most two teams, or a different aggregation_method."
+            )
+
+        # Order teams by name so the difference is deterministic regardless
+        # of agent/dict insertion order.
+        ordered_totals = [team_rewards[name] for name in sorted(team_rewards)]
+        if len(ordered_totals) == 2:
+            return float(ordered_totals[0] - ordered_totals[1])
+
+        return float(sum(ordered_totals))
