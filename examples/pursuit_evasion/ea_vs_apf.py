@@ -720,6 +720,7 @@ def run_evolution(
                     eval_episodes=EVAL_EPISODES_TRAIN,
                     layer_sizes=tuple(genome.layer_sizes),
                     activation=genome.activation,
+                    output_activation=genome.output_activation,
                 )
                 payloads.append((_individual_to_payload(ind, seed=seed), spec))
             return list(executor.map(_mixed_worker_evaluate, payloads))
