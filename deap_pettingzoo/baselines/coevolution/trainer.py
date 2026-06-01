@@ -466,10 +466,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             )
         self._resolved_workers = resolved_workers
 
-        # Seed RNGs and construct/initialise every side (sets _np_state
-        # per side and emits GPU/RL parallelism warnings).
-        states = self._initialize_sides(env, coev_cfg, resolved_workers)
-
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
@@ -477,6 +473,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             initargs=(get_registry_snapshot(),),
         ) as executor:
             self._executor = executor
+            # Keep side initialisation inside the executor scope. This
+            # preserves the last known-good ordering for QDax-backed
+            # coevolution on Windows.
+            states = self._initialize_sides(env, coev_cfg, resolved_workers)
             print(
                 f"[CoEv] bootstrapping {len(states)} sides "
                 f"({sum(1 for s in states.values() if s.side.optimizer != 'frozen')} active)",
