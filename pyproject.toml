@@ -67,7 +67,7 @@ rl-baselines = [
     "torch>=2.0.0",
 ]
 aquarium = [
-    "marl-aquarium>=0.1.10",
+    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
 ]
 supersuit = [
     "supersuit>=3.9",
