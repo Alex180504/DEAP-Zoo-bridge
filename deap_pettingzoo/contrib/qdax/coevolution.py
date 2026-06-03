@@ -27,6 +27,9 @@ opponents and QDax individuals is straightforward.
 
 from __future__ import annotations
 
+import builtins
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -51,6 +54,36 @@ from deap_pettingzoo.baselines.coevolution.sides import (
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import summarise_qdax_archive
 from deap_pettingzoo.environments import PettingZooWrapper
+
+
+@contextmanager
+def _mask_optional_pyarrow_imports() -> Any:
+    """Temporarily make ``pyarrow`` look unavailable on Windows.
+
+    The QDax import chain reaches ``pandas.compat.pyarrow`` through
+    ``sklearn``. Pandas already handles ``ImportError`` as an optional
+    dependency miss, but some Windows runs surface a native ``OSError`` from
+    pyarrow instead. Masking the import for this narrow window keeps pandas on
+    its supported fallback path.
+    """
+    if os.name != "nt":
+        yield
+        return
+
+    original_import = builtins.__import__
+
+    def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pyarrow" or name.startswith("pyarrow."):
+            raise ModuleNotFoundError(
+                "pyarrow masked for QDax import compatibility"
+            )
+        return original_import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = _guarded_import
+    try:
+        yield
+    finally:
+        builtins.__import__ = original_import
 
 
 def _compute_qdax_descriptor(
@@ -502,20 +535,21 @@ class QDaxSideState(SideState):
         env: PettingZooWrapper,
         rng: Optional[np.random.Generator] = None,
     ) -> None:
-        import jax
+        with _mask_optional_pyarrow_imports():
+            import jax
 
-        from qdax.core.map_elites import MAPElites
-        from qdax.utils.metrics import default_qd_metrics
+            from qdax.core.map_elites import MAPElites
+            from qdax.utils.metrics import default_qd_metrics
 
-        from deap_pettingzoo.contrib.qdax.policy import (
-            FlaxPolicyAdapter,
-            flat_count,
-            flat_to_pytree,
-            init_flax_mlp_params,
-            make_flax_mlp,
-        )
-        from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
-        from deap_pettingzoo.contrib.qdax.trainer import _compute_centroids
+            from deap_pettingzoo.contrib.qdax.policy import (
+                FlaxPolicyAdapter,
+                flat_count,
+                flat_to_pytree,
+                init_flax_mlp_params,
+                make_flax_mlp,
+            )
+            from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+            from deap_pettingzoo.contrib.qdax.trainer import _compute_centroids
 
         self._env = env
         # Shared action space across this side's agents.
