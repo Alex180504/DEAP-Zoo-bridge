@@ -24,6 +24,12 @@ from .objectives import (
     build_fitness_vector,
     compute_parsimony,
 )
+from .pso_integration import (
+    setup_pso_swarm,
+    make_pso_ind_init,
+    register_pso_toolbox,
+    make_pso_stats,
+)
 
 __all__ = [
     'setup_deap_creators',
@@ -44,4 +50,8 @@ __all__ = [
     'ObjectiveSpec',
     'build_fitness_vector',
     'compute_parsimony',
+    'setup_pso_swarm',
+    'make_pso_ind_init',
+    'register_pso_toolbox',
+    'make_pso_stats',
 ]
