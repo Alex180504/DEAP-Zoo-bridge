@@ -75,6 +75,7 @@ class SelfPlayEvaluator(BaseEvaluator):
         team: Optional[str] = None,
         masked: bool = True,
         flatten_obs: bool = True,
+        fitness_spec: Optional[Any] = None,
     ) -> None:
         if aggregation not in self.VALID_AGGREGATIONS:
             raise ValueError(
@@ -98,13 +99,20 @@ class SelfPlayEvaluator(BaseEvaluator):
         self.team = team
         self.masked = bool(masked)
         self.flatten_obs = bool(flatten_obs)
+        self.fitness_spec = fitness_spec
+        if fitness_spec is not None:
+            fitness_spec.validate()
 
     def evaluate(
         self,
         individual: Any,
         seed: Optional[int] = None,
-    ) -> Tuple[float]:
-        """Play one self-play episode and return ``(fitness,)``.
+    ) -> Tuple[float, ...]:
+        """Play one self-play episode and return fitness tuple.
+
+        When ``fitness_spec is None`` returns the historical 1-tuple
+        ``(aggregated_scalar,)``.  When a spec is set, the tuple may be
+        multi-dimensional (standard) or a flat vector (lexicase).
 
         Raises:
             ValueError: If ``individual`` is ``None``, is missing a
@@ -126,6 +134,9 @@ class SelfPlayEvaluator(BaseEvaluator):
         cumulative: Dict[str, float] = {
             a: 0.0 for a in self.env_wrapper.possible_agents
         }
+        reward_components: Optional[Dict[str, float]] = (
+            {} if self._has_reward_component_objective() else None
+        )
         steps = 0
         done = False
         while not done and steps < self.max_steps and observations:
@@ -140,16 +151,36 @@ class SelfPlayEvaluator(BaseEvaluator):
                 actions[agent] = policies[agent].get_action(
                     flat, deterministic=True, action_mask=mask
                 )
-            observations, rewards, terms, truncs, _ = self.env_wrapper.step(actions)
+            observations, rewards, terms, truncs, step_infos = self.env_wrapper.step(actions)
             for agent, reward in rewards.items():
                 cumulative[agent] = cumulative.get(agent, 0.0) + float(reward)
+            # Accumulate reward components using post-step infos.
+            if reward_components is not None and self.fitness_spec is not None:
+                rc_fn = self.fitness_spec.reward_components_fn
+                if rc_fn is not None:
+                    step_rc = rc_fn(step_infos or {}, rewards)
+                    for k, v in step_rc.items():
+                        reward_components[k] = reward_components.get(k, 0.0) + float(v)
             done = (
                 (terms and all(terms.get(a, False) for a in terms))
                 or (truncs and all(truncs.get(a, False) for a in truncs))
             )
             steps += 1
 
-        return (self._aggregate(cumulative),)
+        aggregated = self._aggregate(cumulative)
+
+        if self.fitness_spec is not None and self.fitness_spec.objectives:
+            from deap_pettingzoo.integration.objectives import build_fitness_vector
+            return build_fitness_vector(
+                aggregated_reward=aggregated,
+                per_episode_rewards=[aggregated],
+                per_agent_rewards=cumulative,
+                reward_components=reward_components,
+                genome=genome,
+                spec=self.fitness_spec,
+            )
+
+        return (aggregated,)
 
     def _build_shared_policies(
         self, genome: FixedTopologyGenome
@@ -194,6 +225,13 @@ class SelfPlayEvaluator(BaseEvaluator):
                 if self.team_mapping.get(a) == self.team
             )
         )
+
+    def _has_reward_component_objective(self) -> bool:
+        """Return ``True`` if the fitness spec requires per-step reward components."""
+        spec = self.fitness_spec
+        if spec is None or not spec.objectives:
+            return False
+        return any(o.source == "reward_component" for o in spec.objectives)
 
 
 __all__ = ["SelfPlayEvaluator"]
