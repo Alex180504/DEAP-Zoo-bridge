@@ -200,6 +200,9 @@ class TrainingResult:
         metadata: Additional algorithm-specific metadata.
         seed: Random seed used for this training run.
         training_time: Wall-clock time in seconds.
+        pareto_front: For multi-objective runs (NSGA-II / SPEA2), the
+            nondominated individuals from the final population.
+            ``None`` for single-objective runs.
     """
     algorithm: str
     policy: PolicyProtocol
@@ -207,6 +210,7 @@ class TrainingResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     seed: Optional[int] = None
     training_time: Optional[float] = None
+    pareto_front: Optional[List[Any]] = None
 
     @property
     def best_policy(self) -> PolicyProtocol:

@@ -132,7 +132,7 @@ def test_unknown_selection_raises(evaluator, genome_config):
         create_toolbox(
             genome_config=genome_config,
             evaluator=evaluator,
-            selection_config={"method": "nsga2"},
+            selection_config={"method": "cxOrdered"},
         )
 
 

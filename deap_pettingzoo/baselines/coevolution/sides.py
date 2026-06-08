@@ -310,9 +310,15 @@ class EASideState(SideState):
         self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
 
+        # Multi-objective support (Phase 1.3).
+        self._is_multiobjective = self.selection_method in {"nsga2", "spea2"}
+
         self.toolbox = None
         self.population: List[Any] = []
-        self.hof = tools.HallOfFame(1)
+        if self._is_multiobjective:
+            self.hof = tools.ParetoFront()
+        else:
+            self.hof = tools.HallOfFame(1)
         self._policy_factory: Optional[PolicyFactory] = None
         self._action_space: Any = None
         #: Per-side deterministic RNG. Seeded from the trainer-provided
@@ -416,7 +422,7 @@ class EASideState(SideState):
                 ind.fitness.values = self.toolbox.evaluate(ind)
         self.hof.update(self.population)
         if len(self.hof) > 0:
-            self.best_fitness = float(self.hof[0].fitness.values[0])
+            self.best_fitness = float(self._mo_champion().fitness.values[0])
 
     def step_generation(
         self,
@@ -514,12 +520,25 @@ class EASideState(SideState):
     def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:
         assert len(self.hof) > 0, "No evaluated individuals yet."
         assert self._policy_factory is not None
-        return self._policy_factory(self.hof[0])
+        return self._policy_factory(self._mo_champion())
 
     def best_snapshot(self) -> Any:
         """Return a *cloned* genome of the current best (HoF-safe)."""
         assert len(self.hof) > 0
-        return self.hof[0].genome.clone()
+        return self._mo_champion().genome.clone()
+
+    def _mo_champion(self) -> Any:
+        """Return a champion from ParetoFront or HallOfFame.
+
+        For a Pareto front the individual with the highest first
+        objective value (typically reward) is returned.
+        For standard HallOfFame ``[0]`` is returned.
+        """
+        if isinstance(self.hof, tools.ParetoFront):
+            if not self.hof.items:
+                raise RuntimeError("ParetoFront is empty")
+            return max(self.hof.items, key=lambda ind: ind.fitness.values[0])
+        return self.hof[0]
 
 
 def _evaluate_with(individual: Any, evaluator: Any) -> Tuple[float, ...]:
