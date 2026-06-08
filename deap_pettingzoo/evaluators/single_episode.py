@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .base_evaluator import BaseEvaluator
@@ -16,20 +16,29 @@ class SingleEpisodeEvaluator(BaseEvaluator):
     padding wrappers (``pad_observations_v0`` +
     ``pad_action_space_v0``) via :attr:`EnvSpec.wrappers`, or evolve
     per-role with :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`.
+
+    Multi-objective / lexicase support
+    ----------------------------------
+    Pass ``fitness_spec`` (a :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`)
+    to return N-tuples for multi-objective fitness or flat vectors for
+    lexicase selection.  When ``fitness_spec`` is ``None`` (default)
+    the evaluator returns a 1-tuple ``(aggregated_reward,)`` —
+    identical to the historical behaviour.
     """
-    
+
     VALID_AGGREGATIONS = ['sum', 'mean', 'min', 'max', 'team']
-    
+
     def __init__(
         self,
         env_wrapper: PettingZooWrapper,
         max_steps: int = 500,
         aggregation_method: str = 'sum',
-        team_mapping: Optional[Dict[str, str]] = None
+        team_mapping: Optional[Dict[str, str]] = None,
+        fitness_spec: Optional[Any] = None,
     ) -> None:
         """
         Initialize single episode evaluator.
-        
+
         Args:
             env_wrapper: PettingZoo environment wrapper
             max_steps: Maximum steps per episode
@@ -39,27 +48,37 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 - 'min': Minimum reward (worst agent)
                 - 'max': Maximum reward (best agent)
                 - 'team': Team-based aggregation (requires team_mapping)
-            team_mapping: Maps agent_id to team name (for competitive scenarios)
-            
+            team_mapping: Maps agent_id to team name (for competitive
+                scenarios).
+            fitness_spec: Optional
+                :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`.
+                When ``None`` the evaluator returns the historical
+                1-tuple.  When set, the returned tuple may be multi-
+                dimensional (standard multi-objective) or a flat vector
+                (lexicase mode).
+
         Raises:
-            ValueError: If invalid aggregation method
+            ValueError: If invalid aggregation method.
         """
         if aggregation_method not in self.VALID_AGGREGATIONS:
             raise ValueError(
                 f"Invalid aggregation_method '{aggregation_method}'. "
                 f"Must be one of {self.VALID_AGGREGATIONS}"
             )
-        
+
         self.env_wrapper = env_wrapper
         self.max_steps = max_steps
         self.aggregation_method = aggregation_method
         self.team_mapping = team_mapping or {}
+        self.fitness_spec = fitness_spec
+        if fitness_spec is not None:
+            fitness_spec.validate()
     
     def evaluate(
         self,
         individual: Any,
         seed: Optional[int] = None
-    ) -> Tuple[float]:
+    ) -> Tuple[float, ...]:
         """
         Evaluate individual in one episode.
         
@@ -68,7 +87,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             seed: Optional seed for episode reproducibility
             
         Returns:
-            Tuple containing single fitness value (DEAP format)
+            Tuple of fitness values (length 1 for backward-compatible
+            single-objective; N for multi-objective; flat vector for
+            lexicase modes).
             
         Raises:
             ValueError: If individual or genome is None/invalid.
@@ -95,6 +116,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         
         # Run episode
         cumulative_rewards = {agent: 0.0 for agent in observations.keys()}
+        reward_components: Optional[Dict[str, float]] = (
+            {} if self._has_reward_component_objective() else None
+        )
         done = False
         steps = 0
         
@@ -112,19 +136,39 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 
                 # Step environment
                 observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)
-                
+
                 # Accumulate rewards
                 for agent, reward in rewards.items():
                     cumulative_rewards[agent] += reward
+
+                # Accumulate reward components (per the fitness spec hook).
+                if reward_components is not None and self.fitness_spec is not None:
+                    rc_fn = self.fitness_spec.reward_components_fn
+                    if rc_fn is not None:
+                        step_rc = rc_fn(infos or {}, rewards)
+                        for k, v in step_rc.items():
+                            reward_components[k] = reward_components.get(k, 0.0) + float(v)
                 
                 # Check if episode is done
                 done = all(dones.values()) or all(truncated.values())
                 steps += 1
             
             # Aggregate fitness across agents
-            fitness = self._aggregate_fitness(cumulative_rewards)
+            aggregated = self._aggregate_fitness(cumulative_rewards)
+
+            # Build multi-objective / lexicase vector when a spec is set.
+            if self.fitness_spec is not None and self.fitness_spec.objectives:
+                from deap_pettingzoo.integration.objectives import build_fitness_vector
+                return build_fitness_vector(
+                    aggregated_reward=aggregated,
+                    per_episode_rewards=[aggregated],  # single episode
+                    per_agent_rewards=cumulative_rewards,
+                    reward_components=reward_components,
+                    genome=individual.genome,
+                    spec=self.fitness_spec,
+                )
             
-            return (fitness,)
+            return (aggregated,)
         except Exception as e:
             # Log error and re-raise with context
             raise RuntimeError(f"Error during episode evaluation: {e}") from e
@@ -244,3 +288,10 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             return float(ordered_totals[0] - ordered_totals[1])
 
         return float(sum(ordered_totals))
+
+    def _has_reward_component_objective(self) -> bool:
+        """Return ``True`` if the fitness spec requires per-step reward components."""
+        spec = self.fitness_spec
+        if spec is None or not spec.objectives:
+            return False
+        return any(o.source == "reward_component" for o in spec.objectives)
