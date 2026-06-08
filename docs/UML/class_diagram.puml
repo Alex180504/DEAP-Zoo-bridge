@@ -494,6 +494,20 @@ package "deap_pettingzoo.baselines" {
         - _translate_budget(config) -> dict
     }
 
+    class PSOTrainer {
+        - hidden_size: int
+        - population_size: int
+        - phi1: float  ' cognitive coefficient
+        - phi2: float  ' social coefficient
+        - weight: float  ' inertia weight
+        -- 
+        + __init__(hidden_size, population_size, phi1, phi2, weight, smin, smax, activation, weight_range)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _translate_budget(config) -> dict
+    }
+
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str
         # ALGORITHM_IMPORT: tuple[str, str]
@@ -583,6 +597,7 @@ package "deap_pettingzoo.baselines" {
 
     BaselineTrainer <|-- EATrainer
     BaselineTrainer <|-- CMAESTrainer
+    BaselineTrainer <|-- PSOTrainer
     BaselineTrainer <|-- AgileRLTrainer
     AgileRLTrainer <|-- MADDPGTrainer
     AgileRLTrainer <|-- MATD3Trainer
@@ -594,6 +609,8 @@ package "deap_pettingzoo.baselines" {
     EATrainer ..> GenomePolicyWrapper : produces
     CMAESTrainer ..> cma_integration_mod : uses
     CMAESTrainer ..> GenomePolicyWrapper : produces
+    PSOTrainer ..> pso_integration_mod : uses
+    PSOTrainer ..> GenomePolicyWrapper : produces
     GenomePolicyWrapper --> FixedTopologyGenome : wraps
     GenomePolicyWrapper ..|> PolicyProtocol : implements
 
