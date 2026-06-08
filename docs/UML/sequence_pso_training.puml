@@ -1,0 +1,46 @@
+@startuml
+title PSO Training Sequence
+
+actor User
+participant "PSOTrainer" as T
+participant "PSO Integration\n(pso_integration)" as I
+participant "Evaluator\n(SingleEpisode)" as E
+participant "PettingZooWrapper" as W
+database "Registry" as R
+
+== Setup ==
+User -> T: train(config)
+T -> T: _translate_budget(config)
+T -> W: reset(seed=0)
+W --> T: observations
+T -> T: derive input/output sizes
+T -> I: setup_pso_swarm(genome_config, pop_size, phi1, phi2, weight)
+I -> I: probe genome → dimension N
+I --> T: (pso_state, dimension)
+T -> I: make_pso_ind_init(genome_config, pso_state)
+I --> T: ind_init closure
+T -> E: SingleEpisodeEvaluator(env_wrapper, max_steps)
+T -> I: register_pso_toolbox(pso_state, ind_init, evaluator)
+I -> I: register toolbox.generate / update / evaluate
+I --> T: toolbox
+
+== Training loop (per generation) ==
+T -> T: toolbox.generate()
+T --> T: population (N particles)
+loop for each particle
+  T -> E: evaluate(particle, seed)
+  E -> W: reset(seed)
+  E -> E: run episode
+  E --> T: (fitness,)
+end
+T -> T: toolbox.update(population)
+note right: velocity/position update\npersonal+global best tracking
+
+T -> T: HallOfFame.update(population)
+T -> T: stats.compile(population)
+
+== Result ==
+T -> T: champion = hof[0].genome
+T -> T: GenomePolicyWrapper(champion) → PolicyProtocol
+T --> User: TrainingResult(policy, metrics)
+@enduml
