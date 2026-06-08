@@ -113,11 +113,12 @@ class Side:
             "qdax_map_elites",
             "qdax_cma_me",
             "rl",
+            "pso",
         }:
             raise ValueError(
                 f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
-                "'frozen', 'qdax_map_elites', 'qdax_cma_me', or 'rl'; got "
-                f"{self.optimizer!r}."
+                "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', or "
+                f"'pso'; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -756,7 +757,185 @@ class CMAESSideState(SideState):
         return self.hof[0].genome.clone()
 
 
+# ---------------------------------------------------------------------------
+# PSO side
+# ---------------------------------------------------------------------------
+
+
+class PSOSideState(SideState):
+    """PSO side — particle swarm over a flat weight vector.
+
+    Accepted ``optimizer_config`` keys mirror :class:`PSOTrainer`:
+
+    * ``hidden_size``, ``population_size``, ``phi1``, ``phi2``,
+      ``weight``, ``smin``, ``smax``, ``activation``, ``weight_range``.
+    * ``masked``: attach :class:`MaskedDiscreteHead`.
+    * ``seed``: int or None.
+    """
+
+    def __init__(self, side: Side) -> None:
+        super().__init__(side)
+        cfg = side.optimizer_config
+        self.hidden_size = int(cfg.get("hidden_size", 32))
+        self.population_size = int(cfg.get("population_size", 20))
+        self.phi1 = float(cfg.get("phi1", 2.0))
+        self.phi2 = float(cfg.get("phi2", 2.0))
+        self.weight = float(cfg.get("weight", 0.7298))
+        self.smin = cfg.get("smin", None)
+        self.smax = cfg.get("smax", None)
+        self.activation = cfg.get("activation", "tanh")
+        self.weight_range = tuple(cfg.get("weight_range", (-1.0, 1.0)))
+        self.masked = bool(cfg.get("masked", False))
+        self.seed = cfg.get("seed", None)
+
+        self.pso_state: Optional[Dict[str, Any]] = None
+        self.toolbox = None
+        self.population: List[Any] = []
+        self.hof = tools.HallOfFame(1)
+        self._policy_factory: Optional[PolicyFactory] = None
+        self._action_space: Any = None
+        self._ind_init = None
+
+    def initialise(
+        self, env: PettingZooWrapper, rng: Optional[np.random.Generator] = None,
+    ) -> None:
+        sample_obs = env.reset(seed=0)
+        learner_agent = next(
+            a for a in env.possible_agents
+            if a.startswith(self.side.role_prefixes)
+        )
+        input_size = len(sample_obs[learner_agent])
+        self._action_space = _resolve_side_action_space(env, self.side.role_prefixes)
+        output_size = required_output_size(self._action_space)
+
+        if rng is not None:
+            pso_seed = int(rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
+        elif self.seed is not None:
+            pso_seed = int(self.seed)
+        else:
+            pso_seed = None
+
+        genome_config = {
+            "layer_sizes": [input_size, self.hidden_size, output_size],
+            "activation": self.activation,
+            "weight_range": self.weight_range,
+        }
+        from deap_pettingzoo.integration.pso_integration import (
+            setup_pso_swarm,
+            make_pso_ind_init,
+            register_pso_toolbox,
+        )
+        self.pso_state, _ = setup_pso_swarm(
+            genome_config=genome_config,
+            population_size=self.population_size,
+            phi1=self.phi1, phi2=self.phi2, weight=self.weight,
+            smin=self.smin, smax=self.smax,
+            seed=pso_seed,
+        )
+        self._ind_init = make_pso_ind_init(genome_config, self.pso_state)
+
+        class _NoopEvaluator:
+            def evaluate(self, individual, **_kwargs):  # pragma: no cover
+                return (0.0,)
+
+        self.toolbox = register_pso_toolbox(
+            self.pso_state, self._ind_init, _NoopEvaluator(),
+        )
+        self.population = self.toolbox.generate()
+        self._policy_factory = _make_feedforward_policy_factory(
+            self._action_space, masked=self.masked,
+        )
+
+    def rebind_evaluator(self, evaluator: Any) -> None:
+        assert self.toolbox is not None
+        self.toolbox.unregister("evaluate")
+        self.toolbox.register("evaluate", _evaluate_with, evaluator=evaluator)
+
+    def evaluate_population(self, *, batch_eval_fn=None) -> None:
+        assert self.toolbox is not None
+        if batch_eval_fn is not None:
+            fitnesses = batch_eval_fn(self.population)
+            for ind, fit in zip(self.population, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                ind.fitness.values = self.toolbox.evaluate(ind)
+        self.hof.update(self.population)
+        if len(self.hof) > 0:
+            self.best_fitness = float(self.hof[0].fitness.values[0])
+
+    def step_generation(
+        self,
+        evaluator_factory: Callable[["SideState"], Any],
+        *,
+        batch_eval_fn=None,
+    ) -> GenerationStats:
+        assert self.toolbox is not None
+        self.generation += 1
+        evaluator = evaluator_factory(self)
+        self.rebind_evaluator(evaluator)
+
+        for ind in self.population:
+            del ind.fitness.values
+
+        invalid = [ind for ind in self.population if not ind.fitness.valid]
+        if batch_eval_fn is not None and invalid:
+            fitnesses = batch_eval_fn(invalid)
+            for ind, fit in zip(invalid, fitnesses):
+                ind.fitness.values = fit
+        else:
+            for ind in self.population:
+                if not ind.fitness.valid:
+                    ind.fitness.values = self.toolbox.evaluate(ind)
+
+        self.toolbox.update(self.population)
+        self.hof.update(self.population)
+        fitnesses = [ind.fitness.values[0] for ind in self.population]
+        best = float(max(fitnesses))
+        self.best_fitness = max(self.best_fitness, best)
+
+        stats = GenerationStats(
+            generation=self.generation,
+            side_name=self.side.name,
+            mean=float(np.mean(fitnesses)),
+            std=float(np.std(fitnesses)),
+            min=float(np.min(fitnesses)),
+            max=best,
+            best_fitness=best,
+        )
+        self.history.append(stats)
+        return stats
+
+    def current_pool(self) -> OpponentPool:
+        assert self._policy_factory is not None
+        pop_pool: OpponentPool = PopulationPool(
+            self.population, self._policy_factory,
+            sampler=self.side.opponent_sampler,
+        )
+        if self.side.use_archive_in_opponent_pool and self.side.hof is not None:
+            if len(self.side.hof) == 0:
+                return pop_pool
+            archive_pool = ArchivePool(
+                self.side.hof, self._policy_factory,
+                sampler=self.side.archive_sampler,
+            )
+            weights = (1.0 - self.side.archive_mix, self.side.archive_mix)
+            return CompositePool([pop_pool, archive_pool], weights=weights)
+        return pop_pool
+
+    def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:
+        assert len(self.hof) > 0
+        assert self._policy_factory is not None
+        return self._policy_factory(self.hof[0])
+
+    def best_snapshot(self) -> Any:
+        assert len(self.hof) > 0
+        return self.hof[0].genome.clone()
+
+
+# ---------------------------------------------------------------------------
 # Frozen side
+# ---------------------------------------------------------------------------
 
 
 class FrozenSideState(SideState):
@@ -838,6 +1017,8 @@ def make_side_state(side: Side) -> SideState:
         from .rl_side import RLSideState
 
         return RLSideState(side)
+    if side.optimizer == "pso":
+        return PSOSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )
@@ -849,6 +1030,7 @@ __all__ = [
     "EASideState",
     "CMAESSideState",
     "FrozenSideState",
+    "PSOSideState",
     "GenerationStats",
     "make_side_state",
 ]
