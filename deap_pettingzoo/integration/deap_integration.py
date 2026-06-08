@@ -135,6 +135,7 @@ def evaluate_individual(
 
 SUPPORTED_SELECTION_METHODS = (
     "tournament", "roulette", "best", "random",
+    "sus", "double_tournament", "lexicase", "epsilon_lexicase",
 )
 SUPPORTED_CROSSOVER_METHODS = (
     "blend", "one_point", "two_point", "uniform", "sbx", "es_blend",
@@ -262,6 +263,17 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
 
     Selection operators only read ``individual.fitness`` so they work on
     the existing ``creator.Individual`` (plain object) without adapters.
+
+    Exceptions:
+
+    * ``"double_tournament"`` uses ``genome.get_weight_count()`` as the
+      parsimony (size) key because the project's individuals are plain
+      objects, not sequences, and therefore lack ``__len__``.
+    * ``"lexicase"`` / ``"epsilon_lexicase"`` require multi-dimensional
+      fitness vectors (one test-case per position).  They are a no-op
+      for single-objective evaluators but work correctly with
+      :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`
+      lexicase modes set up in Phase 1.1.
     """
     method = cfg.get("method", "tournament")
     if method == "tournament":
@@ -290,11 +302,105 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
         toolbox.register("select", tools.selBest)
     elif method == "random":
         toolbox.register("select", tools.selRandom)
+    elif method == "sus":
+        toolbox.register("select", tools.selStochasticUniversalSampling)
+    elif method == "double_tournament":
+        toolbox.register(
+            "select",
+            _sel_double_tournament_adapter,
+            fitness_size=cfg.get("fitness_size", 2),
+            parsimony_size=cfg.get("parsimony_size", 3),
+            fitness_first=cfg.get("fitness_first", True),
+        )
+    elif method == "lexicase":
+        toolbox.register("select", tools.selLexicase)
+    elif method == "epsilon_lexicase":
+        toolbox.register("select", tools.selAutomaticEpsilonLexicase)
     else:
         raise ValueError(
             f"Unknown selection method {method!r}. "
             f"Supported: {SUPPORTED_SELECTION_METHODS}"
         )
+
+
+def _sel_double_tournament_adapter(
+    individuals: list,
+    k: int,
+    fitness_size: int = 2,
+    parsimony_size: int = 3,
+    fitness_first: bool = True,
+) -> list:
+    """Double-tournament selection using genome weight count as parsimony.
+
+    DEAP's :func:`~deap.tools.selDoubleTournament` uses ``len(ind)`` as
+    the size measure, but the project's ``creator.Individual`` is a plain
+    object — not a sequence — so ``len()`` is undefined.  This adapter
+    reimplements the same two-stage tournament logic while reading the
+    genome's weight count via :meth:`~FixedTopologyGenome.get_weight_count`.
+
+    Args:
+        individuals: Population of individuals with ``.genome`` and
+            ``.fitness`` attributes.
+        k: Number of individuals to select.
+        fitness_size: Number of candidates compared on fitness in the
+            first-stage tournament.
+        parsimony_size: Number of candidates compared on size in the
+            second-stage tournament.
+        fitness_first: If ``True``, first tournament is on fitness and
+            second on size (favours fit, then small).  If ``False``,
+            first tournament is on size and second on fitness (favours
+            small, then fit).
+
+    Returns:
+        List of *k* selected individuals.
+    """
+    import random
+
+    def _genome_size(ind):
+        """Return the parsimony measure (weight count) for an individual."""
+        try:
+            return ind.genome.get_weight_count()
+        except AttributeError:
+            return 0  # fallback — shouldn't happen in normal use
+
+    def _fitness_key(ind):
+        """Higher-is-better fitness key (DEAP FitnessMax convention)."""
+        return ind.fitness.values[0] if ind.fitness.wvalues else 0.0
+
+    def _tournament(pool, n_candidates, key_fn, reverse=True):
+        """Select one winner from *n_candidates* random aspirants."""
+        aspirants = random.choices(pool, k=n_candidates)
+        return sorted(aspirants, key=key_fn, reverse=reverse)[0]
+        # Note: random.choices samples WITH replacement — intentional,
+        # matching DEAP's selTournament behaviour.
+
+    chosen = []
+    for _ in range(k):
+        if fitness_first:
+            # Stage 1: fitness tournament → `fitness_size` candidates
+            stage1 = _tournament(individuals, fitness_size, _fitness_key)
+            # Stage 2: parsimony tournament among those candidates
+            # (lower weight count = better, so reverse=False)
+            stage1_candidates = [stage1]  # Only got one from stage1
+            # Actually DEAP's logic is: for each of parsimony_size, pick
+            # a random individual, then do fitness tournament to get
+            # fitness_size candidates, then pick the smallest among them.
+            # Let me replicate: draw parsimony_size aspirants, each
+            # aspirant is the winner of a fitness_size tournament.
+            candidate_pool = [
+                _tournament(individuals, fitness_size, _fitness_key)
+                for _ in range(parsimony_size)
+            ]
+            winner = min(candidate_pool, key=_genome_size)
+        else:
+            candidate_pool = [
+                _tournament(individuals, parsimony_size,
+                            _genome_size, reverse=False)
+                for _ in range(fitness_size)
+            ]
+            winner = max(candidate_pool, key=_fitness_key)
+        chosen.append(winner)
+    return chosen
 
 
 def _register_crossover(
