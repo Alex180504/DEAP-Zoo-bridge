@@ -151,14 +151,14 @@ class SelfPlayEvaluator(BaseEvaluator):
                 actions[agent] = policies[agent].get_action(
                     flat, deterministic=True, action_mask=mask
                 )
-            observations, rewards, terms, truncs, _ = self.env_wrapper.step(actions)
+            observations, rewards, terms, truncs, step_infos = self.env_wrapper.step(actions)
             for agent, reward in rewards.items():
                 cumulative[agent] = cumulative.get(agent, 0.0) + float(reward)
-            # Accumulate reward components.
+            # Accumulate reward components using post-step infos.
             if reward_components is not None and self.fitness_spec is not None:
                 rc_fn = self.fitness_spec.reward_components_fn
                 if rc_fn is not None:
-                    step_rc = rc_fn(infos or {}, rewards)
+                    step_rc = rc_fn(step_infos or {}, rewards)
                     for k, v in step_rc.items():
                         reward_components[k] = reward_components.get(k, 0.0) + float(v)
             done = (

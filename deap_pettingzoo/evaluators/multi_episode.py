@@ -191,13 +191,12 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         tuples = self._evaluate_episodes(individual)
         return [t[0] for t in tuples]
 
-    @staticmethod
-    def _aggregate_scalars(values: List[float]) -> float:
-        """Aggregate a list of scalars per the configured method."""
+    def _aggregate_scalars(self, values: List[float]) -> float:
+        """Aggregate a list of scalars using the configured aggregation_method."""
         if not values:
             return 0.0
         arr = np.asarray(values, dtype=np.float64)
-        return float(np.mean(arr))  # default — overridden by caller logic
+        return self._aggregate_fitnesses(arr)
 
     def _aggregate_fitnesses(self, fitnesses: np.ndarray) -> float:
         """
