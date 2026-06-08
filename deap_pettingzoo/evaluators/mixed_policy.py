@@ -122,8 +122,9 @@ class MixedPolicyEvalResult:
         scripted_reward: Sum of scripted-side rewards (for diagnostics).
         steps: Number of environment steps taken.
         per_learner_rewards: Dict ``{agent_id: total}`` of per-agent
-            learner-side rewards (populated when ``fitness_spec`` is
-            active; ``None`` otherwise).
+            learner-side rewards. Always populated (never ``None``) even
+            when ``fitness_spec`` is not active, so callers can inspect
+            individual-agent contributions for diagnostics.
     """
 
     fitness: float
@@ -391,7 +392,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
                     )
                 # else: agent terminated — no action required
 
-            observations, rewards, terms, truncs, _ = env.step(actions)
+            observations, rewards, terms, truncs, step_infos = env.step(actions)
 
             for agent, reward in rewards.items():
                 if agent.startswith(self.learner_agent_prefixes):
@@ -400,11 +401,11 @@ class MixedPolicyEvaluator(BaseEvaluator):
                 else:
                     scripted_total += reward
 
-            # Accumulate reward components.
+            # Accumulate reward components using post-step infos.
             if reward_components is not None and self.fitness_spec is not None:
                 rc_fn = self.fitness_spec.reward_components_fn
                 if rc_fn is not None:
-                    step_rc = rc_fn(infos or {}, rewards)
+                    step_rc = rc_fn(step_infos or {}, rewards)
                     for k, v in step_rc.items():
                         reward_components[k] = reward_components.get(k, 0.0) + float(v)
 
