@@ -18,6 +18,12 @@ from .cma_integration import (
     register_cma_toolbox,
     make_cma_stats,
 )
+from .objectives import (
+    FitnessSpec,
+    ObjectiveSpec,
+    build_fitness_vector,
+    compute_parsimony,
+)
 
 __all__ = [
     'setup_deap_creators',
@@ -34,4 +40,8 @@ __all__ = [
     'make_cma_ind_init',
     'register_cma_toolbox',
     'make_cma_stats',
+    'FitnessSpec',
+    'ObjectiveSpec',
+    'build_fitness_vector',
+    'compute_parsimony',
 ]

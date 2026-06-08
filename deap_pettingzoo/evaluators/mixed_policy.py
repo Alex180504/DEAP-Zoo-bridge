@@ -121,12 +121,16 @@ class MixedPolicyEvalResult:
             both sides' totals are useful.
         scripted_reward: Sum of scripted-side rewards (for diagnostics).
         steps: Number of environment steps taken.
+        per_learner_rewards: Dict ``{agent_id: total}`` of per-agent
+            learner-side rewards (populated when ``fitness_spec`` is
+            active; ``None`` otherwise).
     """
 
     fitness: float
     learner_reward: float
     scripted_reward: float
     steps: int
+    per_learner_rewards: Optional[Dict[str, float]] = None
 
 
 class MixedPolicyEvaluator(BaseEvaluator):
@@ -157,6 +161,8 @@ class MixedPolicyEvaluator(BaseEvaluator):
         # --- factory path (picklable; required for parallel eval) ---
         env_factory: Optional[EnvFactory] = None,
         scripted_policy_factory: Optional[ScriptedPolicyFactory] = None,
+        # --- multi-objective / lexicase ---
+        fitness_spec: Optional[Any] = None,
     ) -> None:
         """Build the evaluator.
 
@@ -231,6 +237,9 @@ class MixedPolicyEvaluator(BaseEvaluator):
         self.learner_agent_prefixes = tuple(learner_agent_prefixes)
         self.learner_factory = learner_factory
         self.max_steps = max_steps
+        self.fitness_spec = fitness_spec
+        if fitness_spec is not None:
+            fitness_spec.validate()
 
         # Store factories (used by parallel workers and _build_episode_context).
         self.env_factory: Optional[EnvFactory] = env_factory
@@ -303,14 +312,28 @@ class MixedPolicyEvaluator(BaseEvaluator):
         self,
         individual: Any,
         seed: Optional[int] = None,
-    ) -> Tuple[float]:
-        """Run one episode and return ``(fitness,)`` (DEAP contract).
+    ) -> Tuple[float, ...]:
+        """Run one episode and return fitness tuple (DEAP contract).
 
-        ``fitness`` is the summed reward across all learner-side agents.
-        Scripted-side rewards are recorded separately in
-        :meth:`run_episode` but do not enter the DEAP fitness.
+        When ``fitness_spec is None`` the returned tuple is ``(fitness,)``
+        — backward-compatible.  When a spec is set the tuple may be
+        multi-dimensional (standard multi-objective) or a flat vector
+        (lexicase).
         """
         result = self.run_episode(individual, seed=seed)
+        if self.fitness_spec is not None and self.fitness_spec.objectives:
+            from deap_pettingzoo.integration.objectives import build_fitness_vector
+            genome = individual.genome if (
+                individual is not None and hasattr(individual, "genome")
+            ) else None
+            return build_fitness_vector(
+                aggregated_reward=result.fitness,
+                per_episode_rewards=[result.fitness],
+                per_agent_rewards=result.per_learner_rewards,
+                reward_components=getattr(result, "_reward_components", None),
+                genome=genome,
+                spec=self.fitness_spec,
+            )
         return (result.fitness,)
 
     # ------------------------------------------------------------------
@@ -348,6 +371,10 @@ class MixedPolicyEvaluator(BaseEvaluator):
         learner_total = 0.0
         scripted_total = 0.0
         steps = 0
+        per_learner: Dict[str, float] = {a: 0.0 for a in self.learner_agents}
+        reward_components: Optional[Dict[str, float]] = (
+            {} if self._has_reward_component_objective() else None
+        )
 
         while steps < self.max_steps and observations:
             infos = getattr(env, "last_infos", {}) or {}
@@ -369,8 +396,17 @@ class MixedPolicyEvaluator(BaseEvaluator):
             for agent, reward in rewards.items():
                 if agent.startswith(self.learner_agent_prefixes):
                     learner_total += reward
+                    per_learner[agent] = per_learner.get(agent, 0.0) + float(reward)
                 else:
                     scripted_total += reward
+
+            # Accumulate reward components.
+            if reward_components is not None and self.fitness_spec is not None:
+                rc_fn = self.fitness_spec.reward_components_fn
+                if rc_fn is not None:
+                    step_rc = rc_fn(infos or {}, rewards)
+                    for k, v in step_rc.items():
+                        reward_components[k] = reward_components.get(k, 0.0) + float(v)
 
             steps += 1
             if all(terms.values()) or all(truncs.values()):
@@ -380,9 +416,21 @@ class MixedPolicyEvaluator(BaseEvaluator):
         if self.env_factory is not None:
             env.close()
 
-        return MixedPolicyEvalResult(
+        result = MixedPolicyEvalResult(
             fitness=learner_total,
             learner_reward=learner_total,
             scripted_reward=scripted_total,
             steps=steps,
+            per_learner_rewards=per_learner,
         )
+        # Attach reward components as a transient attribute.
+        if reward_components is not None:
+            result._reward_components = reward_components  # type: ignore[attr-defined]
+        return result
+
+    def _has_reward_component_objective(self) -> bool:
+        """Return ``True`` if the fitness spec requires per-step reward components."""
+        spec = self.fitness_spec
+        if spec is None or not spec.objectives:
+            return False
+        return any(o.source == "reward_component" for o in spec.objectives)

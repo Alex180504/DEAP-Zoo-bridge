@@ -19,36 +19,53 @@ from ..genomes import FixedTopologyGenome
 from ..evaluators import BaseEvaluator
 
 
-def setup_deap_creators() -> None:
+def setup_deap_creators(weights: tuple = (1.0,)) -> None:
     """
     Setup DEAP creator classes for fitness and individuals.
-    
+
     Creates:
-        - FitnessMax: Fitness class for maximization (weights=(1.0,))
-        - Individual: Individual class containing genome attribute
-    
+        - ``creator.FitnessMax``: Fitness class for maximisation with the
+          supplied ``weights`` tuple.  Single-objective callers keep the
+          default ``(1.0,)``; multi-objective callers pass e.g.
+          ``(1.0, -1.0)`` for reward + parsimony.
+        - ``creator.Individual``: Plain object holding a genome.
+
+    The creator name is always ``"FitnessMax"`` regardless of weights
+    so that the rest of the toolbox machinery stays agnostic.
+
+    Args:
+        weights: Signed weight per objective.  Default ``(1.0,)``.
+
     Note:
-        This function is idempotent - it's safe to call multiple times.
-        Existing classes will be deleted and recreated.
-    
+        This function is idempotent — it is safe to call multiple times.
+        Existing classes are deleted and recreated.
+
     Example:
         >>> setup_deap_creators()
         >>> ind = creator.Individual(genome)
         >>> ind.fitness.values = (10.5,)
     """
+    if not isinstance(weights, tuple):
+        weights = tuple(weights)
+    if len(weights) == 0:
+        weights = (1.0,)
+
     # Remove existing creators if they exist
     if hasattr(creator, "FitnessMax"):
         del creator.FitnessMax
     if hasattr(creator, "Individual"):
         del creator.Individual
-    
-    # Create fitness class (maximization)
-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    
-    # Create individual class - simple object to hold genome and fitness
-    creator.create("Individual", object,
-                   fitness=creator.FitnessMax,
-                   genome=None)
+
+    # Create fitness class (maximisation)
+    creator.create("FitnessMax", base.Fitness, weights=weights)
+
+    # Create individual class — simple object to hold genome and fitness
+    creator.create(
+        "Individual",
+        object,
+        fitness=creator.FitnessMax,
+        genome=None,
+    )
 
 
 def create_deap_individual(
