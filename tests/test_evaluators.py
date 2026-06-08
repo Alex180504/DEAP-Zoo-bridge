@@ -5,7 +5,9 @@ from typing import Dict, Any
 from deap_pettingzoo.evaluators import (
     BaseEvaluator,
     SingleEpisodeEvaluator,
-    MultiEpisodeEvaluator
+    MultiEpisodeEvaluator,
+    SelfPlayEvaluator,
+    MixedPolicyEvaluator,
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.genomes import FixedTopologyGenome
@@ -376,3 +378,333 @@ class TestEvaluatorIntegration:
             assert ind.fitness.values is not None
             assert isinstance(ind.fitness.values, tuple)
             assert len(ind.fitness.values) == 1
+
+
+# ===========================================================================
+# Multi-objective / lexicase evaluator tests (Phase 1.1)
+# ===========================================================================
+
+
+class _MockFitnessSpec:
+    """Minimal fitness-spec stand-in for tests that don't need the real
+    `deap_pettingzoo.integration.objectives` import (but the real classes
+    are preferred when testing integration)."""
+
+    def __init__(self, objectives, lexicase_mode=None, reward_components_fn=None):
+        self.objectives = objectives or []
+        self.lexicase_mode = lexicase_mode
+        self.reward_components_fn = reward_components_fn
+
+    def validate(self):
+        pass
+
+
+class TestSingleEpisodeEvaluatorMultiObjective:
+    """Backward-compatible + multi-objective SingleEpisodeEvaluator."""
+
+    @pytest.fixture
+    def wrapper(self):
+        return PettingZooWrapper(
+            env_name='simple_spread_v3',
+            env_config={'max_cycles': 25},
+        )
+
+    @pytest.fixture
+    def individual(self, wrapper):
+        observations = wrapper.reset(seed=42)
+        agent = list(observations.keys())[0]
+        obs_dim = len(observations[agent])
+        action_dim = wrapper.action_space(agent).n
+        genome = FixedTopologyGenome(
+            layer_sizes=[obs_dim, 16, action_dim], random_seed=42,
+        )
+        return MockIndividual(genome)
+
+    def test_no_spec_is_backward_compatible(self, wrapper, individual):
+        evaluator = SingleEpisodeEvaluator(env_wrapper=wrapper)
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+        assert isinstance(result[0], float)
+
+    def test_single_reward_objective(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(objectives=[ObjectiveSpec("reward")])
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+
+    def test_multiobjective_reward_parsimony(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(objectives=[
+            ObjectiveSpec("reward", weight=1.0, source="reward"),
+            ObjectiveSpec("parsimony", weight=-1.0, source="parsimony"),
+        ])
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        # Reward should be a real number; parsimony should be negative.
+        assert isinstance(result[0], float)
+        assert result[1] < 0.0
+
+    def test_lexicase_per_episode(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(
+            objectives=[ObjectiveSpec("reward")],
+            lexicase_mode="per_episode",
+        )
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        # 1 objective, 1 episode = 1 scalar in flat vector
+        assert len(result) == 1
+
+    def test_lexicase_per_agent(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(
+            objectives=[ObjectiveSpec("reward")],
+            lexicase_mode="per_agent",
+        )
+        evaluator = SingleEpisodeEvaluator(
+            env_wrapper=wrapper, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        # N agents in the env, 1 objective → N scalars
+        assert len(result) > 0
+
+
+class TestMultiEpisodeEvaluatorMultiObjective:
+    """Multi-objective MultiEpisodeEvaluator tests."""
+
+    @pytest.fixture
+    def wrapper(self):
+        return PettingZooWrapper(
+            env_name='simple_spread_v3',
+            env_config={'max_cycles': 25},
+        )
+
+    @pytest.fixture
+    def individual(self, wrapper):
+        observations = wrapper.reset(seed=42)
+        agent = list(observations.keys())[0]
+        obs_dim = len(observations[agent])
+        action_dim = wrapper.action_space(agent).n
+        genome = FixedTopologyGenome(
+            layer_sizes=[obs_dim, 16, action_dim], random_seed=42,
+        )
+        return MockIndividual(genome)
+
+    def test_no_spec_is_backward_compatible(self, wrapper, individual):
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=3,
+        )
+        result = evaluator.evaluate(individual)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+
+    def test_multiobjective_elementwise_mean(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(objectives=[
+            ObjectiveSpec("reward", weight=1.0, source="reward"),
+            ObjectiveSpec("parsimony", weight=-1.0, source="parsimony"),
+        ])
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=3, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert result[1] < 0.0
+
+    def test_lexicase_per_episode(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(
+            objectives=[ObjectiveSpec("reward")],
+            lexicase_mode="per_episode",
+        )
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=4, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual)
+        # 1 objective × 4 episodes = 4 scalars concatenated
+        assert isinstance(result, tuple)
+        assert len(result) == 4
+
+    def test_evaluate_with_stats_rejects_multiobjective(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(objectives=[
+            ObjectiveSpec("reward", source="reward"),
+            ObjectiveSpec("parsimony", source="parsimony"),
+        ])
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=3, fitness_spec=spec,
+        )
+        with pytest.raises(ValueError, match="evaluate_with_stats"):
+            evaluator.evaluate_with_stats(individual)
+
+    def test_evaluate_with_stats_rejects_lexicase(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        spec = FitnessSpec(
+            objectives=[ObjectiveSpec("reward")],
+            lexicase_mode="per_episode",
+        )
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=3, fitness_spec=spec,
+        )
+        with pytest.raises(ValueError, match="evaluate_with_stats"):
+            evaluator.evaluate_with_stats(individual)
+
+
+class TestSelfPlayEvaluatorMultiObjective:
+    """Multi-objective SelfPlayEvaluator tests."""
+
+    @pytest.fixture
+    def wrapper(self):
+        return PettingZooWrapper(
+            env_name='simple_spread_v3',
+            env_config={'max_cycles': 25},
+        )
+
+    @pytest.fixture
+    def individual(self, wrapper):
+        observations = wrapper.reset(seed=42)
+        agent = list(observations.keys())[0]
+        obs_dim = len(observations[agent])
+        action_dim = wrapper.action_space(agent).n
+        genome = FixedTopologyGenome(
+            layer_sizes=[obs_dim, 16, action_dim], random_seed=42,
+        )
+        return MockIndividual(genome)
+
+    def test_no_spec_is_backward_compatible(self, wrapper, individual):
+        evaluator = SelfPlayEvaluator(env_wrapper=wrapper)
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+
+    def test_multiobjective(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        from deap_pettingzoo.evaluators import SelfPlayEvaluator
+        spec = FitnessSpec(objectives=[
+            ObjectiveSpec("reward", weight=1.0, source="reward"),
+            ObjectiveSpec("parsimony", weight=-1.0, source="parsimony"),
+        ])
+        evaluator = SelfPlayEvaluator(
+            env_wrapper=wrapper, fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+
+class TestMixedPolicyEvaluatorMultiObjective:
+    """Multi-objective MixedPolicyEvaluator tests."""
+
+    @pytest.fixture
+    def wrapper(self):
+        return PettingZooWrapper(
+            env_name='simple_spread_v3',
+            env_config={'max_cycles': 25},
+        )
+
+    @pytest.fixture
+    def individual(self, wrapper):
+        observations = wrapper.reset(seed=42)
+        agent = list(observations.keys())[0]
+        obs_dim = len(observations[agent])
+        action_dim = wrapper.action_space(agent).n
+        genome = FixedTopologyGenome(
+            layer_sizes=[obs_dim, 16, action_dim], random_seed=42,
+        )
+        return MockIndividual(genome)
+
+    @staticmethod
+    def _learner_factory(genome, agent_id, action_space):
+        from deap_pettingzoo.policies import FeedforwardNeuralPolicy
+        return FeedforwardNeuralPolicy(genome, action_space=action_space)
+
+    def test_no_spec_is_backward_compatible(self, wrapper, individual):
+        from deap_pettingzoo.evaluators import MixedPolicyEvaluator
+        # Pick one agent prefix that exists in the env.
+        agents = list(wrapper.possible_agents)
+        prefix = agents[0][:agents[0].rfind("_")] if "_" in agents[0] else agents[0]
+        evaluator = MixedPolicyEvaluator(
+            env_wrapper=wrapper,
+            learner_agent_prefixes=[prefix],
+            learner_factory=self._learner_factory,
+            scripted_policies={},
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+
+    def test_multiobjective(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        from deap_pettingzoo.evaluators import MixedPolicyEvaluator
+        agents = list(wrapper.possible_agents)
+        prefix = agents[0][:agents[0].rfind("_")] if "_" in agents[0] else agents[0]
+        spec = FitnessSpec(objectives=[
+            ObjectiveSpec("reward", weight=1.0, source="reward"),
+            ObjectiveSpec("parsimony", weight=-1.0, source="parsimony"),
+        ])
+        evaluator = MixedPolicyEvaluator(
+            env_wrapper=wrapper,
+            learner_agent_prefixes=[prefix],
+            learner_factory=self._learner_factory,
+            scripted_policies={},
+            fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_lexicase_per_agent(self, wrapper, individual):
+        from deap_pettingzoo.integration.objectives import (
+            FitnessSpec, ObjectiveSpec,
+        )
+        from deap_pettingzoo.evaluators import MixedPolicyEvaluator
+        agents = list(wrapper.possible_agents)
+        prefix = agents[0][:agents[0].rfind("_")] if "_" in agents[0] else agents[0]
+        spec = FitnessSpec(
+            objectives=[ObjectiveSpec("reward")],
+            lexicase_mode="per_agent",
+        )
+        evaluator = MixedPolicyEvaluator(
+            env_wrapper=wrapper,
+            learner_agent_prefixes=[prefix],
+            learner_factory=self._learner_factory,
+            scripted_policies={},
+            fitness_spec=spec,
+        )
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) > 0

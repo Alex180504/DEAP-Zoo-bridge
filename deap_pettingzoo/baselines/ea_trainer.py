@@ -171,6 +171,8 @@ class EATrainer(BaselineTrainer):
         mutation_params: Optional[Dict[str, Any]] = None,
         num_workers: int = 1,
         parallel_backend: str = "process",
+        # --- multi-objective (Phase 1.3) ---
+        fitness_spec: Optional[Any] = None,
     ):
         """Initialize EA trainer.
 
@@ -253,7 +255,17 @@ class EATrainer(BaselineTrainer):
         self.selection_params = dict(selection_params or {})
         self.crossover_params = dict(crossover_params or {})
         self.mutation_params = dict(mutation_params or {})
-        
+        self.fitness_spec = fitness_spec
+
+        # Multi-objective guard: NSGA-II / SPEA2 require the "simple"
+        # strategy.  eaMu*Lambda uses DEAP builtins that cannot dispatch
+        # multi-objective selection internally.
+        if self._is_multiobjective and strategy != "simple":
+            raise ValueError(
+                "Multi-objective selection (nsga2/spea2) requires "
+                f"strategy='simple', got {strategy!r}."
+            )
+
         if num_workers < 0:
             raise ValueError(
                 f"num_workers must be >= 0 (or 1 for serial), got {num_workers}."
@@ -267,6 +279,25 @@ class EATrainer(BaselineTrainer):
             )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+
+    @property
+    def _is_multiobjective(self) -> bool:
+        """``True`` when a multi-objective selection method is configured."""
+        return self.selection_method in {"nsga2", "spea2"}
+
+    @staticmethod
+    def _mo_champion(pareto_or_hof: Any) -> Any:
+        """Return a single champion from a ParetoFront or HallOfFame.
+
+        For a Pareto front (multi-objective) the individual with the
+        best **first** objective value is returned (this is typically
+        the reward axis).  For a standard HallOfFame ``[0]`` is used.
+        """
+        if isinstance(pareto_or_hof, tools.ParetoFront):
+            if not pareto_or_hof.items:
+                raise RuntimeError("ParetoFront is empty")
+            return max(pareto_or_hof.items, key=lambda ind: ind.fitness.values[0])
+        return pareto_or_hof[0]
     
     def train(self, config: TrainingConfig) -> TrainingResult:
         """Train EA with the given configuration.
@@ -303,11 +334,15 @@ class EATrainer(BaselineTrainer):
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
             max_steps=max_steps_per_episode,
-            aggregation_method='sum'
+            aggregation_method='sum',
+            fitness_spec=self.fitness_spec,
         )
         
-        # Setup DEAP
-        setup_deap_creators()
+        # Setup DEAP — with multi-objective weights when appropriate.
+        if self._is_multiobjective and self.fitness_spec is not None:
+            setup_deap_creators(weights=self.fitness_spec.weights)
+        else:
+            setup_deap_creators()
         
         # Create genome configuration
         seed = config.algorithm_params.get('seed', None)
@@ -361,7 +396,10 @@ class EATrainer(BaselineTrainer):
         stats.register("min", np.min)
         stats.register("max", np.max)
         
-        hof = tools.HallOfFame(1)
+        if self._is_multiobjective:
+            hof = tools.ParetoFront()
+        else:
+            hof = tools.HallOfFame(1)
         
         # Setup random number generator
         rng = np.random.default_rng(config.algorithm_params.get('seed'))
@@ -393,12 +431,14 @@ class EATrainer(BaselineTrainer):
             Best-effort: any failure is swallowed so recording can't
             break a long training run.
             """
-            if recording_evaluator is None or hof.items == []:
+            if recording_evaluator is None:
+                return
+            if not hof.items if isinstance(hof, tools.ParetoFront) else (not hof):
                 return
             if gen % recording_cadence != 0:
                 return
             try:
-                best = hof[0]
+                best = self._mo_champion(hof)
                 champ_policy = GenomePolicyWrapper(
                     best.genome, config.env_name, action_space=action_space
                 )
@@ -539,12 +579,17 @@ class EATrainer(BaselineTrainer):
         
         training_time = time.time() - start_time
         
-        # Get best individual
-        best_individual = hof[0]
+        # Get best individual (MO: champion from Pareto front).
+        best_individual = self._mo_champion(hof)
         best_genome = best_individual.genome
         
         # Wrap genome as policy
         policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
+
+        # For multi-objective runs, record the full Pareto front.
+        pareto_front: Optional[List[Any]] = None
+        if isinstance(hof, tools.ParetoFront):
+            pareto_front = list(hof.items)
 
         # Persist results via the logger 
         # No-op when ``config.output_dir is None`` (NoOpLogger) so the backend stays usable without the analysis stack.
@@ -612,6 +657,7 @@ class EATrainer(BaselineTrainer):
                 'parallel_backend': backend,
             },
             training_time=training_time,
+            pareto_front=pareto_front,
         )
     
     def supports_budget_mode(self, mode: BudgetMode) -> bool:

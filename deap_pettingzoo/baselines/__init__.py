@@ -24,6 +24,7 @@ from deap_pettingzoo.baselines.base import (
 )
 from deap_pettingzoo.baselines.ea_trainer import EATrainer
 from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
+from deap_pettingzoo.baselines.pso_trainer import PSOTrainer
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.baselines.agilerl_trainer import (
     AgileRLTrainer,
@@ -78,6 +79,7 @@ __all__ = [
     "PolicyProtocol",
     "EATrainer",
     "CMAESTrainer",
+    "PSOTrainer",
     "AgileRLTrainer",
     "MADDPGTrainer",
     "MATD3Trainer",
