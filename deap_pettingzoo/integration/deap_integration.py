@@ -136,6 +136,7 @@ def evaluate_individual(
 SUPPORTED_SELECTION_METHODS = (
     "tournament", "roulette", "best", "random",
     "sus", "double_tournament", "lexicase", "epsilon_lexicase",
+    "nsga2", "spea2",
 )
 SUPPORTED_CROSSOVER_METHODS = (
     "blend", "one_point", "two_point", "uniform", "sbx", "es_blend",
@@ -316,6 +317,10 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
         toolbox.register("select", tools.selLexicase)
     elif method == "epsilon_lexicase":
         toolbox.register("select", tools.selAutomaticEpsilonLexicase)
+    elif method == "nsga2":
+        toolbox.register("select", tools.selNSGA2, nd=cfg.get("nd", "standard"))
+    elif method == "spea2":
+        toolbox.register("select", tools.selSPEA2)
     else:
         raise ValueError(
             f"Unknown selection method {method!r}. "
