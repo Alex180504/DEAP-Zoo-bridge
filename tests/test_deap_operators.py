@@ -36,14 +36,17 @@ def genome_config():
 
 @pytest.mark.parametrize(
     "method",
-    ["tournament", "roulette", "best", "random"],
+    ["tournament", "roulette", "best", "random", "sus", "double_tournament"],
 )
 def test_selection_method_dispatch(evaluator, genome_config, method):
     """Every supported selection method must produce a working toolbox."""
+    cfg: dict = {"method": method, "tournament_size": 3}
+    if method == "double_tournament":
+        cfg.update({"fitness_size": 2, "parsimony_size": 3})
     toolbox = create_toolbox(
         genome_config=genome_config,
         evaluator=evaluator,
-        selection_config={"method": method, "tournament_size": 3},
+        selection_config=cfg,
     )
     pop = toolbox.population(n=6)
     for ind in pop:
@@ -167,3 +170,136 @@ def test_default_methods_backwards_compatible(evaluator, genome_config):
     # tournament default:
     chosen = toolbox.select(pop, k=2)
     assert len(chosen) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.2 — Advanced selection operator tests
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleTournamentSelection:
+    """Double-tournament uses genome.get_weight_count() as parsimony."""
+
+    def test_favours_smaller_networks(self, evaluator, genome_config):
+        setup_deap_creators()
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={
+                "method": "double_tournament",
+                "fitness_size": 2,
+                "parsimony_size": 3,
+            },
+        )
+        pop = toolbox.population(n=12)
+        # Give half the population a small network (manually trim weights).
+        for i, ind in enumerate(pop):
+            ind.fitness.values = (1.0,)
+            if i >= 6:
+                # Artificially inflate genome weight count to simulate bloat.
+                _orig_wc = ind.genome.get_weight_count
+                ind.genome.get_weight_count = lambda _orig=_orig_wc: _orig_wc() * 10
+
+        chosen = toolbox.select(pop, k=4)
+        assert len(chosen) == 4
+        # All chosen should be from the first 6 (smaller) individuals.
+        for ind in chosen:
+            wc = ind.genome.get_weight_count()
+            # Should be the non-inflated weight count.
+            assert wc < 200  # small network, not 10× inflated
+
+    def test_fitness_first_false(self, evaluator, genome_config):
+        """Parsimony-first mode selects small networks first, then fit among them."""
+        setup_deap_creators()
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={
+                "method": "double_tournament",
+                "fitness_size": 2,
+                "parsimony_size": 3,
+                "fitness_first": False,
+            },
+        )
+        pop = toolbox.population(n=8)
+        for ind in pop:
+            ind.fitness.values = (0.0,)
+        chosen = toolbox.select(pop, k=3)
+        assert len(chosen) == 3
+        for ind in chosen:
+            assert hasattr(ind, "genome")
+
+
+class TestLexicaseSelection:
+    """Lexicase / epsilon-lexicase require multi-dimensional fitness vectors."""
+
+    @staticmethod
+    def _multi_fitness_pop(genome_config, evaluator, n=6, dim=4):
+        setup_deap_creators(weights=(1.0,) * dim)
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+        )
+        pop = toolbox.population(n=n)
+        rng = __import__("numpy").random.default_rng(42)
+        for ind in pop:
+            ind.fitness.values = tuple(float(v) for v in rng.uniform(-10, 10, size=dim))
+        return toolbox, pop
+
+    def test_lexicase_selects_with_vector_fitness(self, evaluator, genome_config):
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={"method": "lexicase"},
+        )
+        _, pop = self._multi_fitness_pop(genome_config, evaluator)
+        chosen = toolbox.select(pop, k=3)
+        assert len(chosen) == 3
+        for ind in chosen:
+            assert hasattr(ind, "genome")
+
+    def test_epsilon_lexicase_selects(self, evaluator, genome_config):
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={"method": "epsilon_lexicase"},
+        )
+        _, pop = self._multi_fitness_pop(genome_config, evaluator)
+        chosen = toolbox.select(pop, k=3)
+        assert len(chosen) == 3
+
+    def test_lexicase_requires_multi_dimensional_fitness(self, evaluator, genome_config):
+        """Lexicase with scalar fitness is defined-but-passive (picks randomly)."""
+        # Reset to single-objective creators — surrounding tests may have
+        # switched to multi-dimensional fitness.
+        setup_deap_creators()
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={"method": "lexicase"},
+        )
+        pop = toolbox.population(n=4)
+        for ind in pop:
+            ind.fitness.values = (5.0,)  # 1-D tuple
+        chosen = toolbox.select(pop, k=2)
+        assert len(chosen) == 2
+
+
+class TestSUSSelection:
+    """Stochastic Universal Sampling plain dispatch test."""
+
+    def test_sus_selects_correct_count(self, evaluator, genome_config):
+        # Ensure single-objective creators (may have been altered by lexicase tests).
+        setup_deap_creators()
+        toolbox = create_toolbox(
+            genome_config=genome_config,
+            evaluator=evaluator,
+            selection_config={"method": "sus"},
+        )
+        pop = toolbox.population(n=8)
+        for ind in pop:
+            ind.fitness.values = (abs(float(hash(str(id(ind))))) % 100,)
+        chosen = toolbox.select(pop, k=5)
+        assert len(chosen) == 5
+        for ind in chosen:
+            assert hasattr(ind, "genome")
