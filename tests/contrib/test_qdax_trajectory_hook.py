@@ -187,6 +187,17 @@ def test_qdax_descriptor_skips_variable_shape_frames() -> None:
     np.testing.assert_allclose(result, [0.2, 0.3])
 
 
+def test_mask_optional_pyarrow_imports_blocks_pyarrow_only() -> None:
+    from deap_pettingzoo.contrib.qdax.coevolution import _mask_optional_pyarrow_imports
+
+    with _mask_optional_pyarrow_imports():
+        with pytest.raises(ImportError):
+            __import__("pyarrow")
+
+        math_mod = __import__("math")
+        assert math_mod.sqrt(9) == 3.0
+
+
 def test_qdax_bootstrap_replaces_temporary_repertoire() -> None:
     jax = pytest.importorskip("jax")
 
