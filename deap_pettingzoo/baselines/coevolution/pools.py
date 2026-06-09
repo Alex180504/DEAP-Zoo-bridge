@@ -203,10 +203,25 @@ def rebuild_opponent_policy(
         params = flat_to_pytree(np.asarray(payload["flat_params"]), layer_sizes)
         return FlaxPolicyAdapter(module, params, action_space=action_space)
 
+    if kind == "neat":
+        from deap_pettingzoo.contrib.neat.policy import NeatPolicy
+        from deap_pettingzoo.contrib.neat.config import build_neat_config
+
+        genome = payload["genome"]
+        input_size = int(payload["config_input_size"])
+        output_size = int(payload["config_output_size"])
+        neat_cfg = build_neat_config(
+            input_size=input_size,
+            output_size=output_size,
+        )
+        return NeatPolicy(
+            genome, neat_cfg, action_space=action_space,
+        )
+
     raise ValueError(
         f"rebuild_opponent_policy: unknown snapshot kind {kind!r}. "
         "Built-in kinds: 'feedforward', 'frozen', 'frozen_registered', "
-        "'qdax_flax'."
+        "'qdax_flax', 'neat'."
     )
 
 

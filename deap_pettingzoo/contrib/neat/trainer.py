@@ -1,0 +1,280 @@
+"""NEAT trainer — wraps ``neat.Population`` behind the :class:`BaselineTrainer` API.
+
+:class:`NEATTrainer` is a standard :class:`~deap_pettingzoo.baselines.base.BaselineTrainer`
+implementation that uses NEAT to evolve a population of small
+feed-forward neural networks.
+
+Budget translation
+------------------
+NEAT's generation count is the natural budget unit.  The trainer maps
+:attr:`~deap_pettingzoo.baselines.base.BudgetMode.EVAL_EPISODES` and
+:attr:`~deap_pettingzoo.baselines.base.BudgetMode.ENV_STEPS` to
+generations using the population size and evaluation episodes.
+
+Only :class:`~deap_pettingzoo.baselines.base.BudgetMode.WALL_CLOCK` is
+not supported (NEAT does not expose a suspend/resume hook).
+"""
+
+from __future__ import annotations
+
+import time
+import warnings
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List, Optional
+
+import numpy as np
+
+import neat  # guarded by _require_neat
+
+from deap_pettingzoo.baselines._logging_helpers import (
+    build_logger,
+    dump_fitness_history,
+    write_summary,
+)
+from deap_pettingzoo.baselines.base import (
+    BaselineTrainer,
+    BudgetMode,
+    TrainingConfig,
+    TrainingResult,
+    PolicyProtocol,
+)
+from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.environments import PettingZooWrapper
+from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
+from deap_pettingzoo.policies.action_heads import required_output_size
+
+from .config import build_neat_config
+from .policy import NeatPolicy
+
+
+class NEATTrainer(BaselineTrainer):
+    """Train a NEAT population on a PettingZoo environment.
+
+    Orchestrates the neat-python ``Population.run()`` loop inside the
+    :class:`BaselineTrainer` protocol.
+
+    Algorithm-specific params accepted in ``TrainingConfig.algorithm_params``:
+
+    * ``pop_size`` (int, default 50) — NEAT population size.
+    * ``n_generations`` (int, optional) — explicit generation budget
+      (bypasses the budget_mode translation when set).
+    * ``neat_config_overrides`` (dict) — section→key→value overrides
+      passed to :func:`build_neat_config`.
+    * ``eval_episodes_per_genome`` (int, default 1) — number of
+      episodes used to evaluate each genome's fitness.
+    * ``seed`` (int, optional) — RNG seed passed to both the NEAT
+      config and the env reset.
+    * ``action_aggregator`` (str, default "mean") — how to combine
+      per-episode rewards into a scalar fitness: ``"mean"`` or
+      ``"sum"``.
+    """
+
+    # NEAT typically needs more generations than EA; record every gen
+    # by default is too noisy but consistent with other trainers.
+    _default_recording_every_n: ClassVar[int] = 1
+
+    def __init__(self) -> None:
+        self._fitness_history: List[float] = []
+        self._generation_num: int = 0
+
+    # ------------------------------------------------------------------
+    # BaselineTrainer interface
+    # ------------------------------------------------------------------
+
+    def supports_budget_mode(self, mode: BudgetMode) -> bool:
+        return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            "discrete_action": True,
+            "continuous_action": True,
+            "multi_agent": True,
+            "multi_objective": False,
+            "parallel_training": False,
+            "recurrent": False,
+            "population_based": True,
+            "algorithm": "NEAT",
+        }
+
+    def train(self, config: TrainingConfig) -> TrainingResult:
+        t0 = time.perf_counter()
+        params = dict(config.algorithm_params)
+
+        # --- Resolve budget to generations -----------------------------------
+        pop_size = int(params.get("pop_size", 50))
+        n_generations = params.get("n_generations", None)
+        if n_generations is None:
+            n_generations = self._budget_to_generations(config, pop_size)
+
+        # --- Build env -------------------------------------------------------
+        env = PettingZooWrapper(
+            config.env_name,
+            env_config=config.env_config,
+            render_mode="rgb_array" if config.render else None,
+        )
+        action_spaces = {
+            agent: env.action_space(agent) for agent in env.possible_agents
+        }
+        # For homogeneous teams we assume a single shared action space.
+        shared_action_space = action_spaces[env.possible_agents[0]]
+
+        # --- Build NEAT config -----------------------------------------------
+        obs_shape = env.observation_space(env.possible_agents[0]).shape
+        input_size = int(obs_shape[0]) if obs_shape else 1
+        output_size = required_output_size(shared_action_space)
+
+        overrides = dict(params.get("neat_config_overrides", {}))
+        seed = params.get("seed", None)
+        neat_config = build_neat_config(
+            input_size=input_size,
+            output_size=output_size,
+            pop_size=pop_size,
+            seed=seed,
+            overrides=overrides,
+        )
+
+        # --- Create initial population ---------------------------------------
+        pop = neat.Population(neat_config, seed=seed)
+
+        # --- Evaluation callback for neat ------------------------------------
+        eval_eps = int(params.get("eval_episodes_per_genome", 1))
+
+        # We use a closure-friendly wrapper to cap eval episodes.
+        def _eval_genomes(
+            genomes_and_ids: list, neat_cfg: neat.Config
+        ) -> None:
+            """neat fitness-function contract: assign .fitness to each genome."""
+            self._generation_num += 1
+            gen_fitnesses: list[float] = []
+
+            for _genome_id, genome in genomes_and_ids:
+                policy = NeatPolicy(
+                    genome, neat_cfg, action_space=shared_action_space
+                )
+                rewards: list[float] = []
+                # Simple multi-episode loop via Parallel API
+                for _ in range(eval_eps):
+                    observations = env.reset(seed=seed)
+                    episode_reward = 0.0
+                    done = False
+                    _steps = 0
+                    while not done and _steps < 500:
+                        actions = {}
+                        for agent in observations:
+                            actions[agent] = policy.get_action(
+                                observations[agent]
+                            )
+                        observations, step_rewards, dones, truncateds, _infos = (
+                            env.step(actions)
+                        )
+                        episode_reward += float(sum(step_rewards.values()))
+                        done = all(dones.values()) or all(truncateds.values())
+                        _steps += 1
+                    rewards.append(episode_reward)
+
+                # Aggregate
+                aggregator = params.get("action_aggregator", "mean")
+                if aggregator == "sum":
+                    fitness = float(np.sum(rewards))
+                else:
+                    fitness = float(np.mean(rewards))
+                genome.fitness = fitness
+                gen_fitnesses.append(fitness)
+
+            if gen_fitnesses:
+                self._fitness_history.append(float(np.max(gen_fitnesses)))
+
+        # --- Add reporters ---------------------------------------------------
+        pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
+
+        # --- Run NEAT --------------------------------------------------------
+        try:
+            best_genome = pop.run(_eval_genomes, n=n_generations)
+        except neat.CompleteExtinctionException:
+            warnings.warn(
+                "NEAT population went extinct before completing the budget. "
+                "The best genome from the last surviving generation is used.",
+                stacklevel=2,
+            )
+            best_genome = pop.best_genome
+
+        # --- Build result policy --------------------------------------------
+        champion = NeatPolicy(
+            best_genome, neat_config, action_space=shared_action_space
+        )
+
+        elapsed = time.perf_counter() - t0
+
+        # Logging
+        output_dir = config.output_dir
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            if not output_dir.exists():
+                output_dir.mkdir(parents=True, exist_ok=True)
+            logger = build_logger(config, algorithm="NEAT")
+            dump_fitness_history(
+                logger,
+                [
+                    {"generation": i, "best_fitness": f}
+                    for i, f in enumerate(self._fitness_history)
+                ],
+                env_steps_per_iteration=pop_size,
+            )
+            write_summary(
+                logger,
+                {
+                    "algorithm": "NEAT",
+                    "best_fitness": float(
+                        best_genome.fitness if best_genome else -np.inf
+                    ),
+                    "generations": self._generation_num,
+                    "pop_size": pop_size,
+                    "elapsed_sec": round(elapsed, 2),
+                },
+            )
+
+        return TrainingResult(
+            algorithm="NEAT",
+            policy=champion,
+            metrics={
+                "fitness_history": list(self._fitness_history),
+                "final_generation": self._generation_num,
+                "population_size": pop_size,
+            },
+            metadata={
+                "genome": best_genome,
+                "config": neat_config,
+            },
+            seed=seed,
+            training_time=elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _budget_to_generations(
+        self, config: TrainingConfig, pop_size: int
+    ) -> int:
+        """Translate ``config.budget_mode`` / ``.budget_value`` to generations."""
+        if config.budget_mode == BudgetMode.EVAL_EPISODES:
+            # Each generation evaluates pop_size genomes × eval_eps episodes.
+            eval_eps = int(
+                config.algorithm_params.get("eval_episodes_per_genome", 1)
+            )
+            eps_per_gen = pop_size * eval_eps
+            return max(1, config.budget_value // max(1, eps_per_gen))
+
+        if config.budget_mode == BudgetMode.ENV_STEPS:
+            # Coarse estimate: a typical episode is ~25 steps.
+            avg_steps_per_episode = int(
+                config.env_config.get("max_cycles", 25)
+            )
+            eval_eps = int(
+                config.algorithm_params.get("eval_episodes_per_genome", 1)
+            )
+            steps_per_gen = pop_size * eval_eps * avg_steps_per_episode
+            return max(1, config.budget_value // max(1, steps_per_gen))
+
+        # Fallback — should not happen (supports_budget_mode gate).
+        return 10

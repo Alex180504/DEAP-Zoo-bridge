@@ -115,11 +115,12 @@ class Side:
             "rl",
             "pso",
             "rl_hpo",
+            "neat",
         }:
             raise ValueError(
                 f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
                 "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', "
-                f"'pso', or 'rl_hpo'; got {self.optimizer!r}."
+                f"'pso', 'rl_hpo', or 'neat'; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -1023,6 +1024,16 @@ def make_side_state(side: Side) -> SideState:
     if side.optimizer == "rl_hpo":
         from .rl_hpo_side import RLEvolveHPOSideState
         return RLEvolveHPOSideState(side)
+    if side.optimizer == "neat":
+        try:
+            from deap_pettingzoo.contrib.neat.coevolution import NeatSideState
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                f"Side {side.name!r}: optimizer='neat' requires the "
+                "neat extra. Install with `pip install "
+                "deap-pettingzoo[neat]`."
+            ) from exc
+        return NeatSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )
