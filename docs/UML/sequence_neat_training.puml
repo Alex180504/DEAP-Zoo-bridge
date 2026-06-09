@@ -1,0 +1,57 @@
+@startuml sequence_neat_training
+!theme plain
+title NEAT Training Sequence
+
+actor User
+participant "NEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "PettingZooWrapper" as Env
+participant "NeatPolicy" as Policy
+participant "TrainingResult" as Result
+
+User -> Trainer: train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer: _budget_to_generations(config, pop_size)
+Trainer -> Env: PettingZooWrapper(env_name, env_config)
+activate Env
+Trainer <-- Env: env handle
+deactivate Env
+
+Trainer -> Trainer: build_neat_config(input_size, output_size, pop_size, seed)
+Trainer -> Pop: neat.Population(config, seed)
+activate Pop
+
+loop n_generations
+    Trainer -> Pop: run(eval_function, n=1)
+    activate Pop
+
+    loop for each genome in population
+        Pop -> Trainer: eval_function(genomes, config)
+        Trainer -> Policy: NeatPolicy(genome, config, action_space)
+        activate Policy
+        Trainer -> Policy: get_action(obs)
+        Policy -> Policy: network.activate(obs)
+        Policy -> Policy: head.decode(raw_output)
+        Trainer <-- Policy: action
+        deactivate Policy
+
+        Trainer -> Env: reset(seed)
+        loop episode steps
+            Trainer -> Env: step(actions_dict)
+            Env --> Trainer: observations, rewards, dones, truncateds, infos
+        end
+        Trainer -> Trainer: genome.fitness = mean(rewards)
+    end
+
+    Pop -> Pop: reproduce / speciate
+    Pop --> Trainer: best_genome (if threshold met)
+    deactivate Pop
+end
+
+Trainer -> Policy: NeatPolicy(best_genome, config)
+Trainer -> Result: TrainingResult(algorithm="NEAT", policy=champion, metrics)
+Trainer --> User: TrainingResult
+deactivate Trainer
+
+@enduml
