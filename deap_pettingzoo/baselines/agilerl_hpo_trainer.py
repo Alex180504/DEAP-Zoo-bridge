@@ -1,0 +1,505 @@
+"""
+AgileRL evolutionary hyperparameter-optimisation trainer.
+
+Wraps AgileRL's built-in ``Mutations``, ``TournamentSelection``, and
+``EvolvableAlgorithm.population()`` facilities behind the unified
+:class:`BaselineTrainer` API.  A population of AgileRL agents is
+evolved generation-by-generation, with periodic architecture / weight /
+hyperparameter mutations and tournament-driven survival.
+
+This module depends on the optional ``rl-baselines`` extra
+(``pip install 'deap-pettingzoo[rl-baselines]'``).  Imports are lazy
+inside :meth:`train` so the core package remains importable without
+AgileRL or PyTorch.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any, ClassVar, Dict, List, Optional
+
+import numpy as np
+
+from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
+from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.baselines.base import (
+    BaselineTrainer,
+    BudgetMode,
+    TrainingConfig,
+    TrainingResult,
+)
+
+
+class EvolveHPOTrainer(AgileRLTrainer):
+    """AgileRL trainer with evolutionary HPO (population-level mutations).
+
+    Builds a *population* of AgileRL agents, runs each through a
+    rollout-and-learn loop, evaluates fitness, then applies tournament
+    selection and mutations to form the next generation.
+
+    Constructor parameters mirror :class:`AgileRLTrainer` with the
+    addition of:
+
+    * ``population_size`` — number of agents in the HPO population.
+    * ``evo_every_n_steps`` — number of env steps between evaluations.
+    * ``mutation_probs`` — dict of mutation probabilities passed to
+      AgileRL's :class:`~agilerl.hpo.mutation.Mutations`.
+
+    See the AgileRL documentation for full details on the mutation and
+    tournament framework:
+    https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html
+    """
+
+    _default_recording_every_n: ClassVar[int] = 5
+
+    def __init__(
+        self,
+        population_size: int = 6,
+        evo_every_n_steps: int = 50_000,
+        mutation_probs: Optional[Dict[str, float]] = None,
+        device: str = "cpu",
+        verbose: bool = False,
+    ) -> None:
+        super().__init__(device=device, verbose=verbose)
+        if population_size < 2:
+            raise ValueError(
+                f"population_size must be >= 2, got {population_size}"
+            )
+        self._hpo_population_size = int(population_size)
+        self._evo_every_n_steps = int(evo_every_n_steps)
+        self._mutation_probs = dict(mutation_probs or {})
+        self._mutation_probs.setdefault("no_mutation", 0.4)
+        self._mutation_probs.setdefault("architecture", 0.2)
+        self._mutation_probs.setdefault("new_layer_prob", 0.2)
+        self._mutation_probs.setdefault("parameters", 0.2)
+        self._mutation_probs.setdefault("activation", 0.0)
+        self._mutation_probs.setdefault("rl_hp", 0.2)
+
+    # ------------------------------------------------------------------
+    # BaselineTrainer
+    # ------------------------------------------------------------------
+
+    def train(self, config: TrainingConfig) -> TrainingResult:
+        """Run evolutionary HPO training.
+
+        Args:
+            config: Training configuration.  ``algorithm_params`` may
+                contain HPO-specific keys:
+
+                * ``hp_config`` — dict mapping parameter names to
+                  ``[min, max]`` ranges, forwarded to
+                  :class:`~agilerl.algorithms.core.registry.HyperparameterConfig`.
+                * ``net_config`` — ``{encoder_config, head_config}``
+                  dict for AgileRL network construction.
+                * ``population_size`` — overrides the constructor default.
+                * ``tournament_size`` — tournament selection size.
+                * ``mutation_probs`` — overrides constructor defaults.
+                * ``seed`` — RNG seed for reproducibility.
+
+        Returns:
+            :class:`TrainingResult` with champion policy and metrics.
+        """
+        start_time = time.time()
+
+        # Lazy imports — AgileRL is an optional dependency.
+        try:
+            from agilerl.hpo.mutation import Mutations
+            from agilerl.hpo.tournament import TournamentSelection
+            from agilerl.algorithms.core.registry import (
+                HyperparameterConfig,
+                RLParameter,
+            )
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "EvolveHPOTrainer requires the 'rl-baselines' extra. "
+                "Install with: pip install 'deap-pettingzoo[rl-baselines]'"
+            ) from exc
+
+        # ---- resolve algorithm class and environment ----
+        alg_cls = self._import_algorithm()
+        env, obs_spaces, act_spaces, agent_ids = self._build_env(config)
+        is_vec = config.algorithm_params.get("num_envs", 1) > 1
+        max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
+
+        # ---- HPO hyperparameters ----
+        pop_size = config.algorithm_params.get(
+            "population_size", self._hpo_population_size
+        )
+        evo_every = config.algorithm_params.get(
+            "evo_every_n_steps", self._evo_every_n_steps
+        )
+        tournament_size = config.algorithm_params.get("tournament_size", 2)
+        seed = config.algorithm_params.get("seed", None)
+
+        # Build NetConfig and HyperparameterConfig.
+        net_config = config.algorithm_params.get("net_config", {})
+        hp_config = self._build_hp_config(
+            config.algorithm_params.get("hp_config", {}),
+            HyperparameterConfig,
+            RLParameter,
+        )
+
+        # ---- build population ----
+        ctor_kwargs: Dict[str, Any] = {}
+        ctor_kwargs["device"] = config.algorithm_params.get(
+            "device", self.device
+        )
+        for key in (
+            "batch_size", "memory_size", "learning_delay", "learn_step",
+            "lr_actor", "lr_critic", "lr", "gamma", "tau", "policy_freq",
+            "expl_noise", "O_U_noise", "ent_coef",
+        ):
+            if key in config.algorithm_params:
+                ctor_kwargs[key] = config.algorithm_params[key]
+
+        population = self._build_population(
+            alg_cls, pop_size, obs_spaces, act_spaces, agent_ids,
+            net_config, hp_config, ctor_kwargs,
+        )
+
+        # ---- HPO machinery ----
+        mut_probs = dict(self._mutation_probs)
+        mut_probs.update(config.algorithm_params.get("mutation_probs", {}))
+        mutations = Mutations(
+            no_mutation=mut_probs["no_mutation"],
+            architecture=mut_probs["architecture"],
+            new_layer_prob=mut_probs["new_layer_prob"],
+            parameters=mut_probs["parameters"],
+            activation=mut_probs["activation"],
+            rl_hp=mut_probs["rl_hp"],
+            mutation_sd=config.algorithm_params.get("mutation_sd", 0.1),
+            rand_seed=seed,
+            device=self.device,
+        )
+        tournament = TournamentSelection(
+            tournament_size=tournament_size,
+            elitism=True,
+            population_size=pop_size,
+            eval_loop=1,
+        )
+
+        # ---- training loop ----
+        rng = np.random.default_rng(seed)
+        budget_steps = self._resolve_budget_steps(config)
+        steps_done = 0
+        generation = 0
+        fitness_history: List[Dict[str, Any]] = []
+
+        # Main loop: evolve for budget_steps.
+        while steps_done < budget_steps:
+            generation += 1
+            gen_fitnesses: List[float] = []
+
+            # Train each agent for evo_every steps.
+            for agent in population:
+                gen_steps = self._train_one_agent(
+                    agent, env, agent_ids, is_vec, max_steps,
+                    evo_every, seed, rng,
+                )
+                steps_done += gen_steps
+
+            # Evaluate all agents.
+            for i, agent in enumerate(population):
+                fit = self._evaluate_agent(
+                    agent, env, agent_ids, max_steps,
+                    seed, rng, num_episodes=3,
+                )
+                gen_fitnesses.append(fit)
+
+            # Record stats.
+            best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
+            mean_fit = float(np.mean(gen_fitnesses)) if gen_fitnesses else 0.0
+            fitness_history.append({
+                "generation": generation,
+                "steps": steps_done,
+                "mean": mean_fit,
+                "max": best_fit,
+                "min": min(gen_fitnesses) if gen_fitnesses else 0.0,
+                "std": float(np.std(gen_fitnesses)) if gen_fitnesses else 0.0,
+            })
+
+            if self.verbose:
+                print(
+                    f"[{self.ALGORITHM_NAME}-HPO] gen {generation} "
+                    f"steps={steps_done:,} mean={mean_fit:+.2f} "
+                    f"max={best_fit:+.2f}"
+                )
+
+            # Tournament selection + mutation.
+            _, population = tournament.select(population)
+            population = mutations.mutation(population)
+
+        # Champion = best agent by fitness.
+        champ_fits = [
+            self._evaluate_agent(a, env, agent_ids, max_steps, seed, rng, num_episodes=5)
+            for a in population
+        ]
+        champ_idx = int(np.argmax(champ_fits))
+        champion = population[champ_idx]
+
+        policy = AgileRLPolicyWrapper(
+            champion, agent_ids, algorithm_name=f"{self.ALGORITHM_NAME}-hpo",
+        )
+        training_time = time.time() - start_time
+
+        return TrainingResult(
+            algorithm=f"{self.ALGORITHM_NAME}-hpo",
+            policy=policy,
+            metrics={
+                "fitness_history": fitness_history,
+                "final_fitness": champ_fits[champ_idx],
+                "num_generations": generation,
+                "population_size": pop_size,
+                "total_env_steps": steps_done,
+            },
+            metadata={
+                "algorithm_name": self.ALGORITHM_NAME,
+                "population_size": pop_size,
+                "mutation_probs": mut_probs,
+            },
+            training_time=training_time,
+        )
+
+    # ------------------------------------------------------------------
+    # BaselineTrainer — capabilities
+    # ------------------------------------------------------------------
+
+    def supports_budget_mode(self, mode: BudgetMode) -> bool:
+        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            "discrete_action": True,
+            "continuous_action": True,
+            "needs_global_state": False,
+            "on_policy": self.ON_POLICY,
+            "supports_turn_based": False,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_hp_config(
+        hp_spec: Dict[str, Any],
+        HyperparameterConfig: type,
+        RLParameter: type,
+    ) -> Any:
+        """Build a ``HyperparameterConfig`` from a simple ``{name: [lo,hi]}`` dict."""
+        if not hp_spec:
+            return HyperparameterConfig()
+        params = {}
+        for name, spec in hp_spec.items():
+            if isinstance(spec, (list, tuple)) and len(spec) >= 2:
+                lo, hi = float(spec[0]), float(spec[1])
+                grow = float(spec[2]) if len(spec) > 2 else 1.5
+                shrink = float(spec[3]) if len(spec) > 3 else 0.75
+                params[name] = RLParameter(
+                    min=lo, max=hi, grow_factor=grow, shrink_factor=shrink,
+                )
+            else:
+                params[name] = spec  # already an RLParameter
+        return HyperparameterConfig(**params)
+
+    def _build_population(
+        self,
+        alg_cls: type,
+        size: int,
+        obs_spaces: Any,
+        act_spaces: Any,
+        agent_ids: List[str],
+        net_config: Dict[str, Any],
+        hp_config: Any,
+        ctor_kwargs: Dict[str, Any],
+    ) -> List[Any]:
+        """Create a population of AgileRL agents.
+
+        Uses ``alg_cls.population(...)`` when available (AgileRL >= 2.6);
+        otherwise falls back to manual construction.
+        """
+        kwargs = dict(ctor_kwargs)
+        if net_config:
+            kwargs["net_config"] = net_config
+        if hp_config:
+            kwargs["hp_config"] = hp_config
+
+        try:
+            return list(alg_cls.population(
+                size=size,
+                observation_space=obs_spaces,
+                action_space=act_spaces,
+                agent_ids=agent_ids,
+                **kwargs,
+            ))
+        except TypeError:
+            # Older AgileRL — construct manually.
+            pop = []
+            for i in range(size):
+                agent = alg_cls(
+                    observation_spaces=obs_spaces,
+                    action_spaces=act_spaces,
+                    agent_ids=agent_ids,
+                    index=i,
+                    **kwargs,
+                )
+                pop.append(agent)
+            return pop
+
+    @staticmethod
+    def _train_one_agent(
+        agent: Any,
+        env: Any,
+        agent_ids: List[str],
+        is_vec: bool,
+        max_steps: int,
+        target_steps: int,
+        seed: Optional[int],
+        rng: np.random.Generator,
+    ) -> int:
+        """Run rollout-and-learn for one agent, returning steps consumed."""
+        steps = 0
+        learn_step = getattr(agent, "learn_step", 100)
+        batch_size = getattr(agent, "batch_size", 64)
+        memory = getattr(agent, "memory", None)
+        learning_delay = getattr(agent, "learning_delay", 500)
+        total_transitions = getattr(agent, "_total_transitions", 0)
+        discrete = bool(getattr(agent, "discrete_actions", False))
+
+        while steps < target_steps:
+            ep_seed = int(rng.integers(0, 2**31)) if seed is not None else None
+            obs, info = env.reset(seed=ep_seed)
+            ep_steps = 0
+
+            while ep_steps < max_steps and steps < target_steps:
+                try:
+                    actions = agent.get_action(obs, training=True)
+                except TypeError:
+                    actions = agent.get_action(obs)
+                result = actions[0] if isinstance(actions, tuple) else actions
+                # Unwrap batched actions for raw PettingZoo envs.
+                unwrapped: Dict[str, Any] = {}
+                for a, act in result.items():
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                        if discrete and arr.shape == ():
+                            arr = arr.item()
+                    unwrapped[a] = arr
+                next_obs, rewards, terms, truncs, infos = env.step(unwrapped)
+                done = all(terms.get(a, False) for a in agent_ids) or all(
+                    truncs.get(a, False) for a in agent_ids
+                )
+
+                # Store transition.
+                if memory is not None:
+                    for a in agent_ids:
+                        memory.save_to_memory(
+                            obs.get(a), result.get(a),
+                            float(rewards.get(a, 0.0)),
+                            next_obs.get(a), done,
+                        )
+                total_transitions += 1
+                steps += 1
+                ep_steps += 1
+                obs = next_obs
+
+                if (
+                    total_transitions >= learning_delay
+                    and steps % learn_step == 0
+                    and memory is not None
+                    and len(memory) >= batch_size
+                ):
+                    try:
+                        experiences = memory.sample(batch_size)
+                        agent.learn(experiences)
+                    except Exception:
+                        pass
+
+                if done:
+                    break
+
+        if hasattr(agent, "_total_transitions"):
+            object.__setattr__(agent, "_total_transitions", total_transitions)
+        return steps
+
+    @staticmethod
+    def _evaluate_agent(
+        agent: Any,
+        env: Any,
+        agent_ids: List[str],
+        max_steps: int,
+        seed: Optional[int],
+        rng: np.random.Generator,
+        num_episodes: int = 3,
+    ) -> float:
+        """Evaluate an agent's deterministic policy and return mean reward."""
+        discrete = bool(getattr(agent, "discrete_actions", False))
+        rewards: List[float] = []
+        for ep in range(num_episodes):
+            ep_seed = int(rng.integers(0, 2**31)) if seed is not None else None
+            obs, _ = env.reset(seed=ep_seed)
+            total = 0.0
+            for _ in range(max_steps):
+                try:
+                    actions = agent.get_action(obs, training=False)
+                except TypeError:
+                    actions = agent.get_action(obs)
+                result = actions[0] if isinstance(actions, tuple) else actions
+                unwrapped: Dict[str, Any] = {}
+                for a, act in result.items():
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                        if discrete and arr.shape == ():
+                            arr = arr.item()
+                    unwrapped[a] = arr
+                next_obs, rews, terms, truncs, _ = env.step(unwrapped)
+                total += sum(float(rews.get(a, 0.0)) for a in agent_ids)
+                obs = next_obs
+                if all(terms.get(a, False) for a in agent_ids) or all(
+                    truncs.get(a, False) for a in agent_ids
+                ):
+                    break
+            rewards.append(total)
+        return float(np.mean(rewards)) if rewards else 0.0
+
+    def _resolve_budget_steps(self, config: TrainingConfig) -> int:
+        """Translate config budget to env-step count."""
+        if config.budget_mode == BudgetMode.ENV_STEPS:
+            return config.budget_value
+        if config.budget_mode == BudgetMode.EVAL_EPISODES:
+            max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
+            return config.budget_value * max_steps
+        raise ValueError(
+            f"EvolveHPOTrainer does not support budget mode {config.budget_mode}"
+        )
+
+    def _build_env(self, config: TrainingConfig):
+        """Build env + extract spaces — reuses AgileRL adapter."""
+        from deap_pettingzoo.baselines.agilerl_adapter import (
+            build_parallel_env,
+            extract_space_metadata,
+        )
+        env = build_parallel_env(
+            config.env_name,
+            env_config=config.env_config or None,
+        )
+        obs_spaces, act_spaces, agent_ids = extract_space_metadata(env)
+        return env, obs_spaces, act_spaces, agent_ids
+
+    # ------------------------------------------------------------------
+    # Concrete subclasses per algorithm
+    # ------------------------------------------------------------------
+
+
+class MADDPGHPOTrainer(EvolveHPOTrainer):
+    ALGORITHM_NAME = "maddpg"
+    ALGORITHM_IMPORT = ("agilerl.algorithms.maddpg", "MADDPG")
+    ON_POLICY = False
+
+
+class MATD3HPOTrainer(EvolveHPOTrainer):
+    ALGORITHM_NAME = "matd3"
+    ALGORITHM_IMPORT = ("agilerl.algorithms.matd3", "MATD3")
+    ON_POLICY = False

@@ -114,11 +114,12 @@ class Side:
             "qdax_cma_me",
             "rl",
             "pso",
+            "rl_hpo",
         }:
             raise ValueError(
                 f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
-                "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', or "
-                f"'pso'; got {self.optimizer!r}."
+                "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', "
+                f"'pso', or 'rl_hpo'; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -1019,6 +1020,9 @@ def make_side_state(side: Side) -> SideState:
         return RLSideState(side)
     if side.optimizer == "pso":
         return PSOSideState(side)
+    if side.optimizer == "rl_hpo":
+        from .rl_hpo_side import RLEvolveHPOSideState
+        return RLEvolveHPOSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )
