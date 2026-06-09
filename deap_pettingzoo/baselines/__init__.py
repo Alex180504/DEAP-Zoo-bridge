@@ -33,6 +33,11 @@ from deap_pettingzoo.baselines.agilerl_trainer import (
     IPPOTrainer,
     GroupedIPPOTrainer,
 )
+from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
+    EvolveHPOTrainer,
+    MADDPGHPOTrainer,
+    MATD3HPOTrainer,
+)
 from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.baselines.comparison import (
     compare_baselines,
@@ -85,6 +90,9 @@ __all__ = [
     "MATD3Trainer",
     "IPPOTrainer",
     "GroupedIPPOTrainer",
+    "EvolveHPOTrainer",
+    "MADDPGHPOTrainer",
+    "MATD3HPOTrainer",
     "AgileRLPolicyWrapper",
     "UnifiedEvaluator",
     "compare_baselines",
