@@ -173,3 +173,88 @@ def build_neat_config(
         )
     finally:
         os.unlink(tmp.name)
+
+
+# ---------------------------------------------------------------------------
+# CPPN-specific config
+# ---------------------------------------------------------------------------
+
+#: CPPN-compatible activation functions — includes periodic (sin), 
+#: Gaussian, absolute-value, and clamped variants that enable the CPPN
+#: to produce regular patterns.
+CPPN_ACTIVATION_OPTIONS = "sin sigmoid gauss tanh relu identity abs clamped square"
+
+#: CPPN defaults — wider weight ranges and more activation variety
+#: than the standard neuroevolution config.
+_CPPN_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "DefaultGenome": {
+        "activation_default": "sin",
+        "activation_mutate_rate": 0.1,
+        "activation_options": CPPN_ACTIVATION_OPTIONS,
+        "aggregation_default": "sum",
+        "aggregation_options": "sum product",
+        "aggregation_mutate_rate": 0.0,
+        "weight_init_mean": 0.0,
+        "weight_init_stdev": 1.0,
+        "weight_init_type": "gaussian",
+        "weight_mutate_rate": 0.4,
+        "weight_mutate_power": 0.2,
+        "weight_max_value": 8.0,
+        "weight_min_value": -8.0,
+    },
+}
+
+
+def build_cppn_config(
+    input_size: int,
+    output_size: int,
+    *,
+    pop_size: int = 50,
+    seed: Optional[int] = None,
+    overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> neat.Config:
+    """Build a NEAT :class:`~neat.Config` suitable for **CPPN** evolution.
+
+    This config uses periodic / Gaussian activation functions and
+    different weight mutation rates than :func:`build_neat_config`,
+    making it appropriate for Compositional Pattern Producing Networks.
+
+    The resulting config can be used directly with
+    :class:`~deap_pettingzoo.contrib.neat.NEATTrainer` — the CPPN is
+    just a regular NEAT genome with different activation defaults.
+
+    Parameters
+    ----------
+    input_size:
+        Number of CPPN inputs (typically 5: x1, y1, x2, y2, bias).
+    output_size:
+        Number of CPPN outputs (typically 1 for weight queries).
+    pop_size:
+        Population size.
+    seed:
+        Optional RNG seed.
+    overrides:
+        Optional section→key→value overrides (merged on top of
+        defaults).
+
+    Returns
+    -------
+    neat.Config
+    """
+    # Start from the base defaults, then layer CPPN-specific overrides.
+    base_overrides: Dict[str, Dict[str, Any]] = {}
+    for section in _CPPN_DEFAULTS:
+        base_overrides[section] = dict(_CPPN_DEFAULTS[section])
+
+    # Merge caller overrides on top.
+    if overrides:
+        for section, items in overrides.items():
+            base_overrides.setdefault(section, {}).update(items)
+
+    return build_neat_config(
+        input_size=input_size,
+        output_size=output_size,
+        pop_size=pop_size,
+        seed=seed,
+        overrides=base_overrides if base_overrides else None,
+    )

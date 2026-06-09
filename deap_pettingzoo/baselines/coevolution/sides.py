@@ -116,11 +116,14 @@ class Side:
             "pso",
             "rl_hpo",
             "neat",
+            "hyperneat",
+            "es_hyperneat",
         }:
             raise ValueError(
                 f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
                 "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', "
-                f"'pso', 'rl_hpo', or 'neat'; got {self.optimizer!r}."
+                f"'pso', 'rl_hpo', 'neat', 'hyperneat', or "
+                f"'es_hyperneat'; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -1034,6 +1037,30 @@ def make_side_state(side: Side) -> SideState:
                 "deap-pettingzoo[neat]`."
             ) from exc
         return NeatSideState(side)
+    if side.optimizer == "hyperneat":
+        try:
+            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+                HyperNeatSideState,
+            )
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                f"Side {side.name!r}: optimizer='hyperneat' requires the "
+                "neat extra. Install with `pip install "
+                "deap-pettingzoo[neat]`."
+            ) from exc
+        return HyperNeatSideState(side)
+    if side.optimizer == "es_hyperneat":
+        try:
+            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+                ESHyperNeatSideState,
+            )
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                f"Side {side.name!r}: optimizer='es_hyperneat' requires "
+                "the neat extra. Install with `pip install "
+                "deap-pettingzoo[neat]`."
+            ) from exc
+        return ESHyperNeatSideState(side)
     raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
         f"Unknown optimizer {side.optimizer!r}"
     )
