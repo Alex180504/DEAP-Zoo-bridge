@@ -1,0 +1,72 @@
+@startuml sequence_eshyperneat_training
+!theme plain
+title ES-HyperNEAT Training Sequence
+
+actor User
+participant "ESHyperNEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "PettingZooWrapper" as Env
+participant "ESHyperNeatPolicy" as Policy
+participant "ESNetwork" as ESN
+participant "Substrate" as Sub
+
+User -> Trainer: train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer: substrate_for_env(obs_size, act_size)
+Trainer -> Sub: make_uniform_substrate(n_in, n_out)
+Trainer <-- Sub: substrate (input + output coords only)
+
+Trainer -> Trainer: build_cppn_config(input_size=5, output_size=1)
+Trainer -> Pop: neat.Population(cppn_config, seed)
+activate Pop
+
+loop n_generations
+    Trainer -> Pop: run(eval_function, n=1)
+
+    loop for each genome
+        Pop -> Trainer: eval_function(genomes, config)
+        Trainer -> Policy: ESHyperNeatPolicy(genome, config, substrate, es_params)
+        activate Policy
+
+        Policy -> Policy: neat.nn.FeedForwardNetwork.create(genome, config)
+        note right: CPPN (5 inputs, 1 output weight)
+        Policy -> ESN: ESNetwork(substrate, cppn, params)
+        activate ESN
+        ESN -> ESN: es_hyperneat()
+        note right
+            Quadtree variance analysis:
+            1. division_initialization from each input
+            2. pruning_extraction (band-threshold)
+            3. iterate from hidden nodes
+            4. explore to outputs
+            5. clean_net (dead-end removal)
+        end note
+        ESN -> ESN: create_phenotype_network()
+        note right
+            Map discovered hidden coords to IDs.
+            Build node_evals from connections.
+            Return RecurrentNetwork.
+        end note
+        Policy <-- ESN: phenotype RecurrentNetwork
+        deactivate ESN
+
+        Trainer -> Policy: get_action(obs)
+        Policy -> Policy: phenotype.activate(obs)
+        Policy -> Policy: head.decode(raw_output)
+        Trainer <-- Policy: action
+        deactivate Policy
+
+        Trainer -> Env: reset / step loop
+        Trainer -> Trainer: genome.fitness = mean(rewards)
+    end
+
+    Pop -> Pop: reproduce / speciate
+    deactivate Pop
+end
+
+Trainer -> Policy: ESHyperNeatPolicy(best_genome, config, substrate)
+Trainer --> User: TrainingResult(algorithm="ES-HyperNEAT")
+deactivate Trainer
+
+@enduml

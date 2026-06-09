@@ -1,0 +1,61 @@
+@startuml sequence_agilerl_hpo_training
+!theme plain
+title AgileRL Evolvable-HPO Training Sequence
+
+actor User
+participant "EvolveHPOTrainer\n(MADDPGHPO / MATD3HPO)" as Trainer
+participant "agilerl.hpo" as HPO
+participant "PettingZooWrapper" as Env
+participant "AgileRLPolicyWrapper" as Policy
+
+User -> Trainer: train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer: _build_hp_config(spec)
+Trainer -> HPO: HyperparameterConfig(rl_params)
+activate HPO
+HPO --> Trainer: hp_config
+deactivate HPO
+
+Trainer -> Trainer: _build_population(size=N, obs_spaces, act_spaces, net_config, hp_config)
+note right
+    Population of N AgileRL agents,
+    each with a different sampled
+    architecture + hyperparameter set.
+end note
+
+loop ep_cycle
+    loop for each agent in population
+        Trainer -> Env: reset / step loop
+        note right: Collect rollouts with current architecture/HP
+        Trainer -> Policy: agent.learn()
+        note right: Train one learn_step of gradient updates
+    end
+
+    Trainer -> Env: evaluate each agent (k episodes)
+    Trainer -> Trainer: fitnesses = [mean(ep_rewards) for each agent]
+
+    Trainer -> HPO: TournamentSelection.select(population, fitnesses)
+    activate HPO
+    HPO --> Trainer: selected (elite + tournament winners)
+    deactivate HPO
+
+    Trainer -> HPO: Mutations.mutation(population)
+    activate HPO
+    note right
+        Architecture mutations:
+        - add/remove layers
+        - change activation fn
+        HP mutations:
+        - lr_actor, batch_size
+        - learn_step, gamma
+    end note
+    HPO --> Trainer: mutated_population
+    deactivate HPO
+end
+
+Trainer -> Policy: AgileRLPolicyWrapper(best_agent, agent_ids)
+Trainer --> User: TrainingResult(algorithm="MADDPG-HPO", policy=champion)
+deactivate Trainer
+
+@enduml
