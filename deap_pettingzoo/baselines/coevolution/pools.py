@@ -218,10 +218,40 @@ def rebuild_opponent_policy(
             genome, neat_cfg, action_space=action_space,
         )
 
+    if kind == "hyperneat":
+        from deap_pettingzoo.contrib.neat.hyperneat import HyperNeatPolicy
+        from deap_pettingzoo.contrib.neat.config import build_cppn_config
+        from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
+
+        genome = payload["genome"]
+        env_obs_size = int(payload["env_obs_size"])
+        env_act_size = int(payload["env_act_size"])
+        cppn_cfg = build_cppn_config(input_size=5, output_size=1)
+        substrate = substrate_for_env(env_obs_size, env_act_size)
+        return HyperNeatPolicy(
+            genome, cppn_cfg, substrate, action_space=action_space,
+        )
+
+    if kind == "es_hyperneat":
+        from deap_pettingzoo.contrib.neat.hyperneat import ESHyperNeatPolicy
+        from deap_pettingzoo.contrib.neat.config import build_cppn_config
+        from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
+
+        genome = payload["genome"]
+        env_obs_size = int(payload["env_obs_size"])
+        env_act_size = int(payload["env_act_size"])
+        es_params = payload.get("es_params", None)
+        cppn_cfg = build_cppn_config(input_size=5, output_size=1)
+        substrate = substrate_for_env(env_obs_size, env_act_size)
+        return ESHyperNeatPolicy(
+            genome, cppn_cfg, substrate, action_space=action_space,
+            es_params=es_params,
+        )
+
     raise ValueError(
         f"rebuild_opponent_policy: unknown snapshot kind {kind!r}. "
         "Built-in kinds: 'feedforward', 'frozen', 'frozen_registered', "
-        "'qdax_flax', 'neat'."
+        "'qdax_flax', 'neat', 'hyperneat', 'es_hyperneat'."
     )
 
 

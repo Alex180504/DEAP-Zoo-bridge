@@ -206,32 +206,7 @@ class NEATTrainer(BaselineTrainer):
         elapsed = time.perf_counter() - t0
 
         # Logging
-        output_dir = config.output_dir
-        if output_dir is not None:
-            output_dir = Path(output_dir)
-            if not output_dir.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
-            logger = build_logger(config, algorithm="NEAT")
-            dump_fitness_history(
-                logger,
-                [
-                    {"generation": i, "best_fitness": f}
-                    for i, f in enumerate(self._fitness_history)
-                ],
-                env_steps_per_iteration=pop_size,
-            )
-            write_summary(
-                logger,
-                {
-                    "algorithm": "NEAT",
-                    "best_fitness": float(
-                        best_genome.fitness if best_genome else -np.inf
-                    ),
-                    "generations": self._generation_num,
-                    "pop_size": pop_size,
-                    "elapsed_sec": round(elapsed, 2),
-                },
-            )
+        self._log(config, best_genome, pop_size, elapsed, algorithm="NEAT")
 
         return TrainingResult(
             algorithm="NEAT",
@@ -252,6 +227,44 @@ class NEATTrainer(BaselineTrainer):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _log(
+        self,
+        config: TrainingConfig,
+        best_genome: Any,
+        pop_size: int,
+        elapsed: float,
+        *,
+        algorithm: str = "NEAT",
+    ) -> None:
+        """Persist fitness history and summary to ``config.output_dir``."""
+        output_dir = config.output_dir
+        if output_dir is None:
+            return
+        output_dir = Path(output_dir)
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+        logger = build_logger(config, algorithm=algorithm)
+        dump_fitness_history(
+            logger,
+            [
+                {"generation": i, "best_fitness": f}
+                for i, f in enumerate(self._fitness_history)
+            ],
+            env_steps_per_iteration=pop_size,
+        )
+        write_summary(
+            logger,
+            {
+                "algorithm": algorithm,
+                "best_fitness": float(
+                    best_genome.fitness if best_genome else -np.inf
+                ),
+                "generations": self._generation_num,
+                "pop_size": pop_size,
+                "elapsed_sec": round(elapsed, 2),
+            },
+        )
 
     def _budget_to_generations(
         self, config: TrainingConfig, pop_size: int
