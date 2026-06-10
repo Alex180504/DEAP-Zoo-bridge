@@ -19,29 +19,21 @@ from __future__ import annotations
 
 import time
 import warnings
-from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
 import neat  # guarded by _require_neat
 
 from deap_pettingzoo.baselines.base import (
-    BaselineTrainer,
-    BudgetMode,
     TrainingConfig,
     TrainingResult,
-)
-from deap_pettingzoo.baselines._logging_helpers import (
-    build_logger,
-    dump_fitness_history,
-    write_summary,
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
 
 from .config import build_cppn_config
-from .substrate import Substrate, substrate_for_env
+from .substrate import substrate_for_env
 from .hyperneat import HyperNeatPolicy, ESHyperNeatPolicy
 from .trainer import NEATTrainer
 from ._pureples.es_hyperneat import ES_HYPERNEAT_PARAMS_DEFAULTS
@@ -163,7 +155,13 @@ class HyperNEATTrainer(NEATTrainer):
         )
 
         elapsed = time.perf_counter() - t0
-        self._log(config, best_genome, pop_size, elapsed)
+
+        try:
+            env.close()
+        except Exception:
+            pass
+
+        self._log(config, best_genome, pop_size, elapsed, algorithm="HyperNEAT")
 
         return TrainingResult(
             algorithm="HyperNEAT",
@@ -289,7 +287,13 @@ class ESHyperNEATTrainer(NEATTrainer):
         )
 
         elapsed = time.perf_counter() - t0
-        self._log(config, best_genome, pop_size, elapsed)
+
+        try:
+            env.close()
+        except Exception:
+            pass
+
+        self._log(config, best_genome, pop_size, elapsed, algorithm="ES-HyperNEAT")
 
         return TrainingResult(
             algorithm="ES-HyperNEAT",

@@ -1,9 +1,15 @@
 """Surface tests for AgileRL HPO trainer (Phase 2.1).
 
-Does NOT import agilerl — tests the constructor, config parsing,
-and capability surface using the abstract trainer infrastructure.
+:class:`TestEvolveHPOTrainerInit`, :class:`TestConcreteTrainers` and
+:class:`TestBudgetMode` require only the core package (no agilerl).
+:class:`TestBuildHPConfig` directly imports agilerl and is skipped when
+the ``rl-baselines`` extra is not installed.
 """
+import importlib
+
 import pytest
+
+_AGILERL_AVAILABLE = importlib.util.find_spec("agilerl") is not None
 
 from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
     EvolveHPOTrainer,
@@ -61,6 +67,7 @@ class TestConcreteTrainers:
             assert caps["continuous_action"] is True
 
 
+@pytest.mark.skipif(not _AGILERL_AVAILABLE, reason="rl-baselines extra not installed")
 class TestBuildHPConfig:
     def test_empty_spec_returns_empty_config(self):
         from agilerl.algorithms.core.registry import (

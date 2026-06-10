@@ -46,7 +46,7 @@ class TestNEATTrainer:
         assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
 
     def test_train_smoke(self, trainer, minimal_config):
-        """End-to-end smoke test on simple_tag_v3."""
+        """End-to-end smoke test on simple_spread_v3."""
         result = trainer.train(minimal_config)
         assert result.algorithm == "NEAT"
         assert result.policy is not None

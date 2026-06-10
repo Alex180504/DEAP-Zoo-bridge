@@ -36,11 +36,8 @@ from deap_pettingzoo.baselines.base import (
     BudgetMode,
     TrainingConfig,
     TrainingResult,
-    PolicyProtocol,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.environments import PettingZooWrapper
-from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.policies.action_heads import required_output_size
 
 from .config import build_neat_config
@@ -112,11 +109,17 @@ class NEATTrainer(BaselineTrainer):
             env_config=config.env_config,
             render_mode="rgb_array" if config.render else None,
         )
-        action_spaces = {
-            agent: env.action_space(agent) for agent in env.possible_agents
-        }
-        # For homogeneous teams we assume a single shared action space.
-        shared_action_space = action_spaces[env.possible_agents[0]]
+        agents = list(env.possible_agents)
+        reference_space = env.action_space(agents[0])
+        divergent = [a for a in agents[1:] if env.action_space(a) != reference_space]
+        if divergent:
+            raise ValueError(
+                "NEATTrainer requires a single shared action space across all "
+                "agents (homogeneous-team neuroevolution). Diverging agents: "
+                f"{divergent}. Use MixedPolicyEvaluator or an AgileRL trainer "
+                "for heterogeneous-action envs."
+            )
+        shared_action_space = reference_space
 
         # --- Build NEAT config -----------------------------------------------
         obs_shape = env.observation_space(env.possible_agents[0]).shape
@@ -205,7 +208,11 @@ class NEATTrainer(BaselineTrainer):
 
         elapsed = time.perf_counter() - t0
 
-        # Logging
+        try:
+            env.close()
+        except Exception:
+            pass
+
         self._log(config, best_genome, pop_size, elapsed, algorithm="NEAT")
 
         return TrainingResult(

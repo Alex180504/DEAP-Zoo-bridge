@@ -11,10 +11,16 @@ installed (the ``neat`` extra of ``deap-pettingzoo``).
 
 Quick start::
 
-    from deap_pettingzoo.contrib.neat import NEATTrainer, build_neat_config
+    from deap_pettingzoo.contrib.neat import NEATTrainer
+    from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 
-    config = build_neat_config(input_size=8, output_size=5, pop_size=50)
-    trainer = NEATTrainer(config)
+    trainer = NEATTrainer()
+    result = trainer.train(TrainingConfig(
+        env_name="simple_spread_v3",
+        budget_mode=BudgetMode.ENV_STEPS,
+        budget_value=50_000,
+        algorithm_params={"pop_size": 50},
+    ))
 """
 
 from __future__ import annotations
