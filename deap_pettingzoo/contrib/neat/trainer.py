@@ -44,6 +44,27 @@ from .config import build_neat_config
 from .policy import NeatPolicy
 
 
+def _action_space_hint(action_space: Any) -> Dict[str, Any]:
+    """Serialize a gymnasium action space to a picklable dict for workers."""
+    import gymnasium.spaces as spaces
+
+    if isinstance(action_space, spaces.Discrete):
+        return {"type": "discrete", "args": {"n": int(action_space.n)}}
+    if isinstance(action_space, spaces.Box):
+        return {
+            "type": "continuous",
+            "args": {
+                "shape": tuple(int(s) for s in action_space.shape),
+                "low": np.asarray(action_space.low, dtype=np.float32).tolist(),
+                "high": np.asarray(action_space.high, dtype=np.float32).tolist(),
+            },
+        }
+    raise NotImplementedError(
+        f"NEAT parallel evaluation does not support action space "
+        f"{type(action_space).__name__}. Only Discrete and Box are supported."
+    )
+
+
 class NEATTrainer(BaselineTrainer):
     """Train a NEAT population on a PettingZoo environment.
 
@@ -70,9 +91,12 @@ class NEATTrainer(BaselineTrainer):
     # by default is too noisy but consistent with other trainers.
     _default_recording_every_n: ClassVar[int] = 1
 
-    def __init__(self) -> None:
+    def __init__(self, num_workers: int = 1) -> None:
         self._fitness_history: List[float] = []
         self._generation_num: int = 0
+        if num_workers < 1:
+            raise ValueError(f"num_workers must be >= 1, got {num_workers}")
+        self._num_workers = int(num_workers)
 
     # ------------------------------------------------------------------
     # BaselineTrainer interface
@@ -87,7 +111,7 @@ class NEATTrainer(BaselineTrainer):
             "continuous_action": True,
             "multi_agent": True,
             "multi_objective": False,
-            "parallel_training": False,
+            "parallel_training": self._num_workers > 1,
             "recurrent": False,
             "population_based": True,
             "algorithm": "NEAT",
@@ -141,67 +165,107 @@ class NEATTrainer(BaselineTrainer):
 
         # --- Evaluation callback for neat ------------------------------------
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
+        aggregator = params.get("action_aggregator", "mean")
 
-        # Use a closure-friendly wrapper to cap eval episodes.
-        _base_seed = seed if seed is not None else 0
+        # Build action-space hint for worker spec.
+        _act_hint = _action_space_hint(shared_action_space)
 
-        def _eval_genomes(
-            genomes_and_ids: list, neat_cfg: neat.Config
-        ) -> None:
-            """neat fitness-function contract: assign .fitness to each genome."""
-            self._generation_num += 1
-            gen_fitnesses: list[float] = []
+        # --- Parallel or sequential eval -------------------------------------
+        if self._num_workers > 1:
+            from deap_pettingzoo.environments.registry import (
+                get_registry_snapshot,
+                replay_registry_snapshot,
+            )
+            from deap_pettingzoo.utils.parallel import make_executor
+            from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
-            for genome_id, genome in genomes_and_ids:
-                try:
-                    policy = NeatPolicy(
-                        genome, neat_cfg, action_space=shared_action_space
-                    )
-                    rewards: list[float] = []
-                    # Simple multi-episode loop via Parallel API
-                    for ep_i in range(eval_eps):
-                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
-                        observations = env.reset(seed=ep_seed)
-                        episode_reward = 0.0
-                        done = False
-                        _steps = 0
-                        while not done and _steps < 500:
-                            actions = {}
-                            for agent in observations:
-                                actions[agent] = policy.get_action(
-                                    observations[agent]
+            snapshot = get_registry_snapshot()
+            worker_spec = _NeatWorkerSpec(
+                env_name=config.env_name,
+                env_config=dict(config.env_config),
+                input_size=input_size,
+                output_size=output_size,
+                action_space_type=_act_hint["type"],
+                action_space_args=_act_hint.get("args", {}),
+                eval_episodes_per_genome=eval_eps,
+                seed=seed if seed is not None else 0,
+            )
+            _executor = make_executor(
+                self._num_workers,
+                initializer=replay_registry_snapshot,
+                initargs=(snapshot,),
+            )
+            _executor_ctx = _executor
+            _eval_genomes = make_neat_parallel_evaluate(_executor, worker_spec)
+            _is_parallel = True
+        else:
+            _executor_ctx = None
+            _is_parallel = False
+
+            _base_seed = seed if seed is not None else 0
+
+            def _eval_genomes(
+                genomes_and_ids: list, neat_cfg: neat.Config
+            ) -> None:
+                """neat fitness-function contract: assign .fitness to each genome."""
+                self._generation_num += 1
+                gen_fitnesses: list[float] = []
+
+                for _genome_id, genome in genomes_and_ids:
+                    try:
+                        policy = NeatPolicy(
+                            genome, neat_cfg, action_space=shared_action_space
+                        )
+                        rewards: list[float] = []
+                        for ep_i in range(eval_eps):
+                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            observations = env.reset(seed=ep_seed)
+                            episode_reward = 0.0
+                            done = False
+                            _steps = 0
+                            while not done and _steps < 500:
+                                actions = {}
+                                for agent in observations:
+                                    actions[agent] = policy.get_action(
+                                        observations[agent]
+                                    )
+                                observations, step_rewards, dones, truncateds, _infos = (
+                                    env.step(actions)
                                 )
-                            observations, step_rewards, dones, truncateds, _infos = (
-                                env.step(actions)
-                            )
-                            episode_reward += float(sum(step_rewards.values()))
-                            done = all(dones.values()) or all(truncateds.values())
-                            _steps += 1
-                        rewards.append(episode_reward)
+                                episode_reward += float(sum(step_rewards.values()))
+                                done = all(dones.values()) or all(truncateds.values())
+                                _steps += 1
+                            rewards.append(episode_reward)
 
-                    # Aggregate
-                    aggregator = params.get("action_aggregator", "mean")
-                    if aggregator == "sum":
-                        fitness = float(np.sum(rewards))
-                    else:
-                        fitness = float(np.mean(rewards))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    fitness = -1e9  # lethal fitness for broken genomes
+                        if aggregator == "sum":
+                            fitness = float(np.sum(rewards))
+                        else:
+                            fitness = float(np.mean(rewards))
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                        fitness = -1e9
 
-                genome.fitness = fitness
-                gen_fitnesses.append(fitness)
+                    genome.fitness = fitness
+                    gen_fitnesses.append(fitness)
 
-            if gen_fitnesses:
-                self._fitness_history.append(float(np.max(gen_fitnesses)))
+                if gen_fitnesses:
+                    self._fitness_history.append(float(np.max(gen_fitnesses)))
 
         # --- Add reporters ---------------------------------------------------
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
 
         # --- Run NEAT --------------------------------------------------------
         try:
-            best_genome = pop.run(_eval_genomes, n=n_generations)
+            if _is_parallel and _executor_ctx is not None:
+                with _executor_ctx:
+                    best_genome = pop.run(_eval_genomes, n=n_generations)
+                if not self._fitness_history:
+                    self._fitness_history.append(
+                        float(best_genome.fitness if best_genome else 0.0)
+                    )
+            else:
+                best_genome = pop.run(_eval_genomes, n=n_generations)
         except neat.CompleteExtinctionException:
             warnings.warn(
                 "NEAT population went extinct before completing the budget. "
