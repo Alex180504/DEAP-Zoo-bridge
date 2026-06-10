@@ -97,42 +97,50 @@ class HyperNEATTrainer(NEATTrainer):
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         activation = params.get("phenotype_activation", "sigmoid")
 
+        _base_seed = seed if seed is not None else 0
+
         def _eval_genomes(
             genomes_and_ids: list, neat_cfg: neat.Config
         ) -> None:
             self._generation_num += 1
             gen_fitnesses: list[float] = []
 
-            for _genome_id, genome in genomes_and_ids:
-                policy = HyperNeatPolicy(
-                    genome,
-                    neat_cfg,
-                    substrate,
-                    action_space=shared_action_space,
-                    activation=activation,
-                )
-                rewards: list[float] = []
-                for _ in range(eval_eps):
-                    observations = env.reset(seed=seed)
-                    ep_rew = 0.0
-                    done = False
-                    _steps = 0
-                    while not done and _steps < 500:
-                        actions = {}
-                        for agent in observations:
-                            actions[agent] = policy.get_action(
-                                observations[agent]
+            for genome_id, genome in genomes_and_ids:
+                try:
+                    policy = HyperNeatPolicy(
+                        genome,
+                        neat_cfg,
+                        substrate,
+                        action_space=shared_action_space,
+                        activation=activation,
+                    )
+                    rewards: list[float] = []
+                    for ep_i in range(eval_eps):
+                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                        observations = env.reset(seed=ep_seed)
+                        ep_rew = 0.0
+                        done = False
+                        _steps = 0
+                        while not done and _steps < 500:
+                            actions = {}
+                            for agent in observations:
+                                actions[agent] = policy.get_action(
+                                    observations[agent]
+                                )
+                            observations, s_rewards, dones, truncateds, _ = (
+                                env.step(actions)
                             )
-                        observations, s_rewards, dones, truncateds, _ = (
-                            env.step(actions)
-                        )
-                        ep_rew += float(sum(s_rewards.values()))
-                        done = all(dones.values()) or all(
-                            truncateds.values()
-                        )
-                        _steps += 1
-                    rewards.append(ep_rew)
-                genome.fitness = float(np.mean(rewards))
+                            ep_rew += float(sum(s_rewards.values()))
+                            done = all(dones.values()) or all(
+                                truncateds.values()
+                            )
+                            _steps += 1
+                        rewards.append(ep_rew)
+                    genome.fitness = float(np.mean(rewards))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    genome.fitness = -1e9
                 gen_fitnesses.append(genome.fitness)
 
             if gen_fitnesses:
@@ -228,6 +236,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         es_params = dict(
             params.get("es_params", ES_HYPERNEAT_PARAMS_DEFAULTS)
         )
+        _base_seed = seed if seed is not None else 0
 
         def _eval_genomes(
             genomes_and_ids: list, neat_cfg: neat.Config
@@ -235,36 +244,43 @@ class ESHyperNEATTrainer(NEATTrainer):
             self._generation_num += 1
             gen_fitnesses: list[float] = []
 
-            for _genome_id, genome in genomes_and_ids:
-                policy = ESHyperNeatPolicy(
-                    genome,
-                    neat_cfg,
-                    substrate,
-                    action_space=shared_action_space,
-                    es_params=es_params,
-                )
-                rewards: list[float] = []
-                for _ in range(eval_eps):
-                    observations = env.reset(seed=seed)
-                    ep_rew = 0.0
-                    done = False
-                    _steps = 0
-                    while not done and _steps < 500:
-                        actions = {}
-                        for agent in observations:
-                            actions[agent] = policy.get_action(
-                                observations[agent]
+            for genome_id, genome in genomes_and_ids:
+                try:
+                    policy = ESHyperNeatPolicy(
+                        genome,
+                        neat_cfg,
+                        substrate,
+                        action_space=shared_action_space,
+                        es_params=es_params,
+                    )
+                    rewards: list[float] = []
+                    for ep_i in range(eval_eps):
+                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                        observations = env.reset(seed=ep_seed)
+                        ep_rew = 0.0
+                        done = False
+                        _steps = 0
+                        while not done and _steps < 500:
+                            actions = {}
+                            for agent in observations:
+                                actions[agent] = policy.get_action(
+                                    observations[agent]
+                                )
+                            observations, s_rewards, dones, truncateds, _ = (
+                                env.step(actions)
                             )
-                        observations, s_rewards, dones, truncateds, _ = (
-                            env.step(actions)
-                        )
-                        ep_rew += float(sum(s_rewards.values()))
-                        done = all(dones.values()) or all(
-                            truncateds.values()
-                        )
-                        _steps += 1
-                    rewards.append(ep_rew)
-                genome.fitness = float(np.mean(rewards))
+                            ep_rew += float(sum(s_rewards.values()))
+                            done = all(dones.values()) or all(
+                                truncateds.values()
+                            )
+                            _steps += 1
+                        rewards.append(ep_rew)
+                    genome.fitness = float(np.mean(rewards))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    genome.fitness = -1e9
+                gen_fitnesses.append(genome.fitness)
                 gen_fitnesses.append(genome.fitness)
 
             if gen_fitnesses:
