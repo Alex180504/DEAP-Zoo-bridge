@@ -39,6 +39,35 @@ from .trainer import NEATTrainer
 from ._pureples.es_hyperneat import ES_HYPERNEAT_PARAMS_DEFAULTS
 
 
+def _substrate_to_spec(substrate: Any) -> Dict[str, Any]:
+    """Serialize a :class:`~._pureples.substrate.Substrate` to a picklable dict."""
+    return {
+        "input_coordinates": [list(c) for c in substrate.input_coordinates],
+        "output_coordinates": [list(c) for c in substrate.output_coordinates],
+        "hidden_coordinates": [
+            [list(c) for c in layer] for layer in substrate.hidden_coordinates
+        ] if substrate.hidden_coordinates else None,
+    }
+
+
+def _run_neat(
+    pop: neat.Population,
+    fitness_func: Any,
+    n_generations: int,
+) -> None:
+    """Run the NEAT population and handle extinction.
+
+    Mutates *pop* in-place; ``pop.best_genome`` is set after completion.
+    """
+    import warnings
+
+    pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
+    try:
+        pop.run(fitness_func, n=n_generations)
+    except neat.CompleteExtinctionException:
+        warnings.warn("NEAT population went extinct.", stacklevel=2)
+
+
 class HyperNEATTrainer(NEATTrainer):
     """NEAT trainer that builds HyperNEAT phenotype policies."""
 
@@ -97,62 +126,93 @@ class HyperNEATTrainer(NEATTrainer):
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         activation = params.get("phenotype_activation", "sigmoid")
 
-        _base_seed = seed if seed is not None else 0
+        # --- Parallel or sequential eval -------------------------------------
+        if self._num_workers > 1:
+            from deap_pettingzoo.environments.registry import (
+                get_registry_snapshot,
+                replay_registry_snapshot,
+            )
+            from deap_pettingzoo.utils.parallel import make_executor
+            from .trainer import _action_space_hint
+            from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
-        def _eval_genomes(
-            genomes_and_ids: list, neat_cfg: neat.Config
-        ) -> None:
-            self._generation_num += 1
-            gen_fitnesses: list[float] = []
+            _act_hint = _action_space_hint(shared_action_space)
+            snapshot = get_registry_snapshot()
+            worker_spec = _NeatWorkerSpec(
+                env_name=config.env_name,
+                env_config=dict(config.env_config),
+                input_size=cppn_input_size,
+                output_size=cppn_output_size,
+                action_space_type=_act_hint["type"],
+                action_space_args=_act_hint.get("args", {}),
+                eval_episodes_per_genome=eval_eps,
+                seed=seed if seed is not None else 0,
+                substrate_spec=_substrate_to_spec(substrate),
+                phenotype_activation=activation,
+            )
 
-            for genome_id, genome in genomes_and_ids:
-                try:
-                    policy = HyperNeatPolicy(
-                        genome,
-                        neat_cfg,
-                        substrate,
-                        action_space=shared_action_space,
-                        activation=activation,
-                    )
-                    rewards: list[float] = []
-                    for ep_i in range(eval_eps):
-                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
-                        observations = env.reset(seed=ep_seed)
-                        ep_rew = 0.0
-                        done = False
-                        _steps = 0
-                        while not done and _steps < 500:
-                            actions = {}
-                            for agent in observations:
-                                actions[agent] = policy.get_action(
-                                    observations[agent]
+            with make_executor(
+                self._num_workers,
+                initializer=replay_registry_snapshot,
+                initargs=(snapshot,),
+            ) as executor:
+                _eval_genomes = make_neat_parallel_evaluate(executor, worker_spec)
+                _run_neat(pop, _eval_genomes, n_generations)
+                if not self._fitness_history:
+                    self._fitness_history.append(0.0)
+        else:
+            _base_seed = seed if seed is not None else 0
+
+            def _eval_genomes(
+                genomes_and_ids: list, neat_cfg: neat.Config
+            ) -> None:
+                self._generation_num += 1
+                gen_fitnesses: list[float] = []
+
+                for _genome_id, genome in genomes_and_ids:
+                    try:
+                        policy = HyperNeatPolicy(
+                            genome,
+                            neat_cfg,
+                            substrate,
+                            action_space=shared_action_space,
+                            activation=activation,
+                        )
+                        rewards: list[float] = []
+                        for ep_i in range(eval_eps):
+                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            observations = env.reset(seed=ep_seed)
+                            ep_rew = 0.0
+                            done = False
+                            _steps = 0
+                            while not done and _steps < 500:
+                                actions = {}
+                                for agent in observations:
+                                    actions[agent] = policy.get_action(
+                                        observations[agent]
+                                    )
+                                observations, s_rewards, dones, truncateds, _ = (
+                                    env.step(actions)
                                 )
-                            observations, s_rewards, dones, truncateds, _ = (
-                                env.step(actions)
-                            )
-                            ep_rew += float(sum(s_rewards.values()))
-                            done = all(dones.values()) or all(
-                                truncateds.values()
-                            )
-                            _steps += 1
-                        rewards.append(ep_rew)
-                    genome.fitness = float(np.mean(rewards))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    genome.fitness = -1e9
-                gen_fitnesses.append(genome.fitness)
+                                ep_rew += float(sum(s_rewards.values()))
+                                done = all(dones.values()) or all(
+                                    truncateds.values()
+                                )
+                                _steps += 1
+                            rewards.append(ep_rew)
+                        genome.fitness = float(np.mean(rewards))
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                        genome.fitness = -1e9
+                    gen_fitnesses.append(genome.fitness)
 
-            if gen_fitnesses:
-                self._fitness_history.append(float(np.max(gen_fitnesses)))
+                if gen_fitnesses:
+                    self._fitness_history.append(float(np.max(gen_fitnesses)))
 
-        pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
+            _run_neat(pop, _eval_genomes, n_generations)
 
-        try:
-            best_genome = pop.run(_eval_genomes, n=n_generations)
-        except neat.CompleteExtinctionException:
-            warnings.warn("NEAT population went extinct.", stacklevel=2)
-            best_genome = pop.best_genome
+        best_genome = pop.best_genome
 
         champion = HyperNeatPolicy(
             best_genome,
@@ -236,63 +296,94 @@ class ESHyperNEATTrainer(NEATTrainer):
         es_params = dict(
             params.get("es_params", ES_HYPERNEAT_PARAMS_DEFAULTS)
         )
-        _base_seed = seed if seed is not None else 0
 
-        def _eval_genomes(
-            genomes_and_ids: list, neat_cfg: neat.Config
-        ) -> None:
-            self._generation_num += 1
-            gen_fitnesses: list[float] = []
+        # --- Parallel or sequential eval -------------------------------------
+        if self._num_workers > 1:
+            from deap_pettingzoo.environments.registry import (
+                get_registry_snapshot,
+                replay_registry_snapshot,
+            )
+            from deap_pettingzoo.utils.parallel import make_executor
+            from .trainer import _action_space_hint
+            from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
-            for genome_id, genome in genomes_and_ids:
-                try:
-                    policy = ESHyperNeatPolicy(
-                        genome,
-                        neat_cfg,
-                        substrate,
-                        action_space=shared_action_space,
-                        es_params=es_params,
-                    )
-                    rewards: list[float] = []
-                    for ep_i in range(eval_eps):
-                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
-                        observations = env.reset(seed=ep_seed)
-                        ep_rew = 0.0
-                        done = False
-                        _steps = 0
-                        while not done and _steps < 500:
-                            actions = {}
-                            for agent in observations:
-                                actions[agent] = policy.get_action(
-                                    observations[agent]
+            _act_hint = _action_space_hint(shared_action_space)
+            snapshot = get_registry_snapshot()
+            worker_spec = _NeatWorkerSpec(
+                env_name=config.env_name,
+                env_config=dict(config.env_config),
+                input_size=cppn_input_size,
+                output_size=cppn_output_size,
+                action_space_type=_act_hint["type"],
+                action_space_args=_act_hint.get("args", {}),
+                eval_episodes_per_genome=eval_eps,
+                seed=seed if seed is not None else 0,
+                substrate_spec=_substrate_to_spec(substrate),
+                es_params=dict(es_params),
+            )
+
+            with make_executor(
+                self._num_workers,
+                initializer=replay_registry_snapshot,
+                initargs=(snapshot,),
+            ) as executor:
+                _eval_genomes = make_neat_parallel_evaluate(executor, worker_spec)
+                _run_neat(pop, _eval_genomes, n_generations)
+                if not self._fitness_history:
+                    self._fitness_history.append(0.0)
+        else:
+            _base_seed = seed if seed is not None else 0
+
+            def _eval_genomes(
+                genomes_and_ids: list, neat_cfg: neat.Config
+            ) -> None:
+                self._generation_num += 1
+                gen_fitnesses: list[float] = []
+
+                for _genome_id, genome in genomes_and_ids:
+                    try:
+                        policy = ESHyperNeatPolicy(
+                            genome,
+                            neat_cfg,
+                            substrate,
+                            action_space=shared_action_space,
+                            es_params=es_params,
+                        )
+                        rewards: list[float] = []
+                        for ep_i in range(eval_eps):
+                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            observations = env.reset(seed=ep_seed)
+                            ep_rew = 0.0
+                            done = False
+                            _steps = 0
+                            while not done and _steps < 500:
+                                actions = {}
+                                for agent in observations:
+                                    actions[agent] = policy.get_action(
+                                        observations[agent]
+                                    )
+                                observations, s_rewards, dones, truncateds, _ = (
+                                    env.step(actions)
                                 )
-                            observations, s_rewards, dones, truncateds, _ = (
-                                env.step(actions)
-                            )
-                            ep_rew += float(sum(s_rewards.values()))
-                            done = all(dones.values()) or all(
-                                truncateds.values()
-                            )
-                            _steps += 1
-                        rewards.append(ep_rew)
-                    genome.fitness = float(np.mean(rewards))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    genome.fitness = -1e9
-                gen_fitnesses.append(genome.fitness)
-                gen_fitnesses.append(genome.fitness)
+                                ep_rew += float(sum(s_rewards.values()))
+                                done = all(dones.values()) or all(
+                                    truncateds.values()
+                                )
+                                _steps += 1
+                            rewards.append(ep_rew)
+                        genome.fitness = float(np.mean(rewards))
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                        genome.fitness = -1e9
+                    gen_fitnesses.append(genome.fitness)
 
-            if gen_fitnesses:
-                self._fitness_history.append(float(np.max(gen_fitnesses)))
+                if gen_fitnesses:
+                    self._fitness_history.append(float(np.max(gen_fitnesses)))
 
-        pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
+            _run_neat(pop, _eval_genomes, n_generations)
 
-        try:
-            best_genome = pop.run(_eval_genomes, n=n_generations)
-        except neat.CompleteExtinctionException:
-            warnings.warn("NEAT population went extinct.", stacklevel=2)
-            best_genome = pop.best_genome
+        best_genome = pop.best_genome
 
         champion = ESHyperNeatPolicy(
             best_genome,
