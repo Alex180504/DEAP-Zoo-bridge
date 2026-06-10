@@ -33,9 +33,6 @@ from deap_pettingzoo.policies.action_heads import required_output_size
 from deap_pettingzoo.baselines.coevolution.pools import (
     OpponentPool,
     OpponentSnapshot,
-    PolicyFactory,
-    PopulationPool,
-    rebuild_opponent_policy,
 )
 from deap_pettingzoo.baselines.coevolution.sides import (
     GenerationStats,

@@ -15,10 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from deap_pettingzoo.baselines.base import PolicyProtocol
-from deap_pettingzoo.baselines.agilerl_policy import (
-    AgileRLPolicyWrapper,
-    FrozenRLPolicyWrapper,
-)
+from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 
 from .pools import OpponentPool, RLPolicyPool
@@ -169,10 +166,9 @@ class RLEvolveHPOSideState(SideState):
             )
             fitnesses.append(fit)
 
-        # 3. Tournament selection + mutation.
+        # 3. Mutation.
         try:
             from agilerl.hpo.mutation import Mutations
-            from agilerl.hpo.tournament import TournamentSelection
         except ImportError:  # pragma: no cover
             raise ImportError("AgileRL required for HPO co-evolution.")
 
@@ -187,21 +183,7 @@ class RLEvolveHPOSideState(SideState):
             rand_seed=self.seed,
             device=self.device,
         )
-        tournament = TournamentSelection(
-            tournament_size=2,
-            elitism=True,
-            population_size=self.population_size,
-            eval_loop=1,
-        )
-        # Attach fitnesses to agents so tournament can read them.
-        for agent, fit in zip(self._population, fitnesses):
-            agent._hpo_fitness = fit  # type: ignore[attr-defined]
-        # Monkey-patch: TournamentSelection expects agent.fitness.
-        # We store fitness on a custom attribute and override evaluate.
-        # Simpler: rebuild tournament with a wrapper.
-        # For now, use a simple best-N-then-mutate approach directly.
-
-        # Simple implementation: select best, keep elites, mutate rest.
+        # Select by fitness: keep top 1/4 elites, mutate the rest.
         ranked = sorted(
             zip(self._population, fitnesses),
             key=lambda x: x[1], reverse=True,
@@ -216,10 +198,9 @@ class RLEvolveHPOSideState(SideState):
         mean = float(np.mean(fitnesses))
         self.best_fitness = max(self.best_fitness, best)
 
-        # Update champion wrapper.
-        best_agent = max(
-            zip(self._population, fitnesses), key=lambda x: x[1]
-        )[0]
+        # Champion = best pre-mutation elite (fitnesses are pre-mutation;
+        # using ranked[0][0] avoids pairing stale fitnesses with mutated agents).
+        best_agent = ranked[0][0]
         self._champion_wrapper = AgileRLPolicyWrapper(
             best_agent, self._learner_ids, algorithm_name=self._algo_key,
         )

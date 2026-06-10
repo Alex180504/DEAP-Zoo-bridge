@@ -23,7 +23,6 @@ import numpy as np
 from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.baselines.base import (
-    BaselineTrainer,
     BudgetMode,
     TrainingConfig,
     TrainingResult,

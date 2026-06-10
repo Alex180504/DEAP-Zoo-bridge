@@ -12,10 +12,11 @@ Parallel-evaluation pickling
 ``NeatPolicy`` is NOT directly picklable because
 ``neat.nn.FeedForwardNetwork`` is not fork-safe.  Instead, ship the
 policy via :class:`~deap_pettingzoo.baselines.coevolution.pools.OpponentSnapshot`
-with ``kind="neat"`` and payload ``{"genome": ..., "config_dict": ...,
-"action_space_type": ..., "action_space_args": ..., "masked": ...}``.
-The worker calls :func:`rebuild_opponent_policy` which in turn
-reconstructs a ``NeatPolicy`` from the serialisable payload.
+with ``kind="neat"`` and payload
+``{"genome": ..., "config_input_size": int, "config_output_size": int}``.
+The worker calls :func:`rebuild_opponent_policy` which rebuilds the
+``neat.Config`` via :func:`build_neat_config` and reconstructs
+a ``NeatPolicy`` from the genome.
 """
 
 from __future__ import annotations
