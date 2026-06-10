@@ -142,7 +142,9 @@ class NEATTrainer(BaselineTrainer):
         # --- Evaluation callback for neat ------------------------------------
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
 
-        # We use a closure-friendly wrapper to cap eval episodes.
+        # Use a closure-friendly wrapper to cap eval episodes.
+        _base_seed = seed if seed is not None else 0
+
         def _eval_genomes(
             genomes_and_ids: list, neat_cfg: neat.Config
         ) -> None:
@@ -150,37 +152,44 @@ class NEATTrainer(BaselineTrainer):
             self._generation_num += 1
             gen_fitnesses: list[float] = []
 
-            for _genome_id, genome in genomes_and_ids:
-                policy = NeatPolicy(
-                    genome, neat_cfg, action_space=shared_action_space
-                )
-                rewards: list[float] = []
-                # Simple multi-episode loop via Parallel API
-                for _ in range(eval_eps):
-                    observations = env.reset(seed=seed)
-                    episode_reward = 0.0
-                    done = False
-                    _steps = 0
-                    while not done and _steps < 500:
-                        actions = {}
-                        for agent in observations:
-                            actions[agent] = policy.get_action(
-                                observations[agent]
+            for genome_id, genome in genomes_and_ids:
+                try:
+                    policy = NeatPolicy(
+                        genome, neat_cfg, action_space=shared_action_space
+                    )
+                    rewards: list[float] = []
+                    # Simple multi-episode loop via Parallel API
+                    for ep_i in range(eval_eps):
+                        ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                        observations = env.reset(seed=ep_seed)
+                        episode_reward = 0.0
+                        done = False
+                        _steps = 0
+                        while not done and _steps < 500:
+                            actions = {}
+                            for agent in observations:
+                                actions[agent] = policy.get_action(
+                                    observations[agent]
+                                )
+                            observations, step_rewards, dones, truncateds, _infos = (
+                                env.step(actions)
                             )
-                        observations, step_rewards, dones, truncateds, _infos = (
-                            env.step(actions)
-                        )
-                        episode_reward += float(sum(step_rewards.values()))
-                        done = all(dones.values()) or all(truncateds.values())
-                        _steps += 1
-                    rewards.append(episode_reward)
+                            episode_reward += float(sum(step_rewards.values()))
+                            done = all(dones.values()) or all(truncateds.values())
+                            _steps += 1
+                        rewards.append(episode_reward)
 
-                # Aggregate
-                aggregator = params.get("action_aggregator", "mean")
-                if aggregator == "sum":
-                    fitness = float(np.sum(rewards))
-                else:
-                    fitness = float(np.mean(rewards))
+                    # Aggregate
+                    aggregator = params.get("action_aggregator", "mean")
+                    if aggregator == "sum":
+                        fitness = float(np.sum(rewards))
+                    else:
+                        fitness = float(np.mean(rewards))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    fitness = -1e9  # lethal fitness for broken genomes
+
                 genome.fitness = fitness
                 gen_fitnesses.append(fitness)
 
@@ -286,15 +295,29 @@ class NEATTrainer(BaselineTrainer):
             return max(1, config.budget_value // max(1, eps_per_gen))
 
         if config.budget_mode == BudgetMode.ENV_STEPS:
-            # Coarse estimate: a typical episode is ~25 steps.
+            # Resolve episode length from env config: MPE uses "max_cycles",
+            # aquarium and other custom envs may use "max_time_steps".
             avg_steps_per_episode = int(
-                config.env_config.get("max_cycles", 25)
+                config.env_config.get(
+                    "max_cycles",
+                    config.env_config.get("max_time_steps", 25),
+                )
             )
             eval_eps = int(
                 config.algorithm_params.get("eval_episodes_per_genome", 1)
             )
             steps_per_gen = pop_size * eval_eps * avg_steps_per_episode
-            return max(1, config.budget_value // max(1, steps_per_gen))
+            n_gens = config.budget_value // max(1, steps_per_gen)
+            if n_gens == 0:
+                import warnings
+                warnings.warn(
+                    f"NEAT budget ({config.budget_value:,} steps) is smaller "
+                    f"than one generation ({steps_per_gen:,} steps). "
+                    "Running 1 generation only.",
+                    stacklevel=2,
+                )
+                return 1
+            return n_gens
 
         # Fallback — should not happen (supports_budget_mode gate).
         return 10
