@@ -1,10 +1,15 @@
 @startuml sequence_neat_training
 !theme plain
-title NEAT Training Sequence
+title NEAT Training Sequence (with parallel eval + recording)
 
 actor User
 participant "NEATTrainer" as Trainer
+participant "ExperimentLogger" as EL
+participant "FrameRecorder" as FR
+participant "UnifiedEvaluator" as UE
+participant "_RecordingReporter" as RR
 participant "neat.Population" as Pop
+participant "ProcessPoolExecutor\n(parallel)" as Executor
 participant "PettingZooWrapper" as Env
 participant "NeatPolicy" as Policy
 participant "TrainingResult" as Result
@@ -19,38 +24,91 @@ Trainer <-- Env: env handle
 deactivate Env
 
 Trainer -> Trainer: build_neat_config(input_size, output_size, pop_size, seed)
+
+== Recording setup (if config.recording.enabled) ==
+Trainer -> EL: build_logger(config, algorithm="neat")
+Trainer -> EL: get_frame_recorder(fps, fmt, ...)
+EL -> FR: FrameRecorder(run_dir/'frames', ...)
+FR --> EL: recorder
+Trainer -> UE: UnifiedEvaluator(max_steps=500, frame_recorder=recorder)
+activate UE
+
 Trainer -> Pop: neat.Population(config, seed)
 activate Pop
 
-loop n_generations
-    Trainer -> Pop: run(eval_function, n=1)
-    activate Pop
+Trainer -> RR: _RecordingReporter(record_fn, cadence)
+Trainer -> Pop: add_reporter(recording_reporter)
 
-    loop for each genome in population
-        Pop -> Trainer: eval_function(genomes, config)
-        Trainer -> Policy: NeatPolicy(genome, config, action_space)
-        activate Policy
-        Trainer -> Policy: get_action(obs)
-        Policy -> Policy: network.activate(obs)
-        Policy -> Policy: head.decode(raw_output)
-        Trainer <-- Policy: action
-        deactivate Policy
+== Parallel or sequential eval ==
+alt num_workers > 1
+    Trainer -> Trainer: get_registry_snapshot()
+    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, ...)
+    Trainer -> Executor: make_executor(n_workers,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))
 
-        Trainer -> Env: reset(seed)
-        loop episode steps
-            Trainer -> Env: step(actions_dict)
-            Env --> Trainer: observations, rewards, dones, truncateds, infos
+    loop n_generations
+        Trainer -> Pop: run(parallel_eval_function, n=1)
+
+        loop for each genome (distributed)
+            Pop -> Executor: map(_neat_worker_evaluate, [(genome, spec), ...])
+            Executor -> Executor: each worker rebuilds:\n  neat.Config + PettingZooWrapper + NeatPolicy
+            Executor -> Executor: evaluate genome across eval_eps episodes
+            Executor --> Pop: [(genome_id, fitness), ...]
         end
-        Trainer -> Trainer: genome.fitness = mean(rewards)
-    end
 
-    Pop -> Pop: reproduce / speciate
-    Pop --> Trainer: best_genome (if threshold met)
-    deactivate Pop
+        Pop -> Pop: reproduce / speciate
+    end
+    Trainer -> Executor: executor.__exit__()
+else num_workers == 1 (sequential)
+    loop n_generations
+        Trainer -> Pop: run(eval_function, n=1)
+        activate Pop
+
+        loop for each genome in population
+            Pop -> Trainer: eval_function(genomes, config)
+            Trainer -> Policy: NeatPolicy(genome, config, action_space)
+            activate Policy
+            Trainer -> Policy: get_action(obs)
+            Policy -> Policy: network.activate(obs)
+            Policy -> Policy: head.decode(raw_output)
+            Trainer <-- Policy: action
+            deactivate Policy
+
+            Trainer -> Env: reset(seed)
+            loop episode steps
+                Trainer -> Env: step(actions_dict)
+                Env --> Trainer: observations, rewards, dones, truncateds, infos
+            end
+            Trainer -> Trainer: genome.fitness = mean(rewards)
+        end
+
+        Pop -> Pop: reproduce / speciate
+        deactivate Pop
+    end
+end
+
+== Recording: champion rollout (every N gens, hooks post_evaluate) ==
+alt recording enabled
+    loop generation g where g > 0 and g % cadence == 0
+        Pop -> RR: post_evaluate(config, pop, species, best_genome)
+        RR -> RR: _record_fn(g, best_genome)
+        RR -> UE: evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, seed, env_config)
+        UE -> FR: start_episode()
+        loop rollout steps
+            UE -> UE: env.render('rgb_array')
+            UE -> FR: add_frame(frame)
+            UE -> UE: env.step(actions)
+        end
+        UE -> FR: end_episode()
+        FR -> FR: imwrite(train_episode_{g:04d}.mp4)
+    end
 end
 
 Trainer -> Policy: NeatPolicy(best_genome, config)
 Trainer -> Result: TrainingResult(algorithm="NEAT", policy=champion, metrics)
+
+Trainer -> UE: close()
+Trainer -> EL: close()
+
 Trainer --> User: TrainingResult
 deactivate Trainer
 
