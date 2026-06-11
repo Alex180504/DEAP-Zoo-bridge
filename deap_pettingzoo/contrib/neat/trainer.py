@@ -37,11 +37,43 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
 )
+from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
 
 from .config import build_neat_config
 from .policy import NeatPolicy
+
+
+class _RecordingReporter(neat.reporting.BaseReporter):
+    """NEAT reporter that records champion-rollout episodes during training.
+
+    Parameters
+    ----------
+    record_fn : callable
+        ``record_fn(generation: int, best_genome) -> None`` — called
+        every ``cadence`` generations with the current best genome.
+    cadence : int
+        Record every N generations (1-indexed).
+    """
+
+    def __init__(self, record_fn, cadence: int = 1):
+        self._record_fn = record_fn
+        self._cadence = max(1, int(cadence))
+        self._gen = 0
+
+    def start_generation(self, generation: int) -> None:
+        self._gen = generation
+
+    def post_evaluate(
+        self, config, population, species_set, best_genome
+    ) -> None:
+        if self._gen <= 0 or self._gen % self._cadence != 0:
+            return
+        try:
+            self._record_fn(self._gen, best_genome)
+        except Exception:
+            pass
 
 
 def _action_space_hint(action_space: Any) -> Dict[str, Any]:
@@ -160,6 +192,26 @@ class NEATTrainer(BaselineTrainer):
             overrides=overrides,
         )
 
+        # --- Logger + optional FrameRecorder ---------------------------------
+        log = build_logger(config, algorithm="neat")
+        recording_cfg = config.recording
+        recording_cadence = self._resolve_recording_every_n(config)
+        recording_evaluator: Optional[UnifiedEvaluator] = None
+
+        if recording_cfg.enabled:
+            recorder = log.get_frame_recorder(
+                fps=recording_cfg.fps,
+                fmt=recording_cfg.fmt,
+                max_frames_per_episode=recording_cfg.max_frames_per_episode,
+                max_dim=recording_cfg.max_dim,
+                episode_prefix=recording_cfg.episode_prefix or "train_",
+            )
+            if recorder.enabled:
+                recording_evaluator = UnifiedEvaluator(
+                    max_steps=500,
+                    frame_recorder=recorder,
+                )
+
         # --- Create initial population ---------------------------------------
         pop = neat.Population(neat_config, seed=seed)
 
@@ -169,6 +221,26 @@ class NEATTrainer(BaselineTrainer):
 
         # Build action-space hint for worker spec.
         _act_hint = _action_space_hint(shared_action_space)
+
+        # --- Recording reporter ----------------------------------------------
+        if recording_evaluator is not None:
+
+            def _record_champion(gen: int, best_genome) -> None:
+                champ_policy = NeatPolicy(
+                    best_genome, neat_config, action_space=shared_action_space
+                )
+                rollout_seed = seed if seed is not None else 0
+                recording_evaluator.evaluate(
+                    policy=champ_policy,
+                    env_name=config.env_name,
+                    num_episodes=1,
+                    seed=int(rollout_seed),
+                    env_config=dict(config.env_config) if config.env_config else None,
+                )
+
+            pop.add_reporter(
+                _RecordingReporter(_record_champion, cadence=recording_cadence)
+            )
 
         # --- Parallel or sequential eval -------------------------------------
         if self._num_workers > 1:
@@ -285,8 +357,12 @@ class NEATTrainer(BaselineTrainer):
             env.close()
         except Exception:
             pass
+        if recording_evaluator is not None:
+            recording_evaluator.close()
 
         self._log(config, best_genome, pop_size, elapsed, algorithm="NEAT")
+        if recording_cfg.enabled:
+            log.close()
 
         return TrainingResult(
             algorithm="NEAT",
