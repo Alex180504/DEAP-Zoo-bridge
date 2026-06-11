@@ -1,8 +1,8 @@
 @startuml sequence_frame_recording
-title Frame Recording – Trainer → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
+title Frame Recording — Trainer → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
 
 actor "Researcher" as R
-participant "EATrainer / CMAESTrainer /\nCoEvolutionTrainer / AgileRLTrainer" as T
+participant "EATrainer / CMAESTrainer /\nCoEvolutionTrainer / AgileRLTrainer /\nNEATTrainer / HyperNEATTrainer /\nESHyperNEATTrainer" as T
 participant "ExperimentLogger" as EL
 participant "FrameRecorder" as FR
 participant "UnifiedEvaluator\n(or _record_coevolution_rollout)" as UE
@@ -21,8 +21,8 @@ EL --> T: recorder
 note over T
   Cadence resolved by
   ``BaselineTrainer._resolve_recording_every_n``:
-   • EA / CMA / CoEvo  default = 1
-   • AgileRL           default = 10
+   • EA / CMA / CoEvo / NEAT  default = 1
+   • AgileRL                 default = 10
   User-supplied value wins.
 end note
 
@@ -44,6 +44,18 @@ loop generation g in 1..G  where g % every_n == 0
     deactivate FR
     UE --> T: EvaluationResult (discarded)
 end
+
+== NEAT-family variant (_RecordingReporter) ==
+note right of T
+  NEAT / HyperNEAT / ES-HyperNEAT record
+  through a custom ``neat.reporting.BaseReporter``:
+   • ``_RecordingReporter`` is added to the population
+     before ``pop.run()``.
+   • On ``post_evaluate`` it calls the same
+     ``UnifiedEvaluator.evaluate`` champion-rollout
+     codepath as EA/CMA-ES.
+   • Generation 0 is always skipped (no prior eval).
+end note
 
 == Coevolution variant (heterogeneous policies) ==
 note right of T
