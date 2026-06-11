@@ -102,6 +102,11 @@ class HyperNEATTrainer(NEATTrainer):
         substrate = params.get("substrate", None)
         if substrate is None:
             hidden_layers = params.get("substrate_hidden_layers", None)
+            if hidden_layers is None:
+                # HyperNEAT MUST have at least one hidden layer; without
+                # hidden nodes the CPPN can only produce direct input→output
+                # weights and the phenotype effectively does nothing.
+                hidden_layers = [4, 4]
             substrate = substrate_for_env(
                 input_size,
                 output_size,
@@ -147,11 +152,13 @@ class HyperNEATTrainer(NEATTrainer):
 
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         activation = params.get("phenotype_activation", "sigmoid")
+        weight_threshold = float(params.get("weight_threshold", 0.1))
 
         # --- Recording reporter ------------------------------------------
         if recording_evaluator is not None:
             _substrate = substrate
             _activation = activation
+            _wthresh = weight_threshold
 
             def _record_champion(gen: int, best_genome) -> None:
                 champ_policy = HyperNeatPolicy(
@@ -160,6 +167,7 @@ class HyperNEATTrainer(NEATTrainer):
                     _substrate,
                     action_space=shared_action_space,
                     activation=_activation,
+                    weight_threshold=_wthresh,
                 )
                 rollout_seed = seed if seed is not None else 0
                 recording_evaluator.evaluate(
@@ -197,6 +205,7 @@ class HyperNEATTrainer(NEATTrainer):
                 seed=seed if seed is not None else 0,
                 substrate_spec=_substrate_to_spec(substrate),
                 phenotype_activation=activation,
+                weight_threshold=weight_threshold,
             )
 
             with make_executor(
@@ -225,6 +234,7 @@ class HyperNEATTrainer(NEATTrainer):
                             substrate,
                             action_space=shared_action_space,
                             activation=activation,
+                            weight_threshold=weight_threshold,
                         )
                         rewards: list[float] = []
                         for ep_i in range(eval_eps):
@@ -268,6 +278,7 @@ class HyperNEATTrainer(NEATTrainer):
             substrate,
             action_space=shared_action_space,
             activation=activation,
+            weight_threshold=weight_threshold,
         )
 
         elapsed = time.perf_counter() - t0
@@ -325,10 +336,17 @@ class ESHyperNEATTrainer(NEATTrainer):
         output_size = required_output_size(shared_action_space)
 
         # ES-HyperNEAT substrate: no hidden nodes.
+        # IMPORTANT: must use uniform 1D layout (inputs at y=-1, outputs at
+        # y=+1).  The ES-HyperNEAT pruning_extraction function enforces a
+        # strict "con.y1 < con.y2 (upward only)" constraint, so inputs must
+        # be at the bottom and outputs at the top.  A 2D grid substrate
+        # places inputs at mixed y levels, disconnecting most of them.
         substrate = params.get("substrate", None)
         if substrate is None:
             substrate = substrate_for_env(
-                input_size, output_size, layout="uniform"
+                input_size, output_size,
+                layout="uniform",
+                hidden_layers=params.get("substrate_hidden_layers", None),
             )
 
         cppn_input_size = 5

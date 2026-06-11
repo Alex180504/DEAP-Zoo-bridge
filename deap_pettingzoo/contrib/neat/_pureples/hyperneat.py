@@ -23,6 +23,7 @@ def create_phenotype_network(
     cppn: neat.nn.FeedForwardNetwork,
     substrate: Substrate,
     activation_function: str = "sigmoid",
+    weight_threshold: float = 0.2,
 ) -> neat.nn.RecurrentNetwork:
     """Build a phenotype ANN by querying *cppn* at *substrate* coordinates.
 
@@ -70,7 +71,10 @@ def create_phenotype_network(
     for oc in output_coordinates:
         idx = 0
         for layer in hidden_coordinates:
-            im = find_neurons(cppn, oc, layer, hidden_nodes[idx], False)
+            im = find_neurons(
+                cppn, oc, layer, hidden_nodes[idx], False,
+                weight_threshold=weight_threshold,
+            )
             idx += len(layer)
             if im:
                 node_evals.append(
@@ -87,7 +91,8 @@ def create_phenotype_network(
         for i in range(current_layer, len(hidden_coordinates)):
             for hc in layer:
                 im = find_neurons(
-                    cppn, hc, hidden_coordinates[i], hidden_nodes[idx], False
+                    cppn, hc, hidden_coordinates[i], hidden_nodes[idx], False,
+                    weight_threshold=weight_threshold,
                 )
                 if im:
                     node_evals.append(
@@ -102,7 +107,8 @@ def create_phenotype_network(
     for layer in hidden_coordinates:
         for hc in layer:
             im = find_neurons(
-                cppn, hc, input_coordinates, input_nodes[0], False
+                cppn, hc, input_coordinates, input_nodes[0], False,
+                weight_threshold=weight_threshold,
             )
             if im:
                 node_evals.append(
@@ -120,6 +126,7 @@ def find_neurons(
     start_idx: int,
     outgoing: bool,
     max_weight: float = 5.0,
+    weight_threshold: float = 0.2,
 ) -> list:
     """Find the nodes to which *coord* is connected via the CPPN.
 
@@ -128,7 +135,7 @@ def find_neurons(
     """
     result: list = []
     for i, node in enumerate(nodes):
-        w = query_cppn(coord, node, outgoing, cppn, max_weight)
+        w = query_cppn(coord, node, outgoing, cppn, max_weight, weight_threshold)
         if w != 0.0:
             result.append((start_idx + i, w))
     return result
@@ -140,6 +147,7 @@ def query_cppn(
     outgoing: bool,
     cppn: neat.nn.FeedForwardNetwork,
     max_weight: float = 5.0,
+    weight_threshold: float = 0.2,
 ) -> float:
     """Query the CPPN for the weight from *coord1* to *coord2*.
 
@@ -157,21 +165,25 @@ def query_cppn(
         The CPPN query network.
     max_weight:
         Maximum absolute weight value (outputs are scaled to this).
+    weight_threshold:
+        Minimum absolute CPPN output below which the weight is zeroed.
+        Lower values let through more connections at the cost of noise.
+        Default 0.2 (original pureples behaviour).
 
     Returns
     -------
     float
-        The queried weight (0.0 if below the 0.2 threshold).
+        The queried weight (0.0 if below *weight_threshold*).
     """
     if outgoing:
         i = [coord1[0], coord1[1], coord2[0], coord2[1], 1.0]
     else:
         i = [coord2[0], coord2[1], coord1[0], coord1[1], 1.0]
     w = cppn.activate(i)[0]
-    if abs(w) > 0.2:
+    if abs(w) > weight_threshold:
         if w > 0:
-            w = (w - 0.2) / 0.8
+            w = (w - weight_threshold) / (1.0 - weight_threshold)
         else:
-            w = (w + 0.2) / 0.8
+            w = (w + weight_threshold) / (1.0 - weight_threshold)
         return w * max_weight
     return 0.0
