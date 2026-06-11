@@ -88,6 +88,9 @@ qdax = [
     "deap-pettingzoo[jax,jaxmarl]",
     "qdax>=0.4.0",
 ]
+neat = [
+    "neat-python>=2.0",
+]
 scoop = [
     "scoop>=0.7,<1.0",
 ]
@@ -102,7 +105,7 @@ ui = [
     "imageio>=2.31",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,scoop,dask,ui]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui]"
 ]
 
 [tool.setuptools]

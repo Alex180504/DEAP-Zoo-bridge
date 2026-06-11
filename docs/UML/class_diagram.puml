@@ -508,6 +508,63 @@ package "deap_pettingzoo.baselines" {
         - _translate_budget(config) -> dict
     }
 
+    class NEATTrainer {
+        - _fitness_history: List[float]
+        - _generation_num: int
+        + _num_workers: int
+        -- requires neat-python >= 2.0
+        + __init__(num_workers=1)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _budget_to_generations(config, pop_size) -> int
+        - _log(config, best_genome, pop_size, elapsed, algorithm) -> None
+    }
+
+    class _RecordingReporter <<neat.reporting.BaseReporter>> {
+        - _record_fn: Callable
+        - _cadence: int
+        + start_generation(generation)
+        + post_evaluate(config, population, species, best_genome)
+    }
+
+    class HyperNEATTrainer {
+        -- CPPN + fixed substrate phenotype
+        + get_capabilities() -> dict
+        + train(config) -> TrainingResult
+        - _substrate_to_spec(substrate) -> dict
+    }
+
+    class ESHyperNEATTrainer {
+        -- CPPN + quadtree-discovered substrate
+        + get_capabilities() -> dict
+        + train(config) -> TrainingResult
+    }
+
+    class EvolveHPOTrainer {
+        # _hp_config: dict
+        # _population: list
+        -- AgileRL HPO base
+        + train(config) -> TrainingResult
+        # _build_hp_config(spec) -> HyperparameterConfig
+        # _build_population(...) -> list
+    }
+
+    class MADDPGHPOTrainer {
+        -- MADDPG with evolvable architecture + HPO
+    }
+
+    class MATD3HPOTrainer {
+        -- MATD3 with evolvable architecture + HPO
+    }
+
+    NEATTrainer --|> BaselineTrainer
+    HyperNEATTrainer --|> NEATTrainer
+    ESHyperNEATTrainer --|> NEATTrainer
+    EvolveHPOTrainer --|> AgileRLTrainer
+    MADDPGHPOTrainer --|> EvolveHPOTrainer
+    MATD3HPOTrainer --|> EvolveHPOTrainer
+
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str
         # ALGORITHM_IMPORT: tuple[str, str]
@@ -697,6 +754,70 @@ note bottom of openspiel
   for OpenSpiel turn-based games.
 end note
 
+package "deap_pettingzoo.contrib.neat" {
+    class NeatPolicy {
+        - _genome: neat.DefaultGenome
+        - _config: neat.Config
+        - _network: neat.nn.FeedForwardNetwork
+        - _head: Optional[ActionHead]
+        -- lazy; requires neat-python >= 2.0
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+        + from_snapshot_payload(genome, config, action_space, masked) -> NeatPolicy
+    }
+
+    class HyperNeatPolicy {
+        - _substrate: Substrate
+        - _network: neat.nn.RecurrentNetwork
+        - _activation_steps: int
+        -- CPPN → substrate-query phenotype
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+    }
+
+    class ESHyperNeatPolicy {
+        - _es_params: dict
+        - _activation_steps: int
+        -- CPPN → ESNetwork quadtree phenotype
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+    }
+
+    class Substrate {
+        + input_coordinates: List[Coord]
+        + output_coordinates: List[Coord]
+        + hidden_coordinates: List[List[Coord]]
+    }
+
+    class "coevolution" as neat_coevolution {
+        class NeatSideState
+        class HyperNeatSideState
+        class ESHyperNeatSideState
+    }
+
+    NeatPolicy ..|> PolicyProtocol : implements
+    HyperNeatPolicy ..|> PolicyProtocol : implements
+    ESHyperNeatPolicy ..|> PolicyProtocol : implements
+    HyperNeatPolicy --> Substrate : uses
+    ESHyperNeatPolicy --> Substrate : uses
+    NEATTrainer ..> NeatPolicy : produces
+    HyperNEATTrainer ..> HyperNeatPolicy : produces
+    ESHyperNEATTrainer ..> ESHyperNeatPolicy : produces
+    NEATTrainer --> _RecordingReporter : adds to population
+    NeatSideState --|> SideState
+    HyperNeatSideState --|> NeatSideState
+    ESHyperNeatSideState --|> NeatSideState
+}
+
+note bottom of "deap_pettingzoo.contrib.neat"
+  Lazy-imported; gated by import neat.
+  Requires `pip install deap-pettingzoo[neat]`.
+  Vendored pureples core in _pureples/.
+  CPPN = Compositional Pattern Producing Network.
+  ESNetwork = quadtree variance analysis for
+  evolvable-substrate HyperNEAT.
+end note
+
 package "deap_pettingzoo.contrib.qdax" {
     class FlaxPolicyAdapter {
         - module
@@ -839,8 +960,26 @@ package "deap_pettingzoo.baselines.coevolution" {
   class EASideState
   class CMAESSideState
   class FrozenSideState
-
-  class RLPolicyPool {
+  class PSOSideState
+  class RLSideState
+  class RLEvolveHPOSideState {
+      -- AgileRL HPO champion-as-opponent
+      optimizer = "rl_hpo"
+  }
+  class NeatSideState {
+      -- optimizer = "neat"
+      owns neat.Population;
+      RNG isolation (random + np)
+  }
+  class HyperNeatSideState {
+      -- optimizer = "hyperneat"
+  }
+  class ESHyperNeatSideState {
+      -- optimizer = "es_hyperneat"
+  }
+  class QDaxSideState {
+      -- optimizer = "qdax_map_elites" / "qdax_cma_me"
+  }
     - policy: PolicyProtocol
     + update(policy)
     + sample_opponent(rng): PolicyProtocol
@@ -971,6 +1110,13 @@ package "deap_pettingzoo.baselines.coevolution" {
   SideState <|-- EASideState
   SideState <|-- CMAESSideState
   SideState <|-- FrozenSideState
+  SideState <|-- PSOSideState
+  SideState <|-- RLSideState
+  SideState <|-- RLEvolveHPOSideState
+  SideState <|-- NeatSideState
+  SideState <|-- HyperNeatSideState
+  SideState <|-- ESHyperNeatSideState
+  SideState <|-- QDaxSideState
 
   SideState o-- Side
   Side o-- HallOfFame
