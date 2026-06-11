@@ -58,6 +58,9 @@ class _NeatWorkerSpec:
         Forwarded directly to ``ESHyperNeatPolicy``.
     phenotype_activation:
         Phenotype activation function name (HyperNEAT only, default ``"sigmoid"``).
+    weight_threshold:
+        Minimum absolute CPPN output below which phenotype connection
+        weights are zeroed.  Default 0.1 (HyperNEAT / ES-HyperNEAT).
     """
 
     env_name: str
@@ -71,6 +74,7 @@ class _NeatWorkerSpec:
     substrate_spec: Optional[Dict[str, Any]] = None
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
+    weight_threshold: float = 0.1
 
 
 def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
@@ -116,18 +120,26 @@ def _neat_worker_evaluate(payload: tuple) -> float:
         Mean episode reward across ``spec.eval_episodes_per_genome``
         episodes.
     """
-    from deap_pettingzoo.contrib.neat.config import build_neat_config
+    from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
     from deap_pettingzoo.environments import PettingZooWrapper
 
     genome, spec = payload
 
-    # Rebuild config (default settings sufficient for eval).
-    neat_cfg = build_neat_config(
-        input_size=spec.input_size,
-        output_size=spec.output_size,
-        seed=spec.seed,
-    )
+    # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,
+    # standard config for plain NEAT.
+    if spec.substrate_spec is not None:
+        neat_cfg = build_cppn_config(
+            input_size=spec.input_size,
+            output_size=spec.output_size,
+            seed=spec.seed,
+        )
+    else:
+        neat_cfg = build_neat_config(
+            input_size=spec.input_size,
+            output_size=spec.output_size,
+            seed=spec.seed,
+        )
 
     # Rebuild action space and policy.
     action_space = _rebuild_action_space(spec)
@@ -151,6 +163,7 @@ def _neat_worker_evaluate(payload: tuple) -> float:
                 genome, neat_cfg, substrate,
                 action_space=action_space,
                 activation=spec.phenotype_activation,
+                weight_threshold=spec.weight_threshold,
             )
     else:
         policy = NeatPolicy(genome, neat_cfg, action_space=action_space)

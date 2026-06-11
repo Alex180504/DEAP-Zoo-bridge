@@ -103,20 +103,29 @@ class Connection:
         )
 
 
+#: Identity activation — returns input unchanged.  Used for output nodes
+#: in ES-HyperNEAT phenotypes so that argmax over DiscreteHead logits has
+#: a wide dynamic range (sigmoid would squash all logits to [0, 1]).
+def _identity_activation(x: float) -> float:
+    return float(x)
+
+
 # ---------------------------------------------------------------------------
 # ES-HyperNEAT parameters
 # ---------------------------------------------------------------------------
 
-# Default parameters from the "Small" variant.
+# Default parameters — "Medium" variant (balanced: enough depth for
+# moderate-sized substrates without excessive computational cost).
 ES_HYPERNEAT_PARAMS_DEFAULTS: Dict[str, Any] = {
-    "initial_depth": 0,
-    "max_depth": 1,
+    "initial_depth": 1,
+    "max_depth": 2,
     "variance_threshold": 0.03,
-    "band_threshold": 0.3,
+    "band_threshold": 0.1,
     "iteration_level": 1,
     "division_threshold": 0.5,
     "max_weight": 8.0,
     "activation": "sigmoid",
+    "weight_threshold": 0.1,
 }
 
 # "Medium" variant.
@@ -129,6 +138,7 @@ ES_HYPERNEAT_PARAMS_MEDIUM: Dict[str, Any] = {
     "division_threshold": 0.5,
     "max_weight": 8.0,
     "activation": "sigmoid",
+    "weight_threshold": 0.1,
 }
 
 # "Large" variant.
@@ -141,6 +151,7 @@ ES_HYPERNEAT_PARAMS_LARGE: Dict[str, Any] = {
     "division_threshold": 0.5,
     "max_weight": 8.0,
     "activation": "sigmoid",
+    "weight_threshold": 0.1,
 }
 
 
@@ -183,6 +194,7 @@ class ESNetwork:
         self.iteration_level = int(params.get("iteration_level", 1))
         self.division_threshold = float(params.get("division_threshold", 0.5))
         self.max_weight = float(params.get("max_weight", 8.0))
+        self._weight_threshold = float(params.get("weight_threshold", 0.2))
         self.connections: Set[Connection] = set()
         # Number of layers (activations to propagate) = 2^max_depth + 1.
         self.activations: int = 2 ** self.max_depth + 1
@@ -259,8 +271,18 @@ class ESNetwork:
                         ]
 
         for idx, links in nodes.items():
+            # ── activation selection ──────────────────────────────────
+            # Hidden nodes use the ES-params activation (typically
+            # sigmoid) for non-linearity.  Output nodes must use
+            # identity (linear); otherwise sigmoid squashes every logit
+            # into [0, 1], the argmax sees differences of ~0.01, and
+            # the policy cannot learn meaningful action diversity.
+            if idx in output_nodes:
+                act = _identity_activation
+            else:
+                act = self.activation
             node_evals.append(
-                (idx, self.activation, sum, 0.0, 1.0, links)
+                (idx, act, sum, 0.0, 1.0, links)
             )
 
         return neat.nn.RecurrentNetwork(
@@ -343,6 +365,7 @@ class ESNetwork:
                     outgoing,
                     self.cppn,
                     self.max_weight,
+                    self._weight_threshold,
                 )
 
             if (p.lvl < self.initial_depth) or (
@@ -379,6 +402,7 @@ class ESNetwork:
                         outgoing,
                         self.cppn,
                         self.max_weight,
+                        self._weight_threshold,
                     )
                 )
                 d_right = abs(
@@ -389,6 +413,7 @@ class ESNetwork:
                         outgoing,
                         self.cppn,
                         self.max_weight,
+                        self._weight_threshold,
                     )
                 )
                 d_top = abs(
@@ -399,6 +424,7 @@ class ESNetwork:
                         outgoing,
                         self.cppn,
                         self.max_weight,
+                        self._weight_threshold,
                     )
                 )
                 d_bottom = abs(
@@ -409,6 +435,7 @@ class ESNetwork:
                         outgoing,
                         self.cppn,
                         self.max_weight,
+                        self._weight_threshold,
                     )
                 )
 

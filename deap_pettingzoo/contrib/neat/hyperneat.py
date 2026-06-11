@@ -13,6 +13,7 @@
     nodes need to be specified in the substrate — they are placed by
     the algorithm.
 """
+    # pyright: reportCallIssue=false
 
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import neat  # guarded by _require_neat
 from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.policies.action_heads import (
     ActionHead,
+    MaskedDiscreteHead,
     make_head,
 )
 
@@ -54,6 +56,10 @@ class HyperNeatPolicy(PolicyProtocol):
         Forwarded to :func:`make_head`.
     activation:
         Phenotype activation function (default ``"sigmoid"``).
+    weight_threshold:
+        Minimum absolute CPPN output below which phenotype weights are
+        zeroed.  Lower values let through more connections at the cost
+        of noise.  Default 0.1.
     """
 
     def __init__(
@@ -65,6 +71,7 @@ class HyperNeatPolicy(PolicyProtocol):
         action_space: Any = None,
         masked: bool = False,
         activation: str = "sigmoid",
+        weight_threshold: float = 0.1,
     ) -> None:
         self._genome = genome
         self._config = config
@@ -76,7 +83,12 @@ class HyperNeatPolicy(PolicyProtocol):
         cppn = neat.nn.FeedForwardNetwork.create(genome, config)
         # Build phenotype from CPPN + substrate.
         self._network = create_phenotype_network(
-            cppn, substrate, activation_function=activation
+            cppn, substrate,
+            activation_function=activation,
+            weight_threshold=weight_threshold,
+        )
+        self._activation_steps = max(
+            1, len(getattr(substrate, "hidden_coordinates", []) or []) + 1
         )
 
         self._head: Optional[ActionHead] = (
@@ -96,21 +108,22 @@ class HyperNeatPolicy(PolicyProtocol):
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
         obs = np.asarray(observation, dtype=np.float64)
-        raw = self._network.activate(obs)
+        self._network.reset()
+        raw = None
+        for _ in range(self._activation_steps):
+            raw = self._network.activate(obs)
+        assert raw is not None
         raw_arr = np.asarray(raw, dtype=np.float32)
 
-        if self._head is not None:
-            if (
-                action_mask is not None
-                and getattr(self._head, "supports_mask", False)
-            ):
-                return self._head.decode(raw_arr, action_mask=action_mask)
-            return self._head.decode(raw_arr)
+        head = self._head
+        if head is not None:
+            if action_mask is not None and isinstance(head, MaskedDiscreteHead):
+                return MaskedDiscreteHead.decode(head, raw_arr, action_mask)
+            return head.decode(raw_arr)
         return raw_arr
 
     def reset(self) -> None:
-        """No-op — the feed-forward phenotype has no hidden state."""
-        pass
+        self._network.reset()
 
     @property
     def genome(self) -> neat.DefaultGenome:
@@ -167,6 +180,7 @@ class ESHyperNeatPolicy(PolicyProtocol):
         cppn = neat.nn.FeedForwardNetwork.create(genome, config)
         es_network = ESNetwork(substrate, cppn, self._es_params)
         self._network = es_network.create_phenotype_network()
+        self._activation_steps = max(1, int(es_network.activations))
 
         self._head: Optional[ActionHead] = (
             make_head(action_space, masked=self._masked)
@@ -185,20 +199,22 @@ class ESHyperNeatPolicy(PolicyProtocol):
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
         obs = np.asarray(observation, dtype=np.float64)
-        raw = self._network.activate(obs)
+        self._network.reset()
+        raw = None
+        for _ in range(self._activation_steps):
+            raw = self._network.activate(obs)
+        assert raw is not None
         raw_arr = np.asarray(raw, dtype=np.float32)
 
-        if self._head is not None:
-            if (
-                action_mask is not None
-                and getattr(self._head, "supports_mask", False)
-            ):
-                return self._head.decode(raw_arr, action_mask=action_mask)
-            return self._head.decode(raw_arr)
+        head = self._head
+        if head is not None:
+            if action_mask is not None and isinstance(head, MaskedDiscreteHead):
+                return MaskedDiscreteHead.decode(head, raw_arr, action_mask)
+            return head.decode(raw_arr)
         return raw_arr
 
     def reset(self) -> None:
-        pass
+        self._network.reset()
 
     @property
     def genome(self) -> neat.DefaultGenome:
@@ -207,3 +223,15 @@ class ESHyperNeatPolicy(PolicyProtocol):
     @property
     def substrate(self) -> Substrate:
         return self._substrate
+
+    def __repr__(self) -> str:
+        n_in = len(self._substrate.input_coordinates)
+        n_out = len(self._substrate.output_coordinates)
+        n_evals = len(self._network.node_evals)
+        # node_evals is list of (key, activation, aggregation, bias, response, links)
+        n_nodes = len({entry[0] for entry in self._network.node_evals})
+        return (
+            f"ESHyperNeatPolicy(inputs={n_in}, outputs={n_out}, "
+            f"phenotype_nodes={n_nodes}, node_evals={n_evals}, "
+            f"activation_steps={self._activation_steps})"
+        )
