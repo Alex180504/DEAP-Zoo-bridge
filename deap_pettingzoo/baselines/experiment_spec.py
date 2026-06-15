@@ -413,6 +413,88 @@ def _split_hyperparameters(
 
 
 # ---------------------------------------------------------------------------
+# Auto-padding for heterogeneous-obs environments
+# ---------------------------------------------------------------------------
+
+_AUTO_PADDED_SUFFIX = "__deap_auto_padded"
+
+
+def _maybe_auto_pad_env(
+    spec: "ExperimentSpec",
+    env_spec,
+) -> str:
+    """Auto-register a SuperSuit-padded variant of *env_spec* when an
+    evolutionary algorithm is used against a heterogeneous-observation
+    environment.
+
+    Returns the (possibly new) environment name to use in
+    :class:`TrainingConfig`.  The original name is returned unchanged
+    when no padding is needed.
+    """
+    from deap_pettingzoo.catalog import algorithms as cat_algorithms
+
+    # Only fire when at least one evolutionary algorithm is selected.
+    has_evolutionary = any(
+        cat_algorithms.get_algorithm(a).family == "evolutionary"
+        for a in spec.algorithms
+    )
+    if not has_evolutionary:
+        return spec.environment
+
+    # Detect heterogeneous observations.
+    try:
+        from deap_pettingzoo.baselines.compatibility import inspect_environment
+        info = inspect_environment(spec.environment)
+        if info.obs_dim is not None or info.num_agents <= 1:
+            return spec.environment  # homogeneous — nothing to do
+    except Exception:
+        return spec.environment  # can't inspect — trust the user
+
+    # Check if SuperSuit is installed.
+    try:
+        import supersuit  # noqa: F401
+    except ImportError:
+        return spec.environment  # can't pad — let it fail with a clear error
+
+    # Already padded or already has custom wrappers?
+    padded_name = f"{spec.environment}{_AUTO_PADDED_SUFFIX}"
+    from deap_pettingzoo.environments.registry import (
+        is_registered,
+        register_env,
+        get_env_spec,
+    )
+
+    if is_registered(padded_name):
+        return padded_name
+
+    # Re-use the original env's factory so the padded variant is
+    # environment-identical apart from the SuperSuit wrapper chain.
+    original_spec = get_env_spec(spec.environment)
+
+    try:
+        register_env(
+            padded_name,
+            original_spec.factory,
+            default_episode_len=env_spec.default_episode_len,
+            api=env_spec.api,
+            continuous_default=env_spec.continuous_default,
+            tags=set(env_spec.tags) | {"auto_padded"},
+            wrappers=(
+                supersuit.pad_observations_v0,
+                supersuit.pad_action_space_v0,
+                supersuit.agent_indicator_v0,
+            ),
+            params=original_spec.params,
+            teams=original_spec.teams,
+            overwrite=True,
+        )
+    except Exception:
+        return spec.environment
+
+    return padded_name
+
+
+# ---------------------------------------------------------------------------
 # build_configs
 # ---------------------------------------------------------------------------
 
@@ -443,6 +525,12 @@ def build_configs(
         team_mapping=spec.fitness.team_mapping,
     )
 
+    # Auto-apply SuperSuit padding when an evolutionary algorithm is used
+    # on a heterogeneous-observation environment.  Python-API users who
+    # construct TrainingConfig directly are unaffected — this only fires
+    # through the ExperimentSpec → build_configs path (UI + programmatic).
+    effective_env_name = _maybe_auto_pad_env(spec, env_spec)
+
     if spec.coevolution.enabled:
         return _build_coevolution_plan(
             spec, env_config, budget_mode, recording_config, output_root
@@ -471,7 +559,7 @@ def build_configs(
                 else None
             )
             config = TrainingConfig(
-                env_name=spec.environment,
+                env_name=effective_env_name,
                 budget_mode=budget_mode,
                 budget_value=spec.budget.value,
                 num_seeds=1,
@@ -755,13 +843,21 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         return
 
     compatible: List[str] = []
+    env_has_heterogeneous_obs = False
     if env_spec is not None:
         try:
             from deap_pettingzoo.catalog import compatibility as cat_compat
-
             compatible = cat_compat.compatible_algorithms(env_spec.name)
         except Exception:  # pragma: no cover - env build failure
             compatible = []
+
+        # Detect heterogeneous observation sizes (EA/CMA/PSO require homogeneous).
+        try:
+            from deap_pettingzoo.baselines.compatibility import inspect_environment
+            env_info = inspect_environment(env_spec.name)
+            env_has_heterogeneous_obs = env_info.obs_dim is None and env_info.num_agents > 1
+        except Exception:
+            pass
 
     for algo in spec.algorithms:
         canonical = cat_algorithms.canonical_name(algo)
@@ -789,6 +885,37 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
             )
         _validate_hyperparameters(spec, report, algo, algo_spec)
         _validate_aggregation(spec, report, algo_spec)
+
+        # EA / CMA-ES / PSO require homogeneous observation sizes.
+        # When SuperSuit is available, build_configs auto-pads — warn
+        # instead of blocking.  Without SuperSuit, this is a hard error.
+        if (
+            env_has_heterogeneous_obs
+            and algo_spec.family == "evolutionary"
+        ):
+            try:
+                import supersuit  # noqa: F401
+                severity = "warning"
+                hint = (
+                    "Observations will be auto-padded with SuperSuit "
+                    "(pad_observations_v0, pad_action_space_v0, "
+                    "agent_indicator_v0)."
+                )
+            except ImportError:
+                severity = "error"
+                hint = (
+                    "Use AgileRL trainers (MADDPG/MATD3/IPPO) which build "
+                    "per-agent networks, or install supersuit for automatic "
+                    "padding (pip install deap-pettingzoo[supersuit])."
+                )
+            report.add(
+                f"algorithms.{canonical}",
+                "heterogeneous_obs",
+                f"{canonical!r} requires all agents to have identical "
+                f"observation sizes, but {env_spec.name!r} has per-role "
+                f"observations. {hint}",
+                severity=severity,
+            )
         if (
             env_spec is not None
             and compatible
