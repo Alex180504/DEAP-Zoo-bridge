@@ -1,5 +1,5 @@
 @startuml user_flow_ui
-title Streamlit UI – User Flow
+title Streamlit UI – User Flow (v0.2+)
 
 skinparam state {
   BackgroundColor #F5F8FA
@@ -15,6 +15,24 @@ state Home {
 
 Home --> Browse : root selected
 
+state "Experiment group" as ExpGroup {
+    state Setup {
+        Setup : Select env → compatible algos auto-highlighted
+        Setup : Configure hyperparams / budget / fitness
+        Setup : Optional coevolution + recording
+        Setup : Validate → Submit → enqueue
+    }
+    state Queue {
+        Queue : Active experiment: progress bar + stdout
+        Queue : Pause / Resume / Cancel controls
+        Queue : All-experiments table with status badges
+    }
+}
+
+Home --> Setup : configure new experiment
+Setup --> Queue : submitted successfully
+Queue --> Browse : completed → inspect results
+
 state Browse {
     Browse : Filter by algo / env / date range
     Browse : Sort by any column (asc / desc)
@@ -27,47 +45,59 @@ state Browse {
 
 Browse --> Compare : ≥ 2 runs selected
 Browse --> Replay : 1 run + saved episode
-Browse --> Live   : 1 run, want fresh rollout
 Browse --> Report : N runs, want export
 
-state Compare {
-    state "Summary tab"        as Sum
-    state "Learning curves"    as LC
-    state "Distribution"       as Dist
-    state "Pairwise stats"     as PW
-    state "Performance profile" as PP
-    state "P(improve) matrix"  as PI
-    [*] --> Sum
-    Sum --> LC
-    LC --> Dist
-    Dist --> PW
-    PW --> PP
-    PP --> PI
+state "Visualize group" as VisGroup {
+    state Compare {
+        state "Summary tab"        as Sum
+        state "Learning curves"    as LC
+        state "Distribution"       as Dist
+        state "Pairwise stats"     as PW
+        state "Performance profile" as PP
+        state "P(improve) matrix"  as PI
+        [*] --> Sum
+        Sum --> LC
+        LC --> Dist
+        Dist --> PW
+        PW --> PP
+        PP --> PI
+    }
+
+    state Replay {
+        Replay : Pick episode_*.mp4 / .gif
+        Replay : Inline video / image
+    }
+
+    state Report {
+        Report : analysis.report.build_report()
+        Report : Inline HTML preview
+        Report : Download button
+    }
 }
 
-state Replay {
-    Replay : Pick episode_*.mp4 / .gif
-    Replay : Inline video / image
+state "Inspect group" as InsGroup {
+    state Inspect {
+        state "Diff tab" as Diff {
+            Diff : Side-by-side hyperparams
+            Diff : Manifest comparison
+            Diff : Final-summary diff
+        }
+        state "Sweep tab" as Sweep {
+            Sweep : Group by hyperparameter
+            Sweep : Mean / CI / IQM bar charts
+            Sweep : Bootstrap confidence intervals
+        }
+        [*] --> Diff
+        Diff --> Sweep
+        Sweep --> Diff
+    }
 }
 
-state Live {
-    Live : Reconstruct env from manifest
-    Live : Load policy artifact
-    Live : Stream rgb frames step-by-step
-    Live : Show cumulative reward
-}
-
-state Report {
-    Report : analysis.report.build_report()
-    Report : Inline HTML preview
-    Report : Download button
-}
+Browse --> Inspect : ≥ 2 runs selected (replaces old Diff+Hyperparams)
 
 Compare --> Report
 Compare --> Replay : inspect a single run
-Compare --> Live   : inspect a single run
 Replay --> Compare
-Live   --> Compare
 Report --> [*]
 
 @enduml
