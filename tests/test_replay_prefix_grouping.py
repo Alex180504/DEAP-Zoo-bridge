@@ -14,7 +14,7 @@ pytest.importorskip("streamlit")
 
 
 def _load_replay_module():
-    """Load 5_Replay.py without going through Streamlit's page runner.
+    """Load 6_Replay.py without going through Streamlit's page runner.
 
     The filename starts with a digit which makes it impossible to
     `import` directly. We bypass that with `importlib.util`.
@@ -25,7 +25,7 @@ def _load_replay_module():
         / "deap_pettingzoo"
         / "ui"
         / "pages"
-        / "5_Replay.py"
+        / "6_Replay.py"
     )
     spec = importlib.util.spec_from_file_location(
         "_replay_under_test", page_path
