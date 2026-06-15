@@ -19,10 +19,6 @@
 
 FROM python:3.11-slim-bookworm
 
-# --- Build arguments -------------------------------------------------------
-ARG DEAP_RESULTS_ROOT=/app/results
-ARG SERVICE_PORT=8100
-
 # --- System dependencies ---------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # For potential C-extensions and OpenMP in numpy/scipy
@@ -41,30 +37,29 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE.txt ./
 COPY deap_pettingzoo/ deap_pettingzoo/
 
-# Install torch CPU-only first to avoid pulling the ~2 GB CUDA wheel.
+# Install torch CPU-only first to avoid pulling the ~2 GB CUDA wheel,
+# then AgileRL without deps (it pins pettingzoo~=1.23.1 which conflicts
+# with mpe2's >=1.24.3 — works fine at runtime though), then the rest.
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
     "torch>=2.0.0" && \
+    pip install --no-cache-dir --no-deps "agilerl>=2.6,<3" && \
     pip install --no-cache-dir ".[service]"
 
 # --- Runtime setup ---------------------------------------------------------
-RUN mkdir -p /app/results && chown deap:deap /app/results
+# The results volume is mounted at /app/results at runtime (may be root-owned).
+# Keep the SQLite DB in a non-volume directory so it's always writable.
+RUN mkdir -p /app/results /app/data && chown deap:deap /app/results /app/data
 
-ENV DEAP_RESULTS_ROOT=${DEAP_RESULTS_ROOT}
+ENV DEAP_RESULTS_ROOT=/app/results
+ENV DEAP_SERVICE_DB=/app/data/_service.db
 # Bind to 0.0.0.0 so docker-compose / container networks can reach the port.
 # The host firewall / docker port mapping controls external access.
-ENV SERVICE_HOST=0.0.0.0
-ENV SERVICE_PORT=${SERVICE_PORT}
-
-# Trusted-input model (see docs/known_issues.md):
-# The service executes Python dotted-import paths from experiment specs.
-# This container MUST only be exposed to trusted networks.
-# Authentication is deferred; use a reverse proxy with auth if needed.
-EXPOSE ${SERVICE_PORT}
+EXPOSE 8100
 
 USER deap
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${SERVICE_PORT}/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')" || exit 1
 
 ENTRYPOINT ["python", "-m", "deap_pettingzoo.service", \
             "--host", "0.0.0.0", "--port", "8100"]

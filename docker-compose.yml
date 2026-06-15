@@ -33,12 +33,8 @@ services:
       dockerfile: Dockerfile.server
     image: deap-bridge-service:latest
     container_name: deap-service
-    # The service port is only exposed to the internal compose network by
-    # default.  Uncomment the "ports" line to also make it reachable from
-    # the host (useful for debugging or native-backend mode with host
-    # port forwarding reversed).
-    # ports:
-    #   - "8100:8100"
+    networks:
+      - deap-net
     expose:
       - "8100"
     volumes:
@@ -48,14 +44,12 @@ services:
       - SERVICE_HOST=0.0.0.0
       - SERVICE_PORT=8100
     restart: unless-stopped
-    # GPU access (uncomment if using a CUDA base image + nvidia-docker):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   # Streamlit UI (no ML deps — talks to service over HTTP)
@@ -66,18 +60,19 @@ services:
       dockerfile: Dockerfile.ui
     image: deap-bridge-ui:latest
     container_name: deap-ui
+    networks:
+      - deap-net
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
     volumes:
-      # Read-only access to completed-run data so Browse / Compare /
-      # Replay / Report / Inspect can discover results.
       - results:/app/results:ro
     environment:
-      - FASTAPI_URL=${FASTAPI_URL:-http://service:8100}
+      - FASTAPI_URL=http://service:8100
       - DEAP_RESULTS_ROOT=/app/results
       - STREAMLIT_PORT=8501
     depends_on:
-      - service
+      service:
+        condition: service_healthy
     restart: unless-stopped
 
   # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -114,6 +109,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+
+networks:
+  deap-net:
+    driver: bridge
 
 # ---------------------------------------------------------------------------
 # Volumes
