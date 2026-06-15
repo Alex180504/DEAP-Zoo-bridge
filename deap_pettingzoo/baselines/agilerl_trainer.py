@@ -28,6 +28,8 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
@@ -224,13 +226,91 @@ class AgileRLTrainer(BaselineTrainer):
         "device": "cpu",
     }
 
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        The four AgileRL subclasses share one hyperparameter surface. Only
+        ``device`` / ``verbose`` are constructor arguments
+        (:class:`~deap_pettingzoo.catalog.schema.ParamTarget.TRAINER`); every
+        other knob is merged over :attr:`DEFAULT_PARAMS` and passed through
+        ``algorithm_params``. Off-policy-only knobs (``memory_size``,
+        ``learning_delay``, ``learn_step``) and the on-policy ``rollout_steps``
+        are both surfaced; the inactive ones are ignored by the running
+        algorithm. Optimiser passthroughs (``lr_actor`` / ``lr_critic`` /
+        ``gamma`` / ``tau``) are nullable — left unset, AgileRL's own defaults
+        apply.
+        """
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F, B, E = (
+            ParamType.INT,
+            ParamType.FLOAT,
+            ParamType.BOOL,
+            ParamType.ENUM,
+        )
+        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        return (
+            ParamSpec("batch_size", I, 64, minimum=1, step=1, target=AP,
+                      group="Learning",
+                      help="Mini-batch size for gradient updates."),
+            ParamSpec("num_envs", I, 1, minimum=1, step=1, target=AP,
+                      group="Parallelism",
+                      help="Vectorised environments for rollout collection."),
+            ParamSpec("memory_size", I, 10_000, minimum=1, step=1000, target=AP,
+                      group="Learning", advanced=True,
+                      help="Replay-buffer capacity (off-policy only)."),
+            ParamSpec("learning_delay", I, 500, minimum=0, step=1, target=AP,
+                      group="Learning", advanced=True,
+                      help="Env steps before learning begins (off-policy)."),
+            ParamSpec("learn_step", I, 100, minimum=1, step=1, target=AP,
+                      group="Learning", advanced=True,
+                      help="Env steps between learn() calls (off-policy)."),
+            ParamSpec("rollout_steps", I, 256, minimum=1, step=1, target=AP,
+                      group="Learning", advanced=True,
+                      help="Steps collected per update (on-policy / IPPO)."),
+            ParamSpec("lr_actor", F, None, minimum=0.0, target=AP,
+                      group="Learning", advanced=True, nullable=True,
+                      help="Actor learning rate (unset = AgileRL default)."),
+            ParamSpec("lr_critic", F, None, minimum=0.0, target=AP,
+                      group="Learning", advanced=True, nullable=True,
+                      help="Critic learning rate (unset = AgileRL default)."),
+            ParamSpec("gamma", F, None, minimum=0.0, maximum=1.0, target=AP,
+                      group="Learning", advanced=True, nullable=True,
+                      help="Discount factor (unset = AgileRL default)."),
+            ParamSpec("tau", F, None, minimum=0.0, maximum=1.0, target=AP,
+                      group="Learning", advanced=True, nullable=True,
+                      help="Target-network soft-update rate (off-policy)."),
+            ParamSpec("device", E, "cpu", target=TR, group="Runtime",
+                      choices=("cpu", "cuda"),
+                      help="Torch device for training."),
+            ParamSpec("verbose", B, False, target=TR, group="Runtime",
+                      advanced=True,
+                      help="Print per-interval training progress."),
+            ParamSpec("seed", I, None, minimum=0, step=1, target=AP,
+                      group="Run", nullable=True,
+                      help="Random seed for this run (None = unseeded)."),
+            ParamSpec("max_steps_per_episode", I, None, minimum=1, step=1,
+                      target=AP, group="Run", nullable=True,
+                      help="Hard cap on env steps per evaluation episode."),
+        )
+
     def __init__(self, device: str = "cpu", verbose: bool = False) -> None:
         self.device = device
         self.verbose = verbose
 
     # BaselineTrainer interface
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train an AgileRL algorithm under the given budget.
 
         Raises:
@@ -323,6 +403,9 @@ class AgileRLTrainer(BaselineTrainer):
 
         recording_cfg = config.recording
         with build_logger(config, algorithm=self.ALGORITHM_NAME) as log:
+            run_dir_str = (
+                str(log.run_dir) if config.output_dir is not None else None
+            )
             recorder = None
             record_every_n_steps: Optional[int] = None
             record_state = {"episode_idx": 0}
@@ -407,12 +490,14 @@ class AgileRLTrainer(BaselineTrainer):
                     env, agent, agent_ids, budget_steps, params, seed,
                     record_callback=_record_episode if recorder is not None else None,
                     record_every_n_steps=record_every_n_steps,
+                    progress_callback=progress_callback,
                 )
             else:
                 metrics = self._run_off_policy(
                     env, agent, agent_ids, budget_steps, params, seed,
                     record_callback=_record_episode if recorder is not None else None,
                     record_every_n_steps=record_every_n_steps,
+                    progress_callback=progress_callback,
                 )
             training_time = time.time() - start
             try:
@@ -479,6 +564,7 @@ class AgileRLTrainer(BaselineTrainer):
                 "agent_ids": agent_ids,
                 "on_policy": self.ON_POLICY,
                 "algorithm_params": params,
+                "run_dir": run_dir_str,
             },
             seed=seed,
             training_time=training_time,
@@ -714,6 +800,7 @@ class AgileRLTrainer(BaselineTrainer):
         *,
         record_callback: Optional[Any] = None,
         record_every_n_steps: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """Hand-rolled off-policy loop using AgileRL's replay buffer.
 
@@ -749,6 +836,7 @@ class AgileRLTrainer(BaselineTrainer):
         num_envs = int(getattr(env, "num_envs", 1))
         is_vec = num_envs > 1
         progress_interval = max(1, budget_steps // 300) if self.verbose else 0
+        progress_emit_interval = max(1, budget_steps // 100)
         loop_start = time.time()
 
         obs, info = env.reset(seed=seed)
@@ -918,6 +1006,30 @@ class AgileRLTrainer(BaselineTrainer):
                     flush=True,
                 )
 
+            if progress_callback is not None and (
+                progress_steps // progress_emit_interval
+                > prev_steps // progress_emit_interval
+                or progress_steps >= budget_steps
+            ):
+                _emit_mean = (
+                    float(np.mean(episode_rewards[-10:]))
+                    if episode_rewards else None
+                )
+                _emit_best = (
+                    float(max(episode_rewards)) if episode_rewards else None
+                )
+                self._emit_progress(
+                    progress_callback,
+                    ProgressEvent(
+                        unit="env_step",
+                        current=int(progress_steps),
+                        total=int(budget_steps),
+                        best_fitness=_emit_best,
+                        mean_fitness=_emit_mean,
+                        wall_time_s=time.time() - loop_start,
+                    ),
+                )
+
             # Mid-training champion-rollout recording. Triggered every
             # ``record_every_n_steps`` env steps when both a callback and a
             # cadence are set; the callback is responsible for catching
@@ -958,6 +1070,7 @@ class AgileRLTrainer(BaselineTrainer):
         *,
         record_callback: Optional[Any] = None,
         record_every_n_steps: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """On-policy rollout loop for IPPO.
 
@@ -1051,6 +1164,7 @@ class AgileRLTrainer(BaselineTrainer):
             f"num_envs={num_envs}"
         )
 
+        on_policy_start = time.time()
         while steps_done < budget_steps:
             remaining_steps = budget_steps - steps_done
             collect_target = min(learn_step, remaining_steps)
@@ -1197,6 +1311,26 @@ class AgileRLTrainer(BaselineTrainer):
                 f" | mean_rew={np.mean(episode_rewards[-10:]) if episode_rewards else 0.0:.2f}"
                 + loss_str
             )
+
+            if progress_callback is not None:
+                _emit_mean = (
+                    float(np.mean(episode_rewards[-10:]))
+                    if episode_rewards else None
+                )
+                _emit_best = (
+                    float(max(episode_rewards)) if episode_rewards else None
+                )
+                self._emit_progress(
+                    progress_callback,
+                    ProgressEvent(
+                        unit="env_step",
+                        current=int(progress_steps),
+                        total=int(budget_steps),
+                        best_fitness=_emit_best,
+                        mean_fitness=_emit_mean,
+                        wall_time_s=time.time() - on_policy_start,
+                    ),
+                )
 
             # Mid-training champion-rollout recording. ``steps_done`` is
             # checked at learn-iteration boundaries (rollout chunks of

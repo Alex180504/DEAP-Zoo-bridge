@@ -31,6 +31,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
+from deap_pettingzoo.catalog.schema import ParamSpec, TeamSpec
+
 
 class EnvFactory:
     """Factory for constructing PettingZoo environments.
@@ -117,6 +119,17 @@ class EnvSpec:
     Default is an empty tuple (no wrapping).
     """
     wrappers: Tuple[Callable[[Any], Any], ...] = ()
+    #: Declarative schema for the environment-constructor kwargs, consumed by
+    #: the catalog / experiment-setup UI to auto-generate a typed config form.
+    #: Empty ⇒ no introspectable params (the env takes no kwargs, or none are
+    #: surfaced). MPE2 factories use ``**kwargs`` passthrough so this metadata
+    #: is hand-authored in :mod:`deap_pettingzoo.environments.builtin`.
+    params: Tuple[ParamSpec, ...] = ()
+    #: Declared agent teams (groups of agent-name prefixes). ``len(teams) >= 2``
+    #: marks the env as multi-team and therefore co-evolution-capable. Empty ⇒
+    #: single-team / cooperative (the UI hides co-evolution for it unless the
+    #: user explicitly opts in).
+    teams: Tuple[TeamSpec, ...] = ()
 
 
 #: Fallback episode length when an :class:`EnvSpec` does not specify one.
@@ -136,6 +149,8 @@ def register_env(
     tags: Optional[set] = None,
     api: EnvApi = "parallel",
     wrappers: Sequence[Callable[[Any], Any]] = (),
+    params: Sequence[ParamSpec] = (),
+    teams: Sequence[TeamSpec] = (),
     overwrite: bool = False,
 ) -> EnvSpec:
     """Register a PettingZoo environment.
@@ -215,6 +230,8 @@ def register_env(
         tags=frozenset(tags or ()),
         api=api,
         wrappers=wrapper_tuple,
+        params=tuple(params),
+        teams=tuple(teams),
     )
     _REGISTRY[name] = spec
     return spec

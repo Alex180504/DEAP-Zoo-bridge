@@ -223,39 +223,32 @@ def compare_baselines(
 
 # Auto-register built-in trainers
 def _register_builtins():
-    """Register built-in trainers.
+    """Register built-in trainers, sourcing the mapping from the catalog.
 
-    Importing the AgileRL trainer module does NOT require AgileRL to be
-    installed — the ``import agilerl`` call is deferred until ``train()``
-    is invoked.  That means the user can always register the class; only calling
-    ``train()`` without the ``[rl-baselines]`` extra will raise ImportError.
+    The algorithm → trainer-class bindings come from
+    :func:`deap_pettingzoo.catalog.algorithms.iter_trainer_bindings`, so the
+    trainer registry and the unified catalog can never drift apart (this is how
+    ``pso`` — historically missing from the registry — is now registered as a
+    first-class standalone algorithm).
+
+    Importing a trainer module does NOT require its optional extra (the heavy
+    ``import agilerl`` / ``import torch`` calls are deferred until ``train()``),
+    so every binding registers; only calling ``train()`` without the matching
+    extra raises ImportError.
     """
-    try:
-        from deap_pettingzoo.baselines.ea_trainer import EATrainer
-        register_trainer('ea', EATrainer)
-    except ImportError:
-        pass
+    import importlib
 
-    try:
-        from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
-        register_trainer('cma-es', CMAESTrainer)
-    except ImportError:
-        pass
+    from deap_pettingzoo.catalog.algorithms import iter_trainer_bindings
 
-    try:
-        from deap_pettingzoo.baselines.agilerl_trainer import (
-            MADDPGTrainer,
-            MATD3Trainer,
-            IPPOTrainer,
-            GroupedIPPOTrainer,
-        )
-        register_trainer('maddpg', MADDPGTrainer)
-        register_trainer('matd3', MATD3Trainer)
-        register_trainer('ippo', IPPOTrainer)
-        register_trainer('ippo-grouped', GroupedIPPOTrainer)
-    except ImportError:
-        pass
+    for name, module_path, class_name in iter_trainer_bindings():
+        try:
+            module = importlib.import_module(module_path)
+            register_trainer(name, getattr(module, class_name))
+        except ImportError:
+            pass
 
+    # Co-evolution is a meta-trainer, not a standalone catalog algorithm, so it
+    # is registered explicitly rather than via the catalog binding list.
     try:
         from deap_pettingzoo.baselines.coevolution import CoEvolutionTrainer
         register_trainer('coevolution', CoEvolutionTrainer)
