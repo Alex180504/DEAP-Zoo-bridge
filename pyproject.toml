@@ -103,16 +103,24 @@ ui = [
     "plotly>=5.0",
     "pillow>=10.0",
     "imageio>=2.31",
+    "httpx>=0.24",
+    "pyyaml>=6.0",
+]
+service = [
+    "deap-pettingzoo[rl-baselines]",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.22",
+    "pydantic>=2",
+]
+ui-full = [
+    "deap-pettingzoo[ui,service]",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui,service,ui-full]"
 ]
 
-[tool.setuptools]
-packages = ["deap_pettingzoo"]
-
-[tool.setuptools.package-data]
-deap_pettingzoo = ["py.typed"]
+[tool.setuptools.packages.find]
+include = ["deap_pettingzoo", "deap_pettingzoo.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
