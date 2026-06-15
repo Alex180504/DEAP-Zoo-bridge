@@ -20,6 +20,8 @@ from deap_pettingzoo.baselines._logging_helpers import (
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
@@ -57,6 +59,57 @@ class PSOTrainer(BaselineTrainer):
 
     _default_recording_every_n: ClassVar[int] = 1
 
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog."""
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
+        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        return (
+            ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
+                      group="Architecture",
+                      help="Hidden layer width of the evolved MLP."),
+            ParamSpec("population_size", I, 50, minimum=2, step=1, target=TR,
+                      group="Population",
+                      help="Number of particles in the swarm."),
+            ParamSpec("phi1", F, 2.0, minimum=0.0, step=0.1, target=TR,
+                      group="Strategy",
+                      help="Cognitive coefficient (pull toward personal best)."),
+            ParamSpec("phi2", F, 2.0, minimum=0.0, step=0.1, target=TR,
+                      group="Strategy",
+                      help="Social coefficient (pull toward global best)."),
+            ParamSpec("weight", F, 0.7298, minimum=0.0, step=0.05, target=TR,
+                      group="Strategy", help="Inertia weight."),
+            ParamSpec("smin", F, None, target=TR, group="Strategy",
+                      advanced=True, nullable=True,
+                      help="Lower clamp on particle velocity (None = unset)."),
+            ParamSpec("smax", F, None, target=TR, group="Strategy",
+                      advanced=True, nullable=True,
+                      help="Upper clamp on particle velocity (None = unset)."),
+            ParamSpec("activation", E, "tanh", target=TR, group="Architecture",
+                      advanced=True,
+                      choices=("tanh", "relu", "sigmoid", "linear"),
+                      help="MLP activation function."),
+            ParamSpec("num_workers", I, 1, minimum=0, step=1, target=TR,
+                      group="Parallelism",
+                      help="Parallel evaluation workers (1 = serial)."),
+            ParamSpec("parallel_backend", E, "process", target=TR,
+                      group="Parallelism", advanced=True,
+                      choices=("process", "scoop", "dask"),
+                      help="Parallel executor backend."),
+            ParamSpec("seed", I, None, minimum=0, step=1, target=AP,
+                      group="Run", nullable=True,
+                      help="Random seed for this run (None = unseeded)."),
+            ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
+                      target=AP, group="Run",
+                      help="Hard cap on environment steps per rollout."),
+        )
+
     def __init__(
         self,
         hidden_size: int = 64,
@@ -92,7 +145,12 @@ class PSOTrainer(BaselineTrainer):
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         start_time = time.time()
         params = self._translate_budget(config)
         num_generations = params["num_generations"]
@@ -108,7 +166,8 @@ class PSOTrainer(BaselineTrainer):
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
             max_steps=max_steps,
-            aggregation_method="sum",
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
         )
 
         seed = config.algorithm_params.get("seed", None)
@@ -138,6 +197,9 @@ class PSOTrainer(BaselineTrainer):
         log = build_logger(config, algorithm="pso")
         recording_cfg = config.recording
         recording_cadence = self._resolve_recording_every_n(config)
+        recording_schedule = recording_cfg.planned_record_iterations(
+            num_generations
+        )
         recording_evaluator: Optional[UnifiedEvaluator] = None
         if recording_cfg.enabled:
             recorder = log.get_frame_recorder(
@@ -158,8 +220,8 @@ class PSOTrainer(BaselineTrainer):
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
             max_steps=max_steps,
-            aggregation_method="sum",
-            team_mapping=None,
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
         )
 
         with make_executor(
@@ -208,10 +270,25 @@ class PSOTrainer(BaselineTrainer):
                     "max": record["max"],
                     "gbest": gbest_fit,
                 })
+                if progress_callback is not None:
+                    self._emit_progress(
+                        progress_callback,
+                        ProgressEvent(
+                            unit="generation",
+                            current=gen + 1,
+                            total=num_generations,
+                            best_fitness=record["max"],
+                            mean_fitness=record["avg"],
+                            wall_time_s=time.time() - start_time,
+                        ),
+                    )
 
-                if recording_evaluator and recording_cfg.enabled and (
-                    (gen + 1) % recording_cadence == 0
-                ):
+                _record_due = (
+                    (gen + 1) in recording_schedule
+                    if recording_schedule is not None
+                    else (gen + 1) % recording_cadence == 0
+                )
+                if recording_evaluator and recording_cfg.enabled and _record_due:
                     if len(hof) > 0:
                         try:
                             best = hof[0]
@@ -280,6 +357,7 @@ class PSOTrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
         )

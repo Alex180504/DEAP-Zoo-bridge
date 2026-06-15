@@ -9,7 +9,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Protocol, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Protocol,
+    Union,
+)
+import warnings
+
 import numpy as np
 
 
@@ -67,6 +79,13 @@ class RecordingConfig:
     max_frames_per_episode: Optional[int] = None
     max_dim: Optional[int] = None
     episode_prefix: str = ""
+    #: Cap on the number of champion-rollout recordings produced over a whole
+    #: run. When set, it **overrides** :attr:`every_n_generations` cadence for
+    #: generation-based trainers (EA / CMA-ES / PSO): the first recording is
+    #: allocated to the first generation, the last to the final generation, and
+    #: any remaining are spread evenly in between. ``1`` records only the final
+    #: generation. ``None`` (default) falls back to cadence-based recording.
+    max_recordings: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.every_n_generations is not None and self.every_n_generations <= 0:
@@ -100,6 +119,141 @@ class RecordingConfig:
                 "RecordingConfig.max_dim must be positive or None, "
                 f"got {self.max_dim}"
             )
+        if self.max_recordings is not None and self.max_recordings < 1:
+            raise ValueError(
+                "RecordingConfig.max_recordings must be >= 1 or None, "
+                f"got {self.max_recordings}"
+            )
+
+    def planned_record_iterations(
+        self, total_iterations: int
+    ) -> Optional[FrozenSet[int]]:
+        """Resolve the explicit set of generations to record, or ``None``.
+
+        Implements the :attr:`max_recordings` allocation for generation-based
+        trainers. Returns ``None`` when :attr:`max_recordings` is unset, in
+        which case the caller falls back to :attr:`every_n_generations`
+        cadence.
+
+        Args:
+            total_iterations: Number of generations ``G``; the trainer records
+                using 1-based generation indices in ``[1, G]`` (matching the
+                value passed to its ``_record_champion_if_due`` hook).
+
+        Returns:
+            A frozenset of 1-based generation indices, or ``None`` for cadence
+            mode. ``max_recordings == 1`` yields only the final generation;
+            ``>= G`` yields every generation; otherwise the first (``1``) and
+            last (``G``) plus evenly-spaced interior generations.
+        """
+        if self.max_recordings is None:
+            return None
+        if total_iterations <= 0:
+            return frozenset()
+        n = int(self.max_recordings)
+        if n <= 1:
+            return frozenset({total_iterations})
+        if n >= total_iterations:
+            return frozenset(range(1, total_iterations + 1))
+        positions = {
+            1 + round(i * (total_iterations - 1) / (n - 1)) for i in range(n)
+        }
+        return frozenset(int(p) for p in positions)
+
+
+@dataclass
+class FitnessConfig:
+    """Fitness-aggregation configuration nested on :class:`TrainingConfig`.
+
+    Population-based trainers (EA / CMA-ES / PSO) collapse the per-agent
+    rewards of a rollout into a single scalar fitness via
+    :class:`~deap_pettingzoo.evaluators.SingleEpisodeEvaluator`. Historically
+    every trainer hard-coded ``'sum'``; this config surfaces the other
+    aggregation methods (``mean`` / ``min`` / ``max`` / ``team``) through the
+    unified API so the experiment-setup UI can configure them.
+
+    Attributes:
+        aggregation_method: One of ``SingleEpisodeEvaluator.VALID_AGGREGATIONS``
+            (``'sum'`` / ``'mean'`` / ``'min'`` / ``'max'`` / ``'team'``).
+        team_mapping: Required for ``'team'`` aggregation — maps each agent id
+            to a team name. ``None`` for the scalar methods.
+    """
+
+    aggregation_method: str = "sum"
+    team_mapping: Optional[Dict[str, str]] = None
+
+    _VALID: ClassVar[frozenset] = frozenset(
+        {"sum", "mean", "min", "max", "team"}
+    )
+
+    def __post_init__(self) -> None:
+        if self.aggregation_method not in self._VALID:
+            raise ValueError(
+                f"FitnessConfig.aggregation_method must be one of "
+                f"{sorted(self._VALID)}, got {self.aggregation_method!r}"
+            )
+        if self.aggregation_method == "team" and not self.team_mapping:
+            raise ValueError(
+                "FitnessConfig.aggregation_method='team' requires a non-empty "
+                "team_mapping (agent_id -> team_name)."
+            )
+
+
+@dataclass
+class ProgressEvent:
+    """A single per-iteration training-progress snapshot.
+
+    Emitted by trainers through the optional ``progress_callback`` so the
+    subprocess runner / FastAPI service can stream live progress to the UI
+    queue page. Deliberately logger-independent: it is built from in-loop
+    variables and fires even when ``output_dir is None`` (no run directory).
+
+    Attributes:
+        unit: ``"generation"`` for population-based trainers, ``"env_step"``
+            for the step-based AgileRL trainers.
+        current: Current 1-based generation (or completed env-step count).
+        total: Total generations (or budgeted env steps).
+        best_fitness: Best fitness / return so far (``None`` if unknown).
+        mean_fitness: Population-mean fitness this iteration (``None`` if N/A).
+        wall_time_s: Seconds elapsed since training started.
+        extra: Free-form trainer-specific extras (e.g. ``{"side": "..."}``).
+    """
+
+    unit: str
+    current: int
+    total: int
+    best_fitness: Optional[float] = None
+    mean_fitness: Optional[float] = None
+    wall_time_s: float = 0.0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fraction(self) -> float:
+        """Completion in ``[0, 1]`` (0 when ``total <= 0``)."""
+        if self.total <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.current / self.total))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "unit": self.unit,
+            "current": int(self.current),
+            "total": int(self.total),
+            "fraction": self.fraction,
+            "best_fitness": (
+                None if self.best_fitness is None else float(self.best_fitness)
+            ),
+            "mean_fitness": (
+                None if self.mean_fitness is None else float(self.mean_fitness)
+            ),
+            "wall_time_s": float(self.wall_time_s),
+            "extra": dict(self.extra),
+        }
+
+
+#: Type alias for the optional per-iteration progress hook accepted by
+#: :meth:`BaselineTrainer.train`.
+ProgressCallback = Callable[["ProgressEvent"], None]
 
 
 @dataclass
@@ -135,6 +289,7 @@ class TrainingConfig:
     output_dir: Optional[Path] = None
     render: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -317,13 +472,45 @@ class BaselineTrainer(ABC):
             return int(explicit)
         return int(type(self)._default_recording_every_n)
 
+    @staticmethod
+    def _emit_progress(
+        callback: Optional[ProgressCallback],
+        event: ProgressEvent,
+    ) -> None:
+        """Invoke ``callback`` with ``event``, swallowing any exception.
+
+        Progress reporting must never be able to crash a long training run, so
+        a misbehaving callback only raises a :class:`RuntimeWarning`. Mirrors
+        the error-isolation idiom used by the co-evolution generation hook.
+        """
+        if callback is None:
+            return
+        try:
+            callback(event)
+        except Exception as exc:  # noqa: BLE001 - intentional isolation
+            warnings.warn(
+                f"progress_callback raised {exc!r}; ignoring this update",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     @abstractmethod
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train the algorithm with the given configuration.
-        
+
         Args:
             config: Training configuration including budget and hyperparameters.
-            
+            progress_callback: Optional hook invoked once per generation /
+                progress interval with a :class:`ProgressEvent`. Additive and
+                error-isolated (see :meth:`_emit_progress`); ``None`` disables
+                progress reporting. Not every trainer emits progress — those
+                that do are the standard UI-exposed algorithms.
+
         Returns:
             TrainingResult containing the trained policy and metrics.
         """

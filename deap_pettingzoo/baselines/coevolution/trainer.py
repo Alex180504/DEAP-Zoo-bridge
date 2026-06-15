@@ -45,6 +45,8 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
@@ -405,7 +407,12 @@ class CoEvolutionTrainer(BaselineTrainer):
     #: rollout artefact per generation when recording is enabled.
     _default_recording_every_n: ClassVar[int] = 1
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Execute the co-evolution training loop.
 
         Note:
@@ -494,6 +501,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             }
             recording_cadence = self._setup_recording(config)
 
+            # Per-generation progress reporting (logger-independent).
+            self._progress_callback = progress_callback
+            self._progress_total = num_generations
+            self._progress_start = start
+
             if coev_cfg.schedule == "synchronous":
                 self._run_synchronous_loop(
                     env, states, coev_cfg, config,
@@ -542,6 +554,12 @@ class CoEvolutionTrainer(BaselineTrainer):
             "reporting_side": coev_cfg.reporting_side,
             "coevolution_num_workers": resolved_workers,
             "coevolution_parallel_backend": coev_cfg.parallel_backend,
+            "run_dir": (
+                str(self._recording_log.run_dir)
+                if config.output_dir is not None
+                and getattr(self, "_recording_log", None) is not None
+                else None
+            ),
             "sides": [
                 {
                     "name": s.name,
@@ -704,18 +722,50 @@ class CoEvolutionTrainer(BaselineTrainer):
         gen: int,
         states: Dict[str, SideState],
     ) -> None:
-        """Call the user-supplied generation callback, isolating errors."""
-        if coev_cfg.generation_callback is None:
+        """Call the user generation callback and emit a progress event.
+
+        Both are error-isolated so neither can interrupt training. The
+        progress event is logger-independent (built from in-loop state) and
+        is wired into **both** the synchronous and alternating schedules.
+        """
+        if coev_cfg.generation_callback is not None:
+            try:
+                coev_cfg.generation_callback(gen, states)
+            except Exception as _cb_exc:
+                warnings.warn(
+                    f"[CoEvolution] generation_callback failed at gen {gen}: "
+                    f"{type(_cb_exc).__name__}: {_cb_exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        callback = getattr(self, "_progress_callback", None)
+        if callback is None:
             return
-        try:
-            coev_cfg.generation_callback(gen, states)
-        except Exception as _cb_exc:
-            warnings.warn(
-                f"[CoEvolution] generation_callback failed at gen {gen}: "
-                f"{type(_cb_exc).__name__}: {_cb_exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        best: Optional[float] = None
+        side_best: Dict[str, float] = {}
+        for nm, st in states.items():
+            if st.side.optimizer == "frozen":
+                continue
+            try:
+                bf = float(st.best_fitness)
+            except (TypeError, ValueError):
+                continue
+            side_best[nm] = bf
+            best = bf if best is None else max(best, bf)
+        start = getattr(self, "_progress_start", None)
+        self._emit_progress(
+            callback,
+            ProgressEvent(
+                unit="generation",
+                current=gen,
+                total=int(getattr(self, "_progress_total", 0)),
+                best_fitness=best,
+                mean_fitness=None,
+                wall_time_s=(time.time() - start) if start is not None else 0.0,
+                extra={"side_best": side_best},
+            ),
+        )
 
     def _run_synchronous_loop(
         self,
@@ -773,6 +823,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                     self._record_champion_if_due(
                         config, coev_cfg, states, total, cadence
                     )
+                    self._invoke_generation_callback(coev_cfg, total, states)
                     _side_info = "  ".join(
                         _format_progress_entry(h[-1])
                         for n, h in history.items()

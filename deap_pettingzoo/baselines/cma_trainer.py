@@ -23,6 +23,8 @@ from deap_pettingzoo.baselines._logging_helpers import (
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
@@ -63,6 +65,53 @@ class CMAESTrainer(BaselineTrainer):
 
     # CMA-ES iterates per generation just like EA, so the natural recording cadence is one artefact per generation.
     _default_recording_every_n: ClassVar[int] = 1
+
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        ``weight_range`` is a tuple and is therefore omitted from the form
+        surface (it is reachable through raw config / the Python API).
+        """
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
+        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        return (
+            ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
+                      group="Architecture",
+                      help="Hidden layer width of the evolved MLP."),
+            ParamSpec("population_size", I, 50, minimum=2, step=1, target=TR,
+                      group="Population",
+                      help="lambda - samples drawn per generation."),
+            ParamSpec("sigma0", F, 0.3, minimum=1e-6, step=0.05, target=TR,
+                      group="Strategy",
+                      help="Initial step size of the CMA search distribution."),
+            ParamSpec("variant", E, "mu_mu_lambda", target=TR, group="Strategy",
+                      choices=("mu_mu_lambda", "one_plus_lambda"),
+                      help="CMA-ES flavour: rank-mu update or (1+lambda) elitist."),
+            ParamSpec("activation", E, "tanh", target=TR, group="Architecture",
+                      advanced=True,
+                      choices=("tanh", "relu", "sigmoid", "linear"),
+                      help="MLP activation function."),
+            ParamSpec("num_workers", I, 1, minimum=0, step=1, target=TR,
+                      group="Parallelism",
+                      help="Parallel evaluation workers (1 = serial)."),
+            ParamSpec("parallel_backend", E, "process", target=TR,
+                      group="Parallelism", advanced=True,
+                      choices=("process", "scoop", "dask"),
+                      help="Parallel executor backend."),
+            ParamSpec("seed", I, None, minimum=0, step=1, target=AP,
+                      group="Run", nullable=True,
+                      help="Random seed for this run (None = unseeded)."),
+            ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
+                      target=AP, group="Run",
+                      help="Hard cap on environment steps per rollout."),
+        )
 
     def __init__(
         self,
@@ -129,11 +178,17 @@ class CMAESTrainer(BaselineTrainer):
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train CMA-ES with the given configuration.
 
         Args:
             config: Unified training configuration.
+            progress_callback: Optional per-generation progress hook.
 
         Returns:
             :class:`TrainingResult` whose ``policy`` wraps the best-found
@@ -164,7 +219,8 @@ class CMAESTrainer(BaselineTrainer):
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
             max_steps=max_steps_per_episode,
-            aggregation_method="sum",
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
         )
 
         # Seed NumPy's global RNG — deap.cma.Strategy samples via numpy.random.standard_normal, so this is the only control knob.
@@ -191,6 +247,9 @@ class CMAESTrainer(BaselineTrainer):
         log = build_logger(config, algorithm="cma-es")
         recording_cfg = config.recording
         recording_cadence = self._resolve_recording_every_n(config)
+        recording_schedule = recording_cfg.planned_record_iterations(
+            num_generations
+        )
         recording_evaluator: Optional[UnifiedEvaluator] = None
         if recording_cfg.enabled:
             recorder = log.get_frame_recorder(
@@ -210,7 +269,10 @@ class CMAESTrainer(BaselineTrainer):
             """One champion-rollout episode per recording cadence (1-indexed)."""
             if recording_evaluator is None or len(hof) == 0:
                 return
-            if gen % recording_cadence != 0:
+            if recording_schedule is not None:
+                if gen not in recording_schedule:
+                    return
+            elif gen % recording_cadence != 0:
                 return
             try:
                 best = hof[0]
@@ -238,8 +300,8 @@ class CMAESTrainer(BaselineTrainer):
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
             max_steps=max_steps_per_episode,
-            aggregation_method="sum",
-            team_mapping=None,
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
         )
 
         with make_executor(
@@ -291,6 +353,18 @@ class CMAESTrainer(BaselineTrainer):
                 )
                 # gen is 0-indexed in this loop - fire callback with 1-indexed.
                 _record_champion_if_due(gen + 1)
+                if progress_callback is not None:
+                    self._emit_progress(
+                        progress_callback,
+                        ProgressEvent(
+                            unit="generation",
+                            current=gen + 1,
+                            total=num_generations,
+                            best_fitness=record["max"],
+                            mean_fitness=record["avg"],
+                            wall_time_s=time.time() - start_time,
+                        ),
+                    )
 
         env.close()
         if recording_evaluator is not None:
@@ -357,6 +431,7 @@ class CMAESTrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
         )
