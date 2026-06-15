@@ -151,7 +151,7 @@ def run_experiment(
 
     # 3. Build configs
     try:
-        plan = build_configs(spec)
+        plan = build_configs(spec, output_root=experiment_dir)
     except Exception as exc:
         _write_result(
             experiment_dir,
