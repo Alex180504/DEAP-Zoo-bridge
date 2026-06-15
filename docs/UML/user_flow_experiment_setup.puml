@@ -1,0 +1,99 @@
+@startuml user_flow_experiment_setup
+!theme plain
+title Experiment Setup – User Flow
+
+skinparam state {
+  BackgroundColor #F5F8FA
+  BorderColor #4A5568
+}
+
+[*] --> EnvTab
+
+state EnvTab {
+    EnvTab : Select environment from catalog
+    EnvTab : See availability badge (installed / missing extra)
+    EnvTab : Env-level params (continuous_actions, max_cycles, ...)
+}
+
+EnvTab --> AlgoTab : env selected
+
+state AlgoTab {
+    AlgoTab : See algorithm list (compatible highlighted, incompatible disabled)
+    AlgoTab : Select one or more algorithms
+    AlgoTab : Per-algo hyperparameter widgets (dynamic from catalog ParamSpec)
+}
+
+AlgoTab --> BudgetTab : at least 1 algo selected
+
+state BudgetTab {
+    BudgetTab : Budget mode (eval_episodes, env_steps, generations)
+    BudgetTab : Budget value
+    BudgetTab : Number of seeds
+}
+
+BudgetTab --> FitnessTab : budget set
+
+state FitnessTab {
+    FitnessTab : Aggregation method (sum, mean, min, max, team)
+    FitnessTab : Team mapping (for multi-team envs)
+}
+
+FitnessTab --> RecordingTab
+
+state RecordingTab {
+    RecordingTab : Enable/disable champion recording
+    RecordingTab : FPS
+    RecordingTab : Max recordings (1 = final only, N ≥ 2 = spaced)
+}
+
+RecordingTab --> CoevTab : optional
+RecordingTab --> RawTab : skip coevolution
+
+state CoevTab {
+    CoevTab : Coevolution mode (competitive_2pop, cooperative, self_play_hof)
+    CoevTab : Schedule (synchronous, alternating)
+    CoevTab : Configure sides (per-side optimizer, params)
+    CoevTab : Opponent sampling (k_opponents, sampler)
+    CoevTab : Hall of Fame size
+}
+
+CoevTab --> RawTab
+
+state RawTab {
+    RawTab : Paste YAML/JSON raw config override
+    RawTab : Precedence: defaults < raw < explicit form
+}
+
+RawTab --> Validate
+
+state Validate {
+    Validate : Click "Validate" → POST /experiments/validate
+    Validate : Render field errors grouped by tab
+    Validate : Render warnings (e.g. unverifiable import)
+}
+
+Validate --> Submit : no blocking errors
+Validate --> EnvTab : fix errors
+
+state Submit {
+    Submit : Click "Submit" → POST /experiments
+    Submit : Server re-validates (defense in depth → 422 on failure)
+    Submit : On success → toast + auto-navigate to Queue
+}
+
+Submit --> [*]
+
+note right of Validate
+  Validation checks:
+  • env exists & extras installed
+  • env_config types & ranges
+  • algo exists & extras installed
+  • hyperparam types, ranges, enums
+  • budget mode supported by ALL algos
+  • aggregation supported per algo
+  • coevolution sides cover all teams
+  • num_seeds ≥ 1, budget > 0
+  • recording fps > 0
+end note
+
+@enduml

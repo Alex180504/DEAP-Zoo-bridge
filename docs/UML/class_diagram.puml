@@ -1451,6 +1451,211 @@ package "deap_pettingzoo.ui" {
     }
 }
 
+package "deap_pettingzoo.catalog (v0.2+)" #F0F8FF {
+    class ParamSpec <<dataclass>> {
+        + name: str
+        + type: ParamType (int|float|bool|str|enum|list)
+        + default: Any
+        + min: float | None
+        + max: float | None
+        + step: float | None
+        + choices: list | None
+        + group: str
+        + label: str
+        + help: str
+        + advanced: bool
+        --
+        + coerce(value) -> Any
+        + validate(value) -> list[str]
+        + to_dict() -> dict
+    }
+
+    class AlgorithmSpec <<dataclass>> {
+        + name: str
+        + aliases: list[str]
+        + family: str
+        + hyperparameters: list[ParamSpec]
+        + capabilities: dict
+        + coevolution_optimizer: bool
+        + required_extras: list[str]
+        + supported_budget_modes: list[str]
+        + supported_aggregations: list[str]
+        --
+        + {static} canonical_name(name) -> str
+    }
+
+    class EnvironmentSpec <<dataclass>> {
+        + name: str
+        + env_config: list[ParamSpec]
+        + teams: list[TeamSpec]
+        + api: str
+        + continuous_default: bool
+        + tags: set[str]
+        + required_extras: list[str]
+    }
+
+    class TeamSpec <<dataclass>> {
+        + name: str
+        + agent_prefixes: list[str]
+    }
+
+    class ValidationReport <<dataclass>> {
+        + ok: bool
+        + errors: list[ValidationIssue]
+        + warnings: list[ValidationIssue]
+    }
+
+    class Catalog <<facade>> {
+        + list_algorithms() -> list[AlgorithmSpec]
+        + get_algorithm(name) -> AlgorithmSpec
+        + list_environments() -> list[EnvironmentSpec]
+        + get_environment(name) -> EnvironmentSpec
+        + get_coevolution_options() -> dict
+        + compatible_algorithms(env, algos) -> dict
+        + to_json() -> dict
+    }
+
+    class availability <<module>> {
+        + module_available(extra_name) -> bool
+    }
+}
+
+package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
+    class ExperimentSpecModel <<pydantic>> {
+        + env_name: str
+        + algorithms: list[str]
+        + hyperparameters: dict
+        + budget: BudgetSpecModel
+        + fitness: FitnessSettingsModel
+        + recording: RecordingSettingsModel
+        + coevolution: CoevolutionSettingsModel | None
+        + parallelism: ParallelismSettingsModel
+        + raw_config: str | None
+        + num_seeds: int
+        + label: str
+        --
+        + to_dataclass() -> ExperimentSpec
+    }
+
+    class SubmitResponse <<pydantic>> {
+        + id: str
+        + status: str
+        + position: int
+    }
+
+    class ExperimentRecord <<pydantic>> {
+        + id: str
+        + label: str
+        + status: str
+        + created_at: float
+        + started_at: float | None
+        + finished_at: float | None
+        + run_dirs: list[str] | None
+        + error: str | None
+    }
+
+    class ProgressSnapshot <<pydantic>> {
+        + run_index: int
+        + total_runs: int
+        + algo: str
+        + seed: int
+        + unit: str
+        + current: int
+        + total: int
+        + best_fitness: float | None
+        + mean_fitness: float | None
+        + wall_time_s: float
+    }
+
+    class Dispatcher {
+        - _running: Task | None
+        - _paused: bool
+        - _worker_limit: int = 1
+        --
+        + start()
+        + cancel(experiment_id)
+        + shutdown()
+    }
+
+    class Runner <<subprocess>> {
+        + run_experiment(spec_file, experiment_dir) -> int
+        + ProgressWriter (callback -> _progress.json)
+    }
+
+    class FastAPIApp <<FastAPI>> {
+        + GET /health
+        + GET /catalog
+        + POST /experiments
+        + POST /experiments/validate
+        + GET /experiments/{id}/progress
+        + GET /experiments/{id}/stdout
+        + GET /queue
+        + POST /queue/pause
+        + POST /queue/resume
+    }
+
+    class db <<module>> {
+        + create_tables()
+        + insert_experiment(spec)
+        + list_experiments(status, limit, offset)
+        + dequeue_next() -> experiment | None
+        + set_running / set_completed / set_failed / set_cancelled
+        + update_progress(id, progress_json)
+        + get_queue_state()
+    }
+}
+
+package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
+    class ApiClient {
+        - _client: httpx.Client
+        - _base_url: str
+        --
+        + get_catalog() -> dict
+        + get_algorithms() -> list
+        + get_environment(name) -> dict
+        + get_compatibility(env, algos) -> dict
+        + validate(spec) -> ValidationReportModel
+        + submit(spec) -> SubmitResponse
+        + list_experiments() -> list[ExperimentRecord]
+        + get_progress(id) -> ProgressSnapshot
+        + get_stdout(id, offset, limit) -> dict
+        + get_queue() -> QueueState
+        + pause_queue() / resume_queue()
+        + cancel_experiment(id)
+    }
+
+    class param_widgets <<module>> {
+        + coerce_param(value, spec) -> Any
+        + render_param(spec, key) -> value  (thin Streamlit wrapper)
+    }
+
+    class forms <<module>> {
+        + build_env_form(catalog) -> (values, touched)
+        + build_algo_form(catalog, env) -> (values, touched)
+        + build_fitness_form(env_spec) -> (values, touched)
+    }
+
+    class validation_view <<module>> {
+        + group_issues_by_tab(report) -> dict
+        + render_validation_report(report)
+    }
+}
+
+' Cross-package relationships (v0.2+)
+Catalog --> AlgorithmSpec : contains
+Catalog --> EnvironmentSpec : contains
+ExperimentSpecModel ..> ExperimentSpec : to_dataclass()
+FastAPIApp --> Catalog : serves as JSON
+FastAPIApp --> Dispatcher : lifespan manages
+FastAPIApp --> db : async I/O
+Dispatcher --> Runner : Popen subprocess
+Runner --> "baselines.Trainer" : train(progress_callback)
+ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
+"Setup Page" ..> ApiClient : uses
+"Queue Page" ..> ApiClient : uses
+AlgorithmSpec --> ParamSpec : hyperparameters
+EnvironmentSpec --> TeamSpec : teams
+
 policies ..> RunRecord : "reads .manifest"
 policies ..> PolicyCheckpointEntry : parses
 checkpoints ..> RunManifest : "writes .artifacts['policy']"

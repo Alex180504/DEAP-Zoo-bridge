@@ -1,0 +1,72 @@
+@startuml sequence_queue_progress
+!theme plain
+title Queue Page – Live Progress & Control
+
+participant "Queue Page\n(Streamlit)" as QP
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+participant "Runner\n(subprocess)" as Runner
+participant "_progress.json" as Prog
+
+== Poll loop (every ~2s via st.rerun) ==
+loop Poll interval
+    QP -> Client: GET /queue
+    Client -> API: HTTP GET
+    API -> DB: get_queue_state()
+    DB --> API: {paused, running_id, queued_ids[]}
+    API --> Client: QueueState
+    Client --> QP: render control bar\n(pause/resume buttons)
+
+    alt running experiment
+        QP -> Client: GET /experiments/{id}/progress
+        Client -> API: HTTP GET
+        API -> DB: get_experiment(id) → check status=running
+        DB --> API: experiment record
+        API -> API: read _progress.json from experiment dir
+        API --> Client: ProgressSnapshot
+        Client --> QP: render progress bar\n(run k/N, gen g/G)\nmetric cards (best, mean, wall time)
+
+        QP -> Client: GET /experiments/{id}/stdout?offset=N
+        Client -> API: HTTP GET
+        API -> API: read _stdout.log from byte offset
+        API --> Client: {text, next_offset, eof}
+        Client --> QP: render stdout expander
+    end
+
+    QP -> Client: GET /experiments?limit=50
+    Client -> API: HTTP GET
+    API --> Client: ExperimentRecord[]
+    Client --> QP: render all-experiments table
+end
+
+== Progress writes (trainer -> file) ==
+Runner -> Trainer: train(config, progress_callback=...)
+activate Trainer
+loop each generation / progress step
+    Trainer -> Runner: progress_callback(ProgressEvent)
+    Runner -> Prog: atomic write\n(tmp + os.replace)
+    note right of Prog: {run_index, total_runs,\nalgo, seed, unit,\ncurrent, total,\nbest_fitness, mean_fitness,\nwall_time_s}
+end
+deactivate Trainer
+
+== Queue controls ==
+QP -> QP: user clicks "Pause"
+QP -> Client: POST /queue/pause
+Client -> API: HTTP POST
+API -> DB: set_paused(True)
+DB --> API: ok
+API --> Client: 200 {paused: true}
+Client --> QP: update button state
+
+QP -> QP: user clicks "Cancel" on running experiment
+QP -> Client: POST /experiments/{id}/cancel
+Client -> API: HTTP POST
+API -> API: if running → dispatcher.cancel(id)
+note right of API: dispatcher sends SIGTERM\nto runner subprocess
+API -> DB: set_cancelled(id)
+DB --> API: ok
+API --> Client: 200 {status: "cancelled"}
+Client --> QP: update experiment row
+
+@enduml
