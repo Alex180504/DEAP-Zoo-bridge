@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# .dockerignore — keeps the build context small and avoids leaking secrets.
+# ---------------------------------------------------------------------------
+
+# Python virtual environment & build artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Testing & coverage
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+test_results.txt
+tests/
+
+# Documentation & project notes (not needed at runtime)
+docs/
+examples/
+code_review/
+project_notes.md
+ui_overhaul_spec.md
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Runtime data (mounted as volumes at runtime, not baked into image)
+results/
+
+# Root-level scripts (not needed for the service/UI)
+main.py
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
