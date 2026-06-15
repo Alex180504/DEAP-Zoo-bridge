@@ -43,7 +43,7 @@ state.results_root = settings.results_root
 # Page definitions (st.navigation groups)
 # ---------------------------------------------------------------------------
 
-_PAGES_DIR = "deap_pettingzoo/ui/pages"
+_PAGES_DIR = "pages"
 
 pages = {
     "Experiment": [

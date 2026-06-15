@@ -49,6 +49,11 @@ def _now() -> float:
 
 
 def _connect(path: str = _DEFAULT_DB_PATH, *, read_only: bool = False) -> sqlite3.Connection:
+    # Ensure the parent directory exists (Docker volume mounts may
+    # create the mount point with root ownership; sqlite3 needs write
+    # permission on the directory to create the database file + WAL).
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
     uri = f"file:{path}?mode=ro" if read_only else str(path)
     conn = sqlite3.connect(
         uri if read_only else str(path),

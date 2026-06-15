@@ -61,7 +61,19 @@ _experiments_dir: Optional[Path] = None
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global _dispatcher
+    global _dispatcher, _db_path
+
+    # Resolve the DB path early — create_app() may have been called without
+    # arguments (uvicorn + factory=True), leaving _db_path as None.
+    _db_path = _db_path or db._DEFAULT_DB_PATH
+
+    # Ensure tables exist before the dispatcher queries them.
+    conn = db._connect(_db_path)
+    try:
+        db.create_tables(conn)
+    finally:
+        conn.close()
+
     _dispatcher = Dispatcher(db_path=_db_path, experiments_dir=_experiments_dir)
     await _dispatcher.start()
     yield

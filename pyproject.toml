@@ -63,8 +63,13 @@ rl-baselines = [
     # deap_pettingzoo/baselines/agilerl_trainer.py targets AgileRL's
     # internal `concatenate_experiences_into_batches`. It is verified
     # against the 2.6.x series and fails loudly on signature drift.
-    "agilerl>=2.6,<3",
     "torch>=2.0.0",
+    # agilerl is installed separately by install.bat (or manually with
+    # --no-deps) because it pins pettingzoo~=1.23.1 which conflicts
+    # with mpe2's pettingzoo>=1.24.3.  AgileRL works fine at runtime
+    # with newer pettingzoo — the pin is just conservative upstream.
+    #   install.bat service          (recommended)
+    #   pip install --no-deps "agilerl>=2.6,<3" && pip install -e ".[service]"
 ]
 aquarium = [
     "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
