@@ -313,3 +313,301 @@ class TestFormValidationRoundtrip:
         assert not report.ok
         codes = {i.code for i in report.errors}
         assert "unknown_env" in codes
+
+
+# ---------------------------------------------------------------------------
+# Queue page — api_client methods used by 9_Queue.py
+# ---------------------------------------------------------------------------
+
+
+_MOCK_EXPERIMENTS: List[Dict[str, Any]] = [
+    {
+        "id": "abc1234567890def",
+        "label": "my run",
+        "status": "queued",
+        "spec": {"environment": "simple_tag_v3", "algorithms": ["ea"]},
+        "created_at": "2025-01-01T12:00:00Z",
+        "started_at": None,
+        "finished_at": None,
+        "run_dirs": [],
+        "error": None,
+        "position": 0,
+        "progress": None,
+    },
+    {
+        "id": "run2222222222",
+        "label": "run 2",
+        "status": "running",
+        "spec": {"environment": "simple_spread_v3", "algorithms": ["maddpg"]},
+        "created_at": "2025-01-01T13:00:00Z",
+        "started_at": "2025-01-01T13:00:05Z",
+        "finished_at": None,
+        "run_dirs": [],
+        "error": None,
+        "position": 0,
+        "progress": {
+            "unit": "generation",
+            "current": 3,
+            "total": 10,
+            "fraction": 0.3,
+            "best_fitness": 12.5,
+            "mean_fitness": 8.2,
+            "wall_time_s": 15.0,
+            "run_index": 0,
+            "total_runs": 1,
+            "algorithm": "maddpg",
+            "seed": 0,
+            "extra": {},
+        },
+    },
+    {
+        "id": "done9999999999",
+        "label": "done",
+        "status": "completed",
+        "spec": {"environment": "simple_v3", "algorithms": ["ea", "cma-es"]},
+        "created_at": "2025-01-01T11:00:00Z",
+        "started_at": "2025-01-01T11:00:01Z",
+        "finished_at": "2025-01-01T11:02:30Z",
+        "run_dirs": ["/tmp/runs/ea_s0"],
+        "error": None,
+        "position": -1,
+        "progress": None,
+    },
+]
+
+_MOCK_QUEUE_STATE: Dict[str, Any] = {
+    "paused": False,
+    "running_id": "run2222222222",
+    "queued_ids": ["abc1234567890def"],
+    "worker_limit": 1,
+}
+
+_MOCK_PROGRESS: Dict[str, Any] = {
+    "unit": "generation",
+    "current": 5,
+    "total": 10,
+    "fraction": 0.5,
+    "best_fitness": 15.0,
+    "mean_fitness": 10.0,
+    "wall_time_s": 30.0,
+    "run_index": 0,
+    "total_runs": 1,
+    "algorithm": "ea",
+    "seed": 0,
+    "extra": {},
+}
+
+_MOCK_STDOUT: Dict[str, Any] = {
+    "text": "[ea] gen 5/10  best=15.0  mean=10.0\n",
+    "next_offset": 60,
+    "eof": False,
+}
+
+
+class TestApiClientQueue:
+    """Test the api_client methods that the Queue page calls."""
+
+    def test_list_experiments(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _MOCK_EXPERIMENTS
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/experiments"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+        client._client = mock_client
+
+        exps = client.list_experiments()
+        assert len(exps) == 3
+        assert exps[1]["status"] == "running"
+        assert exps[2]["status"] == "completed"
+
+    def test_list_experiments_by_status(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [e for e in _MOCK_EXPERIMENTS if e["status"] == "queued"]
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/experiments"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+        client._client = mock_client
+
+        exps = client.list_experiments(status="queued")
+        assert len(exps) == 1
+
+    def test_get_progress(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _MOCK_PROGRESS
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/experiments/abc/progress"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+        client._client = mock_client
+
+        prog = client.get_progress("abc")
+        assert prog["fraction"] == 0.5
+        assert prog["best_fitness"] == 15.0
+
+    def test_get_stdout(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _MOCK_STDOUT
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/experiments/abc/stdout"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+        client._client = mock_client
+
+        chunk = client.get_stdout("abc", lines=50)
+        assert chunk["eof"] is False
+        assert "gen 5/10" in chunk["text"]
+
+    def test_get_queue_state(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _MOCK_QUEUE_STATE
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/queue"
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+        client._client = mock_client
+
+        qs = client.get_queue()
+        assert qs["running_id"] == "run2222222222"
+        assert len(qs["queued_ids"]) == 1
+
+    def test_pause_and_resume(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"paused": True}
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/queue/pause"
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = mock_resp
+        client._client = mock_client
+
+        r = client.pause_queue()
+        assert r["paused"] is True
+
+    def test_cancel_experiment(self):
+        client = ApiClient(base_url="http://test")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"id": "abc123", "status": "cancelled"}
+        mock_resp.text = "ok"
+        mock_resp.headers = {}
+        mock_resp.url = MagicMock()
+        mock_resp.url.path = "/experiments/abc123/cancel"
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = mock_resp
+        client._client = mock_client
+
+        r = client.cancel_experiment("abc123")
+        assert r["status"] == "cancelled"
+
+
+class TestQueueStatusBadge:
+    """Test the _status_badge helper from queue_helpers."""
+
+    def test_known_statuses(self):
+        from deap_pettingzoo.ui.services.queue_helpers import status_badge
+        assert "\U0001f504" in status_badge("running")
+        assert "\u2705" in status_badge("completed")
+        assert "\u274c" in status_badge("failed")
+        assert "\u23f3" in status_badge("queued")
+        assert "\U0001f6ab" in status_badge("cancelled")
+
+    def test_unknown_status(self):
+        from deap_pettingzoo.ui.services.queue_helpers import status_badge
+        badge = status_badge("bogus")
+        assert "Bogus" in badge
+
+
+class TestQueueFormatTime:
+    def test_iso_formatted(self):
+        from deap_pettingzoo.ui.services.queue_helpers import format_time
+        assert "2025" in format_time("2025-06-15T14:30:00Z")
+
+    def test_none_returns_dash(self):
+        from deap_pettingzoo.ui.services.queue_helpers import format_time
+        assert format_time(None) == "\u2014"
+
+
+class TestQueueShortId:
+    def test_long_id_truncated(self):
+        from deap_pettingzoo.ui.services.queue_helpers import short_id
+        result = short_id("abcdef1234567890")
+        assert len(result) <= 12  # 8 chars + ellipsis
+        assert result.startswith("abcdef12")
+
+    def test_short_id_preserved(self):
+        from deap_pettingzoo.ui.services.queue_helpers import short_id
+        assert short_id("abc") == "abc"
+
+
+class TestQueueAlgoLabel:
+    def test_extracts_algorithm_names(self):
+        from deap_pettingzoo.ui.services.queue_helpers import algo_label
+        spec = {"algorithms": ["ea", "cma-es", "pso", "maddpg"]}
+        result = algo_label(spec)
+        assert "ea" in result
+        assert "cma-es" in result
+        assert "pso" in result
+        # Only first 3 shown
+        assert "maddpg" not in result
+
+    def test_falls_back_to_env(self):
+        from deap_pettingzoo.ui.services.queue_helpers import algo_label
+        spec = {"environment": "simple_tag_v3", "algorithms": []}
+        assert algo_label(spec) == "simple_tag_v3"
+
+    def test_none_spec(self):
+        from deap_pettingzoo.ui.services.queue_helpers import algo_label
+        assert algo_label(None) == "\u2014"
+
+
+class TestQueueProgressDescription:
+    def test_label_format(self):
+        from deap_pettingzoo.ui.services.queue_helpers import progress_description
+        desc = progress_description({
+            "unit": "generation", "current": 3, "total": 10,
+            "run_index": 0, "total_runs": 2,
+            "algorithm": "ea", "seed": 1,
+        })
+        assert "Run 1/2" in desc
+        assert "ea s1" in desc
+        assert "generation 3/10" in desc
+
+    def test_empty_dict(self):
+        from deap_pettingzoo.ui.services.queue_helpers import progress_description
+        assert progress_description({}) == ""
+
+    def test_none(self):
+        from deap_pettingzoo.ui.services.queue_helpers import progress_description
+        assert progress_description(None) == ""
