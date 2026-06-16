@@ -1,4 +1,4 @@
-"""Browse — filter discovered runs and select which to compare/replay.
+﻿"""Browse — filter discovered runs and select which to compare/replay.
 
 Selection writes through to :class:`UIState.selected_run_ids`, which the
 Compare / Diff / Replay / Report pages all read from.
@@ -19,6 +19,8 @@ from deap_pettingzoo.ui.services import (
     move_run,
     rename_run,
 )
+from deap_pettingzoo.ui.services.api_client import ApiClient, ApiValidationError
+from deap_pettingzoo.ui.services.spec_utils import spec_to_form_defaults
 
 st.set_page_config(page_title="Browse runs", layout="wide")
 st.title("Browse runs")
@@ -56,7 +58,33 @@ def _root_mtime_bucket(root: Path) -> float:
 root = settings.results_root
 runs = _cached_discover(str(root), _root_mtime_bucket(root))
 if not runs:
-    st.info(f"No runs found under **{root}**.")
+    st.info(f"No runs found under **{root}**. Import a previously exported experiment below.")
+    # Render import section in main area when there are no runs.
+    st.markdown("### 📦 Import experiments")
+    uploaded_zip = st.file_uploader(
+        "Upload a DEAP export (.zip)",
+        type=["zip"],
+        key="browse_import_empty",
+    )
+    if uploaded_zip is not None and st.button("📥 Import", key="browse_import_btn_empty"):
+        file_id = f"{uploaded_zip.name}_{uploaded_zip.size}"
+        if st.session_state.get("_last_import_id") == file_id:
+            st.info("This file was already imported.")
+        else:
+            with st.spinner("Importing..."):
+                try:
+                    client = ApiClient()
+                    result = client.import_experiments(uploaded_zip.getvalue())
+                    if result.get("ok"):
+                        st.session_state["_last_import_id"] = file_id
+                        st.success(f"Imported {len(result.get('imported',[]))} experiment(s). Refreshing...")
+                        st.cache_resource.clear()
+                        st.rerun()
+                    else:
+                        for err in result.get("errors", []):
+                            st.error(f"{err.get('path', '')}: {err.get('message', '')}")
+                except Exception as exc:
+                    st.error(f"Import failed: {exc}")
     st.stop()
 
 # Sidebar filters & management 
@@ -85,6 +113,11 @@ with st.sidebar:
                 key="browse_date_range",
             )
         )
+
+    st.divider()
+
+    # --- Group by experiment ----------------------------------------------
+    group_by_exp = st.checkbox("Group by experiment", key="browse_group_by_exp")
 
     st.divider()
     st.subheader("Sort")
@@ -144,6 +177,50 @@ with st.sidebar:
         else:
             st.caption("No subfolders found. Create one above first.")
 
+    st.divider()
+
+    # --- Import ----------------------------------------------------------
+    with st.expander("📦 Import experiments"):
+        st.markdown("**Import a previously exported experiment**")
+        uploaded_zip = st.file_uploader(
+            "Upload a DEAP export (.zip)",
+            type=["zip"],
+            key="browse_import_zip",
+            label_visibility="collapsed",
+        )
+        if uploaded_zip is not None and st.button("📥 Import", key="browse_import_btn"):
+            # Prevent re-importing the same file on st.rerun().
+            file_id = f"{uploaded_zip.name}_{uploaded_zip.size}"
+            if st.session_state.get("_last_import_id") == file_id:
+                pass  # already processed this file
+            else:
+                with st.spinner("Importing..."):
+                    try:
+                        client = ApiClient()
+                        result = client.import_experiments(uploaded_zip.getvalue())
+                        if result.get("ok"):
+                            imported = result.get("imported", [])
+                            n = len(imported)
+                            st.session_state["_last_import_id"] = file_id
+                            st.success(f"Imported {n} experiment(s). Refreshing...")
+                            st.cache_resource.clear()
+                            st.rerun()
+                        else:
+                            for err in result.get("errors", []):
+                                st.error(f"{err.get('path', '')}: {err.get('message', '')}")
+                            for warn in result.get("warnings", []):
+                                st.warning(f"{warn.get('path', '')}: {warn.get('message', '')}")
+                    except ApiValidationError as exc:
+                        for issue in exc.report.get("issues", []):
+                            sev = issue.get("severity", "error")
+                            msg = f"**{issue.get('path', '')}**: {issue.get('message', '')}"
+                            if sev == "warning":
+                                st.warning(msg)
+                            else:
+                                st.error(msg)
+                    except Exception as exc:
+                        st.error(f"Import failed: {exc}")
+
 # Apply filters & sort
 filtered = [
     r for r in runs
@@ -192,6 +269,8 @@ rows = [
         or r.final_summary.get("best_fitness")
         or r.final_summary.get("mean_episode_reward"),
         "run_dir": str(r.run_dir),
+        "origin": f"UI ({r.experiment_id})" if r.experiment_id else "",
+        "exp_id": r.experiment_id or "",
     }
     for r in filtered
 ]
@@ -201,6 +280,34 @@ preselected_indices = [
     i for i, row in enumerate(rows) if row["run_id"] in state.selected_run_ids
 ]
 _table_key = "browse_table"
+
+# Store row data so the on_select callback can resolve indices → run IDs
+st.session_state["_browse_rows"] = rows
+
+
+def _on_table_select():
+    """Persist table selection to UI state immediately (before rerun).
+
+    Reads the widget state directly from session state (which Streamlit
+    updates before the callback fires) and writes the resolved run IDs
+    into ``_deap_ui_state_v1``.  This guarantees that Compare / Inspect /
+    Replay / Report see the selection even if the user navigates away
+    before the rerun completes.
+    """
+    table_state = st.session_state.get(_table_key, {})
+    sel_rows = list(table_state.get("selection", {}).get("rows", []))
+    rows_data = st.session_state.get("_browse_rows", [])
+    selected_ids = [
+        rows_data[i]["run_id"] for i in sel_rows if 0 <= i < len(rows_data)
+    ]
+    # Update session state directly (
+    st.session_state.setdefault("_deap_ui_state_v1", {})[
+        "selected_run_ids"
+    ] = selected_ids
+
+
+# Initialise widget state for pre-selection on first render.
+# Streamlit uses a {selection: {rows: [...], columns: [...]}} dict.
 if _table_key not in st.session_state:
     st.session_state[_table_key] = {
         "selection": {"rows": preselected_indices, "columns": []}
@@ -210,19 +317,38 @@ event = st.dataframe(
     rows,
     use_container_width=True,
     hide_index=True,
-    on_select="rerun",
+    on_select=_on_table_select,
     selection_mode="multi-row",
     key=_table_key,
 )
 
-selected_indices = list(event.selection.rows) if event and event.selection else []
+# Read selection directly from widget state (NOT from event.selection,
+# which can be stale during the on_select-triggered rerun).
+_table_state = st.session_state.get(_table_key, {})
+selected_indices = list(
+    _table_state.get("selection", {}).get("rows", [])
+)
 selected_run_ids = [rows[i]["run_id"] for i in selected_indices if 0 <= i < len(rows)]
 selected_run_dirs = {
     rows[i]["run_id"]: Path(rows[i]["run_dir"])
     for i in selected_indices
     if 0 <= i < len(rows)
 }
-state.update_selected(selected_run_ids)
+
+# Re-sync from session state (callback may have updated it before this rerun)
+# and use the widget-state read as the primary source.  If the widget state
+# is empty but the callback already persisted a non-empty selection, keep
+# the callback's value — this guards against stale widget-state reads.
+stored = st.session_state.get("_deap_ui_state_v1", {})
+callback_ids = list(stored.get("selected_run_ids") or [])
+if selected_run_ids:
+    state.update_selected(selected_run_ids)
+elif callback_ids:
+    # Widget state read was empty; trust the callback's persisted value.
+    selected_run_ids = callback_ids
+    state.selected_run_ids = callback_ids
+else:
+    state.update_selected([])
 state.persist()
 
 # Delete confirmation dialog
@@ -234,17 +360,23 @@ if st.session_state.get("_browse_confirm_delete"):
     c1, c2, _ = st.columns([1, 1, 6])
     if c1.button("✅ Confirm delete", key="_confirm_del_yes"):
         errors = []
+        run_dirs_to_delete = []
         for rid in list(state.selected_run_ids):
             run_dir = selected_run_dirs.get(rid)
             if run_dir is None:
-                # Locate from full run list
                 matching = [r for r in runs if r.run_id == rid]
                 run_dir = matching[0].run_dir if matching else None
             if run_dir is None:
                 continue
+            run_dirs_to_delete.append(str(run_dir))
+
+        if run_dirs_to_delete:
             try:
-                delete_run(run_dir)
-            except (FileNotFoundError, ValueError) as exc:
+                client = ApiClient()
+                result = client.delete_runs(run_dirs_to_delete)
+                for err in result.get("errors", []):
+                    errors.append(f"{err.get('path', '?')}: {err.get('error', 'unknown')}")
+            except Exception as exc:
                 errors.append(str(exc))
         st.session_state["_browse_confirm_delete"] = False
         state.update_selected([])
@@ -296,6 +428,65 @@ if selected_run_ids:
         if st.button(f"🗑 Delete {len(selected_run_ids)} selected run(s)", key="browse_delete_btn", type="secondary"):
             st.session_state["_browse_confirm_delete"] = True
             st.rerun()
+
+        # --- Re-run (UI-origin experiments only) --------------------------
+        st.divider()
+        st.markdown("**Re-run** — load an experiment's spec into the Setup page.")
+        exp_ids = sorted({
+            r.experiment_id for r in runs
+            if r.run_id in selected_run_ids and r.experiment_id
+        })
+        if exp_ids:
+            selected_exp = st.selectbox(
+                "Experiment", exp_ids,
+                key="browse_rerun_exp",
+                format_func=lambda eid: f"Experiment {eid}",
+            )
+            if st.button("🔄 Load spec into Setup", key="browse_rerun_btn"):
+                try:
+                    client = ApiClient()
+                    result = client.get_experiment_spec(selected_exp)
+                    spec = result.get("spec", {})
+                    if spec and spec.get("environment"):
+                        import json
+                        form_defaults = spec_to_form_defaults(spec)
+                        form_defaults["_loaded_spec"] = spec
+                        state.setup_config = json.dumps(form_defaults)
+                        state.persist()
+                        st.success(
+                            f"Spec loaded from experiment {selected_exp}. "
+                            "Go to the Setup page to review and submit."
+                        )
+                        st.page_link("pages/8_Setup.py", label="Go to Setup page →")
+                    else:
+                        st.warning("No valid spec found for this experiment.")
+                except Exception as exc:
+                    st.error(f"Failed to load spec: {exc}")
+        else:
+            st.caption("Select runs from a UI-origin experiment to enable re-run.")
+
+st.divider()
+
+# --- Export (after table — sees fresh selection immediately) ------------
+with st.expander("📦 Export selected runs", expanded=bool(state.selected_run_ids)):
+    exp_frames = st.checkbox("Include video recordings", key="browse_exp_frames_main")
+    exp_tb = st.checkbox("Include TensorBoard logs", key="browse_exp_tb_main")
+    exp_traj = st.checkbox("Include trajectory data", key="browse_exp_traj_main")
+    if selected_run_ids:
+        run_dirs_list = [
+            str(r.run_dir) for r in runs if r.run_id in selected_run_ids
+        ]
+        if run_dirs_list:
+            client = ApiClient()
+            url = client.build_run_export_url(
+                run_dirs_list,
+                include_frames=exp_frames,
+                include_tb=exp_tb,
+                include_trajectories=exp_traj,
+            )
+            st.link_button("⬇ Download selected runs", url)
+    else:
+        st.caption("Select runs in the table above first.")
 
 st.divider()
 col_a, col_b = st.columns(2)

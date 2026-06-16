@@ -101,6 +101,11 @@ class ApiClient:
         env_url = os.environ.get("FASTAPI_URL", "").strip()
         if env_url:
             self.base_url = env_url.rstrip("/")
+        # Browser-facing URL for export downloads (st.link_button generates
+        # <a href> tags resolved by the user's browser, not the server).
+        # Defaults to base_url; override with DEAP_BROWSER_API_URL in Docker.
+        browser_url = os.environ.get("DEAP_BROWSER_API_URL", "").strip()
+        self._browser_base_url = browser_url.rstrip("/") if browser_url else self.base_url
 
     @property
     def client(self) -> Any:
@@ -150,10 +155,41 @@ class ApiClient:
     def _check(self, response: Any) -> Dict[str, Any]:
         status = response.status_code
         if status == 422:
+            raw_text = ""
             try:
                 body = response.json()
             except Exception:
-                body = {"ok": False, "issues": []}
+                raw_text = getattr(response, "text", "")[:500]
+                body = {
+                    "ok": False,
+                    "issues": [{
+                        "path": "request",
+                        "code": "unparseable_response",
+                        "message": f"Backend returned 422 but the response body is not valid JSON. "
+                                   f"Raw (first 500 chars): {raw_text}",
+                    }],
+                }
+            # Normalise FastAPI's standard Pydantic validation errors
+            # ({"detail": [...]}) and import validation errors
+            # ({"errors": [...]}) to the issues format ApiValidationError expects.
+            if "detail" in body and "issues" not in body:
+                detail = body.get("detail", [])
+                if isinstance(detail, list):
+                    body = {
+                        "ok": False,
+                        "issues": [
+                            {
+                                "path": " -> ".join(
+                                    str(loc) for loc in e.get("loc", [])
+                                ),
+                                "code": e.get("type", "validation_error"),
+                                "message": e.get("msg", str(e)),
+                            }
+                            for e in detail
+                        ],
+                    }
+            elif "errors" in body and "issues" not in body:
+                body = {"ok": False, "issues": body.get("errors", [])}
             raise ApiValidationError(body)
         if status == 404:
             body = response.json() if getattr(response, "headers", {}).get("content-type") else {}
@@ -254,3 +290,75 @@ class ApiClient:
 
     def resume_queue(self) -> Dict[str, Any]:
         return self._post("/queue/resume")
+
+    # -- export / import ---------------------------------------------------
+
+    def build_experiment_export_url(
+        self,
+        exp_id: str,
+        include_frames: bool = False,
+        include_tb: bool = False,
+        include_trajectories: bool = False,
+    ) -> str:
+        """Return the full URL for experiment export (for ``st.link_button``)."""
+        params = []
+        if include_frames:
+            params.append("include_frames=1")
+        if include_tb:
+            params.append("include_tb=1")
+        if include_trajectories:
+            params.append("include_trajectories=1")
+        qs = "&".join(params)
+        url = f"{self._browser_base_url}/experiments/{exp_id}/export"
+        if qs:
+            url += f"?{qs}"
+        return url
+
+    def build_run_export_url(
+        self,
+        run_dirs: List[str],
+        include_frames: bool = False,
+        include_tb: bool = False,
+        include_trajectories: bool = False,
+    ) -> str:
+        """Return the full URL for run-level export (for ``st.link_button``)."""
+        params = [f"run_dirs={','.join(run_dirs)}"]
+        if include_frames:
+            params.append("include_frames=1")
+        if include_tb:
+            params.append("include_tb=1")
+        if include_trajectories:
+            params.append("include_trajectories=1")
+        return f"{self._browser_base_url}/runs/export?{'&'.join(params)}"
+
+    def import_experiments(
+        self, zip_bytes: bytes, overwrite_existing: bool = False
+    ) -> Dict[str, Any]:
+        """Upload a ZIP and import the experiments. Returns the import result."""
+        try:
+            files = {"file": ("export.zip", zip_bytes, "application/zip")}
+            params = {"overwrite_existing": str(overwrite_existing).lower()}
+            r = self.client.post(
+                "/experiments/import", files=files, params=params,
+                timeout=httpx.Timeout(120.0),
+            )
+        except httpx.ConnectError as exc:
+            raise ApiUnavailable(
+                f"Cannot reach the backend at {self.base_url}. ({exc})"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise ApiTimeout(
+                f"Import request timed out after 120s"
+            ) from exc
+        return self._check(r)
+
+    def get_experiment_spec(self, exp_id: str) -> Dict[str, Any]:
+        """Return ``{spec: {...}}`` for re-run pre-population."""
+        return self._get(f"/experiments/{exp_id}/spec")
+
+    # -- run management ----------------------------------------------------
+
+    def delete_runs(self, run_dirs: List[str]) -> Dict[str, Any]:
+        """Delete run directories via the service (which has write access)."""
+        params = {"run_dirs": ",".join(run_dirs)}
+        return self._post("/runs/delete", params=params)

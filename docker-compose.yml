@@ -1,8 +1,4 @@
-# ===========================================================================
-# docker-compose.yml — DEAP-bridge containerised deployment
-# ===========================================================================
-#
-# Two supported modes (see comments at the bottom of this file):
+
 #
 #   MODE 1 (full stack, default)  →  docker compose up
 #       Both the FastAPI service AND the Streamlit UI run as containers.
@@ -11,22 +7,9 @@
 #   MODE 2 (native backend)  →  docker compose --profile native-backend up
 #       Only the Streamlit UI is containerised; it connects to a FastAPI
 #       service running natively on the host.
-#
-# Security note:
-#   The service container executes dotted Python import paths from
-#   experiment specs (trusted-input model).  Bind it to localhost unless
-#   you have network-level access controls in place.  Authentication is
-#   deferred — put a reverse proxy with auth in front if needed.
-# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Services
-# ---------------------------------------------------------------------------
 
 services:
-  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  # Experiment service (FastAPI + trainers)
-  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   service:
     build:
       context: .
@@ -37,6 +20,10 @@ services:
       - deap-net
     expose:
       - "8100"
+    # Expose the service port to the host so browser-facing export links
+    # (st.link_button) work.  Bind to localhost for trusted-input safety.
+    ports:
+      - "127.0.0.1:${SERVICE_PORT:-8100}:8100"
     volumes:
       - results:/app/results
     environment:
@@ -68,6 +55,7 @@ services:
       - results:/app/results:ro
     environment:
       - FASTAPI_URL=http://service:8100
+      - DEAP_BROWSER_API_URL=http://localhost:${SERVICE_PORT:-8100}
       - DEAP_RESULTS_ROOT=/app/results
       - STREAMLIT_PORT=8501
     depends_on:
@@ -75,14 +63,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   # UI-only variant for MODE 2 (native backend).
-  # Started with:  docker compose --profile native-backend up
-  #
-  # This service is identical to `ui` above except it does NOT depend on
-  # the `service` container and it expects `FASTAPI_URL` to point at a
-  # host-resident FastAPI process.
-  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   ui-native:
     build:
       context: .
@@ -99,10 +80,7 @@ services:
       # results directory (set RESULTS_HOST_DIR) or a named volume.
       - ${RESULTS_HOST_DIR:-./results}:/app/results:ro
     environment:
-      # host.docker.internal resolves to the host gateway on Docker
-      # Desktop (Windows/Mac).  On Linux, add:
-      #   extra_hosts:
-      #     - "host.docker.internal:host-gateway"
+
       - FASTAPI_URL=${FASTAPI_URL:-http://host.docker.internal:8100}
       - DEAP_RESULTS_ROOT=/app/results
       - STREAMLIT_PORT=8501
@@ -110,71 +88,12 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-# ---------------------------------------------------------------------------
-# Networks
-# ---------------------------------------------------------------------------
 
 networks:
   deap-net:
     driver: bridge
 
-# ---------------------------------------------------------------------------
-# Volumes
-# ---------------------------------------------------------------------------
 
 volumes:
   results:
-    # Named volume so data survives container recreation.  The service
-    # writes experiment outputs + _service.db here; the UI reads
-    # completed-run manifests for the visualisation pages.
     driver: local
-
-# ===========================================================================
-# Usage quick-reference
-# ===========================================================================
-#
-# ── MODE 1: Full containerised stack ───────────────────────────────────
-#
-#   docker compose build
-#   docker compose up
-#
-#   • Service:  http://127.0.0.1:8100  (internal only by default)
-#   • UI:       http://127.0.0.1:8501
-#
-#   To expose the service port to the host (e.g. for curl debugging),
-#   uncomment the `ports` block under the `service` definition above.
-#
-#
-# ── MODE 2: Containerised UI + native backend ──────────────────────────
-#
-#   Start the FastAPI service on your host first:
-#
-#     python -m deap_pettingzoo.service --host 127.0.0.1 --port 8100
-#
-#   Then launch the UI container (it connects to host.docker.internal):
-#
-#     docker compose --profile native-backend build
-#     docker compose --profile native-backend up
-#
-#   If your results live somewhere other than ./results, set the env var:
-#
-#     RESULTS_HOST_DIR=/path/to/results docker compose --profile native-backend up
-#
-#   On Linux, if host.docker.internal doesn't resolve, ensure the
-#   `extra_hosts` block under `ui-native` is uncommented (it is by default).
-#
-#
-# ── Useful compose snippets ────────────────────────────────────────────
-#
-#   Rebuild after code changes:
-#     docker compose build --no-cache
-#
-#   Tail logs:
-#     docker compose logs -f
-#
-#   Shell into a running container:
-#     docker compose exec service bash
-#     docker compose exec ui bash
-#
-#   Tear down (including the results volume — DESTRUCTIVE):
-#     docker compose down -v

@@ -1,0 +1,4 @@
+[server]
+# Uncapped upload size for experiment ZIP imports.
+# Actual disk space is checked by the backend before extraction.
+maxUploadSize = 5000

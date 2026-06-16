@@ -14,7 +14,8 @@ experiments (id TEXT PK, label TEXT, spec_json TEXT,
     status TEXT CHECK IN {queued,running,completed,failed,cancelled},
     created_at REAL, started_at REAL, finished_at REAL,
     run_dirs_json TEXT, error TEXT, pid INTEGER,
-    progress_json TEXT, enqueue_seq INTEGER)
+    progress_json TEXT, enqueue_seq INTEGER,
+    origin TEXT DEFAULT 'ui' CHECK IN {ui,cli,import})
 
 queue_state (id INTEGER PK CHECK(id=1), paused INTEGER DEFAULT 0,
     worker_limit INTEGER DEFAULT 1)
@@ -82,7 +83,9 @@ def create_tables(conn: sqlite3.Connection) -> None:
             error         TEXT,
             pid           INTEGER,
             progress_json TEXT,
-            enqueue_seq   INTEGER NOT NULL DEFAULT 0
+            enqueue_seq   INTEGER NOT NULL DEFAULT 0,
+            origin        TEXT NOT NULL DEFAULT 'ui'
+                          CHECK (origin IN ('ui','cli','import'))
         );
         CREATE INDEX IF NOT EXISTS idx_status     ON experiments(status);
         CREATE INDEX IF NOT EXISTS idx_enqueue_seq ON experiments(enqueue_seq);
@@ -94,6 +97,15 @@ def create_tables(conn: sqlite3.Connection) -> None:
         );
         INSERT OR IGNORE INTO queue_state (id, paused, worker_limit) VALUES (1, 0, 1);
     """)
+    # Migration: add origin column to existing databases that were created
+    # before v0.3.  CREATE TABLE IF NOT EXISTS doesn't add columns.
+    try:
+        conn.execute(
+            "ALTER TABLE experiments ADD COLUMN origin TEXT NOT NULL DEFAULT 'ui'"
+            " CHECK (origin IN ('ui','cli','import'))"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
 
 
@@ -113,6 +125,7 @@ async def insert_experiment(
     spec_json: str,
     label: str = "",
     path: Optional[str] = None,
+    origin: str = "ui",
 ) -> str:
     """Insert a new queued experiment; return its UUID id."""
     exp_id = uuid.uuid4().hex[:16]
@@ -127,9 +140,9 @@ async def insert_experiment(
             next_seq = row[0]
             conn.execute(
                 """INSERT INTO experiments
-                   (id, label, spec_json, status, created_at, enqueue_seq)
-                   VALUES (?, ?, ?, 'queued', ?, ?)""",
-                (exp_id, label, spec_json, now, next_seq),
+                   (id, label, spec_json, status, created_at, enqueue_seq, origin)
+                   VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
+                (exp_id, label, spec_json, now, next_seq, origin),
             )
             conn.commit()
             return exp_id
@@ -174,7 +187,8 @@ async def list_experiments(
         try:
             query = (
                 "SELECT id, label, spec_json, status, created_at, started_at, "
-                "finished_at, run_dirs_json, error, pid, progress_json, enqueue_seq "
+                "finished_at, run_dirs_json, error, pid, progress_json, enqueue_seq, "
+                "COALESCE(origin, 'ui') AS origin "
                 "FROM experiments"
             )
             params: tuple = ()
@@ -197,7 +211,8 @@ async def get_experiment(exp_id: str, path: Optional[str] = None) -> Optional[Di
         try:
             row = conn.execute(
                 "SELECT id, label, spec_json, status, created_at, started_at, "
-                "finished_at, run_dirs_json, error, pid, progress_json, enqueue_seq "
+                "finished_at, run_dirs_json, error, pid, progress_json, enqueue_seq, "
+                "COALESCE(origin, 'ui') AS origin "
                 "FROM experiments WHERE id = ?",
                 (exp_id,),
             ).fetchone()
@@ -467,6 +482,7 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "pid": row["pid"],
         "position": position,
         "progress": progress,
+        "origin": row["origin"] if "origin" in row.keys() else "ui",
     }
 
 

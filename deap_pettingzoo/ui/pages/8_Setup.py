@@ -32,6 +32,7 @@ from deap_pettingzoo.ui.components import (
 )
 from deap_pettingzoo.ui.components.param_widgets import render_param
 from deap_pettingzoo.ui.components.forms import _render_param_group
+from deap_pettingzoo.ui.services.spec_utils import extract_loaded_spec, spec_to_form_defaults
 
 st.set_page_config(page_title="Experiment setup", layout="wide")
 st.title("Experiment setup")
@@ -237,8 +238,28 @@ if _stored:
         _prev_parallelism = saved.get("parallelism", {})
         _prev_coev = saved.get("coevolution", {})
         _prev_raw_text = saved.get("raw_text", "")
+
+        # Detect loaded spec from re-run.
+        _loaded_spec = extract_loaded_spec(_stored)
+        if _loaded_spec:
+            loaded_label = _loaded_spec.get("label", "")
     except (json.JSONDecodeError, KeyError):
-        pass
+        _loaded_spec = None
+else:
+    _loaded_spec = None
+
+# --- Banner for loaded spec ------------------------------------------------
+if _loaded_spec:
+    loaded_label = _loaded_spec.get("label", "")
+    cols = st.columns([8, 1])
+    cols[0].info(
+        f"📋 **Loaded spec from experiment** ***'{loaded_label}'***. "
+        "Review and modify before submitting."
+    )
+    if cols[1].button("✕ Clear", key="clear_loaded_spec"):
+        state.setup_config = ""
+        state.persist()
+        st.rerun()
 
 
 # ===========================================================================

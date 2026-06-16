@@ -114,6 +114,7 @@ ui = [
 service = [
     "deap-pettingzoo[rl-baselines]",
     "fastapi>=0.100",
+    "python-multipart>=0.0.5",
     "uvicorn[standard]>=0.22",
     "pydantic>=2",
     "supersuit>=3.9",
