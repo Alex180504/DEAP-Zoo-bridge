@@ -32,15 +32,20 @@ state "Experiment group" as ExpGroup {
 Home --> Setup : configure new experiment
 Setup --> Queue : submitted successfully
 Queue --> Browse : completed → inspect results
+Browse --> Setup : re-run (load spec from UI-origin experiment)
 
 state Browse {
     Browse : Filter by algo / env / date range
     Browse : Sort by any column (asc / desc)
+    Browse : Group by experiment
     Browse : Toggle run-row checkboxes
     Browse : Rename selected runs (display label)
     Browse : Delete selected runs (with confirmation)
     Browse : Create subfolders
     Browse : Move selected runs into a subfolder
+    Browse : Export selected runs / experiments (ZIP)
+    Browse : Import experiments (.zip upload)
+    Browse : Re-run (load spec into Setup)
 }
 
 Browse --> Compare : ≥ 2 runs selected
