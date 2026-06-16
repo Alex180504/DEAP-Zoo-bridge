@@ -1552,6 +1552,7 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + finished_at: float | None
         + run_dirs: list[str] | None
         + error: str | None
+        + origin: str = "ui"
     }
 
     class ProgressSnapshot <<pydantic>> {
@@ -1587,8 +1588,15 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + GET /catalog
         + POST /experiments
         + POST /experiments/validate
+        + GET /experiments/{id}
         + GET /experiments/{id}/progress
         + GET /experiments/{id}/stdout
+        + GET /experiments/{id}/export
+        + GET /experiments/{id}/spec
+        + DELETE /experiments/{id}
+        + POST /experiments/{id}/cancel
+        + POST /experiments/import
+        + GET /runs/export
         + GET /queue
         + POST /queue/pause
         + POST /queue/resume
@@ -1602,6 +1610,15 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + set_running / set_completed / set_failed / set_cancelled
         + update_progress(id, progress_json)
         + get_queue_state()
+    }
+
+    class export_import <<module>> {
+        + build_export_manifest() -> dict
+        + create_run_export_zip(run_dir, flags) -> bytes
+        + create_experiment_export_zip_generator(...) -> Generator
+        + validate_import_zip(zip, root) -> ImportValidationResult
+        + extract_import_zip(zip, root) -> list
+        + restore_experiment_to_db(json, dirs, db) -> str
     }
 }
 
@@ -1617,11 +1634,16 @@ package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
         + validate(spec) -> ValidationReportModel
         + submit(spec) -> SubmitResponse
         + list_experiments() -> list[ExperimentRecord]
+        + get_experiment(id) -> ExperimentRecord
         + get_progress(id) -> ProgressSnapshot
         + get_stdout(id, offset, limit) -> dict
+        + get_experiment_spec(id) -> dict
+        + build_experiment_export_url(id, flags) -> str
+        + build_run_export_url(dirs, flags) -> str
+        + import_experiments(zip, overwrite) -> dict
         + get_queue() -> QueueState
         + pause_queue() / resume_queue()
-        + cancel_experiment(id)
+        + cancel_experiment(id) / delete_experiment(id)
     }
 
     class param_widgets <<module>> {
@@ -1639,6 +1661,11 @@ package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
         + group_issues_by_tab(report) -> dict
         + render_validation_report(report)
     }
+
+    class spec_utils <<module>> {
+        + spec_to_form_defaults(spec) -> dict
+        + extract_loaded_spec(setup_config) -> dict | None
+    }
 }
 
 ' Cross-package relationships (v0.2+)
@@ -1653,6 +1680,8 @@ Runner --> "baselines.Trainer" : train(progress_callback)
 ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
 "Setup Page" ..> ApiClient : uses
 "Queue Page" ..> ApiClient : uses
+"Browse Page" ..> ApiClient : uses (export/import/re-run)
+"Setup Page" ..> spec_utils : uses (re-run pre-populate)
 AlgorithmSpec --> ParamSpec : hyperparameters
 EnvironmentSpec --> TeamSpec : teams
 
