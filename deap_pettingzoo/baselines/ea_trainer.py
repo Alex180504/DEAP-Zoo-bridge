@@ -7,7 +7,7 @@ unified BaselineTrainer interface.
 
 import time
 from pathlib import Path
-from typing import Dict, Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 import numpy as np
 from deap import algorithms, tools
 
