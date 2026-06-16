@@ -36,8 +36,8 @@ from deap_pettingzoo.service.models import (
 )
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, status
-    from fastapi.responses import JSONResponse
+    from fastapi import FastAPI, HTTPException, Query, UploadFile, File, status
+    from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError:  # pragma: no cover
     raise ImportError(
         "The service package requires fastapi. "
@@ -157,6 +157,7 @@ def _experiment_to_record(
         error=raw.get("error"),
         position=raw.get("position", 0),
         progress=raw.get("progress"),
+        origin=raw.get("origin", "ui"),
     )
 
 
@@ -364,6 +365,202 @@ def _register_routes(app: FastAPI) -> None:
             eof = True
 
         return StdoutChunk(text=text, next_offset=next_offset, eof=eof)
+
+    # -- export / import --------------------------------------------------
+
+    @app.get("/experiments/{exp_id}/export")
+    async def export_experiment(
+        exp_id: str,
+        include_frames: bool = Query(default=False),
+        include_tb: bool = Query(default=False),
+        include_trajectories: bool = Query(default=False),
+    ):
+        raw = await db.get_experiment(exp_id, path=_db_path)
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+
+        run_dirs_raw = raw.get("run_dirs", [])
+        run_dirs = [Path(d) for d in run_dirs_raw if d]
+        experiment_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
+
+        from deap_pettingzoo.service.export_import import (
+            create_experiment_export_zip_generator,
+            export_filename,
+        )
+
+        filename = export_filename(exp_id, raw.get("label", ""))
+        generator = create_experiment_export_zip_generator(
+            exp_id=exp_id,
+            db_record=raw,
+            experiment_dir=experiment_dir,
+            run_dirs=run_dirs,
+            include_frames=include_frames,
+            include_tb=include_tb,
+            include_trajectories=include_trajectories,
+        )
+        return StreamingResponse(
+            generator,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/runs/export")
+    async def export_runs(
+        run_dirs: str = Query(default="", description="Comma-separated run directory paths"),
+        include_frames: bool = Query(default=False),
+        include_tb: bool = Query(default=False),
+        include_trajectories: bool = Query(default=False),
+    ):
+        paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
+        if not paths:
+            raise HTTPException(status_code=400, detail="No run_dirs provided.")
+
+        from deap_pettingzoo.service.export_import import (
+            build_export_manifest,
+            _iter_run_files,
+        )
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            manifest = build_export_manifest(
+                exp_id="",
+                label="",
+                run_dirs=[p.name for p in paths if p.is_dir()],
+                include_frames=include_frames,
+                include_tb=include_tb,
+                include_trajectories=include_trajectories,
+            )
+            zf.writestr("deap_export_manifest.json", json.dumps(manifest, indent=2))
+            for run_dir in paths:
+                if not run_dir.is_dir():
+                    continue
+                rel_base = run_dir.name
+                for arcname, filepath in _iter_run_files(
+                    run_dir, include_frames, include_tb, include_trajectories
+                ):
+                    zf.write(filepath, f"{rel_base}/{arcname}")
+        buf.seek(0)
+        zip_bytes = buf.getvalue()
+        return StreamingResponse(
+            iter([zip_bytes]),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": "attachment; filename=\"deap_runs_export.zip\""
+            },
+        )
+
+    @app.post("/experiments/import")
+    async def import_experiments(
+        file: UploadFile = File(...),
+        overwrite_existing: bool = Query(default=False),
+    ):
+        import tempfile
+        from deap_pettingzoo.service.export_import import (
+            validate_import_zip,
+            extract_import_zip,
+            restore_experiment_to_db,
+        )
+
+        # Stream upload to a temp file.
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            while chunk := await file.read(8 * 1024 * 1024):  # 8 MiB chunks
+                tmp.write(chunk)
+            tmp_path = Path(tmp.name)
+
+        try:
+            results_root = Path(os.environ.get("DEAP_RESULTS_ROOT", "results"))
+
+            # Validate.
+            validation = validate_import_zip(tmp_path, results_root)
+            if not validation.ok:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "issues": [
+                            {"path": e.path, "code": e.code, "message": e.message}
+                            for e in validation.errors
+                        ] + [
+                            {"path": w.path, "code": w.code, "message": w.message, "severity": "warning"}
+                            for w in validation.warnings
+                        ],
+                    },
+                )
+
+            # Extract.
+            extracted = extract_import_zip(tmp_path, results_root, overwrite_existing)
+
+            # Restore to DB.
+            imported: list = []
+            for exp_info in extracted:
+                # Read experiment.json from the extracted location.
+                exp_json_path = results_root / "experiment.json"
+                exp_json: dict = {}
+                if exp_json_path.exists():
+                    try:
+                        exp_json = json.loads(exp_json_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                new_id = await restore_experiment_to_db(
+                    experiment_json=exp_json,
+                    run_dirs=exp_info["run_dirs"],
+                    db_path=_db_path or db._DEFAULT_DB_PATH,
+                )
+                imported.append({
+                    "original_exp_id": exp_info["experiment_id"],
+                    "new_exp_id": new_id,
+                    "label": exp_info["label"],
+                    "run_count": len(exp_info["run_dirs"]),
+                    "warnings": exp_info.get("warnings", []),
+                })
+
+            return {"ok": True, "imported": imported}
+
+        finally:
+            # Clean up temp file.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @app.get("/experiments/{exp_id}/spec")
+    async def get_experiment_spec(exp_id: str):
+        """Return the raw ExperimentSpec JSON for re-run pre-population."""
+        raw = await db.get_experiment(exp_id, path=_db_path)
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+        return {"spec": raw.get("spec", {})}
+
+    # -- run management ----------------------------------------------------
+
+    @app.post("/runs/delete")
+    async def delete_runs(
+        run_dirs: str = Query(default="", description="Comma-separated run directory paths"),
+    ):
+        """Delete one or more run directories from disk.
+
+        Only accessible from the UI container on the shared Docker network;
+        the service container has write access to the results volume.
+        """
+        paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
+        if not paths:
+            raise HTTPException(status_code=400, detail="No run_dirs provided.")
+        deleted: list = []
+        errors: list = []
+        for p in paths:
+            try:
+                if p.is_dir():
+                    import shutil
+                    shutil.rmtree(p)
+                    deleted.append(str(p))
+                else:
+                    errors.append({"path": str(p), "error": "Not found or not a directory"})
+            except OSError as exc:
+                errors.append({"path": str(p), "error": str(exc)})
+        return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}
 
     # -- queue control -----------------------------------------------------
 

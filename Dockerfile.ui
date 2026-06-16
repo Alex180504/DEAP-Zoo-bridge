@@ -1,18 +1,4 @@
-# ===========================================================================
-# Dockerfile.ui — DEAP-bridge Streamlit UI (no ML deps, lightweight)
-# ===========================================================================
-#
-# Build:
-#   docker build -t deap-bridge-ui -f Dockerfile.ui .
-#
-# Run (standalone, pointing at a service on the host):
-#   docker run -p 8501:8501 \
-#     -e FASTAPI_URL=http://host.docker.internal:8100 \
-#     -v ./results:/app/results:ro \
-#     deap-bridge-ui
-#
-# The image deliberately excludes torch/agilerl/jax — the UI talks to the
-# FastAPI backend over HTTP and renders the catalog JSON the backend serves.
+# Dockerfile.ui — DEAP-bridge Streamlit UI 
 # ===========================================================================
 
 FROM python:3.11-slim-bookworm
@@ -39,6 +25,7 @@ WORKDIR /app
 # Copy only what pip needs first (layer caching).
 COPY pyproject.toml README.md LICENSE.txt ./
 COPY deap_pettingzoo/ deap_pettingzoo/
+COPY .streamlit/ .streamlit/
 
 # Install the [ui] extra.  No torch / agilerl / jax here — the UI
 # communicates with the backend exclusively over HTTP.
@@ -65,4 +52,5 @@ ENTRYPOINT ["python", "-m", "streamlit", "run", \
             "--server.port", "8501", \
             "--server.address", "0.0.0.0", \
             "--server.headless", "true", \
+            "--server.maxUploadSize", "5000", \
             "--browser.gatherUsageStats", "false"]

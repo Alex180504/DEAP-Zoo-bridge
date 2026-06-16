@@ -248,6 +248,7 @@ class ExperimentRecord(BaseModel):
     error: Optional[str] = None
     position: int = -1
     progress: Optional[ProgressSnapshot] = None
+    origin: str = "ui"
 
 
 class QueueState(BaseModel):
