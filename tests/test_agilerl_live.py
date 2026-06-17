@@ -34,7 +34,7 @@ agilerl = pytest.importorskip(
 )
 
 
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.smoke]
 
 
 @pytest.fixture()
