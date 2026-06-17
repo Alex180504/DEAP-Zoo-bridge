@@ -13,13 +13,12 @@ import streamlit as st
 from deap_pettingzoo.ui.services import (
     UIState,
     create_folder,
-    delete_run,
     discover_runs,
     load_settings,
     move_run,
     rename_run,
 )
-from deap_pettingzoo.ui.services.api_client import ApiClient, ApiValidationError
+from deap_pettingzoo.ui.services.api_client import ApiValidationError, get_client
 from deap_pettingzoo.ui.services.spec_utils import spec_to_form_defaults
 
 st.set_page_config(page_title="Browse runs", layout="wide")
@@ -39,9 +38,9 @@ if not settings.results_root_exists:
     st.stop()
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def _cached_discover(root: str, mtime_bucket: float):
-    """Re-runs only when ``root`` or any ``manifest.json`` mtime changes."""
+    """Re-runs only when root or any manifest.json mtime changes."""
     return discover_runs(Path(root))
 
 
@@ -57,34 +56,66 @@ def _root_mtime_bucket(root: Path) -> float:
 
 root = settings.results_root
 runs = _cached_discover(str(root), _root_mtime_bucket(root))
-if not runs:
-    st.info(f"No runs found under **{root}**. Import a previously exported experiment below.")
-    # Render import section in main area when there are no runs.
-    st.markdown("### 📦 Import experiments")
-    uploaded_zip = st.file_uploader(
+
+
+def _run_import(file_bytes: bytes, file_id: str) -> bool:
+    """Upload the ZIP to the backend; show inline status. Returns True on success."""
+    with st.status("Importing…", expanded=True) as _status:
+        st.write("Uploading archive — this may take a moment for large files…")
+        try:
+            result = get_client().import_experiments(file_bytes)
+        except ApiValidationError as exc:
+            _status.update(label="Validation failed", state="error")
+            for issue in exc.report.get("issues", []):
+                sev = issue.get("severity", "error")
+                msg = f"**{issue.get('path', '')}**: {issue.get('message', '')}"
+                (st.warning if sev == "warning" else st.error)(msg)
+            return False
+        except Exception as exc:
+            _status.update(label="Import failed", state="error")
+            st.error(f"Import failed: {exc}")
+            return False
+        if result.get("ok"):
+            n = len(result.get("imported", []))
+            _status.update(label=f"Imported {n} experiment(s)", state="complete")
+            st.session_state["_last_import_id"] = file_id
+            return True
+        _status.update(label="Import completed with errors", state="error")
+        for err in result.get("errors", []):
+            st.error(f"{err.get('path', '')}: {err.get('message', '')}")
+        for warn in result.get("warnings", []):
+            st.warning(f"{warn.get('path', '')}: {warn.get('message', '')}")
+        return False
+
+
+def _import_widget(uploader_key: str, btn_key: str) -> None:
+    """File-uploader + Import button; clears the discover cache and reruns on success."""
+    uploaded = st.file_uploader(
         "Upload a DEAP export (.zip)",
         type=["zip"],
-        key="browse_import_empty",
+        key=uploader_key,
+        label_visibility="collapsed",
     )
-    if uploaded_zip is not None and st.button("📥 Import", key="browse_import_btn_empty"):
-        file_id = f"{uploaded_zip.name}_{uploaded_zip.size}"
-        if st.session_state.get("_last_import_id") == file_id:
-            st.info("This file was already imported.")
-        else:
-            with st.spinner("Importing..."):
-                try:
-                    client = ApiClient()
-                    result = client.import_experiments(uploaded_zip.getvalue())
-                    if result.get("ok"):
-                        st.session_state["_last_import_id"] = file_id
-                        st.success(f"Imported {len(result.get('imported',[]))} experiment(s). Refreshing...")
-                        st.cache_resource.clear()
-                        st.rerun()
-                    else:
-                        for err in result.get("errors", []):
-                            st.error(f"{err.get('path', '')}: {err.get('message', '')}")
-                except Exception as exc:
-                    st.error(f"Import failed: {exc}")
+    if uploaded is None:
+        return
+    file_id = f"{uploaded.name}_{uploaded.size}"
+    if st.session_state.get("_last_import_id") == file_id:
+        st.info("This file was already imported. Upload a different archive to import again.")
+        return
+    if st.button("📥 Import", key=btn_key):
+        if _run_import(uploaded.getvalue(), file_id):
+            # Drop filter widget state so the next render re-initialises
+            # with default=<all>, exposing newly-imported algorithms/envs.
+            for _k in ("browse_filter_algos", "browse_filter_envs", "browse_date_range"):
+                st.session_state.pop(_k, None)
+            _cached_discover.clear()
+            st.rerun()
+
+
+if not runs:
+    st.info(f"No runs found under **{root}**. Import a previously exported experiment below.")
+    st.markdown("### 📦 Import experiments")
+    _import_widget("browse_import_empty_uploader", "browse_import_empty_btn")
     st.stop()
 
 # Sidebar filters & management 
@@ -96,8 +127,8 @@ run_dates = [r.started_at.date() for r in runs if r.started_at is not None]
 
 with st.sidebar:
     st.header("Filters")
-    sel_algos = st.multiselect("Algorithms", algos, default=algos)
-    sel_envs = st.multiselect("Environments", envs, default=envs)
+    sel_algos = st.multiselect("Algorithms", algos, default=algos, key="browse_filter_algos")
+    sel_envs = st.multiselect("Environments", envs, default=envs, key="browse_filter_envs")
 
     # Date range — only shown when there is timestamp data
     date_range: list = []
@@ -157,7 +188,7 @@ with st.sidebar:
             if st.button("Move selected here", key="browse_move_btn"):
                 target_dir = root / move_target_name
                 moved, errors = 0, []
-                for rid in list(state.selected_run_ids):
+                for rid in state.selected_run_ids:
                     matching = [r for r in runs if r.run_id == rid]
                     if not matching:
                         continue
@@ -170,56 +201,13 @@ with st.sidebar:
                     st.success(f"Moved {moved} run(s) to '{move_target_name}'.")
                     state.update_selected([])
                     state.persist()
-                    st.cache_resource.clear()
+                    _cached_discover.clear()
                     st.rerun()
                 for err in errors:
                     st.error(err)
         else:
             st.caption("No subfolders found. Create one above first.")
 
-    st.divider()
-
-    # --- Import ----------------------------------------------------------
-    with st.expander("📦 Import experiments"):
-        st.markdown("**Import a previously exported experiment**")
-        uploaded_zip = st.file_uploader(
-            "Upload a DEAP export (.zip)",
-            type=["zip"],
-            key="browse_import_zip",
-            label_visibility="collapsed",
-        )
-        if uploaded_zip is not None and st.button("📥 Import", key="browse_import_btn"):
-            # Prevent re-importing the same file on st.rerun().
-            file_id = f"{uploaded_zip.name}_{uploaded_zip.size}"
-            if st.session_state.get("_last_import_id") == file_id:
-                pass  # already processed this file
-            else:
-                with st.spinner("Importing..."):
-                    try:
-                        client = ApiClient()
-                        result = client.import_experiments(uploaded_zip.getvalue())
-                        if result.get("ok"):
-                            imported = result.get("imported", [])
-                            n = len(imported)
-                            st.session_state["_last_import_id"] = file_id
-                            st.success(f"Imported {n} experiment(s). Refreshing...")
-                            st.cache_resource.clear()
-                            st.rerun()
-                        else:
-                            for err in result.get("errors", []):
-                                st.error(f"{err.get('path', '')}: {err.get('message', '')}")
-                            for warn in result.get("warnings", []):
-                                st.warning(f"{warn.get('path', '')}: {warn.get('message', '')}")
-                    except ApiValidationError as exc:
-                        for issue in exc.report.get("issues", []):
-                            sev = issue.get("severity", "error")
-                            msg = f"**{issue.get('path', '')}**: {issue.get('message', '')}"
-                            if sev == "warning":
-                                st.warning(msg)
-                            else:
-                                st.error(msg)
-                    except Exception as exc:
-                        st.error(f"Import failed: {exc}")
 
 # Apply filters & sort
 filtered = [
@@ -361,7 +349,7 @@ if st.session_state.get("_browse_confirm_delete"):
     if c1.button("✅ Confirm delete", key="_confirm_del_yes"):
         errors = []
         run_dirs_to_delete = []
-        for rid in list(state.selected_run_ids):
+        for rid in state.selected_run_ids:
             run_dir = selected_run_dirs.get(rid)
             if run_dir is None:
                 matching = [r for r in runs if r.run_id == rid]
@@ -372,8 +360,7 @@ if st.session_state.get("_browse_confirm_delete"):
 
         if run_dirs_to_delete:
             try:
-                client = ApiClient()
-                result = client.delete_runs(run_dirs_to_delete)
+                result = get_client().delete_runs(run_dirs_to_delete)
                 for err in result.get("errors", []):
                     errors.append(f"{err.get('path', '?')}: {err.get('error', 'unknown')}")
             except Exception as exc:
@@ -381,7 +368,11 @@ if st.session_state.get("_browse_confirm_delete"):
         st.session_state["_browse_confirm_delete"] = False
         state.update_selected([])
         state.persist()
-        st.cache_resource.clear()
+        # Clear the dataframe widget's row-index selection from session state.
+        # Without this, stale indices point to different runs after the table
+        # reshuffles (deleted rows removed), producing phantom selections.
+        st.session_state.pop("browse_table", None)
+        _cached_discover.clear()
         if errors:
             for err in errors:
                 st.error(err)
@@ -418,7 +409,7 @@ if selected_run_ids:
                     errors.append(str(exc))
             if renamed:
                 st.success(f"Renamed {renamed} run(s).")
-                st.cache_resource.clear()
+                _cached_discover.clear()
                 st.rerun()
             for err in errors:
                 st.error(err)
@@ -444,7 +435,7 @@ if selected_run_ids:
             )
             if st.button("🔄 Load spec into Setup", key="browse_rerun_btn"):
                 try:
-                    client = ApiClient()
+                    client = get_client()
                     result = client.get_experiment_spec(selected_exp)
                     spec = result.get("spec", {})
                     if spec and spec.get("environment"):
@@ -477,7 +468,7 @@ with st.expander("📦 Export selected runs", expanded=bool(state.selected_run_i
             str(r.run_dir) for r in runs if r.run_id in selected_run_ids
         ]
         if run_dirs_list:
-            client = ApiClient()
+            client = get_client()
             url = client.build_run_export_url(
                 run_dirs_list,
                 include_frames=exp_frames,
@@ -487,6 +478,11 @@ with st.expander("📦 Export selected runs", expanded=bool(state.selected_run_i
             st.link_button("⬇ Download selected runs", url)
     else:
         st.caption("Select runs in the table above first.")
+
+# --- Import (main content, below export) --------------------------------
+with st.expander("📦 Import experiments"):
+    st.markdown("**Import a previously exported experiment**")
+    _import_widget("browse_import_main_uploader", "browse_import_main_btn")
 
 st.divider()
 col_a, col_b = st.columns(2)

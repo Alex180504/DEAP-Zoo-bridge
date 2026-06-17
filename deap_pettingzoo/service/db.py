@@ -430,6 +430,9 @@ async def update_progress(
     progress_json: str,
     path: Optional[str] = None,
 ) -> None:
+    # NOTE: currently unused — the runner writes _progress.json directly via
+    # ProgressWriter.  This DB path is reserved for future in-process runners
+    # that cannot write files (e.g. sandboxed or remote execution modes).
     def _upd():
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:

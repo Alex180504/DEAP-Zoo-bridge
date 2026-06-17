@@ -79,6 +79,7 @@ with st.sidebar:
         from pathlib import Path as _Path
         state.results_root = _Path(new_root).expanduser().resolve()
         settings = load_settings(results_root=new_root)
+        state.persist()  # write immediately so the current render sees the new root
 
 # ---------------------------------------------------------------------------
 # Home / landing body (shown when no page is selected, i.e. base URL)

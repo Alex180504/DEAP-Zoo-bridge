@@ -300,6 +300,11 @@ def _register_routes(app: FastAPI) -> None:
                 status_code=404,
                 detail=f"Experiment {exp_id!r} not found or is running",
             )
+        # Remove the experiment scratch directory (stdout log, spec, result).
+        import shutil as _shutil
+        exp_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
+        if exp_dir.is_dir():
+            _shutil.rmtree(exp_dir, ignore_errors=True)
         return {"ok": True}
 
     @app.get("/experiments/{exp_id}/progress", response_model=Dict[str, Any])
@@ -337,12 +342,24 @@ def _register_routes(app: FastAPI) -> None:
 
         try:
             if lines is not None:
-                # Return the last N lines.
-                raw = log_path.read_text(encoding="utf-8", errors="replace")
+                # Return the last N lines using a byte-seek to avoid reading
+                # the whole file.  We read at most lines*300 bytes from the
+                # end; if that chunk starts mid-line we drop the partial first
+                # line (unless we're at the very start of the file).
+                with open(log_path, "rb") as fh:
+                    fh.seek(0, 2)
+                    file_size = fh.tell()
+                    read_start = max(0, file_size - lines * 300)
+                    fh.seek(read_start)
+                    raw_bytes = fh.read()
+                raw = raw_bytes.decode("utf-8", errors="replace")
                 all_lines = raw.splitlines()
+                # Drop the first (possibly partial) line when not at file start.
+                if read_start > 0 and len(all_lines) > 1:
+                    all_lines = all_lines[1:]
                 wanted = all_lines[-lines:]
                 text = "\n".join(wanted)
-                next_offset = len(raw)
+                next_offset = file_size
                 eof = True
             else:
                 with open(log_path, "rb") as fh:
@@ -414,6 +431,17 @@ def _register_routes(app: FastAPI) -> None:
         paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
         if not paths:
             raise HTTPException(status_code=400, detail="No run_dirs provided.")
+
+        # Reject any path that resolves outside the results root.
+        results_root_resolved = Path(os.environ.get("DEAP_RESULTS_ROOT", "results")).resolve()
+        for p in paths:
+            try:
+                p.resolve().relative_to(results_root_resolved)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Path '{p}' is outside the results root and cannot be exported.",
+                )
 
         from deap_pettingzoo.service.export_import import (
             build_export_manifest,
@@ -489,21 +517,22 @@ def _register_routes(app: FastAPI) -> None:
                     },
                 )
 
-            # Extract.
+            # Read experiment.json from the ZIP in memory — do not rely on
+            # it being written to disk (extract_import_zip skips metadata files).
+            import zipfile as _zipfile
+            exp_json: dict = {}
+            try:
+                with _zipfile.ZipFile(tmp_path, "r") as _zf:
+                    exp_json = json.loads(_zf.read("experiment.json"))
+            except (KeyError, json.JSONDecodeError, OSError):
+                pass
+
+            # Extract run directories only (metadata files are skipped).
             extracted = extract_import_zip(tmp_path, results_root, overwrite_existing)
 
             # Restore to DB.
             imported: list = []
             for exp_info in extracted:
-                # Read experiment.json from the extracted location.
-                exp_json_path = results_root / "experiment.json"
-                exp_json: dict = {}
-                if exp_json_path.exists():
-                    try:
-                        exp_json = json.loads(exp_json_path.read_text(encoding="utf-8"))
-                    except (json.JSONDecodeError, OSError):
-                        pass
-
                 new_id = await restore_experiment_to_db(
                     experiment_json=exp_json,
                     run_dirs=exp_info["run_dirs"],
@@ -536,6 +565,19 @@ def _register_routes(app: FastAPI) -> None:
 
     # -- run management ----------------------------------------------------
 
+    def _results_root() -> Path:
+        return Path(os.environ.get("DEAP_RESULTS_ROOT", "results")).resolve()
+
+    def _check_under_results_root(p: Path) -> None:
+        """Raise HTTPException 400 if *p* resolves outside the results root."""
+        try:
+            p.resolve().relative_to(_results_root())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Path '{p}' is outside the results root and cannot be accessed.",
+            )
+
     @app.post("/runs/delete")
     async def delete_runs(
         run_dirs: str = Query(default="", description="Comma-separated run directory paths"),
@@ -545,6 +587,7 @@ def _register_routes(app: FastAPI) -> None:
         Only accessible from the UI container on the shared Docker network;
         the service container has write access to the results volume.
         """
+        import shutil
         paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
         if not paths:
             raise HTTPException(status_code=400, detail="No run_dirs provided.")
@@ -552,12 +595,17 @@ def _register_routes(app: FastAPI) -> None:
         errors: list = []
         for p in paths:
             try:
-                if p.is_dir():
-                    import shutil
-                    shutil.rmtree(p)
-                    deleted.append(str(p))
-                else:
+                _check_under_results_root(p)
+                if not p.is_dir():
                     errors.append({"path": str(p), "error": "Not found or not a directory"})
+                    continue
+                if not (p / "manifest.json").is_file():
+                    errors.append({"path": str(p), "error": "Not a run directory (no manifest.json)"})
+                    continue
+                shutil.rmtree(p)
+                deleted.append(str(p))
+            except HTTPException:
+                errors.append({"path": str(p), "error": "Path is outside the results root"})
             except OSError as exc:
                 errors.append({"path": str(p), "error": str(exc)})
         return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}

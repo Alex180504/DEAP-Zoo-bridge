@@ -464,9 +464,11 @@ def validate_import_zip(
                     )
                 )
 
-            # 5. Path-traversal check.
+            # 5. Path-traversal check.  Normalise to forward slashes first so
+            #    that Windows-style "..\\" entries are also caught.
             for name in names:
-                if name.startswith("/") or ".." in name.split("/"):
+                norm = name.replace("\\", "/")
+                if norm.startswith("/") or ".." in norm.split("/"):
                     errors.append(
                         ImportValidationError(
                             path=name,
@@ -542,6 +544,16 @@ def extract_import_zip(
     Handles duplicate run directories by either overwriting or skipping
     (with a warning).
     """
+    # Service-metadata files live at the ZIP root and must not be extracted
+    # into the results tree — they are read from the ZIP in memory by the
+    # caller (app.py) and passed directly to restore_experiment_to_db.
+    _SERVICE_META_FILES = frozenset({
+        "deap_export_manifest.json",
+        "experiment.json",
+        "_spec.json",
+        "_result.json",
+    })
+
     extracted: List[Dict[str, Any]] = []
 
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -555,6 +567,11 @@ def extract_import_zip(
 
         for info in zf.infolist():
             if info.is_dir():
+                continue
+
+            # Skip service-metadata files — these are consumed in memory, not
+            # written to the results tree.
+            if info.filename in _SERVICE_META_FILES:
                 continue
 
             dest = results_root / info.filename

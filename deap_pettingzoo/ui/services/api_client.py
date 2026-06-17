@@ -259,7 +259,17 @@ class ApiClient:
         return self._post(f"/experiments/{exp_id}/cancel")
 
     def delete_experiment(self, exp_id: str) -> Dict[str, Any]:
-        return self.client.delete(f"{self.base_url}/experiments/{exp_id}").json()
+        try:
+            r = self.client.delete(f"/experiments/{exp_id}")
+        except httpx.ConnectError as exc:
+            raise ApiUnavailable(
+                f"Cannot reach the backend at {self.base_url}. ({exc})"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise ApiTimeout(
+                f"Request to /experiments/{exp_id} timed out after {self.timeout}s"
+            ) from exc
+        return self._check(r)
 
     def get_progress(self, exp_id: str) -> Dict[str, Any]:
         return self._get(f"/experiments/{exp_id}/progress")
@@ -362,3 +372,24 @@ class ApiClient:
         """Delete run directories via the service (which has write access)."""
         params = {"run_dirs": ",".join(run_dirs)}
         return self._post("/runs/delete", params=params)
+
+
+# ---------------------------------------------------------------------------
+# Process-level singleton (avoids re-creating the connection pool on every
+# Streamlit script rerun).
+# ---------------------------------------------------------------------------
+
+_singleton: Optional[ApiClient] = None
+
+
+def get_client() -> ApiClient:
+    """Return the shared :class:`ApiClient` instance for this process.
+
+    The singleton is initialised on first call and reused for all subsequent
+    calls, avoiding the cost of re-creating the ``httpx.Client`` connection
+    pool on every Streamlit script rerun.
+    """
+    global _singleton
+    if _singleton is None:
+        _singleton = ApiClient()
+    return _singleton
