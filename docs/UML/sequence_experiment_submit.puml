@@ -42,17 +42,22 @@ Disp -> DB: set_running(id)
 Disp -> Disp: open _stdout.log
 
 Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  stdout=_stdout.log)
+note right of Disp: logger.info "Experiment {id} running (pid, log)"\n(diagnostic log — see sequence_logging_pipeline.puml)
 
 == Training ==
+Runner -> Runner: configure_logging()\n(console only; level inherited via DEAP_LOG_LEVEL env)
 Runner -> Runner: load spec → re-validate
 Runner -> Runner: build_configs(spec) → [SubRun, ...]
+note right of Runner: logger.info component activation\n(env, algorithms, budget, parallelism, coevolution)
 loop for each SubRun (algo × seed)
+    Runner -> Runner: print + logger.info "Starting [i/N] {algo} seed"
     Runner -> Trainer: trainer.train(config, progress_callback=writer.cb)
     activate Trainer
     Trainer -> Runner: progress_callback(ProgressEvent)
     Runner -> Runner: atomic write _progress.json\n(tmp + os.replace)
     deactivate Trainer
 end
+note right of Runner: on failure: logger.exception(...) before _result.json
 Runner -> Runner: write _result.json\n{status, run_dirs[], error?}
 Runner --> Disp: exit 0 (success) or 1 (failure)
 
@@ -60,6 +65,7 @@ Runner --> Disp: exit 0 (success) or 1 (failure)
 Disp -> Runner: await proc.wait()
 Disp -> Disp: read _result.json
 Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
+note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
 Disp --> DB: done
 
 @enduml

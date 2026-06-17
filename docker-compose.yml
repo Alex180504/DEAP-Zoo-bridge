@@ -30,7 +30,20 @@ services:
       - DEAP_RESULTS_ROOT=/app/results
       - SERVICE_HOST=0.0.0.0
       - SERVICE_PORT=8100
+      # Diagnostic logging.  Default "warning" logs only warnings + exceptions;
+      # set DEAP_LOG_LEVEL=info for normal-operation (verbose) logs, or "debug"
+      # for full detail.  Logs go to stdout (docker compose logs) AND a rotating
+      # file at /app/results/_logs/service.log (persisted on the volume) and are
+      # also tailable via the GET /logs endpoint.
+      - DEAP_LOG_LEVEL=${DEAP_LOG_LEVEL:-warning}
+      - DEAP_LOG_FORMAT=${DEAP_LOG_FORMAT:-plain}
     restart: unless-stopped
+    # Cap the docker json-file log so container stdout can't grow unbounded.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
       interval: 10s

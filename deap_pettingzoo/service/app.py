@@ -18,12 +18,15 @@ Or programmatically::
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from deap_pettingzoo.service import db
+
+logger = logging.getLogger(__name__)
 from deap_pettingzoo.service.dispatcher import Dispatcher
 from deap_pettingzoo.service.models import (
     ExperimentRecord,
@@ -74,10 +77,14 @@ async def _lifespan(app: FastAPI):
     finally:
         conn.close()
 
+    logger.info(
+        "Service starting (db=%s, experiments_dir=%s)", _db_path, _experiments_dir
+    )
     _dispatcher = Dispatcher(db_path=_db_path, experiments_dir=_experiments_dir)
     await _dispatcher.start()
     yield
     await _dispatcher.shutdown()
+    logger.info("Service stopped")
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +113,20 @@ def create_app(
         version="0.1.0",
         lifespan=_lifespan,
     )
+
+    @app.middleware("http")
+    async def _log_unhandled_errors(request, call_next):
+        # HTTPExceptions (4xx) are handled below this in the stack and never
+        # reach here; only genuinely-unhandled (500) errors do.  Log and
+        # re-raise so the response behaviour is unchanged.
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.exception(
+                "Unhandled error on %s %s", request.method, request.url.path
+            )
+            raise
+
     _register_routes(app)
     return app
 
@@ -159,6 +180,65 @@ def _experiment_to_record(
         progress=raw.get("progress"),
         origin=raw.get("origin", "ui"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Log / stdout tailing helper (shared by GET /experiments/{id}/stdout and /logs)
+# ---------------------------------------------------------------------------
+
+
+def _read_tail(
+    log_path: Path,
+    offset: Optional[int],
+    limit: Optional[int],
+    lines: Optional[int],
+) -> Tuple[str, int, bool]:
+    """Read a chunk from a log file, returning ``(text, next_offset, eof)``.
+
+    With ``lines`` set, returns the last N lines via a byte-seek from EOF
+    (dropping a partial first line); otherwise returns up to ``limit`` bytes
+    from ``offset``.  Missing or unreadable files yield ``("", 0, True)``.
+    """
+    if not log_path.exists():
+        return "", 0, True
+
+    text = ""
+    next_offset = offset or 0
+    eof = False
+    try:
+        if lines is not None:
+            # Read at most lines*300 bytes from the end; if that chunk starts
+            # mid-line we drop the partial first line (unless at file start).
+            with open(log_path, "rb") as fh:
+                fh.seek(0, 2)
+                file_size = fh.tell()
+                read_start = max(0, file_size - lines * 300)
+                fh.seek(read_start)
+                raw_bytes = fh.read()
+            all_lines = raw_bytes.decode("utf-8", errors="replace").splitlines()
+            if read_start > 0 and len(all_lines) > 1:
+                all_lines = all_lines[1:]
+            text = "\n".join(all_lines[-lines:])
+            next_offset = file_size
+            eof = True
+        else:
+            with open(log_path, "rb") as fh:
+                start = offset if offset is not None else 0
+                fh.seek(0, 2)  # end
+                file_size = fh.tell()
+                if start >= file_size:
+                    text = ""
+                    next_offset = file_size
+                    eof = True
+                else:
+                    fh.seek(start)
+                    chunk_size = min(limit or 65536, file_size - start)
+                    text = fh.read(chunk_size).decode("utf-8", errors="replace")
+                    next_offset = start + chunk_size
+                    eof = next_offset >= file_size
+    except OSError:
+        return "", 0, True
+    return text, next_offset, eof
 
 
 # ---------------------------------------------------------------------------
@@ -332,55 +412,26 @@ def _register_routes(app: FastAPI) -> None:
         lines: Optional[int] = None,
     ):
         exp_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
-        log_path = exp_dir / "_stdout.log"
-        if not log_path.exists():
-            return StdoutChunk(text="", next_offset=0, eof=True)
+        text, next_offset, eof = _read_tail(
+            exp_dir / "_stdout.log", offset, limit, lines
+        )
+        return StdoutChunk(text=text, next_offset=next_offset, eof=eof)
 
-        text = ""
-        next_offset = offset or 0
-        eof = False
+    @app.get("/logs", response_model=StdoutChunk)
+    async def get_service_logs(
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        lines: Optional[int] = None,
+    ):
+        """Tail the backend service log (``<DEAP_LOG_DIR>/service.log``).
 
-        try:
-            if lines is not None:
-                # Return the last N lines using a byte-seek to avoid reading
-                # the whole file.  We read at most lines*300 bytes from the
-                # end; if that chunk starts mid-line we drop the partial first
-                # line (unless we're at the very start of the file).
-                with open(log_path, "rb") as fh:
-                    fh.seek(0, 2)
-                    file_size = fh.tell()
-                    read_start = max(0, file_size - lines * 300)
-                    fh.seek(read_start)
-                    raw_bytes = fh.read()
-                raw = raw_bytes.decode("utf-8", errors="replace")
-                all_lines = raw.splitlines()
-                # Drop the first (possibly partial) line when not at file start.
-                if read_start > 0 and len(all_lines) > 1:
-                    all_lines = all_lines[1:]
-                wanted = all_lines[-lines:]
-                text = "\n".join(wanted)
-                next_offset = file_size
-                eof = True
-            else:
-                with open(log_path, "rb") as fh:
-                    start = offset if offset is not None else 0
-                    fh.seek(0, 2)  # end
-                    file_size = fh.tell()
-                    if start >= file_size:
-                        text = ""
-                        next_offset = file_size
-                        eof = True
-                    else:
-                        fh.seek(start)
-                        chunk_size = min(limit or 65536, file_size - start)
-                        text = fh.read(chunk_size).decode("utf-8", errors="replace")
-                        next_offset = start + chunk_size
-                        eof = next_offset >= file_size
-        except OSError:
-            text = ""
-            next_offset = 0
-            eof = True
+        Mirrors ``GET /experiments/{id}/stdout``: pass ``lines`` for the last N
+        lines, or ``offset``/``limit`` to stream forward.
+        """
+        from deap_pettingzoo.service.logging_config import default_log_dir
 
+        log_path = Path(default_log_dir()) / "service.log"
+        text, next_offset, eof = _read_tail(log_path, offset, limit, lines)
         return StdoutChunk(text=text, next_offset=next_offset, eof=eof)
 
     # -- export / import --------------------------------------------------

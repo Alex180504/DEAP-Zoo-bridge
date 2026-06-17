@@ -1591,6 +1591,7 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + GET /experiments/{id}
         + GET /experiments/{id}/progress
         + GET /experiments/{id}/stdout
+        + GET /logs
         + GET /experiments/{id}/export
         + GET /experiments/{id}/spec
         + DELETE /experiments/{id}
@@ -1610,6 +1611,16 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + set_running / set_completed / set_failed / set_cancelled
         + update_progress(id, progress_json)
         + get_queue_state()
+    }
+
+    class logging_config <<module>> {
+        + configure_logging(verbose, log_level, log_format, log_file) -> dict
+        + build_dict_config(level, fmt, log_file) -> dict
+        + resolve_level / resolve_format / default_log_dir
+        + JsonFormatter
+        .. env: DEAP_LOG_LEVEL / DEAP_LOG_FORMAT / DEAP_LOG_DIR ..
+        ' WARNING (default) -> INFO (--verbose) -> DEBUG (-vv)
+        ' captureWarnings(True): warnings.warn -> py.warnings logger
     }
 
     class export_import <<module>> {
@@ -1677,6 +1688,8 @@ FastAPIApp --> Dispatcher : lifespan manages
 FastAPIApp --> db : async I/O
 Dispatcher --> Runner : Popen subprocess
 Runner --> "baselines.Trainer" : train(progress_callback)
+FastAPIApp ..> logging_config : configure_logging() + GET /logs tails service.log
+Runner ..> logging_config : configure_logging() (console only)
 ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
 "Setup Page" ..> ApiClient : uses
 "Queue Page" ..> ApiClient : uses

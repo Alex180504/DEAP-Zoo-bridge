@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
@@ -31,6 +32,8 @@ from pathlib import Path
 from typing import Optional
 
 from deap_pettingzoo.service import db
+
+logger = logging.getLogger(__name__)
 
 
 class Dispatcher:
@@ -68,11 +71,11 @@ class Dispatcher:
                 conn.close()
         await db.set_interrupted_to_failed(path=db_path)
         self._task = asyncio.create_task(self._loop())
-        print("[dispatcher] started", flush=True)
+        logger.info("Dispatcher started (experiments_dir=%s)", self._experiments_dir)
 
     async def shutdown(self) -> None:
         """Graceful shutdown: cancel the loop, terminate the running process."""
-        print("[dispatcher] shutting down...", flush=True)
+        logger.info("Dispatcher shutting down")
         if self._task:
             self._task.cancel()
             try:
@@ -85,7 +88,7 @@ class Dispatcher:
                 await asyncio.wait_for(self._running_proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 self._running_proc.kill()
-        print("[dispatcher] stopped", flush=True)
+        logger.info("Dispatcher stopped")
 
     # -- main loop ---------------------------------------------------------
 
@@ -111,6 +114,7 @@ class Dispatcher:
 
     async def _run_one(self, exp_id: str, spec_json: str) -> None:
         """Execute a single experiment: write spec, spawn runner, wait, report."""
+        logger.info("Experiment %s dequeued, starting", exp_id)
         experiment_dir = self._experiments_dir / exp_id
         experiment_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +138,7 @@ class Dispatcher:
                 stderr=asyncio.subprocess.STDOUT,
             )
         except Exception as exc:  # pragma: no cover
+            logger.exception("Failed to spawn runner for experiment %s", exp_id)
             log_fh.close()
             await db.set_failed(
                 exp_id,
@@ -145,6 +150,9 @@ class Dispatcher:
 
         self._running_proc = proc
         await db.set_running(exp_id, proc.pid, path=self._db_path)
+        logger.info(
+            "Experiment %s running (pid=%s, log=%s)", exp_id, proc.pid, log_path
+        )
 
         try:
             await proc.wait()
@@ -166,33 +174,50 @@ class Dispatcher:
         # don't overwrite the terminal status with "failed".
         current = await db.get_experiment(exp_id, path=self._db_path)
         if current and current["status"] == "cancelled":
+            logger.info("Experiment %s cancelled", exp_id)
             return
 
-        # Read result.
+        await self._record_result(exp_id, experiment_dir, proc.returncode)
+
+    async def _record_result(
+        self, exp_id: str, experiment_dir: Path, returncode: Optional[int]
+    ) -> None:
+        """Read ``_result.json`` and transition the experiment to its terminal
+        DB status (completed / failed), logging the outcome."""
         result_path = experiment_dir / "_result.json"
-        run_dirs: list = []
-        error: Optional[str] = None
-        if result_path.exists():
-            try:
-                result_data = json.loads(result_path.read_text(encoding="utf-8"))
-                run_dirs = result_data.get("run_dirs", [])
-                status = result_data.get("status", "failed")
-                if status == "completed":
-                    await db.set_completed(exp_id, run_dirs, path=self._db_path)
-                else:
-                    error = result_data.get("error", "Experiment failed (unknown)")
-                    await db.set_failed(exp_id, error, run_dirs, path=self._db_path)
-            except (json.JSONDecodeError, OSError):
-                await db.set_failed(
-                    exp_id,
-                    "Could not read _result.json",
-                    path=self._db_path,
-                )
-        else:
+        if not result_path.exists():
+            logger.error(
+                "Experiment %s: runner exited with code %s but no _result.json",
+                exp_id, returncode,
+            )
             await db.set_failed(
                 exp_id,
-                f"Runner exited with code {proc.returncode} but no _result.json found",
+                f"Runner exited with code {returncode} but no _result.json found",
                 path=self._db_path,
+            )
+            return
+
+        try:
+            result_data = json.loads(result_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.error("Experiment %s: could not read _result.json", exp_id)
+            await db.set_failed(
+                exp_id, "Could not read _result.json", path=self._db_path
+            )
+            return
+
+        run_dirs = result_data.get("run_dirs", [])
+        if result_data.get("status", "failed") == "completed":
+            await db.set_completed(exp_id, run_dirs, path=self._db_path)
+            logger.info(
+                "Experiment %s completed (%d run dir(s))", exp_id, len(run_dirs)
+            )
+        else:
+            error = result_data.get("error", "Experiment failed (unknown)")
+            await db.set_failed(exp_id, error, run_dirs, path=self._db_path)
+            summary = (error or "").strip().splitlines()
+            logger.error(
+                "Experiment %s failed: %s", exp_id, summary[0] if summary else error
             )
 
     # -- external control --------------------------------------------------
