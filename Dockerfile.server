@@ -52,6 +52,21 @@ RUN mkdir -p /app/results /app/data && chown deap:deap /app/results /app/data
 
 ENV DEAP_RESULTS_ROOT=/app/results
 ENV DEAP_SERVICE_DB=/app/data/_service.db
+
+# --- Diagnostic logging ----------------------------------------------------
+# Default "warning" logs only warnings + exceptions.  Override at run time
+# (e.g. `-e DEAP_LOG_LEVEL=info`) to also log normal operation / which
+# components are active.  Logs are emitted to stdout AND to a rotating file at
+# $DEAP_RESULTS_ROOT/_logs/service.log (on the mounted results volume).
+#
+# Retrieve logs from the running container:
+#   docker compose logs -f service                          # live stdout
+#   docker exec deap-service cat /app/results/_logs/service.log
+#   docker cp deap-service:/app/results/_logs ./logs        # copy out
+#   curl 'http://127.0.0.1:8100/logs?lines=200'             # via the API
+ENV DEAP_LOG_LEVEL=warning
+ENV DEAP_LOG_FORMAT=plain
+
 # Bind to 0.0.0.0 so docker-compose / container networks can reach the port.
 # The host firewall / docker port mapping controls external access.
 EXPOSE 8100

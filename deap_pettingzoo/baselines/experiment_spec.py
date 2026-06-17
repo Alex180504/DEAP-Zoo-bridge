@@ -27,9 +27,12 @@ complex raw config" workflow working.
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from deap_pettingzoo.baselines.base import (
     BudgetMode,
@@ -531,6 +534,26 @@ def build_configs(
     # through the ExperimentSpec → build_configs path (UI + programmatic).
     effective_env_name = _maybe_auto_pad_env(spec, env_spec)
 
+    padded = (
+        f" (auto-padded -> {effective_env_name})"
+        if effective_env_name != spec.environment
+        else ""
+    )
+    logger.info(
+        "Building experiment: env=%s%s, algorithms=%s, budget=%s=%s, seeds=%s, "
+        "parallelism=%sx%s, recording=%s, coevolution=%s",
+        spec.environment,
+        padded,
+        spec.algorithms or "(coevolution)",
+        spec.budget.mode,
+        spec.budget.value,
+        spec.budget.num_seeds,
+        spec.parallelism.num_workers,
+        spec.parallelism.parallel_backend,
+        spec.recording.enabled,
+        spec.coevolution.mode if spec.coevolution.enabled else False,
+    )
+
     if spec.coevolution.enabled:
         return _build_coevolution_plan(
             spec, env_config, budget_mode, recording_config, output_root
@@ -544,6 +567,10 @@ def build_configs(
         algo_spec = cat_algorithms.get_algorithm(algo)
         effective = _effective_hyperparameters(spec, algo, algo_spec)
         trainer_params, base_algo_params = _split_hyperparameters(effective, algo_spec)
+        logger.debug(
+            "Resolved hyperparameters for %s: trainer=%s, algo=%s",
+            algo, trainer_params, base_algo_params,
+        )
         # Population-based trainers accept parallelism on the constructor.
         if algo_spec.family == "evolutionary":
             trainer_params.setdefault("num_workers", spec.parallelism.num_workers)

@@ -521,6 +521,29 @@ class TestAppStdout:
         assert r.json()["eof"]
 
 
+class TestAppLogs:
+    def test_logs_missing_file(self, client, monkeypatch, tmp_path):
+        # No service.log written yet -> empty, eof.
+        monkeypatch.setenv("DEAP_LOG_DIR", str(tmp_path / "empty_logs"))
+        r = client.get("/logs")
+        assert r.status_code == 200
+        assert r.json()["eof"]
+
+    def test_logs_tail(self, client, monkeypatch, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "service.log").write_text(
+            "line-one\nline-two\nline-three\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("DEAP_LOG_DIR", str(log_dir))
+
+        r = client.get("/logs", params={"lines": 2})
+        assert r.status_code == 200
+        body = r.json()
+        assert "line-three" in body["text"]
+        assert body["eof"]
+
+
 class TestAppQueue:
     def test_queue_state(self, client):
         r = client.get("/queue")

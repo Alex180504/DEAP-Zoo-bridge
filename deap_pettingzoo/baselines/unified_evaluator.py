@@ -7,6 +7,7 @@ policies from any training algorithm (EA, MARL, etc.).
 
 from typing import Optional, Dict, Any, Tuple
 import json
+import logging
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -16,6 +17,8 @@ from deap_pettingzoo.baselines.base import (
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.utils.logging.replay import FrameRecorder
+
+logger = logging.getLogger(__name__)
 
 
 class UnifiedEvaluator(BaselineEvaluator):
@@ -174,7 +177,7 @@ class UnifiedEvaluator(BaselineEvaluator):
             try:
                 recorder.add_frame(env.render())
             except Exception:
-                pass
+                logger.debug("frame capture failed", exc_info=True)
 
         # Track rewards per agent
         agent_rewards = dict.fromkeys(env.possible_agents, 0.0)

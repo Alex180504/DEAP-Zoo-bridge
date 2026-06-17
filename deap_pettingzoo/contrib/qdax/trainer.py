@@ -16,6 +16,7 @@ See each trainer's ``_DEFAULT_PARAMS`` for the keys and defaults.
 
 from __future__ import annotations
 
+import logging
 import pickle
 import time
 import warnings
@@ -38,6 +39,8 @@ from deap_pettingzoo.contrib.qdax.progress import (
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level flag so we only emit the "frame recording is unsupported
@@ -127,6 +130,14 @@ def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any
     from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe_desc
 
     agents = list(env.possible_agents)
+
+    # --- single_team: no pursuer/evader split needed ----------------------
+    if name == "single_team":
+        num_agents = int(kwargs.pop("num_agents", len(agents)))
+        norm_scale = float(kwargs.pop("norm_scale", 1.0))
+        return pe_desc.single_team_formation(num_agents=num_agents, norm_scale=norm_scale)
+
+    # --- pursuit_evasion_*: resolve pursuer/evader counts -----------------
     pursuers = [a for a in agents if a.startswith("adversary")]
     evaders = [a for a in agents if not a.startswith("adversary")]
 
@@ -149,7 +160,11 @@ def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any
     merged = {**default_kwargs, **kwargs}
     num_pursuers = int(merged["num_pursuers"])
     num_evaders = int(merged["num_evaders"])
-    if num_pursuers + num_evaders != len(agents):
+    # Only validate the agent-count sum when the counts were *auto-inferred*
+    # from agent-name prefixes.  When the user passes explicit kwargs they
+    # know their environment (e.g. scripted opponents may hide some agents
+    # from env.possible_agents).
+    if default_kwargs and (num_pursuers + num_evaders != len(agents)):
         raise ValueError(
             "Descriptor agent counts must sum to the number of possible "
             f"agents: num_pursuers={num_pursuers}, num_evaders={num_evaders}, "
@@ -164,8 +179,9 @@ def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any
         return pe_desc.with_capture_efficiency(**merged)
     raise ValueError(
         f"Unknown descriptor {name!r}. Supported: "
-        "'pursuit_evasion_2d', 'pursuit_evasion_3d'. Pass a callable "
-        "directly via algorithm_params['descriptor_fn'] to use a custom one."
+        "'pursuit_evasion_2d', 'pursuit_evasion_3d', 'single_team'. "
+        "Pass a callable directly via algorithm_params['descriptor_fn'] "
+        "to use a custom one."
     )
 
 
@@ -275,12 +291,13 @@ def _print_qdax_plan(
     num_iters: int,
     num_workers: int,
 ) -> None:
-    print(
+    msg = (
         f"[{label}] init_batch={init_batch_size}  batch={batch_size}  "
         f"eval_eps={eval_episodes}  ep_len={episode_length}  "
-        f"iters={num_iters}  workers={num_workers}",
-        flush=True,
+        f"iters={num_iters}  workers={num_workers}"
     )
+    print(msg, flush=True)
+    logger.info("%s", msg)
 
 
 def _validate_jax_parallel_settings(num_workers: int, eval_episodes: int) -> None:
@@ -323,10 +340,9 @@ def _print_qdax_metrics(
         batch_best=batch_best,
         batch_mean=batch_mean,
     )
-    print(
-        f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)",
-        flush=True,
-    )
+    msg = f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)"
+    print(msg, flush=True)
+    logger.info("%s", msg)
 
 
 def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):

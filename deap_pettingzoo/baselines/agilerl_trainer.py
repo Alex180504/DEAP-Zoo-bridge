@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import time
 import warnings
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
@@ -40,6 +41,8 @@ from deap_pettingzoo.baselines.agilerl_adapter import (
     translate_budget_to_env_steps,
 )
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+
+logger = logging.getLogger(__name__)
 
 
 # AgileRL bug-fix: misaligned state/advantage flattening in grouped IPPO
@@ -974,8 +977,10 @@ class AgileRLTrainer(BaselineTrainer):
                         if mean_loss is not None:
                             losses.append(mean_loss)
                     except Exception as exc:  # pragma: no cover - version drift
-                        if self.verbose:
-                            print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+                        logger.warning(
+                            "[%s] learn() failed: %s",
+                            self.ALGORITHM_NAME, exc, exc_info=True,
+                        )
 
             env_done = self._completed_env_mask(next_done, agent_ids, num_envs)
             for i, finished in enumerate(env_done):
@@ -1301,7 +1306,10 @@ class AgileRLTrainer(BaselineTrainer):
                 if mean_loss is not None:
                     losses.append(mean_loss)
             except Exception as exc:
-                print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+                logger.warning(
+                    "[%s] learn() failed: %s",
+                    self.ALGORITHM_NAME, exc, exc_info=True,
+                )
 
             progress_steps = min(steps_done, budget_steps)
             loss_str = f" | mean_loss={losses[-1]:.4f}" if losses else ""

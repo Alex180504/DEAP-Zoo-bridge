@@ -6,6 +6,7 @@ baseline algorithms under matched budget constraints.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import numpy as np
@@ -18,6 +19,8 @@ from deap_pettingzoo.baselines.base import (
     EvalResult,
 )
 from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 # Algorithm registry
@@ -125,6 +128,10 @@ def compare_baselines(
         # Check budget mode support
         if not trainer.supports_budget_mode(config.budget_mode):
             print(f"Warning: {algorithm} does not support {config.budget_mode.value}")
+            logger.warning(
+                "%s does not support budget mode %s; skipping",
+                algorithm, config.budget_mode.value,
+            )
             continue
         
         # Validate environment compatibility
@@ -135,11 +142,16 @@ def compare_baselines(
                 print(f"Warning: {algorithm} is incompatible with {config.env_name}:")
                 for issue in compat.issues:
                     print(f"  - {issue}")
+                logger.warning(
+                    "%s incompatible with %s: %s",
+                    algorithm, config.env_name, "; ".join(compat.issues),
+                )
                 results[algorithm] = {'skipped': True, 'issues': compat.issues}
                 continue
             if compat.warnings:
                 for w in compat.warnings:
                     print(f"[{algorithm}] Warning: {w}")
+                    logger.warning("[%s] %s", algorithm, w)
         
         # Train across seeds
         seed_results = []

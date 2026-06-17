@@ -23,12 +23,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ProgressWriter
@@ -124,6 +127,7 @@ def run_experiment(
     try:
         spec = _load_spec(spec_file)
     except Exception as exc:
+        logger.exception("Failed to parse spec %s", spec_file)
         _write_result(
             experiment_dir,
             "failed",
@@ -140,6 +144,7 @@ def run_experiment(
             {"path": i.path, "code": i.code, "message": i.message}
             for i in report.errors
         ]
+        logger.error("Spec validation failed: %s", errors)
         _write_result(
             experiment_dir,
             "failed",
@@ -153,6 +158,7 @@ def run_experiment(
     try:
         plan = build_configs(spec, output_root=experiment_dir)
     except Exception as exc:
+        logger.exception("Failed to build experiment configs")
         _write_result(
             experiment_dir,
             "failed",
@@ -171,7 +177,10 @@ def run_experiment(
 
     for sub in plan.sub_runs:
         label = f"[{sub.run_index + 1}/{total_runs}] {sub.algorithm} seed={sub.seed}"
+        # Keep the human-facing progress print on the terminal (always captured
+        # in _stdout.log) and mirror it through logging for the structured feed.
         print(f"--> Starting {label}", flush=True)
+        logger.info("Starting sub-run %s", label)
 
         # Wire per-sub-run progress enrichment.
         def _make_cb(sr=sub):
@@ -189,6 +198,7 @@ def run_experiment(
             trainer = get_trainer(sub.algorithm, **sub.trainer_params)
             result = trainer.train(sub.config, progress_callback=_make_cb())
         except Exception as exc:
+            logger.exception("Sub-run %s failed", label)
             error = (
                 f"Sub-run [{sub.run_index + 1}/{total_runs}] "
                 f"{sub.algorithm} seed={sub.seed} failed: {exc}\n"
@@ -201,6 +211,7 @@ def run_experiment(
         if run_dir:
             run_dirs.append(run_dir)
         print(f"OK  Finished {label}  run_dir={run_dir}", flush=True)
+        logger.info("Finished sub-run %s (run_dir=%s)", label, run_dir)
 
         # Collect best fitness for the aggregate summary.
         algo_key = f"{sub.algorithm}_s{sub.seed}"
@@ -212,6 +223,7 @@ def run_experiment(
 
     # 5. Success
     print(f"OK  All {total_runs} sub-runs completed.", flush=True)
+    logger.info("All %d sub-run(s) completed", total_runs)
     _write_result(experiment_dir, "completed", run_dirs, final_metrics)
 
 
@@ -232,6 +244,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Directory for progress, stdout and result artefacts.",
     )
     args = parser.parse_args(argv)
+    # Console-only: this process's stdout is redirected by the dispatcher to
+    # <experiment-dir>/_stdout.log, so the structured log is retrievable per
+    # experiment.  Level / format are inherited from the parent via env vars.
+    from deap_pettingzoo.service.logging_config import configure_logging
+    configure_logging(log_file=None)
     run_experiment(args.spec_file, args.experiment_dir)
 
 

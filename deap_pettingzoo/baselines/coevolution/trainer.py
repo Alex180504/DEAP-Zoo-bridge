@@ -34,6 +34,7 @@ expose a :class:`PolicyProtocol`.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 import warnings
@@ -65,6 +66,8 @@ from deap_pettingzoo.utils.parallel import (
 from .evaluator import CoEvolutionEvaluator
 from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +204,7 @@ class _QDaxPolicyEvaluator:
                 try:
                     self.trajectory_hook(observations, self._env)
                 except Exception:
-                    pass
+                    logger.debug("trajectory_hook failed", exc_info=True)
             infos = getattr(self._env, "last_infos", {}) or {}
             actions: Dict[str, Any] = {}
             for agent, obs in observations.items():
