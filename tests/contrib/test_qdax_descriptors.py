@@ -45,8 +45,11 @@ def test_formation_spread_raises_on_empty_teams() -> None:
 
     with pytest.raises(ValueError):
         pe.formation_spread_and_mean_distance(num_pursuers=0, num_evaders=1)
+    # num_evaders=0 is allowed (scripted/hidden opponents).
+    assert pe.formation_spread_and_mean_distance(num_pursuers=1, num_evaders=0) is not None
+    # num_evaders < 0 still raises.
     with pytest.raises(ValueError):
-        pe.with_capture_efficiency(num_pursuers=1, num_evaders=0)
+        pe.formation_spread_and_mean_distance(num_pursuers=1, num_evaders=-1)
 
 
 def test_norm_scale_default_matches_mpe_diagonal() -> None:

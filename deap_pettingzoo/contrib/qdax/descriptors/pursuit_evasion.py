@@ -48,10 +48,13 @@ class _FormationSpreadAndMeanDistance:
     ) -> None:
         n_p = int(num_pursuers)
         n_e = int(num_evaders)
-        if n_p <= 0 or n_e <= 0:
+        if n_p <= 0:
             raise ValueError(
-                f"num_pursuers and num_evaders must be positive, got "
-                f"{n_p}, {n_e}."
+                f"num_pursuers must be positive, got {n_p}."
+            )
+        if n_e < 0:
+            raise ValueError(
+                f"num_evaders must be >= 0, got {n_e}."
             )
         self.n_p = n_p
         self.n_e = n_e
@@ -75,9 +78,12 @@ class _FormationSpreadAndMeanDistance:
             jnp.linalg.norm(pursuer_pos - centroid, axis=-1)
         )
 
-        diff = pursuer_pos[:, :, None, :] - evader_pos[:, None, :, :]
-        dists = jnp.linalg.norm(diff, axis=-1)
-        mean_dist = jnp.mean(dists)
+        if n_e > 0:
+            diff = pursuer_pos[:, :, None, :] - evader_pos[:, None, :, :]
+            dists = jnp.linalg.norm(diff, axis=-1)
+            mean_dist = jnp.mean(dists)
+        else:
+            mean_dist = jnp.zeros(())
 
         return jnp.stack(
             [
@@ -213,13 +219,17 @@ class _WithCaptureEfficiency:
         n_e = self.n_e
         r = self.r
 
-        positions = trajectory["positions"]
-        pursuer_pos = positions[:, :n_p, :]
-        evader_pos = positions[:, n_p : n_p + n_e, :]
-        diff = pursuer_pos[:, :, None, :] - evader_pos[:, None, :, :]
-        dists = jnp.linalg.norm(diff, axis=-1)  # (T, n_p, n_e)
-        any_capture = jnp.any(dists < r, axis=(1, 2))  # (T,)
-        efficiency = jnp.mean(any_capture.astype(jnp.float32))
+        if n_e > 0:
+            positions = trajectory["positions"]
+            pursuer_pos = positions[:, :n_p, :]
+            evader_pos = positions[:, n_p : n_p + n_e, :]
+            diff = pursuer_pos[:, :, None, :] - evader_pos[:, None, :, :]
+            dists = jnp.linalg.norm(diff, axis=-1)  # (T, n_p, n_e)
+            any_capture = jnp.any(dists < r, axis=(1, 2))  # (T,)
+            efficiency = jnp.mean(any_capture.astype(jnp.float32))
+        else:
+            efficiency = jnp.zeros(())
+
         base_desc = self.base(trajectory)
         return jnp.concatenate([base_desc, efficiency[None]])
 
@@ -250,6 +260,7 @@ def with_capture_efficiency(
 
 __all__ = [
     "formation_spread_and_mean_distance",
+    "single_team_formation",
     "with_capture_efficiency",
 ]
 
