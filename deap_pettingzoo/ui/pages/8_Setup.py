@@ -21,6 +21,7 @@ from deap_pettingzoo.ui.services.api_client import (
     ApiClient,
     ApiUnavailable,
     ApiValidationError,
+    get_client,
 )
 from deap_pettingzoo.ui.components import (
     WidgetContext,
@@ -46,7 +47,7 @@ settings = load_settings(
 # API client
 # ---------------------------------------------------------------------------
 
-client = ApiClient()
+client = get_client()
 try:
     catalog = client.get_catalog()
 except (ApiUnavailable, Exception):
@@ -185,8 +186,13 @@ def _build_submit_spec(
     parallelism_values: Dict[str, Any],
     coevolution_values: Dict[str, Any],
     raw_config_text: str,
-) -> Dict[str, Any]:
-    """Assemble the full experiment-spec dict for submission."""
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Assemble the full experiment-spec dict for submission.
+
+    Returns ``(spec, raw_error)`` where ``raw_error`` is non-None when the
+    raw-config overlay failed to parse.  Callers must show the error and
+    should not submit if it is set.
+    """
     spec: Dict[str, Any] = {
         "environment": env_name,
         "algorithms": selected_algos,
@@ -199,15 +205,18 @@ def _build_submit_spec(
         "coevolution": coevolution_values,
         "label": env_name,
     }
+    raw_error: Optional[str] = None
     if raw_config_text.strip():
         try:
             import yaml
             raw = yaml.safe_load(raw_config_text)
             if isinstance(raw, dict):
                 spec["raw_config"] = raw
-        except Exception:
-            pass
-    return spec
+            else:
+                raw_error = "Raw config must be a YAML/JSON object (dict), not a scalar or list."
+        except Exception as exc:
+            raw_error = f"Raw config parse error: {exc}"
+    return spec, raw_error
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +418,10 @@ with tab_coev:
         st.caption("Co-evolution requires a multi-team environment (≥2 teams).")
     coevolution_values: Dict[str, Any] = {"enabled": st.session_state.get("_coev_enabled", False)}
     if coevolution_values["enabled"]:
+        st.info(
+            "When co-evolution is enabled the **Algorithm(s)** tab selection is not used — "
+            "configure each side's algorithm below instead."
+        )
         coev_opts = catalog.get("coevolution", {})
         modes = [m["name"] for m in coev_opts.get("modes", [])]
         if modes:
@@ -427,6 +440,13 @@ with tab_coev:
             "Aggregation", options=list(coev_opts.get("aggregations", ["mean"])), key="_coev_agg"
         )
 
+        # Only offer algorithms that are installed and are not the
+        # "coevolution" pseudo-algorithm entry.
+        coev_algo_options = [
+            n for n, s in algo_list.items()
+            if s.get("available", False) and n != "coevolution"
+        ]
+
         # Build simple side spec from the env's declared teams.
         teams = env_spec.get("teams", [])
         sides = []
@@ -435,7 +455,7 @@ with tab_coev:
             st.markdown(f"**Side `{team_name}`** — agents: `{', '.join(team.get('agent_prefixes', []))}`")
             side_algo = st.selectbox(
                 f"Algorithm for {team_name}",
-                options=all_algo_names,
+                options=coev_algo_options,
                 index=0,
                 key=f"_side_algo_{i}",
             )
@@ -489,40 +509,46 @@ col1, col2 = st.columns(2)
 
 with col1:
     if st.button("Validate", use_container_width=True):
-        spec = _build_submit_spec(
+        spec, raw_error = _build_submit_spec(
             env_sel, selected_algos, env_values, algo_forms,
             budget_values, fitness_values, recording_values,
             parallelism_values, coevolution_values, raw_text,
         )
-        with st.spinner("Validating..."):
-            try:
-                report = client.validate(spec)
-                render_validation_report(report)
-            except ApiValidationError as exc:
-                render_validation_report(exc.report)
-            except ApiUnavailable:
-                st.error("Backend unreachable.")
+        if raw_error:
+            st.error(f"Raw config tab: {raw_error}")
+        else:
+            with st.spinner("Validating..."):
+                try:
+                    report = client.validate(spec)
+                    render_validation_report(report)
+                except ApiValidationError as exc:
+                    render_validation_report(exc.report)
+                except ApiUnavailable:
+                    st.error("Backend unreachable.")
 
 with col2:
     if st.button("Submit to queue", use_container_width=True, type="primary"):
-        spec = _build_submit_spec(
+        spec, raw_error = _build_submit_spec(
             env_sel, selected_algos, env_values, algo_forms,
             budget_values, fitness_values, recording_values,
             parallelism_values, coevolution_values, raw_text,
         )
-        with st.spinner("Validating and submitting..."):
-            try:
-                result = client.submit(spec)
-                st.success(
-                    f"Experiment **{result['id']}** submitted! "
-                    f"Position in queue: {result['position']}. "
-                    f"Go to the **Queue** page to watch progress."
-                )
-            except ApiValidationError as exc:
-                render_validation_report(exc.report)
-                st.error("Fix the issues above before submitting.")
-            except ApiUnavailable:
-                st.error("Backend unreachable.")
+        if raw_error:
+            st.error(f"Raw config tab: {raw_error}")
+        else:
+            with st.spinner("Validating and submitting..."):
+                try:
+                    result = client.submit(spec)
+                    st.success(
+                        f"Experiment **{result['id']}** submitted! "
+                        f"Position in queue: {result['position']}. "
+                        f"Go to the **Queue** page to watch progress."
+                    )
+                except ApiValidationError as exc:
+                    render_validation_report(exc.report)
+                    st.error("Fix the issues above before submitting.")
+                except ApiUnavailable:
+                    st.error("Backend unreachable.")
 
 # ---------------------------------------------------------------------------
 # Persist form state for hot-reload / tab-switch survival

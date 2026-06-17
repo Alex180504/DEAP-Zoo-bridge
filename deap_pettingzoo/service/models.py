@@ -226,10 +226,10 @@ class SubmitResponse(BaseModel):
 
 
 class ProgressSnapshot(BaseModel):
-    unit: str
-    current: int
-    total: int
-    fraction: float
+    unit: str = "generation"
+    current: int = 0
+    total: int = 0
+    fraction: float = 0.0
     best_fitness: Optional[float] = None
     mean_fitness: Optional[float] = None
     wall_time_s: float = 0.0

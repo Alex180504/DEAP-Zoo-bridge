@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 
 from deap_pettingzoo.ui.services import UIState, load_settings
-from deap_pettingzoo.ui.services.api_client import ApiClient, ApiUnavailable
+from deap_pettingzoo.ui.services.api_client import ApiClient, ApiUnavailable, get_client
 from deap_pettingzoo.ui.services.queue_helpers import (
     algo_label as _algo_label,
     env_label as _env_label,
@@ -38,7 +38,7 @@ settings = load_settings(
     results_root=str(state.results_root) if state.results_root else None
 )
 
-client = ApiClient()
+client = get_client()
 
 # ---------------------------------------------------------------------------
 # Polling helpers

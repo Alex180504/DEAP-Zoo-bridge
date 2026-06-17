@@ -161,6 +161,13 @@ class Dispatcher:
         self._running_proc = None
         self._running_id = None
 
+        # If cancel() already marked this experiment cancelled while we were
+        # waiting for the process to die, skip the result-file handling so we
+        # don't overwrite the terminal status with "failed".
+        current = await db.get_experiment(exp_id, path=self._db_path)
+        if current and current["status"] == "cancelled":
+            return
+
         # Read result.
         result_path = experiment_dir / "_result.json"
         run_dirs: list = []
