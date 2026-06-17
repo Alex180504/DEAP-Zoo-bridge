@@ -16,10 +16,6 @@ from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec, list_envs
 
 
-# Smoke suite: only run on main/development CI (and explicit `-m smoke`).
-pytestmark = pytest.mark.smoke
-
-
 # All MPE2 envs auto-registered by deap_pettingzoo.environments.builtin.
 _MPE2_ENVS = [n for n in list_envs(tag="mpe2")]
 

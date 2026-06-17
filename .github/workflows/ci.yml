@@ -34,15 +34,34 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
 
+      # ".[all]" is uninstallable in a clean env: every jaxmarl pins
+      # brax==0.10.3 while every qdax needs brax>=0.10.4 — an empty
+      # intersection, so they can never be co-installed.  No test imports
+      # the jaxmarl package, so it is dropped entirely; the jax/flax/qdax
+      # stack is installed by hand (below) at the versions the project runs
+      # on.  Install every other extra via the package.
+      #
       # Mirror the canonical install order (Dockerfile.server / install.ps1):
       # CPU-only torch first, then AgileRL without its conservative pettingzoo
-      # pin, then the package with every optional extra.
-      - name: Install package (all extras, CPU torch)
+      # pin, then the package.
+      - name: Install package (CPU torch, conflict-free extras)
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.0.0"
           pip install --no-deps "agilerl>=2.6,<3"
-          pip install -e ".[all]"
+          pip install -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,scoop,dask,ui,service]"
+          # JAX/QDax CPU stack at the versions the project actually runs on
+          # (the pyproject [jax]/[qdax] extras are stale/unsolvable).  qdax's
+          # brax>=0.10.4 pin is over-conservative — it runs fine on brax 0.10.3
+          # — so install qdax with --no-deps and bring in its real deps under a
+          # constraints file that keeps the jax/brax stack pinned.  Validated in
+          # a python:3.11-slim container: both qdax test files pass.
+          pip install "jax==0.4.38" "jaxlib==0.4.38" "flax==0.10.4" "brax==0.10.3"
+          printf 'jax==0.4.38\njaxlib==0.4.38\nflax==0.10.4\nbrax==0.10.3\n' > /tmp/jaxstack.txt
+          pip install -c /tmp/jaxstack.txt --no-deps "qdax==0.5.0"
+          pip install -c /tmp/jaxstack.txt \
+            "jumanji==1.1.1" "scikit-learn==1.8.0" "tensorflow-probability==0.25.0" \
+            "esquilax==2.1.0" "chex==0.1.90" "optax==0.2.5" "jax-tqdm==0.4.0" "jaxopt==0.8.5"
 
       - name: Run unit tests
         run: python -m pytest --no-cov -q
