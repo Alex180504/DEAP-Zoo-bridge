@@ -136,6 +136,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "smoke: end-to-end smoke tests, run on main/development CI in addition to the unit suite (select with '-m smoke', deselect with '-m \"not smoke\"')",
 ]
 addopts = [
     "--verbose",
