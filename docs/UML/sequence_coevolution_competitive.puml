@@ -1,0 +1,68 @@
+@startuml sequence_coevolution_competitive
+!theme plain
+title Co-evolution — one generation, competitive_2pop mode (synchronous schedule)
+
+actor User
+participant "CoEvolutionTrainer" as T
+participant "CoEvolutionConfig" as C
+participant "SideState\n(pursuers, EA)" as SA
+participant "SideState\n(evaders, CMA)" as SB
+participant "OpponentPool\n(pursuers)" as PA
+participant "OpponentPool\n(evaders)" as PB
+participant "CoEvolutionEvaluator" as EV
+participant "env (PettingZoo)" as ENV
+participant "HallOfFame\n(pursuers)" as HA
+participant "HallOfFame\n(evaders)" as HB
+
+User -> T : train(TrainingConfig)
+T -> C : validate __post_init__
+T -> T : _initialize_sides(env, coev_cfg, workers)
+T -> SA : initialise(env, evaluator, rng)
+T -> SB : initialise(env, evaluator, rng)
+T -> SA : current_pool() -> PA
+T -> SB : current_pool() -> PB
+
+note over T
+  train() is a slim orchestrator (review S1): it calls
+  _initialize_sides, then dispatches to
+  _run_synchronous_loop, which calls the shared
+  _step_one_side(...) helper per side each generation.
+end note
+
+note over T: bootstrap evaluation\n(fresh population, no HoF yet)
+
+loop for each generation (_run_synchronous_loop)
+    par synchronous: _step_one_side per side (frozen pool_snapshot)
+        T -> SA : step_generation(evaluator, rng, opponents={evaders: PB})
+        loop for each candidate in pursuers population
+            SA -> EV : evaluate(candidate, side="pursuers",\n  pools={evaders: PB}, k_opponents=3)
+            loop k_opponents episodes
+                EV -> PB : sample_opponent(rng)  -- one per side
+                PB -->> EV : policy_for_evaders
+                EV -> ENV : rollout
+                ENV -->> EV : return
+            end
+            EV -->> SA : mean fitness
+        end
+        SA -> SA : DEAP select + crossover + mutate
+        SA -> HA : add(best_snapshot, best_fitness)
+    else
+        T -> SB : step_generation(evaluator, rng, opponents={pursuers: PA})
+        loop for each candidate in evaders population
+            SB -> EV : evaluate(candidate, side="evaders",\n  pools={pursuers: PA}, k_opponents=3)
+            EV -> PA : sample_opponent(rng)
+            PA -->> EV : policy_for_pursuers
+            EV -> ENV : rollout
+            ENV -->> EV : return
+        end
+        SB -> SB : CMA update (Strategy.update)
+        SB -> HB : add(best_snapshot, best_fitness)
+    end
+    T -> T : log per_side_history
+end
+
+T -> SA : best_policy() or frozen=None
+SA -->> T : FeedforwardNeuralPolicy
+T -->> User : TrainingResult(policy, metrics)
+
+@enduml

@@ -171,6 +171,35 @@ class TestFeedforwardNeuralPolicyActivationFunctions:
         # Linear can produce any value
         assert action.shape == (4,)
 
+    def test_output_activation_can_differ_from_hidden_activation(self):
+        """Test explicit output activation changes only the final layer."""
+        relu_genome = FixedTopologyGenome(
+            [2, 2, 2], activation='relu', random_seed=42
+        )
+        linear_output_genome = FixedTopologyGenome(
+            [2, 2, 2], activation='relu', output_activation='linear', random_seed=42
+        )
+        weights = np.array([
+            1.0, 0.0,
+            0.0, 1.0,
+            0.0, 0.0,
+            -1.0, 0.0,
+            0.0, 1.0,
+            0.0, 0.0,
+        ])
+        relu_genome.set_weights(weights)
+        linear_output_genome.set_weights(weights)
+
+        observation = np.array([1.0, 1.0])
+        relu_policy = FeedforwardNeuralPolicy(relu_genome)
+        linear_output_policy = FeedforwardNeuralPolicy(linear_output_genome)
+
+        relu_output = relu_policy.forward(observation)
+        linear_output = linear_output_policy.forward(observation)
+
+        np.testing.assert_array_equal(relu_output, np.array([0.0, 1.0]))
+        np.testing.assert_array_equal(linear_output, np.array([-1.0, 1.0]))
+
 class TestFeedforwardNeuralPolicyActionSelection:
     """Test action selection methods."""
     
@@ -306,7 +335,7 @@ class TestFeedforwardNeuralPolicyEdgeCases:
         observation = np.random.randn(10)
         action = policy.forward(observation)
         
-        # With zero weights and biases, output should be zero (or processed through activation)
+        # With zero weights and biases, output should be zero
         assert action.shape == (4,)
     
     def test_policy_repr(self):

@@ -1,0 +1,94 @@
+@startuml sequence_cma_es_training
+!theme plain
+title Sequence Diagram: CMA-ES Training (deap.cma + FixedTopologyGenome)
+
+actor "User" as User
+participant "CMAESTrainer" as Trainer
+participant "PettingZooWrapper\n(env)" as Env
+participant "SingleEpisode\nEvaluator" as Eval
+participant "cma_integration" as CMAInt
+participant "deap.cma.Strategy" as Strategy
+participant "DEAP Toolbox" as Toolbox
+participant "GenomePolicy\nWrapper" as PolicyWrap
+
+== Setup ==
+
+User -> Trainer : train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer : _translate_budget(config)
+note right: computes num_generations\nfrom ENV_STEPS or EVAL_EPISODES
+
+Trainer -> Env : PettingZooWrapper(env_name)
+activate Env
+Env --> Trainer : env
+deactivate Env
+
+Trainer -> Eval : SingleEpisodeEvaluator(env_wrapper, max_steps, aggregation_method)
+activate Eval
+Eval --> Trainer : evaluator
+deactivate Eval
+
+Trainer -> CMAInt : setup_cma_strategy(genome_config,\n  sigma0, population_size)
+activate CMAInt
+CMAInt -> CMAInt : _setup_cma_creators()\n(creator.CMAIndividual)
+CMAInt -> Strategy : Strategy(centroid=0,\n  sigma=sigma0, lambda_=pop_size)
+activate Strategy
+Strategy --> CMAInt : strategy
+CMAInt --> Trainer : (strategy, dim)
+deactivate CMAInt
+
+Trainer -> CMAInt : make_cma_ind_init(genome_config)
+CMAInt --> Trainer : ind_init callable
+
+Trainer -> CMAInt : register_cma_toolbox(strategy, ind_init, evaluator)
+CMAInt -> Toolbox : register("generate", strategy.generate, ind_init)
+CMAInt -> Toolbox : register("update", strategy.update)
+CMAInt -> Toolbox : register("evaluate", evaluate_individual)
+CMAInt --> Trainer : toolbox
+
+== Generational Loop ==
+
+loop num_generations
+    Trainer -> Toolbox : generate()
+    Toolbox -> Strategy : generate(ind_init)
+    Strategy -> Strategy : sample λ points from N(μ, σ²C)
+    Strategy --> Toolbox : population[CMAIndividual]
+    Toolbox --> Trainer : population
+
+    loop each individual
+        Trainer -> Toolbox : evaluate(ind)
+        Toolbox -> Eval : evaluate(ind.genome)
+        Eval --> Toolbox : fitness
+        Toolbox --> Trainer : fitness assigned
+    end
+
+    Trainer -> Toolbox : update(population)
+    Toolbox -> Strategy : update(population)
+    Strategy -> Strategy : numpy.array(pop)\nupdate mean, σ, C
+    Strategy --> Toolbox : (new distribution)
+
+    Trainer -> Trainer : record stats (avg/std/min/max)
+    Trainer -> Trainer : track best genome\nby fitness
+end
+
+== Return ==
+
+Trainer -> PolicyWrap : GenomePolicyWrapper(best_genome, env_name)
+activate PolicyWrap
+PolicyWrap --> Trainer : policy
+deactivate PolicyWrap
+
+Trainer -> Trainer : build TrainingResult\n(policy, metrics, metadata)
+Trainer --> User : TrainingResult
+deactivate Trainer
+
+note right of User
+  Returned policy is a
+  PolicyProtocol-compatible
+  wrapper usable with
+  UnifiedEvaluator /
+  compare_baselines.
+end note
+
+@enduml

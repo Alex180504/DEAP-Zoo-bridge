@@ -7,26 +7,25 @@ name = "deap-pettingzoo"
 version = "0.1.0"
 description = "A bridge library enabling DEAP evolutionary algorithms to work with PettingZoo multi-agent environments"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = {file = "LICENSE.txt"}
 authors = [
     {name = "Alex"},
 ]
-keywords = ["evolutionary-algorithms", "multi-agent", "reinforcement-learning", "DEAP", "PettingZoo", "swarm-robotics"]
+keywords = ["evolutionary-algorithms", "multi-agent", "reinforcement-learning", "DEAP", "PettingZoo", "swarm-robotics", "quality-diversity"]
 classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
     "deap>=1.4.1",
     "pettingzoo>=1.24.0",
+    "mpe2>=0.1",
     "numpy>=1.21.0",
     "gymnasium>=0.29.0", 
 ]
@@ -44,12 +43,69 @@ viz = [
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
 ]
+logging = [
+    "pyarrow>=14.0",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+tensorboard = [
+    "tensorboard>=2.13",
+]
+analysis = [
+    "deap-pettingzoo[viz]",
+    "pandas>=2.0",
+    "scipy>=1.11",
+    "rliable>=1.2.0",
+    "jinja2>=3.1",
+]
 rl-baselines = [
-    "stable-baselines3>=2.0.0",
+    # The GroupedIPPO advantage/state flattening monkey-patch in
+    # deap_pettingzoo/baselines/agilerl_trainer.py targets AgileRL's
+    # internal `concatenate_experiences_into_batches`. It is verified
+    # against the 2.6.x series and fails loudly on signature drift.
+    "agilerl>=2.6,<3",
     "torch>=2.0.0",
 ]
+aquarium = [
+    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
+]
+supersuit = [
+    "supersuit>=3.9",
+]
+shimmy = [
+    "shimmy[openspiel]>=2.0",
+]
+jax = [
+    "jax>=0.4.0,<0.4.37",
+    "jaxlib>=0.4.0,<0.4.37",
+    "flax>=0.7.0",
+]
+jaxmarl = [
+    "deap-pettingzoo[jax]",
+    "jaxmarl>=0.0.4",
+]
+qdax = [
+    "deap-pettingzoo[jax,jaxmarl]",
+    "qdax>=0.4.0",
+]
+neat = [
+    "neat-python>=2.0",
+]
+scoop = [
+    "scoop>=0.7,<1.0",
+]
+dask = [
+    "dask[distributed]>=2024.1",
+]
+ui = [
+    "deap-pettingzoo[analysis]",
+    "streamlit>=1.30",
+    "plotly>=5.0",
+    "pillow>=10.0",
+    "imageio>=2.31",
+]
 all = [
-    "deap-pettingzoo[dev,viz,rl-baselines]",
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui]"
 ]
 
 [tool.setuptools]
@@ -63,6 +119,9 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 addopts = [
     "--verbose",
     "--cov=deap_pettingzoo",
@@ -72,7 +131,7 @@ addopts = [
 
 [tool.black]
 line-length = 88
-target-version = ["py38", "py39", "py310", "py311"]
+target-version = ["py311", "py312"]
 include = '\.pyi?$'
 
 [tool.isort]
@@ -81,8 +140,10 @@ line_length = 88
 multi_line_output = 3
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
+
+

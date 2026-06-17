@@ -1,6 +1,5 @@
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
-import copy
 
 
 class FixedTopologyGenome:
@@ -8,11 +7,13 @@ class FixedTopologyGenome:
     Fixed-topology neural network genome.
     
     Encodes a feedforward neural network with fixed architecture as a flat
-    vector of weights and biases. Compatible with DEAP's genetic operators.
+    vector of weights and biases. Compatible with DEAP's genetic operators and CMA-ES via cma_integration.py.
+    Used as a template for Qdax weight-compatible Flax policy.
     
     Attributes:
         layer_sizes: List of integers defining network architecture [input, hidden..., output]
-        activation: Activation function name ('relu', 'tanh', 'sigmoid', 'linear')
+        activation: Hidden-layer activation function name ('relu', 'tanh', 'sigmoid', 'linear')
+        output_activation: Output-layer activation function name
         weights: Flat numpy array of all network weights and biases
         input_size: Number of input units
         output_size: Number of output units
@@ -25,6 +26,7 @@ class FixedTopologyGenome:
         self,
         layer_sizes: List[int],
         activation: str = 'tanh',
+        output_activation: Optional[str] = None,
         weight_range: Tuple[float, float] = (-1.0, 1.0),
         random_seed: Optional[int] = None
     ) -> None:
@@ -33,7 +35,9 @@ class FixedTopologyGenome:
         
         Args:
             layer_sizes: Network architecture [input, hidden1, hidden2, ..., output]
-            activation: Activation function ('relu', 'tanh', 'sigmoid', 'linear')
+            activation: Hidden-layer activation function
+            output_activation: Output-layer activation function. When omitted,
+                preserves the historical behavior by matching ``activation``.
             weight_range: (min, max) for weight initialization
             random_seed: Seed for reproducible initialization
             
@@ -62,18 +66,26 @@ class FixedTopologyGenome:
                 f"Unsupported activation function '{activation}'. "
                 f"Supported: {self.SUPPORTED_ACTIVATIONS}"
             )
+        if output_activation is None:
+            output_activation = activation
+        if output_activation not in self.SUPPORTED_ACTIVATIONS:
+            raise ValueError(
+                f"Unsupported output activation function '{output_activation}'. "
+                f"Supported: {self.SUPPORTED_ACTIVATIONS}"
+            )
         
         self.layer_sizes = layer_sizes
         self.activation = activation
+        self.output_activation = output_activation
         self._weight_range = weight_range
+        self._random_seed = random_seed
         
-        # Set random seed if provided
-        if random_seed is not None:
-            np.random.seed(random_seed)
+        # Use an encapsulated random number generator
+        self.rng = np.random.default_rng(random_seed)
         
         # Initialize weights
         weight_count = self.get_weight_count()
-        self.weights = np.random.uniform(
+        self.weights = self.rng.uniform(
             low=weight_range[0],
             high=weight_range[1],
             size=weight_count
@@ -186,12 +198,21 @@ class FixedTopologyGenome:
     
     def clone(self) -> 'FixedTopologyGenome':
         """
-        Create deep copy of genome.
+        Create a deep copy of the genome.
         
         Returns:
             FixedTopologyGenome: Cloned genome instance
         """
-        return copy.deepcopy(self)
+        cloned_genome = FixedTopologyGenome(
+            layer_sizes=self.layer_sizes,
+            activation=self.activation,
+            output_activation=self.output_activation,
+            weight_range=self._weight_range,
+            random_seed=None  # Allows the clone have its own independent RNG stream
+        )
+        cloned_genome.set_weights(self.get_weights().copy())
+        # Keep the clone's own freshly seeded RNG so it produces an independent stream
+        return cloned_genome
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -203,7 +224,10 @@ class FixedTopologyGenome:
         return {
             'layer_sizes': self.layer_sizes,
             'activation': self.activation,
+            'output_activation': self.output_activation,
             'weights': self.weights.tolist(),  # Convert to list for JSON compatibility
+            '_weight_range': self._weight_range,
+            '_random_seed': self._random_seed,
         }
     
     @staticmethod
@@ -220,10 +244,11 @@ class FixedTopologyGenome:
         genome = FixedTopologyGenome(
             layer_sizes=data['layer_sizes'],
             activation=data['activation'],
-            weight_range=(-1.0, 1.0),  # Default range, will be overwritten
-            random_seed=None  # Don't randomize, we'll set weights directly
+            output_activation=data.get('output_activation', data['activation']),
+            weight_range=data.get('_weight_range', (-1.0, 1.0)),
+            random_seed=data.get('_random_seed', None)
         )
-        genome.weights = np.array(data['weights'], dtype=np.float64)
+        genome.set_weights(np.array(data['weights'], dtype=np.float64))
         return genome
     
     def mutate(
@@ -244,21 +269,28 @@ class FixedTopologyGenome:
             None if inplace, otherwise new mutated genome
             
         Example:
-            >>> genome.mutate(mutation_rate=0.15, mutation_std=0.1)
+            >>> genome = FixedTopologyGenome([3, 2], random_seed=42)
+            >>> original_weights = genome.get_weights().copy()
+            >>> genome.mutate(mutation_rate=1.0, mutation_std=0.1)
+            >>> np.all(original_weights != genome.get_weights())
+            True
         """
-        # Determine which genome to mutate
         if inplace:
             target = self
         else:
             target = self.clone()
         
         # Create mutation mask (which weights to mutate)
-        mutation_mask = np.random.random(len(target.weights)) < mutation_rate
+        mutation_mask = target.rng.random(len(target.weights)) < mutation_rate
         
         # Apply Gaussian noise to selected weights
         if np.any(mutation_mask):
-            noise = np.random.normal(0, mutation_std, size=len(target.weights))
-            target.weights[mutation_mask] += noise[mutation_mask]
+            noise = target.rng.normal(
+                loc=0.0,
+                scale=mutation_std,
+                size=np.count_nonzero(mutation_mask)
+            )
+            target.weights[mutation_mask] += noise
         
         if not inplace:
             return target

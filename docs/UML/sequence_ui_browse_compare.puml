@@ -1,0 +1,86 @@
+@startuml sequence_ui_browse_compare
+title Streamlit UI – Browse → Compare
+
+actor "User" as U
+participant "Streamlit\nBrowse page" as B
+participant "Streamlit\nCompare page" as C
+participant "services.data" as DS
+participant "services.management" as MGT
+participant "Experiment" as EX
+participant "analysis.aggregate" as AG
+participant "analysis.compare" as CMP
+participant "analysis.rliable_bridge" as RLB
+participant "analysis.plots" as PL
+
+U -> B: open Browse, set root_dir
+B -> DS: discover_runs(root, mtime_bucket)
+note right of DS: @cache_resource\nkeyed by (root, mtime_bucket)
+DS --> B: list[RunSummary] (incl. started_at, display_name)
+
+U -> B: apply filters (algo, env, date range)
+U -> B: choose sort column + order
+B -> B: filter + sort filtered list in memory
+B --> U: render table with name / started_at columns
+
+U -> B: tick checkboxes → select N runs
+B -> B: session_state["selected_run_ids"] = [...]
+
+== Manage selected runs ==
+U -> B: enter display name → click Rename
+B -> MGT: rename_run(run_dir, display_name)
+note right of MGT: atomic .tmp-then-replace\nwrites display_name into manifest.json
+B -> B: st.cache_resource.clear() + st.rerun()
+
+U -> B: click Delete → confirm dialog
+B --> U: st.warning with Confirm / Cancel buttons
+U -> B: click Confirm
+B -> MGT: delete_run(run_dir) for each selected
+note right of MGT: requires manifest.json\nshutil.rmtree(run_dir)
+B -> B: clear selection, clear cache, st.rerun()
+
+== Directory management (sidebar) ==
+U -> B: enter folder name → click Create
+B -> MGT: create_folder(root, name)
+note right of MGT: rejects unsafe names\nmkdir(exist_ok=True)
+U -> B: select target folder → click Move
+B -> MGT: move_run(run_dir, target_dir) for each selected
+note right of MGT: requires manifest.json\nshutil.move()
+B -> B: clear selection, clear cache, st.rerun()
+
+U -> C: navigate to Compare
+C -> EX: filter(run_ids=selected)
+EX --> C: subset Experiment
+
+== Tab: Summary ==
+C -> EX: summary_table()
+EX --> C: DataFrame
+C -> AG: aggregate_summary(final_scores)
+AG --> C: DataFrame[mean+CI, iqm+CI]
+
+== Tab: Learning curves ==
+C -> AG: learning_curve_with_ci(runs, statistic, x_col, y_col)
+AG --> C: DataFrame
+C -> PL: plot_learning_curves(runs_by_algo)
+PL --> C: Figure
+C --> U: render
+
+== Tab: Pairwise ==
+C -> CMP: pairwise_table(exp, metric, test)
+CMP --> C: DataFrame
+C --> U: styled table (effect-size colours)
+
+== Tab: Profile / PI (optional) ==
+alt rliable available
+    C -> RLB: performance_profile(score_groups, taus)
+    RLB --> C: DataFrame
+    C -> PL: plot_performance_profile(...)
+    PL --> C: Figure
+    C -> RLB: probability_of_improvement(score_groups)
+    RLB --> C: DataFrame
+    C -> PL: plot_pi_matrix(...)
+    PL --> C: Figure
+else
+    C --> U: banner "install rliable for full stats"
+end
+
+@enduml

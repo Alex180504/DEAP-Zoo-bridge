@@ -1,0 +1,73 @@
+@startuml user_flow_ui
+title Streamlit UI – User Flow
+
+skinparam state {
+  BackgroundColor #F5F8FA
+  BorderColor #4A5568
+}
+
+[*] --> Home
+
+state Home {
+    Home : Pick `results/` root
+    Home : See run-tree summary
+}
+
+Home --> Browse : root selected
+
+state Browse {
+    Browse : Filter by algo / env / date range
+    Browse : Sort by any column (asc / desc)
+    Browse : Toggle run-row checkboxes
+    Browse : Rename selected runs (display label)
+    Browse : Delete selected runs (with confirmation)
+    Browse : Create subfolders
+    Browse : Move selected runs into a subfolder
+}
+
+Browse --> Compare : ≥ 2 runs selected
+Browse --> Replay : 1 run + saved episode
+Browse --> Live   : 1 run, want fresh rollout
+Browse --> Report : N runs, want export
+
+state Compare {
+    state "Summary tab"        as Sum
+    state "Learning curves"    as LC
+    state "Distribution"       as Dist
+    state "Pairwise stats"     as PW
+    state "Performance profile" as PP
+    state "P(improve) matrix"  as PI
+    [*] --> Sum
+    Sum --> LC
+    LC --> Dist
+    Dist --> PW
+    PW --> PP
+    PP --> PI
+}
+
+state Replay {
+    Replay : Pick episode_*.mp4 / .gif
+    Replay : Inline video / image
+}
+
+state Live {
+    Live : Reconstruct env from manifest
+    Live : Load policy artifact
+    Live : Stream rgb frames step-by-step
+    Live : Show cumulative reward
+}
+
+state Report {
+    Report : analysis.report.build_report()
+    Report : Inline HTML preview
+    Report : Download button
+}
+
+Compare --> Report
+Compare --> Replay : inspect a single run
+Compare --> Live   : inspect a single run
+Replay --> Compare
+Live   --> Compare
+Report --> [*]
+
+@enduml
