@@ -34,34 +34,28 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
 
-      # ".[all]" is uninstallable in a clean env: every jaxmarl pins
-      # brax==0.10.3 while every qdax needs brax>=0.10.4 — an empty
-      # intersection, so they can never be co-installed.  No test imports
-      # the jaxmarl package, so it is dropped entirely; the jax/flax/qdax
-      # stack is installed by hand (below) at the versions the project runs
-      # on.  Install every other extra via the package.
-      #
-      # Mirror the canonical install order (Dockerfile.server / install.ps1):
-      # CPU-only torch first, then AgileRL without its conservative pettingzoo
-      # pin, then the package.
-      - name: Install package (CPU torch, conflict-free extras)
+      - name: Install package (pinned to known-good versions)
         run: |
           python -m pip install --upgrade pip
-          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.0.0"
-          pip install --no-deps "agilerl>=2.6,<3"
-          pip install -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,scoop,dask,ui,service]"
-          # JAX/QDax CPU stack at the versions the project actually runs on
-          # (the pyproject [jax]/[qdax] extras are stale/unsolvable).  qdax's
-          # brax>=0.10.4 pin is over-conservative — it runs fine on brax 0.10.3
-          # — so install qdax with --no-deps and bring in its real deps under a
-          # constraints file that keeps the jax/brax stack pinned.  Validated in
-          # a python:3.11-slim container: both qdax test files pass.
-          pip install "jax==0.4.38" "jaxlib==0.4.38" "flax==0.10.4" "brax==0.10.3"
-          printf 'jax==0.4.38\njaxlib==0.4.38\nflax==0.10.4\nbrax==0.10.3\n' > /tmp/jaxstack.txt
-          pip install -c /tmp/jaxstack.txt --no-deps "qdax==0.5.0"
-          pip install -c /tmp/jaxstack.txt \
-            "jumanji==1.1.1" "scikit-learn==1.8.0" "tensorflow-probability==0.25.0" \
-            "esquilax==2.1.0" "chex==0.1.90" "optax==0.2.5" "jax-tqdm==0.4.0" "jaxopt==0.8.5"
+          C=.github/ci-constraints.txt
+          # CPU-only torch (constraints omit torch: the local build is CUDA).
+          pip install -c "$C" --index-url https://download.pytorch.org/whl/cpu "torch==2.6.0"
+          # AgileRL pins pettingzoo~=1.23.1 (incompatible with mpe2), so install
+          # it without deps, then add its real runtime deps EXCEPT pettingzoo.
+          # fastrand/pymunk float to wheeled versions (the pinned ones have no
+          # manylinux wheel and would otherwise need a source build).
+          pip install -c "$C" --no-deps "agilerl==2.6.1"
+          pip install -c "$C" packaging accelerate dill flatten-dict google-cloud-storage \
+            h5py hydra-core minari omegaconf redis tensordict termcolor tqdm wandb
+          pip install fastrand pymunk
+          pip install -c "$C" -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,scoop,dask,ui,service]"
+          # JAX/QDax: jaxmarl is dropped (no test imports it) and qdax's
+          # brax>=0.10.4 pin is bypassed with --no-deps (it runs on brax 0.10.3);
+          # the constraints file keeps the jax/brax stack from being bumped.
+          pip install -c "$C" "jax==0.4.38" "jaxlib==0.4.38" "flax==0.10.4" "brax==0.10.3"
+          pip install -c "$C" --no-deps "qdax==0.5.0"
+          pip install -c "$C" jumanji scikit-learn tensorflow-probability \
+            esquilax chex optax jax-tqdm jaxopt
 
       - name: Run unit tests
         run: python -m pytest --no-cov -q
@@ -79,19 +73,27 @@ jobs:
       - name: Start stack
         run: docker compose up -d
 
-      - name: Wait for service to become healthy
+      # Both images define their own HEALTHCHECK (service hits /health, UI hits
+      # /_stcore/health), so waiting for the container health status is more
+      # robust than curling from the host before Streamlit has finished booting.
+      - name: Wait for service and UI to become healthy
         run: |
-          for i in $(seq 1 40); do
-            status="$(docker inspect --format '{{.State.Health.Status}}' deap-service 2>/dev/null || echo missing)"
-            echo "attempt $i: service health=$status"
-            if [ "$status" = "healthy" ]; then exit 0; fi
-            sleep 5
-          done
-          echo "::error::service did not become healthy in time"
-          exit 1
-
-      - name: Check UI responds
-        run: curl -fsS --retry 20 --retry-delay 3 --retry-connrefused http://localhost:8501/_stcore/health
+          wait_healthy() {
+            name="$1"
+            for i in $(seq 1 60); do
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)"
+              echo "[$name] attempt $i: $status"
+              case "$status" in
+                healthy) return 0 ;;
+                missing) docker compose ps ;;
+              esac
+              sleep 5
+            done
+            echo "::error::$name did not become healthy in time"
+            return 1
+          }
+          wait_healthy deap-service
+          wait_healthy deap-ui
 
       - name: Dump compose logs on failure
         if: failure()

@@ -8,6 +8,7 @@ those optional deps).
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
@@ -187,6 +188,11 @@ def test_qdax_descriptor_skips_variable_shape_frames() -> None:
     np.testing.assert_allclose(result, [0.2, 0.3])
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="_mask_optional_pyarrow_imports only masks pyarrow on Windows; it is a "
+    "no-op elsewhere, so the ImportError it guards against cannot be raised.",
+)
 def test_mask_optional_pyarrow_imports_blocks_pyarrow_only() -> None:
     from deap_pettingzoo.contrib.qdax.coevolution import _mask_optional_pyarrow_imports
 
