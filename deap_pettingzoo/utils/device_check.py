@@ -15,6 +15,54 @@ import warnings
 from typing import Sequence
 
 
+_warned_devices: set = set()
+
+
+def _torch_cuda_available() -> bool:
+    """Best-effort check for a usable CUDA torch build. Never raises."""
+    try:
+        import torch  # type: ignore
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # pragma: no cover — torch missing / broken
+        return False
+
+
+def resolve_device(requested: object) -> str:
+    """Resolve a requested torch device to one that actually works.
+
+    This guards against the common containerised-deployment failure where an
+    experiment (or a pasted script) asks for ``"cuda"`` but the backend ships a
+    **CPU-only** torch build — AgileRL then crashes with
+    ``AssertionError: Torch not compiled with CUDA enabled``. Instead of
+    crashing, fall back to CPU (with a one-time warning).
+
+    Rules:
+    * ``None`` → auto: ``"cuda"`` if available, else ``"cpu"``.
+    * a CUDA device (e.g. ``"cuda"`` / ``"cuda:0"``) when CUDA is unavailable
+      → ``"cpu"`` (+ one :class:`RuntimeWarning` per distinct requested device).
+    * anything else → ``str(requested)`` unchanged.
+    """
+    cuda_ok = _torch_cuda_available()
+    if requested is None:
+        return "cuda" if cuda_ok else "cpu"
+    dev = str(requested)
+    if torch_uses_cuda(dev) and not cuda_ok:
+        if dev not in _warned_devices:
+            _warned_devices.add(dev)
+            warnings.warn(
+                f"Requested torch device {dev!r} but CUDA is not available in "
+                "this environment (e.g. a CPU-only torch build in the service "
+                "container). Falling back to 'cpu'. Training will run but more "
+                "slowly; for GPU, build the CUDA service image and enable GPU "
+                "access (see Dockerfile.server).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return "cpu"
+    return dev
+
+
 def torch_uses_cuda(device: object) -> bool:
     """Return ``True`` iff ``device`` resolves to a CUDA device.
 
@@ -94,4 +142,9 @@ def warn_on_gpu_contention(
     return True
 
 
-__all__ = ["torch_uses_cuda", "jax_uses_gpu", "warn_on_gpu_contention"]
+__all__ = [
+    "torch_uses_cuda",
+    "resolve_device",
+    "jax_uses_gpu",
+    "warn_on_gpu_contention",
+]

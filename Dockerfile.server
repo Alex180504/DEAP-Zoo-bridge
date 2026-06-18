@@ -8,13 +8,16 @@
 # Run (standalone):
 #   docker run -p 8100:8100 -v ./results:/app/results deap-bridge-service
 #
-# CUDA variant (for GPU-accelerated RL training):
-#   1. Change the FROM line below to a CUDA base, e.g.:
-#        FROM nvidia/cuda:12.1-runtime-ubuntu22.04
-#      (and install Python 3.11 manually or use a CUDA-python hybrid).
-#   2. Remove the --index-url flag from the torch install step so the
-#      CUDA-enabled wheel is pulled from PyPI.
-#   3. Add `--gpus all` to your docker run or compose file.
+# GPU / CUDA variant (for GPU-accelerated RL training):
+#   The torch wheel index is a build arg, so no base-image change is needed —
+#   the pip CUDA wheels bundle their own CUDA runtime; the host driver is
+#   injected at run time by the NVIDIA Container Toolkit (`--gpus all`).
+#     docker build -f Dockerfile.server \
+#       --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 \
+#       -t deap-bridge-service:cuda .
+#     docker run --gpus all -p 8100:8100 -v ./results:/app/results deap-bridge-service:cuda
+#   Or use the compose override: see docker-compose.gpu.yml and the README
+#   "GPU support" section. Default build stays CPU-only (lean, no GPU needed).
 # ===========================================================================
 
 FROM python:3.11-slim-bookworm
@@ -23,6 +26,13 @@ FROM python:3.11-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # For potential C-extensions and OpenMP in numpy/scipy
     libgomp1 \
+    # git: required for the Advanced install panel's `git clone` and for
+    #   `pip install git+https://…` (the recommended way to install a custom
+    #   environment package, e.g. a marl-aquarium fork).
+    # build-essential: a C/C++ toolchain so custom env packages that ship only
+    #   an sdist (and need to compile) can build inside the slim image.
+    git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Create non-root user --------------------------------------------------
@@ -36,14 +46,35 @@ WORKDIR /app
 # Copy only what pip needs first (layer caching for deps).
 COPY pyproject.toml README.md LICENSE.txt ./
 COPY deap_pettingzoo/ deap_pettingzoo/
+# Ship the example experiment scripts so user-pasted scripts (Setup → Advanced)
+# that import `examples.pursuit_evasion.*` modules resolve. PYTHONPATH/
+# DEAP_PROJECT_ROOT are set below so both `deap_pettingzoo` and `examples` import.
+COPY examples/ examples/
 
-# Install torch CPU-only first to avoid pulling the ~2 GB CUDA wheel,
-# then AgileRL without deps (it pins pettingzoo~=1.23.1 which conflicts
+# torch wheel index — CPU by default (lean, ~no GPU). Override at build time
+# with a CUDA index (e.g. .../whl/cu121) to get a CUDA-enabled torch:
+#   --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
+# Install torch first (CPU index avoids the ~2 GB CUDA wheel on the default
+# build), then AgileRL without deps (it pins pettingzoo~=1.23.1 which conflicts
 # with mpe2's >=1.24.3 — works fine at runtime though), then the rest.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+#
+# AgileRL is installed --no-deps *only* to keep mpe2's newer pettingzoo. That
+# also drops AgileRL's other runtime deps (packaging, accelerate, tensordict,
+# …), which makes `import agilerl` fail at runtime with
+# `ModuleNotFoundError: No module named 'packaging'` and breaks every
+# MADDPG/MATD3 experiment. So we explicitly reinstall AgileRL's runtime deps
+# below, *excluding* pettingzoo (kept at mpe2's version) and the heavy bits
+# torch-based MADDPG/MATD3 don't use (jax, minari, the pre-commit dev tool).
+RUN pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} \
     "torch>=2.0.0" && \
     pip install --no-cache-dir --no-deps "agilerl>=2.6,<3" && \
-    pip install --no-cache-dir ".[service]"
+    pip install --no-cache-dir ".[service]" && \
+    pip install --no-cache-dir \
+        accelerate dill fastrand flatten-dict google-cloud-storage h5py \
+        hydra-core matplotlib omegaconf packaging pandas pymunk redis \
+        tensordict termcolor tqdm wandb
 
 # --- Runtime setup ---------------------------------------------------------
 # The results volume is mounted at /app/results at runtime (may be root-owned).
@@ -52,6 +83,18 @@ RUN mkdir -p /app/results /app/data && chown deap:deap /app/results /app/data
 
 ENV DEAP_RESULTS_ROOT=/app/results
 ENV DEAP_SERVICE_DB=/app/data/_service.db
+
+# Project root for custom-script (Setup → Advanced) execution: prepended to the
+# script subprocess's PYTHONPATH so `import deap_pettingzoo` and `import
+# examples...` both resolve regardless of the experiment working directory.
+ENV DEAP_PROJECT_ROOT=/app
+ENV PYTHONPATH=/app
+
+# Advanced surface (dependency-install panel + custom-script submission) is
+# enabled by default. Set DEAP_ENABLE_ADVANCED=0 to disable on shared/exposed
+# deployments. NOTE: pip installs done via the panel live in this container's
+# site-packages and are LOST on rebuild — add permanent deps to this Dockerfile.
+ENV DEAP_ENABLE_ADVANCED=1
 
 # --- Diagnostic logging ----------------------------------------------------
 # Default "warning" logs only warnings + exceptions.  Override at run time

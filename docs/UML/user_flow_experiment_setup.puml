@@ -66,6 +66,19 @@ state RawTab {
 
 RawTab --> Validate
 
+state AdvancedMode {
+    AdvancedMode : Top-level "Advanced" mode (not a tab) — shown if advanced_enabled
+    AdvancedMode : Replaces the spec form + page Validate/Submit (no duplicate buttons)
+    AdvancedMode : Toggle — one tool shown at a time
+    AdvancedMode : 📦 Install deps — pip/git (allowlisted), live scrollable output
+    AdvancedMode : 🐍 Script editor — paste full script (text area; rich editor opt-in)
+    AdvancedMode : Validate script (static) → POST /experiments/script/validate
+    AdvancedMode : Submit script → POST /experiments/script (kind="script")
+}
+
+[*] --> AdvancedMode : select "Advanced" mode
+AdvancedMode --> [*] : script submitted → Queue
+
 state Validate {
     Validate : Click "Validate" → POST /experiments/validate
     Validate : Render field errors grouped by tab

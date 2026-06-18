@@ -301,6 +301,57 @@ class ApiClient:
     def resume_queue(self) -> Dict[str, Any]:
         return self._post("/queue/resume")
 
+    # -- health / advanced -------------------------------------------------
+
+    def get_health(self) -> Dict[str, Any]:
+        """Return the service health, incl. ``advanced_enabled``."""
+        return self._get("/health")
+
+    def start_install(
+        self, manager: str, action: str, args: List[str]
+    ) -> Dict[str, Any]:
+        """Start a dependency-install job. Returns ``{job_id, status}``."""
+        return self._post(
+            "/env/install",
+            json_data={"manager": manager, "action": action, "args": args},
+        )
+
+    def get_install(
+        self,
+        job_id: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        lines: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Poll an install job's status + log tail."""
+        params: Dict[str, Any] = {}
+        if offset is not None:
+            params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
+        if lines is not None:
+            params["lines"] = lines
+        return self._get(f"/env/install/{job_id}", params=params)
+
+    def validate_script(self, src: str) -> Dict[str, Any]:
+        """Static validation of a custom experiment script.
+
+        Returns a ``ValidationReport``-shaped dict or raises
+        :class:`ApiValidationError` on a 422 backend response."""
+        return self._post(
+            "/experiments/script/validate", json_data={"script": src}
+        )
+
+    def submit_script(
+        self, src: str, label: str = "", entry: str = "script"
+    ) -> Dict[str, Any]:
+        """Submit a custom script to the queue. Returns ``{id, status, position}``
+        or raises :class:`ApiValidationError`."""
+        return self._post(
+            "/experiments/script",
+            json_data={"script": src, "label": label, "entry": entry},
+        )
+
     # -- export / import ---------------------------------------------------
 
     def build_experiment_export_url(

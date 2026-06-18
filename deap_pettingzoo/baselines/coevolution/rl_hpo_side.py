@@ -65,7 +65,8 @@ class RLEvolveHPOSideState(SideState):
 
         self.population_size = int(cfg.get("population_size", 6))
         self.evo_every = int(cfg.get("evo_every_n_steps", 20_000))
-        self.device = cfg.get("device", "cpu")
+        from deap_pettingzoo.utils.device_check import resolve_device
+        self.device = resolve_device(cfg.get("device", "cpu"))
         self.seed = cfg.get("seed", None)
         self.agent_ctor_kwargs = dict(cfg.get("agent_ctor_kwargs", {}))
         self.net_config = cfg.get("net_config", {})

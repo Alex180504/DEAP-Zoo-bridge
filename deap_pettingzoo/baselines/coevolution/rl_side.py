@@ -401,18 +401,12 @@ class RLSideState(SideState):
                 "FrozenSideState (one-directional opponent only)."
             )
 
-        # Resolve device.
-        if self.device is not None:
-            self.resolved_device = str(self.device)
-        else:
-            try:
-                import torch  # type: ignore
+        # Resolve device (auto-detect when unset; fall back to CPU when a CUDA
+        # device is requested but unavailable — e.g. CPU-only torch in the
+        # service container — instead of crashing inside AgileRL).
+        from deap_pettingzoo.utils.device_check import resolve_device
 
-                self.resolved_device = (
-                    "cuda" if torch.cuda.is_available() else "cpu"
-                )
-            except ImportError:
-                self.resolved_device = "cpu"
+        self.resolved_device = resolve_device(self.device)
 
         # Seed.
         if self.seed is None and rng is not None:

@@ -1,0 +1,37 @@
+# ===========================================================================
+# docker-compose.gpu.yml — GPU (CUDA) override for the experiment service.
+# ===========================================================================
+#
+# Opt-in: the default `docker compose up` stays CPU-only. To run the backend
+# on the GPU, layer this override on top of the base compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# Prerequisites (host):
+#   * NVIDIA GPU + a recent NVIDIA driver.
+#   * NVIDIA Container Toolkit installed and configured for Docker.
+#   * On Windows: Docker Desktop with the WSL2 backend (GPU passthrough).
+# See the "GPU support" section of the README for the full setup + checks.
+#
+# Pick the CUDA wheel index that matches your driver (cu121 / cu124 / …) via
+# the TORCH_INDEX_URL env var (default below targets CUDA 12.1):
+#   TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 \
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+services:
+  service:
+    build:
+      args:
+        # CUDA-enabled torch wheel index (override per your driver's CUDA version).
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}
+    # Separate tag so the CUDA image doesn't clobber the CPU `:latest` build.
+    image: deap-bridge-service:cuda
+    # Reserve all host GPUs for the service container (Compose v2 honours this
+    # for `docker compose up`, not just Swarm).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1568,6 +1568,33 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + wall_time_s: float
     }
 
+    class InstallRequest <<pydantic>> {
+        + manager: str  ' pip | git
+        + action: str   ' install | uninstall | clone
+        + args: list[str]
+    }
+
+    class ScriptSubmitModel <<pydantic>> {
+        + script: str
+        + label: str
+        + entry: str = "script"
+    }
+
+    class install_jobs <<module>> {
+        + build_command(manager, action, args) -> argv  ' allowlist + reject metachars
+        + start_install(manager, action, args) -> job_id  ' detached subprocess
+        + get_status(job_id, offset, limit, lines) -> dict  ' read_tail(install.log)
+        + InstallValidationError
+    }
+
+    class script_validate <<module>> {
+        + validate_script_source(src) -> {ok, issues}  ' ast.parse + structure
+    }
+
+    class advanced <<module>> {
+        + advanced_enabled() -> bool  ' DEAP_ENABLE_ADVANCED (default True)
+    }
+
     class Dispatcher {
         - _running: Task | None
         - _paused: bool
@@ -1576,6 +1603,9 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + start()
         + cancel(experiment_id)
         + shutdown()
+        .. _run_one branches on spec "kind" ..
+        ' kind=="script": Popen([python, user_script.py], cwd=exp_dir)
+        '   then synthesise _result.json (rglob manifest.json)
     }
 
     class Runner <<subprocess>> {
@@ -1584,10 +1614,14 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
     }
 
     class FastAPIApp <<FastAPI>> {
-        + GET /health
+        + GET /health  ' incl. advanced_enabled
         + GET /catalog
         + POST /experiments
         + POST /experiments/validate
+        + POST /env/install  ' gated
+        + GET /env/install/{job_id}  ' gated
+        + POST /experiments/script  ' gated, kind="script"
+        + POST /experiments/script/validate  ' gated
         + GET /experiments/{id}
         + GET /experiments/{id}/progress
         + GET /experiments/{id}/stdout
@@ -1655,6 +1689,9 @@ package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
         + get_queue() -> QueueState
         + pause_queue() / resume_queue()
         + cancel_experiment(id) / delete_experiment(id)
+        + get_health() -> dict  ' advanced_enabled
+        + start_install(manager, action, args) / get_install(job_id)
+        + validate_script(src) / submit_script(src, label)
     }
 
     class param_widgets <<module>> {
@@ -1690,6 +1727,10 @@ Dispatcher --> Runner : Popen subprocess
 Runner --> "baselines.Trainer" : train(progress_callback)
 FastAPIApp ..> logging_config : configure_logging() + GET /logs tails service.log
 Runner ..> logging_config : configure_logging() (console only)
+FastAPIApp ..> advanced : _require_advanced() gate (403)
+FastAPIApp ..> install_jobs : POST /env/install -> start_install
+FastAPIApp ..> script_validate : POST /experiments/script[/validate]
+Dispatcher ..> ScriptSubmitModel : runs kind=="script" spec as python user_script.py
 ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
 "Setup Page" ..> ApiClient : uses
 "Queue Page" ..> ApiClient : uses

@@ -36,6 +36,59 @@ from deap_pettingzoo.service import db
 logger = logging.getLogger(__name__)
 
 
+def _script_env() -> dict:
+    """Environment for a custom-script subprocess.
+
+    Prepends the project root (``DEAP_PROJECT_ROOT``, default ``/app`` in the
+    container image) to ``PYTHONPATH`` so a pasted script can
+    ``import deap_pettingzoo`` and ``import examples...`` regardless of the
+    experiment working directory it runs in.
+    """
+    env = dict(os.environ)
+    project_root = os.environ.get("DEAP_PROJECT_ROOT") or os.getcwd()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        project_root + os.pathsep + existing if existing else project_root
+    )
+    return env
+
+
+def _synthesise_script_result(experiment_dir: Path, returncode: Optional[int]) -> None:
+    """Write ``_result.json`` for a custom-script run.
+
+    Scripts don't produce a result file themselves, so we derive status from the
+    exit code and discover run dirs by globbing for ``manifest.json`` under the
+    experiment dir (scripts run with ``cwd`` set there, so relative ``results/``
+    outputs land inside it and are linked to this experiment).
+    """
+    run_dirs: list = []
+    seen = set()
+    try:
+        for manifest in experiment_dir.rglob("manifest.json"):
+            d = str(manifest.parent)
+            if d not in seen:
+                seen.add(d)
+                run_dirs.append(d)
+    except OSError:
+        pass
+
+    status = "completed" if returncode == 0 else "failed"
+    payload = {
+        "status": status,
+        "run_dirs": run_dirs,
+        "finished_at": time.time(),
+    }
+    if status == "failed":
+        payload["error"] = f"Script exited with code {returncode}"
+    result_path = experiment_dir / "_result.json"
+    tmp_path = experiment_dir / "_result.tmp"
+    try:
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(str(tmp_path), str(result_path))
+    except OSError:  # pragma: no cover
+        pass
+
+
 class Dispatcher:
     """Manages the experiment queue in an asyncio background task.
 
@@ -113,20 +166,41 @@ class Dispatcher:
             await self._run_one(exp_id, spec_json)
 
     async def _run_one(self, exp_id: str, spec_json: str) -> None:
-        """Execute a single experiment: write spec, spawn runner, wait, report."""
+        """Execute a single experiment: write spec, spawn runner, wait, report.
+
+        Two execution kinds are supported, discriminated by the ``"kind"`` field
+        of the stored spec JSON:
+
+        * ``"spec"`` (default): the catalog-driven path — spawn
+          ``python -m deap_pettingzoo.service.runner`` against ``_spec.json``.
+        * ``"script"``: an advanced user-pasted script — write it to
+          ``user_script.py`` and spawn ``python user_script.py`` in the
+          experiment dir, then synthesise ``_result.json`` from the exit code.
+        """
         logger.info("Experiment %s dequeued, starting", exp_id)
         experiment_dir = self._experiments_dir / exp_id
         experiment_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write spec to a temp file inside the experiment dir.
+        try:
+            spec = json.loads(spec_json)
+        except json.JSONDecodeError:
+            spec = {}
+        kind = spec.get("kind", "spec")
+
+        # Write spec to a file inside the experiment dir (kept for both kinds).
         spec_file = experiment_dir / "_spec.json"
         spec_file.write_text(spec_json, encoding="utf-8")
 
-        # Spawn the runner.
+        # Build the subprocess command for this kind.
         log_path = experiment_dir / "_stdout.log"
         log_fh = open(str(log_path), "wb")
-        try:
-            proc = await asyncio.create_subprocess_exec(
+        if kind == "script":
+            script_path = experiment_dir / "user_script.py"
+            script_path.write_text(spec.get("script", ""), encoding="utf-8")
+            cmd = [sys.executable, str(script_path)]
+            popen_kwargs = {"cwd": str(experiment_dir), "env": _script_env()}
+        else:
+            cmd = [
                 sys.executable,
                 "-m",
                 "deap_pettingzoo.service.runner",
@@ -134,8 +208,15 @@ class Dispatcher:
                 str(spec_file),
                 "--experiment-dir",
                 str(experiment_dir),
+            ]
+            popen_kwargs = {}
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
                 stdout=log_fh,
                 stderr=asyncio.subprocess.STDOUT,
+                **popen_kwargs,
             )
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to spawn runner for experiment %s", exp_id)
@@ -151,7 +232,8 @@ class Dispatcher:
         self._running_proc = proc
         await db.set_running(exp_id, proc.pid, path=self._db_path)
         logger.info(
-            "Experiment %s running (pid=%s, log=%s)", exp_id, proc.pid, log_path
+            "Experiment %s running (kind=%s, pid=%s, log=%s)",
+            exp_id, kind, proc.pid, log_path,
         )
 
         try:
@@ -176,6 +258,12 @@ class Dispatcher:
         if current and current["status"] == "cancelled":
             logger.info("Experiment %s cancelled", exp_id)
             return
+
+        # Custom scripts don't write _result.json; synthesise one from the exit
+        # code and the run dirs discovered under the experiment dir so the
+        # existing _record_result path (and Browse/Compare discovery) work.
+        if kind == "script":
+            _synthesise_script_result(experiment_dir, proc.returncode)
 
         await self._record_result(exp_id, experiment_dir, proc.returncode)
 
