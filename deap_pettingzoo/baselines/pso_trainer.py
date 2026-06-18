@@ -29,7 +29,7 @@ from deap_pettingzoo.baselines.ea_trainer import (
     GenomePolicyWrapper,
     _resolve_shared_action_space,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.pso_integration import (
@@ -56,8 +56,6 @@ class PSOTrainer(BaselineTrainer):
     Same genome representation as :class:`EATrainer` and
     :class:`CMAESTrainer`, so all three can be compared head-to-head.
     """
-
-    _default_recording_every_n: ClassVar[int] = 1
 
     @staticmethod
     def describe_hyperparameters():
@@ -195,23 +193,18 @@ class PSOTrainer(BaselineTrainer):
         fitness_history: list = []
 
         log = build_logger(config, algorithm="pso")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_schedule = recording_cfg.planned_record_iterations(
-            num_generations
+        env_steps_per_iteration = self.population_size * max_steps
+        self._recorder = RecordingController(
+            config, log, max_steps=max_steps,
+            seed=config.algorithm_params.get("seed"),
         )
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps, fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
+
+        def _pso_champion():
+            if len(hof) == 0:
+                return None
+            return GenomePolicyWrapper(
+                hof[0].genome, config.env_name, action_space=action_space
             )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=max_steps, frame_recorder=recorder,
-                )
 
         requested = config.algorithm_params.get("num_workers", self.num_workers)
         effective_workers = resolve_num_workers(requested)
@@ -263,55 +256,33 @@ class PSOTrainer(BaselineTrainer):
                 gbest_ctx = toolbox._pso_gbest_ctx
                 gbest_fit = gbest_ctx.get("fitness")
                 fitness_history.append({
-                    "generation": gen,
+                    "generation": gen + 1,
                     "mean": record["avg"],
                     "std": record["std"],
                     "min": record["min"],
                     "max": record["max"],
                     "gbest": gbest_fit,
                 })
-                if progress_callback is not None:
-                    self._emit_progress(
-                        progress_callback,
-                        ProgressEvent(
-                            unit="generation",
-                            current=gen + 1,
-                            total=num_generations,
-                            best_fitness=record["max"],
-                            mean_fitness=record["avg"],
-                            wall_time_s=time.time() - start_time,
-                        ),
-                    )
-
-                _record_due = (
-                    (gen + 1) in recording_schedule
-                    if recording_schedule is not None
-                    else (gen + 1) % recording_cadence == 0
+                self._on_progress(
+                    progress_callback,
+                    ProgressEvent(
+                        unit="generation",
+                        current=gen + 1,
+                        total=num_generations,
+                        env_steps=(gen + 1) * env_steps_per_iteration,
+                        best_fitness=record["max"],
+                        mean_fitness=record["avg"],
+                        wall_time_s=time.time() - start_time,
+                    ),
+                    champion=_pso_champion,
                 )
-                if recording_evaluator and recording_cfg.enabled and _record_due:
-                    if len(hof) > 0:
-                        try:
-                            best = hof[0]
-                            champ = GenomePolicyWrapper(
-                                best.genome, config.env_name,
-                                action_space=action_space,
-                            )
-                            rs = config.algorithm_params.get("seed")
-                            recording_evaluator.evaluate(
-                                policy=champ, env_name=config.env_name,
-                                num_episodes=1,
-                                seed=int(rs) if rs is not None else None,
-                                env_config=dict(config.env_config)
-                                if config.env_config else None,
-                                iteration=gen,
-                                env_steps=gen * self.population_size * max_steps,
-                            )
-                        except Exception:
-                            pass
 
         env.close()
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.finalize(
+            _pso_champion, iteration=num_generations,
+            env_steps=num_generations * env_steps_per_iteration,
+        )
+        self._recorder.close()
         training_time = time.time() - start_time
 
         best_ind = hof[0]

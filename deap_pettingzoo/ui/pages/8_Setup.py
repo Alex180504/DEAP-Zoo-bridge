@@ -114,18 +114,9 @@ _RECORDING_PARAMS: List[Dict[str, Any]] = [
         "label": "Record champion rollouts",
         "help": "Save MP4/GIF videos of the best policy during training.",
     },
-    {
-        "name": "max_recordings",
-        "type": "int",
-        "default": None,
-        "nullable": True,
-        "minimum": 1,
-        "step": 1,
-        "group": "Advanced",
-        "advanced": True,
-        "label": "Max recordings",
-        "help": "Cap on total recordings (first→gen 1, last→final, rest spaced evenly). None = cadence-based.",
-    },
+    # NOTE: ``mode`` + its companion field (``max_recordings`` / ``every_n_steps``)
+    # are rendered with custom widgets in the Recording tab so the companion
+    # field can be shown conditionally on the chosen mode.
     {
         "name": "fps",
         "type": "int",
@@ -608,6 +599,48 @@ with tab_rec:
     rec_ctx = WidgetContext(values=dict(_prev_recording))
     _render_param_group(_RECORDING_PARAMS, rec_ctx)
     recording_values, _ = coerce_touched(_RECORDING_PARAMS, rec_ctx.values)
+
+    # --- Cadence mode (algorithm-agnostic) -------------------------------------
+    # One concept across EA generations and RL iterations: choose how often to
+    # capture the champion. The companion field (count / env-step interval) is
+    # shown conditionally.
+    _MODE_LABELS = {
+        "count": "N evenly spread over the run",
+        "every": "Every generation / iteration",
+        "interval": "Every N env-steps",
+        "final": "Only the final rollout",
+    }
+    _mode_keys = list(_MODE_LABELS)
+    _prev_mode = str(_prev_recording.get("mode", "count"))
+    _mode_idx = _mode_keys.index(_prev_mode) if _prev_mode in _mode_keys else 0
+    rec_mode = st.selectbox(
+        "Recording mode",
+        options=_mode_keys,
+        index=_mode_idx,
+        format_func=lambda k: _MODE_LABELS[k],
+        help="How often to record a champion rollout. Same meaning for every algorithm.",
+    )
+    recording_values["mode"] = rec_mode
+    if rec_mode == "count":
+        _prev_n = _prev_recording.get("max_recordings") or 10
+        recording_values["max_recordings"] = int(st.number_input(
+            "Max recordings",
+            value=int(_prev_n), min_value=1, step=1,
+            help="First → start of run, last → end, the rest spaced evenly.",
+        ))
+    elif rec_mode == "interval":
+        _prev_step = _prev_recording.get("every_n_steps") or 10000
+        recording_values["every_n_steps"] = int(st.number_input(
+            "Every N env-steps",
+            value=int(_prev_step), min_value=1, step=1000,
+            help="Record one rollout each time this many env steps elapse.",
+        ))
+    elif rec_mode == "every":
+        st.warning(
+            "Recording every generation/iteration can produce a very large "
+            "number of videos (disk + time) on long runs. Prefer 'N evenly "
+            "spread' unless you need every step."
+        )
 
     # --- Resolution control (custom: the generic int widget can't emit None) ---
     # ``max_dim`` downscales the longer side of each rendered frame. Default to

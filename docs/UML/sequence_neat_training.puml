@@ -36,7 +36,7 @@ activate UE
 Trainer -> Pop: neat.Population(config, seed)
 activate Pop
 
-Trainer -> RR: _RecordingReporter(record_fn, cadence)
+Trainer -> RR: _RecordingReporter(record_fn)
 Trainer -> Pop: add_reporter(recording_reporter)
 
 == Parallel or sequential eval ==
@@ -86,12 +86,12 @@ else num_workers == 1 (sequential)
     end
 end
 
-== Recording: champion rollout (every N gens, hooks post_evaluate) ==
+== Recording: champion rollout (RecordingController decides per mode) ==
 alt recording enabled
-    loop generation g where g > 0 and g % cadence == 0
+    loop generation g where g > 0
         Pop -> RR: post_evaluate(config, pop, species, best_genome)
-        RR -> RR: _record_fn(g, best_genome)
-        RR -> UE: evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, seed, env_config)
+        RR -> RR: _record_fn(g, best_genome) → RecordingController.observe(ProgressEvent(g), champion)
+        RR -> UE: (when due) evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, iteration=g, env_steps)
         UE -> FR: start_episode()
         loop rollout steps
             UE -> UE: env.render('rgb_array')

@@ -38,6 +38,7 @@ from deap_pettingzoo.baselines.base import (
     BudgetMode,
     FitnessConfig,
     RecordingConfig,
+    RecordingMode,
     TrainingConfig,
 )
 
@@ -120,7 +121,8 @@ class RecordingSettings:
     enabled: bool = False
     fps: int = 20
     fmt: str = "mp4"
-    every_n_generations: Optional[int] = None
+    mode: str = RecordingMode.COUNT.value
+    every_n_steps: Optional[int] = None
     max_recordings: Optional[int] = None
     max_dim: Optional[int] = None
 
@@ -129,7 +131,8 @@ class RecordingSettings:
             "enabled": self.enabled,
             "fps": self.fps,
             "fmt": self.fmt,
-            "every_n_generations": self.every_n_generations,
+            "mode": str(self.mode),
+            "every_n_steps": self.every_n_steps,
             "max_recordings": self.max_recordings,
             "max_dim": self.max_dim,
         }
@@ -141,7 +144,8 @@ class RecordingSettings:
             enabled=bool(data.get("enabled", False)),
             fps=int(data.get("fps", 20)),
             fmt=str(data.get("fmt", "mp4")),
-            every_n_generations=data.get("every_n_generations"),
+            mode=str(data.get("mode", RecordingMode.COUNT.value)),
+            every_n_steps=data.get("every_n_steps"),
             max_recordings=data.get("max_recordings"),
             max_dim=data.get("max_dim"),
         )
@@ -152,7 +156,8 @@ class RecordingSettings:
             enabled=self.enabled,
             fps=self.fps,
             fmt=self.fmt,
-            every_n_generations=self.every_n_generations,
+            mode=RecordingMode(str(self.mode)),
+            every_n_steps=self.every_n_steps,
             max_recordings=self.max_recordings,
             max_dim=self.max_dim,
         )
@@ -792,14 +797,24 @@ def _validate_recording(spec, report):
             "out_of_range",
             "Max recordings must be >= 1.",
         )
-    if (
-        rec.every_n_generations is not None
-        and rec.every_n_generations < 1
-    ):
+    valid_modes = {m.value for m in RecordingMode}
+    if str(rec.mode) not in valid_modes:
         report.add(
-            "recording.every_n_generations",
+            "recording.mode",
+            "invalid_mode",
+            f"Mode must be one of {sorted(valid_modes)}.",
+        )
+    if rec.every_n_steps is not None and rec.every_n_steps < 1:
+        report.add(
+            "recording.every_n_steps",
             "out_of_range",
-            "Recording cadence must be >= 1.",
+            "Recording env-step interval must be >= 1.",
+        )
+    if str(rec.mode) == RecordingMode.INTERVAL.value and rec.every_n_steps is None:
+        report.add(
+            "recording.every_n_steps",
+            "missing",
+            "mode='interval' requires every_n_steps.",
         )
 
 

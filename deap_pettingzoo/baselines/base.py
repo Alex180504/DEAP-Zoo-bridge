@@ -14,7 +14,6 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
-    FrozenSet,
     List,
     Optional,
     Protocol,
@@ -32,6 +31,30 @@ class BudgetMode(Enum):
     WALL_CLOCK = "wall_clock"
 
 
+class RecordingMode(str, Enum):
+    """Champion-rollout recording cadence policy (algorithm-agnostic).
+
+    The cadence is expressed once, in terms every trainer shares — the
+    normalized training progress (:attr:`ProgressEvent.fraction`) and the
+    cumulative env-step count (:attr:`ProgressEvent.env_steps`) — so EA
+    "generations" and RL "iterations" behave identically.
+
+    * ``COUNT`` — record :attr:`RecordingConfig.max_recordings` videos spread
+      evenly across the run (the default).
+    * ``EVERY`` — record on **every** generation/iteration, with no cap.
+    * ``INTERVAL`` — record every :attr:`RecordingConfig.every_n_steps` env steps.
+    * ``FINAL`` — record only the single end-of-run champion rollout.
+
+    A ``str`` enum so it serializes transparently to/from the catalog JSON,
+    experiment spec, and REST payloads.
+    """
+
+    COUNT = "count"
+    EVERY = "every"
+    INTERVAL = "interval"
+    FINAL = "final"
+
+
 @dataclass
 class RecordingConfig:
     """Opt-in frame-recording configuration nested on :class:`TrainingConfig`.
@@ -43,19 +66,14 @@ class RecordingConfig:
 
     Attributes:
         enabled: Master on/off switch. When False all trainers skip recording.
-        every_n_generations: Recording cadence in generations / iterations.
-            ``None`` defers to the trainer's class-level
-            ``_default_recording_every_n`` (1 for EA / CMA-ES / Coevolution,
-            10 for AgileRL family). For AgileRL trainers this is interpreted
-            as "every N learn iterations" (i.e. every
-            ``every_n_generations * learn_step`` env steps); use
-            :attr:`every_n_steps` for explicit env-step cadence.
-        every_n_steps: AgileRL-only. When set, record one champion-rollout
-            episode every ``every_n_steps`` env steps during training (in
-            addition to the always-emitted end-of-training rollout). Takes
-            precedence over :attr:`every_n_generations` for AgileRL. Ignored
-            by EA / CMA-ES / Coevolution trainers, which use generation
-            cadence.
+        mode: Cadence policy (:class:`RecordingMode`), uniform across all
+            algorithm families. ``COUNT`` (default) records
+            :attr:`max_recordings` videos spread evenly over the run; ``EVERY``
+            records every generation/iteration with no cap; ``INTERVAL`` records
+            every :attr:`every_n_steps` env steps; ``FINAL`` records only the
+            end-of-run champion. See :class:`~deap_pettingzoo.baselines.recording.RecordingController`.
+        every_n_steps: Env-step interval used by ``INTERVAL`` mode (applies to
+            every algorithm, since all trainers report cumulative env steps).
         fps: Frames-per-second for the encoded artefact.
         fmt: Container format. ``"mp4"`` (requires ``imageio[ffmpeg]``) or
             ``"gif"`` (base ``imageio``). ``mp4`` falls back to ``gif`` if
@@ -72,27 +90,22 @@ class RecordingConfig:
             ``frames/`` directory.
     """
     enabled: bool = False
-    every_n_generations: Optional[int] = None
+    mode: RecordingMode = RecordingMode.COUNT
     every_n_steps: Optional[int] = None
     fps: int = 20
     fmt: str = "mp4"
     max_frames_per_episode: Optional[int] = None
     max_dim: Optional[int] = None
     episode_prefix: str = ""
-    #: Cap on the number of champion-rollout recordings produced over a whole
-    #: run. When set, it **overrides** :attr:`every_n_generations` cadence for
-    #: generation-based trainers (EA / CMA-ES / PSO): the first recording is
-    #: allocated to the first generation, the last to the final generation, and
-    #: any remaining are spread evenly in between. ``1`` records only the final
-    #: generation. ``None`` (default) falls back to cadence-based recording.
+    #: Number of champion-rollout recordings to produce over a whole run when
+    #: :attr:`mode` is ``COUNT``: the first is allocated to the start of the
+    #: run, the last to the end, and any remaining are spread evenly in
+    #: between. ``1`` records only the final rollout.
     max_recordings: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.every_n_generations is not None and self.every_n_generations <= 0:
-            raise ValueError(
-                "RecordingConfig.every_n_generations must be positive or None, "
-                f"got {self.every_n_generations}"
-            )
+        if not isinstance(self.mode, RecordingMode):
+            self.mode = RecordingMode(str(self.mode))
         if self.every_n_steps is not None and self.every_n_steps <= 0:
             raise ValueError(
                 "RecordingConfig.every_n_steps must be positive or None, "
@@ -124,41 +137,10 @@ class RecordingConfig:
                 "RecordingConfig.max_recordings must be >= 1 or None, "
                 f"got {self.max_recordings}"
             )
-
-    def planned_record_iterations(
-        self, total_iterations: int
-    ) -> Optional[FrozenSet[int]]:
-        """Resolve the explicit set of generations to record, or ``None``.
-
-        Implements the :attr:`max_recordings` allocation for generation-based
-        trainers. Returns ``None`` when :attr:`max_recordings` is unset, in
-        which case the caller falls back to :attr:`every_n_generations`
-        cadence.
-
-        Args:
-            total_iterations: Number of generations ``G``; the trainer records
-                using 1-based generation indices in ``[1, G]`` (matching the
-                value passed to its ``_record_champion_if_due`` hook).
-
-        Returns:
-            A frozenset of 1-based generation indices, or ``None`` for cadence
-            mode. ``max_recordings == 1`` yields only the final generation;
-            ``>= G`` yields every generation; otherwise the first (``1``) and
-            last (``G``) plus evenly-spaced interior generations.
-        """
-        if self.max_recordings is None:
-            return None
-        if total_iterations <= 0:
-            return frozenset()
-        n = int(self.max_recordings)
-        if n <= 1:
-            return frozenset({total_iterations})
-        if n >= total_iterations:
-            return frozenset(range(1, total_iterations + 1))
-        positions = {
-            1 + round(i * (total_iterations - 1) / (n - 1)) for i in range(n)
-        }
-        return frozenset(int(p) for p in positions)
+        if self.mode is RecordingMode.INTERVAL and self.every_n_steps is None:
+            raise ValueError(
+                "RecordingConfig.mode='interval' requires every_n_steps to be set."
+            )
 
 
 @dataclass
@@ -213,6 +195,11 @@ class ProgressEvent:
             for the step-based AgileRL trainers.
         current: Current 1-based generation (or completed env-step count).
         total: Total generations (or budgeted env steps).
+        env_steps: Cumulative env steps consumed so far — the
+            algorithm-agnostic progress axis. Generation trainers fill
+            ``generation * env_steps_per_iteration``; step-based trainers fill
+            their running step count. Consumed by the recording controller and
+            written to the replay sidecar.
         best_fitness: Best fitness / return so far (``None`` if unknown).
         mean_fitness: Population-mean fitness this iteration (``None`` if N/A).
         wall_time_s: Seconds elapsed since training started.
@@ -222,6 +209,7 @@ class ProgressEvent:
     unit: str
     current: int
     total: int
+    env_steps: int = 0
     best_fitness: Optional[float] = None
     mean_fitness: Optional[float] = None
     wall_time_s: float = 0.0
@@ -239,6 +227,7 @@ class ProgressEvent:
             "unit": self.unit,
             "current": int(self.current),
             "total": int(self.total),
+            "env_steps": int(self.env_steps),
             "fraction": self.fraction,
             "best_fitness": (
                 None if self.best_fitness is None else float(self.best_fitness)
@@ -451,26 +440,36 @@ class BaselineTrainer(ABC):
     
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
-    
-    Note:
-        Default recording cadence (in generations / iterations) used when ``TrainingConfig.recording.every_n_generations`` is ``None``.
-        EA / CMA-ES / Coevolution leave this at 1 (record every generation);
-        AgileRL-family trainers override to 10 since they iterate hundreds of times per run.
     """
-    
-    _default_recording_every_n: ClassVar[int] = 1
 
-    def _resolve_recording_every_n(self, config: TrainingConfig) -> int:
-        """Resolve the recording cadence honouring the trainer-aware default.
+    #: Set by :meth:`train` to a
+    #: :class:`~deap_pettingzoo.baselines.recording.RecordingController`.
+    #: ``None`` (default) means no recording wiring; :meth:`_on_progress`
+    #: then only emits progress.
+    _recorder: ClassVar[Any] = None
 
-        User-supplied ``config.recording.every_n_generations`` always wins;
-        ``None`` falls back to the class-level
-        :attr:`_default_recording_every_n`.
+    def _on_progress(
+        self,
+        callback: Optional[ProgressCallback],
+        event: ProgressEvent,
+        champion: Optional[Callable[[], Any]] = None,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Single per-iteration hook: emit progress **and** maybe record.
+
+        Trainers call this wherever they previously emitted a
+        :class:`ProgressEvent`. When a :class:`RecordingController` has been
+        attached to ``self._recorder`` and a ``champion`` provider is given,
+        the controller decides — from the run's :class:`RecordingMode` — whether
+        this ``event`` warrants a champion-rollout recording. ``champion`` is
+        called lazily (only when a recording is actually due) and returns the
+        policy (or per-agent policy map) to roll out, or ``None`` to skip.
         """
-        explicit = config.recording.every_n_generations
-        if explicit is not None:
-            return int(explicit)
-        return int(type(self)._default_recording_every_n)
+        self._emit_progress(callback, event)
+        recorder = getattr(self, "_recorder", None)
+        if recorder is not None and champion is not None:
+            recorder.observe(event, champion, extra=extra)
 
     @staticmethod
     def _emit_progress(

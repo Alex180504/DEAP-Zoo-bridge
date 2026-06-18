@@ -65,7 +65,7 @@ _MOCK_ALGO_MADDPG_JSON = {
     "label": "MADDPG",
     "hyperparameters": [
         _ps("batch_size", "int", 64, minimum=1, step=1),
-        _ps("lr_actor", "float", None, minimum=0.0, nullable=True),
+        _ps("lr_actor", "float", 1e-3, minimum=0.0, step=1e-4),
     ],
     "available": False,
     "required_extras": ["rl-baselines"],

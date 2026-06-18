@@ -73,7 +73,8 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
             "enabled": recording.get("enabled", False),
             "fps": recording.get("fps", 20),
             "fmt": recording.get("fmt", "mp4"),
-            "every_n_generations": recording.get("every_n_generations"),
+            "mode": recording.get("mode", "count"),
+            "every_n_steps": recording.get("every_n_steps"),
             "max_recordings": recording.get("max_recordings"),
             "max_dim": recording.get("max_dim"),
         }

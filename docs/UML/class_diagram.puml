@@ -398,14 +398,36 @@ package "deap_pettingzoo.baselines" {
 
     class RecordingConfig <<dataclass>> {
         + enabled: bool
-        + every_n_generations: Optional[int]
+        + mode: RecordingMode
         + every_n_steps: Optional[int]
+        + max_recordings: Optional[int]
         + fps: int
         + fmt: str
         + max_frames_per_episode: Optional[int]
         + max_dim: Optional[int]
         + episode_prefix: str
     }
+
+    enum RecordingMode {
+        COUNT
+        EVERY
+        INTERVAL
+        FINAL
+    }
+
+    class RecordingController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        --
+        Algorithm-agnostic cadence: decides per
+        RecordingMode whether a ProgressEvent
+        warrants a champion-rollout recording via
+        UnifiedEvaluator (single or per-agent policy_map).
+    }
+    RecordingConfig *-- RecordingMode : mode
+    RecordingController ..> RecordingConfig : reads
+    RecordingController ..> UnifiedEvaluator : drives
 
     class TrainingResult <<dataclass>> {
         + algorithm: str
@@ -523,9 +545,11 @@ package "deap_pettingzoo.baselines" {
 
     class _RecordingReporter <<neat.reporting.BaseReporter>> {
         - _record_fn: Callable
-        - _cadence: int
         + start_generation(generation)
         + post_evaluate(config, population, species, best_genome)
+        --
+        Forwards each generation's champion to
+        RecordingController.observe (which decides per mode).
     }
 
     class HyperNEATTrainer {
