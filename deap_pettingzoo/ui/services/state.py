@@ -34,6 +34,10 @@ class UIState:
     setup_config: Optional[str] = None
     #: Which experiment detail is expanded on the Queue page.
     queue_expanded: str = ""
+    #: Last source in the Setup → Advanced script editor (persisted as text).
+    advanced_script: str = ""
+    #: Which Advanced subwindow is selected ("install" or "script").
+    advanced_view: str = "install"
 
     _backing: Optional[MutableMapping[str, Any]] = None
 
@@ -58,6 +62,8 @@ class UIState:
             pairwise_test=str(stored.get("pairwise_test", "mann_whitney")),
             setup_config=stored.get("setup_config"),
             queue_expanded=str(stored.get("queue_expanded", "")),
+            advanced_script=str(stored.get("advanced_script", "")),
+            advanced_view=str(stored.get("advanced_view", "install")),
         )
         instance._backing = state
         return instance
@@ -83,6 +89,8 @@ class UIState:
             "pairwise_test": self.pairwise_test,
             "setup_config": self.setup_config,
             "queue_expanded": self.queue_expanded,
+            "advanced_script": self.advanced_script,
+            "advanced_view": self.advanced_view,
         }
 
     def update_selected(self, run_ids: Iterable[str]) -> None:

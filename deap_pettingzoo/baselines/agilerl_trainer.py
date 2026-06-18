@@ -303,7 +303,12 @@ class AgileRLTrainer(BaselineTrainer):
         )
 
     def __init__(self, device: str = "cpu", verbose: bool = False) -> None:
-        self.device = device
+        # Fall back to CPU when a CUDA device is requested but unavailable
+        # (e.g. the CPU-only torch build in the service container) so AgileRL
+        # doesn't crash with "Torch not compiled with CUDA enabled".
+        from deap_pettingzoo.utils.device_check import resolve_device
+
+        self.device = resolve_device(device)
         self.verbose = verbose
 
     # BaselineTrainer interface

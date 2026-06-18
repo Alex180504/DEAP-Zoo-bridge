@@ -600,3 +600,200 @@ class TestDispatcherSmoke:
         assert final_status == "completed", (
             f"status was {final_status!r}. error: {final_error}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Advanced surface: gate, install allowlist, custom-script validate / run
+# ---------------------------------------------------------------------------
+
+
+class TestAdvancedGate:
+    def test_health_reports_advanced_enabled_by_default(self, client, monkeypatch):
+        monkeypatch.delenv("DEAP_ENABLE_ADVANCED", raising=False)
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert r.json()["advanced_enabled"] is True
+
+    def test_endpoints_403_when_disabled(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "0")
+        assert client.get("/health").json()["advanced_enabled"] is False
+        install_body = {"manager": "pip", "action": "install", "args": ["x"]}
+        assert client.post("/env/install", json=install_body).status_code == 403
+        assert client.get("/env/install/whatever").status_code == 403
+        assert (
+            client.post(
+                "/experiments/script/validate", json={"script": "x = 1"}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post("/experiments/script", json={"script": "x = 1"}).status_code
+            == 403
+        )
+
+
+class TestInstallAllowlist:
+    def test_build_command_pip_install(self):
+        from deap_pettingzoo.service.install_jobs import build_command
+
+        cmd = build_command("pip", "install", ["marl-aquarium"])
+        assert cmd[1:4] == ["-m", "pip", "install"]
+        assert cmd[-1] == "marl-aquarium"
+
+    def test_build_command_uninstall_is_noninteractive(self):
+        from deap_pettingzoo.service.install_jobs import build_command
+
+        assert "-y" in build_command("pip", "uninstall", ["foo"])
+
+    def test_build_command_rejects_disallowed_operation(self):
+        from deap_pettingzoo.service.install_jobs import (
+            InstallValidationError,
+            build_command,
+        )
+
+        with pytest.raises(InstallValidationError):
+            build_command("pip", "download", ["foo"])
+        with pytest.raises(InstallValidationError):
+            build_command("rm", "rf", ["/"])
+
+    def test_build_command_rejects_metacharacters(self):
+        from deap_pettingzoo.service.install_jobs import (
+            InstallValidationError,
+            build_command,
+        )
+
+        with pytest.raises(InstallValidationError):
+            build_command("pip", "install", ["foo; rm -rf /"])
+
+    def test_install_endpoint_rejects_disallowed(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "1")
+        r = client.post(
+            "/env/install",
+            json={"manager": "pip", "action": "download", "args": ["foo"]},
+        )
+        assert r.status_code == 400
+
+    def test_install_status_unknown_job(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "1")
+        assert client.get("/env/install/nope").status_code == 404
+
+    @pytest.mark.anyio
+    async def test_install_job_runs_and_reports(self, tmp_path, monkeypatch):
+        from deap_pettingzoo.service import install_jobs
+
+        monkeypatch.setenv("DEAP_RESULTS_ROOT", str(tmp_path))
+        # Avoid touching the network: swap the command for a trivial print.
+        monkeypatch.setattr(
+            install_jobs,
+            "build_command",
+            lambda m, a, args: [sys.executable, "-c", "print('hello-install')"],
+        )
+        job_id = await install_jobs.start_install("pip", "install", ["x"])
+        for _ in range(100):
+            status = install_jobs.get_status(job_id, lines=100)
+            if status["status"] != "running":
+                break
+            await asyncio.sleep(0.05)
+        status = install_jobs.get_status(job_id, lines=100)
+        assert status["status"] == "completed"
+        assert status["returncode"] == 0
+        assert "hello-install" in status["text"]
+
+
+class TestScriptValidate:
+    def test_syntax_error_blocks(self):
+        from deap_pettingzoo.service.script_validate import validate_script_source
+
+        report = validate_script_source("def (:")
+        assert not report["ok"]
+        assert report["issues"][0]["code"] == "syntax_error"
+
+    def test_ok_with_main_guard(self):
+        from deap_pettingzoo.service.script_validate import validate_script_source
+
+        report = validate_script_source(
+            "def main():\n    pass\n\nif __name__ == '__main__':\n    main()\n"
+        )
+        assert report["ok"]
+        assert report["issues"] == []
+
+    def test_warns_when_no_entrypoint(self):
+        from deap_pettingzoo.service.script_validate import validate_script_source
+
+        report = validate_script_source("x = 1\n")
+        assert report["ok"]
+        assert any(i["code"] == "no_entrypoint" for i in report["issues"])
+
+    def test_warns_on_examples_import(self):
+        from deap_pettingzoo.service.script_validate import validate_script_source
+
+        report = validate_script_source(
+            "from examples.foo import bar\n"
+            "if __name__ == '__main__':\n    bar()\n"
+        )
+        assert any(i["code"] == "examples_import" for i in report["issues"])
+
+    def test_validate_endpoint(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "1")
+        r = client.post("/experiments/script/validate", json={"script": "def (:"})
+        assert r.status_code == 200
+        assert not r.json()["ok"]
+
+
+class TestScriptSubmitAndRun:
+    def test_submit_script_enqueues(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "1")
+        r = client.post(
+            "/experiments/script",
+            json={"script": "if __name__ == '__main__':\n    print('hi')\n", "label": "t"},
+        )
+        assert r.status_code == 201
+        assert r.json()["status"] == "queued"
+        # It shows up on the queue as a "(custom script)" environment.
+        lst = client.get("/experiments").json()
+        assert any(e["spec"]["environment"] == "(custom script)" for e in lst)
+
+    def test_submit_script_rejects_syntax_error(self, client, monkeypatch):
+        monkeypatch.setenv("DEAP_ENABLE_ADVANCED", "1")
+        r = client.post("/experiments/script", json={"script": "def (:"})
+        assert r.status_code == 422
+        assert not r.json()["ok"]
+
+    @pytest.mark.anyio
+    async def test_dispatcher_runs_script_and_links_results(
+        self, tmp_db, tmp_experiment_dir
+    ):
+        from deap_pettingzoo.service.dispatcher import Dispatcher
+
+        script = (
+            "import os, json\n"
+            "os.makedirs('results/run1', exist_ok=True)\n"
+            "with open('results/run1/manifest.json', 'w') as f:\n"
+            "    json.dump({'run_id': 'run1'}, f)\n"
+            "print('script-done')\n"
+        )
+        spec_json = json.dumps(
+            {
+                "kind": "script",
+                "environment": "(custom script)",
+                "label": "t",
+                "script": script,
+                "entry": "script",
+            }
+        )
+        exp_id = await db.insert_experiment(spec_json, label="t", path=tmp_db)
+        disp = Dispatcher(db_path=tmp_db, experiments_dir=tmp_experiment_dir)
+        await disp._run_one(exp_id, spec_json)
+
+        record = await db.get_experiment(exp_id, path=tmp_db)
+        assert record["status"] == "completed"
+        assert record["run_dirs"], "script run dirs should be discovered"
+
+        result = json.loads(
+            (tmp_experiment_dir / exp_id / "_result.json").read_text(encoding="utf-8")
+        )
+        assert result["status"] == "completed"
+        stdout = (tmp_experiment_dir / exp_id / "_stdout.log").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        assert "script-done" in stdout

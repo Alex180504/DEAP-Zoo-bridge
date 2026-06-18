@@ -19,6 +19,7 @@ import streamlit as st
 from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.api_client import (
     ApiClient,
+    ApiClientError,
     ApiUnavailable,
     ApiValidationError,
     get_client,
@@ -61,6 +62,12 @@ except (ApiUnavailable, Exception):
 env_list = {e["name"]: e for e in catalog.get("environments", [])}
 algo_list = {a["name"]: a for a in catalog.get("algorithms", [])}
 all_algo_names = list(algo_list.keys())
+
+# Whether the backend exposes the advanced (install + custom-script) surface.
+try:
+    advanced_enabled = bool(client.get_health().get("advanced_enabled", False))
+except Exception:
+    advanced_enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -272,22 +279,228 @@ if _loaded_spec:
 
 
 # ===========================================================================
+# Advanced section (dependency install + custom experiment script)
+# ===========================================================================
+
+_GITHUB_HINT = (
+    "Looks like a bare GitHub URL. pip can't install that directly — use the "
+    "`git+https://…` form, e.g. `git+https://github.com/Alex180504/marl-aquarium.git` "
+    "(or a `.../archive/refs/heads/main.zip` link)."
+)
+
+
+def _looks_like_bare_github(args: List[str]) -> bool:
+    """True if an arg is a plain github.com URL pip can't install as-is."""
+    archive_suffixes = (".zip", ".tar.gz", ".tgz", ".whl")
+    for a in args:
+        low = a.lower()
+        if "github.com/" in low and not low.startswith("git+") \
+                and not low.endswith(archive_suffixes):
+            return True
+    return False
+
+
+@st.fragment(run_every=2)
+def _install_output_fragment(client: ApiClient, job_id: str) -> None:
+    """Poll an install job and render its (scrollable, bounded) log."""
+    try:
+        info = client.get_install(job_id, lines=400)
+    except Exception as exc:  # noqa: BLE001 — best-effort poll
+        st.caption(f"Unable to fetch install output: {exc}")
+        return
+    status = info.get("status", "running")
+    badge = {
+        "running": "🔄 Running…",
+        "completed": "✅ Completed",
+        "failed": "❌ Failed",
+    }.get(status, status)
+    st.markdown(f"**`{info.get('command', '')}`** — {badge}")
+    # Fixed-height scrollable box so a long pip build log can't blow up the page.
+    with st.container(height=320):
+        st.code(info.get("text") or "(no output yet)", language="text")
+
+
+def _render_install_panel(client: ApiClient) -> None:
+    st.subheader("Install dependencies")
+    st.caption(
+        "Install a custom environment package into the backend. Allowed: "
+        "`pip install`, `pip uninstall`, `git clone`. For a GitHub repo use "
+        "`pip install` with a `git+https://…` URL. **Note:** in a containerised "
+        "deployment these installs are lost when the container is rebuilt — add "
+        "the package to `Dockerfile.server` for a permanent environment."
+    )
+    op = st.selectbox(
+        "Operation",
+        options=["pip install", "pip uninstall", "git clone"],
+        index=0,
+    )
+    spec_text = st.text_input(
+        "Package / spec / URL",
+        placeholder="marl-aquarium   ·   git+https://github.com/Alex180504/marl-aquarium.git",
+    )
+    if st.button("Run", type="primary"):
+        manager, action = op.split(" ", 1)
+        args = spec_text.split()
+        if not args:
+            st.error("Enter a package spec or URL.")
+        elif manager == "pip" and _looks_like_bare_github(args):
+            st.warning(_GITHUB_HINT)
+        else:
+            try:
+                res = client.start_install(manager, action, args)
+                st.session_state["_install_job_id"] = res.get("job_id")
+            except ApiUnavailable:
+                st.error("Backend unreachable.")
+            except ApiClientError as exc:
+                st.error(str(exc))
+
+    job_id = st.session_state.get("_install_job_id")
+    if job_id:
+        _install_output_fragment(client, job_id)
+
+
+def _render_script_editor(client: ApiClient, state: UIState) -> None:
+    st.subheader("Custom experiment script")
+    st.caption(
+        "Paste a full experiment script (e.g. an `examples/pursuit_evasion` "
+        "module). It is queued and run as `python user_script.py`; its relative "
+        "`results/…` outputs are linked to the experiment and appear under "
+        "Browse. Validation is **static only** — it checks syntax/structure, not "
+        "that the script trains correctly."
+    )
+    label = st.text_input("Label (optional)", value="")
+
+    # st.text_area is the reliable default (always returns its current value).
+    # The rich editor is opt-in: streamlit-code-editor only emits its text on
+    # editor events, so a naive read can come back empty ("Script is empty").
+    use_rich = st.checkbox(
+        "Rich code editor",
+        value=False,
+        help="Syntax-highlighted editor (needs streamlit-code-editor). The plain "
+             "text area is used otherwise and is fully reliable.",
+    )
+    src = state.advanced_script
+    if use_rich:
+        try:
+            from code_editor import code_editor  # type: ignore
+
+            _ed = code_editor(
+                state.advanced_script,
+                lang="python",
+                height=[18, 30],
+                key="_adv_code_editor",
+                # Emit text on blur + debounced typing so a button click (which
+                # blurs the editor) captures the latest content.
+                response_mode=["debounce", "blur"],
+            )
+            returned = (_ed or {}).get("text", "")
+            # Fall back to the persisted text when the editor hasn't emitted yet.
+            src = returned if returned.strip() else state.advanced_script
+            st.caption("Tip: click outside the editor before Validate/Submit.")
+        except Exception as exc:  # noqa: BLE001 — fall back to a plain area
+            st.caption(f"Rich editor unavailable ({exc}); using plain text area.")
+            src = st.text_area(
+                "Python script", value=state.advanced_script, height=400,
+                label_visibility="collapsed",
+            )
+    else:
+        src = st.text_area(
+            "Python script", value=state.advanced_script, height=400,
+            label_visibility="collapsed",
+        )
+    state.advanced_script = src
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Validate script", use_container_width=True, key="_adv_validate"):
+            try:
+                render_validation_report(client.validate_script(src))
+            except ApiValidationError as exc:
+                render_validation_report(exc.report)
+            except ApiUnavailable:
+                st.error("Backend unreachable.")
+    with c2:
+        if st.button(
+            "Submit script to queue",
+            use_container_width=True,
+            type="primary",
+            key="_adv_submit",
+        ):
+            try:
+                result = client.submit_script(src, label=label)
+                st.success(
+                    f"Script experiment **{result['id']}** submitted! "
+                    f"Position in queue: {result['position']}. "
+                    f"Go to the **Queue** page to watch progress."
+                )
+            except ApiValidationError as exc:
+                render_validation_report(exc.report)
+                st.error("Fix the issues above before submitting.")
+            except ApiUnavailable:
+                st.error("Backend unreachable.")
+
+
+def _render_advanced_section(client: ApiClient, state: UIState) -> None:
+    """Render the install panel / script editor (one at a time)."""
+    st.caption(
+        "⚠️ These tools run arbitrary commands / code in the backend "
+        "environment (trusted-input model — see docs/known_issues.md)."
+    )
+    view = st.radio(
+        "Tool",
+        options=["install", "script"],
+        format_func=lambda v: (
+            "📦 Install dependencies" if v == "install" else "🐍 Script editor"
+        ),
+        index=0 if state.advanced_view != "script" else 1,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    state.advanced_view = view
+    if view == "install":
+        _render_install_panel(client)
+    else:
+        _render_script_editor(client, state)
+
+
+# ===========================================================================
 # Tab 1 — Environment
 # ===========================================================================
 
-tab_env, tab_algos, tab_budget, tab_fitness, tab_rec, tab_coev, tab_par, tab_raw = (
-    st.tabs(
-        [
-            "1. Environment",
-            "2. Algorithm(s)",
-            "3. Budget",
-            "4. Fitness",
-            "5. Recording",
-            "6. Coevolution",
-            "7. Parallelism",
-            "8. Raw config",
-        ]
+# Top-level mode: the spec form (8 tabs + Validate/Submit) OR the Advanced tools.
+# Rendering Advanced as a mutually-exclusive mode (not a 9th tab) keeps the
+# page-level Validate/Submit buttons from showing alongside the script editor's
+# own buttons (they live outside the tab group and would otherwise duplicate).
+if advanced_enabled:
+    page_mode = st.radio(
+        "Page mode",
+        options=["Configure experiment", "Advanced"],
+        horizontal=True,
+        key="_setup_page_mode",
+        label_visibility="collapsed",
     )
+else:
+    page_mode = "Configure experiment"
+
+if page_mode == "Advanced":
+    _render_advanced_section(client, state)
+    state.persist()
+    st.stop()
+
+(
+    tab_env, tab_algos, tab_budget, tab_fitness, tab_rec, tab_coev, tab_par,
+    tab_raw,
+) = st.tabs(
+    [
+        "1. Environment",
+        "2. Algorithm(s)",
+        "3. Budget",
+        "4. Fitness",
+        "5. Recording",
+        "6. Coevolution",
+        "7. Parallelism",
+        "8. Raw config",
+    ]
 )
 
 with tab_env:

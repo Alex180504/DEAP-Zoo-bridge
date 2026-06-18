@@ -268,3 +268,61 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
     catalog_version: str = "1"
+    advanced_enabled: bool = True
+    """Whether the advanced (install panel + custom-script) surface is enabled.
+    Driven by ``DEAP_ENABLE_ADVANCED``; the UI reads this to show/hide the
+    Setup → Advanced section."""
+
+
+# ---------------------------------------------------------------------------
+# Advanced surface — dependency install + custom-script submission
+# ---------------------------------------------------------------------------
+
+
+class InstallRequest(BaseModel):
+    """Request body for ``POST /env/install``.
+
+    Only a strict allowlist of operations is accepted (validated server-side in
+    :mod:`deap_pettingzoo.service.install_jobs`): ``pip install``,
+    ``pip uninstall``, ``git clone``. Commands are spawned with an explicit
+    argument list (never a shell), and args containing shell metacharacters are
+    rejected.
+    """
+
+    manager: str = "pip"          # one of: pip, git
+    action: str = "install"       # pip -> install or uninstall; git -> clone
+    args: List[str] = Field(default_factory=list)
+
+
+class InstallStartResponse(BaseModel):
+    job_id: str
+    status: str = "running"
+
+
+class InstallStatusResponse(BaseModel):
+    job_id: str
+    status: str                   # running | completed | failed
+    returncode: Optional[int] = None
+    command: str = ""
+    text: str = ""                # log tail
+    next_offset: int = 0
+    eof: bool = False
+
+
+class ScriptSubmitModel(BaseModel):
+    """Request body for ``POST /experiments/script`` and ``.../validate``.
+
+    A full hand-written experiment script (e.g. an ``examples/pursuit_evasion``
+    module) is submitted as text; the dispatcher runs it as ``python
+    user_script.py`` in the experiment working directory. See the dispatcher's
+    ``kind == "script"`` branch.
+    """
+
+    script: str
+    label: str = ""
+    entry: str = "script"         # "script" (run file) — reserved: "module"
+
+    @field_validator("label")
+    @classmethod
+    def _sanitise_label(cls, v):
+        return re.sub(r"[^A-Za-z0-9 _\-,.:]", "_", str(v))[:200]

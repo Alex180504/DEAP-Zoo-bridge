@@ -26,7 +26,7 @@ tests/
 
 # Documentation & project notes (not needed at runtime)
 docs/
-examples/
+#examples/
 code_review/
 project_notes.md
 ui_overhaul_spec.md

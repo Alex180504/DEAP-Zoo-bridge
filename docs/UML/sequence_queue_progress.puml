@@ -32,6 +32,7 @@ loop Poll interval
         API -> API: read _stdout.log from byte offset
         API --> Client: {text, next_offset, eof}
         Client --> QP: render stdout expander
+        note over QP, API: custom "script" jobs emit no _progress.json —\nthe Queue shows stdout only (script prints its own progress)
     end
 
     QP -> Client: GET /experiments?limit=50

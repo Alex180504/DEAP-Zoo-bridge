@@ -22,7 +22,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from deap_pettingzoo.service import db
 
@@ -32,7 +32,11 @@ from deap_pettingzoo.service.models import (
     ExperimentRecord,
     ExperimentSpecModel,
     HealthResponse,
+    InstallRequest,
+    InstallStartResponse,
+    InstallStatusResponse,
     QueueState,
+    ScriptSubmitModel,
     StdoutChunk,
     SubmitResponse,
     ValidationReportModel,
@@ -187,58 +191,7 @@ def _experiment_to_record(
 # ---------------------------------------------------------------------------
 
 
-def _read_tail(
-    log_path: Path,
-    offset: Optional[int],
-    limit: Optional[int],
-    lines: Optional[int],
-) -> Tuple[str, int, bool]:
-    """Read a chunk from a log file, returning ``(text, next_offset, eof)``.
-
-    With ``lines`` set, returns the last N lines via a byte-seek from EOF
-    (dropping a partial first line); otherwise returns up to ``limit`` bytes
-    from ``offset``.  Missing or unreadable files yield ``("", 0, True)``.
-    """
-    if not log_path.exists():
-        return "", 0, True
-
-    text = ""
-    next_offset = offset or 0
-    eof = False
-    try:
-        if lines is not None:
-            # Read at most lines*300 bytes from the end; if that chunk starts
-            # mid-line we drop the partial first line (unless at file start).
-            with open(log_path, "rb") as fh:
-                fh.seek(0, 2)
-                file_size = fh.tell()
-                read_start = max(0, file_size - lines * 300)
-                fh.seek(read_start)
-                raw_bytes = fh.read()
-            all_lines = raw_bytes.decode("utf-8", errors="replace").splitlines()
-            if read_start > 0 and len(all_lines) > 1:
-                all_lines = all_lines[1:]
-            text = "\n".join(all_lines[-lines:])
-            next_offset = file_size
-            eof = True
-        else:
-            with open(log_path, "rb") as fh:
-                start = offset if offset is not None else 0
-                fh.seek(0, 2)  # end
-                file_size = fh.tell()
-                if start >= file_size:
-                    text = ""
-                    next_offset = file_size
-                    eof = True
-                else:
-                    fh.seek(start)
-                    chunk_size = min(limit or 65536, file_size - start)
-                    text = fh.read(chunk_size).decode("utf-8", errors="replace")
-                    next_offset = start + chunk_size
-                    eof = next_offset >= file_size
-    except OSError:
-        return "", 0, True
-    return text, next_offset, eof
+from deap_pettingzoo.service.logtail import read_tail as _read_tail  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +204,11 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/health", response_model=HealthResponse)
     async def health():
         from deap_pettingzoo.catalog.schema import CATALOG_SCHEMA_VERSION
-        return HealthResponse(catalog_version=CATALOG_SCHEMA_VERSION)
+        from deap_pettingzoo.service.advanced import advanced_enabled
+        return HealthResponse(
+            catalog_version=CATALOG_SCHEMA_VERSION,
+            advanced_enabled=advanced_enabled(),
+        )
 
     # -- catalog -----------------------------------------------------------
 
@@ -676,3 +633,76 @@ def _register_routes(app: FastAPI) -> None:
     async def resume_queue():
         await db.set_paused(False, path=_db_path)
         return {"paused": False}
+
+    # -- advanced: dependency install + custom-script submission -----------
+    #
+    # Arbitrary code/command execution by design — gated behind
+    # DEAP_ENABLE_ADVANCED (default on). See docs/known_issues.md.
+
+    def _require_advanced() -> None:
+        from deap_pettingzoo.service.advanced import advanced_enabled
+        if not advanced_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail="Advanced features are disabled (DEAP_ENABLE_ADVANCED).",
+            )
+
+    @app.post("/env/install", response_model=InstallStartResponse)
+    async def env_install(req: InstallRequest):
+        _require_advanced()
+        from deap_pettingzoo.service import install_jobs
+        try:
+            job_id = await install_jobs.start_install(
+                req.manager, req.action, req.args
+            )
+        except install_jobs.InstallValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return InstallStartResponse(job_id=job_id, status="running")
+
+    @app.get("/env/install/{job_id}", response_model=InstallStatusResponse)
+    async def env_install_status(
+        job_id: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        lines: Optional[int] = None,
+    ):
+        _require_advanced()
+        from deap_pettingzoo.service import install_jobs
+        status_dict = install_jobs.get_status(job_id, offset, limit, lines)
+        if status_dict is None:
+            raise HTTPException(status_code=404, detail=f"Unknown job {job_id!r}")
+        return InstallStatusResponse(**status_dict)
+
+    @app.post("/experiments/script/validate", response_model=ValidationReportModel)
+    async def validate_script(req: ScriptSubmitModel):
+        _require_advanced()
+        from deap_pettingzoo.service.script_validate import validate_script_source
+        report = validate_script_source(req.script)
+        return ValidationReportModel(ok=report["ok"], issues=report["issues"])
+
+    @app.post("/experiments/script", status_code=201, response_model=SubmitResponse)
+    async def submit_script(req: ScriptSubmitModel):
+        _require_advanced()
+        from deap_pettingzoo.service.script_validate import validate_script_source
+        report = validate_script_source(req.script)
+        if not report["ok"]:
+            return JSONResponse(status_code=422, content=report)
+
+        # Store the script as a discriminated "script"-kind spec. The dispatcher
+        # branches on the "kind" field and runs the source as a subprocess.
+        # NOTE: we serialise the dict directly (not via ExperimentSpecModel) so
+        # the extra `script`/`kind`/`entry` keys are preserved in spec_json.
+        spec_json = json.dumps(
+            {
+                "kind": "script",
+                "environment": "(custom script)",
+                "label": req.label,
+                "script": req.script,
+                "entry": req.entry,
+            }
+        )
+        exp_id = await db.insert_experiment(
+            spec_json=spec_json, label=req.label, path=_db_path
+        )
+        ahead = await db.count_queued_before(exp_id, path=_db_path)
+        return SubmitResponse(id=exp_id, status="queued", position=max(0, ahead))

@@ -37,6 +37,13 @@ services:
       # also tailable via the GET /logs endpoint.
       - DEAP_LOG_LEVEL=${DEAP_LOG_LEVEL:-warning}
       - DEAP_LOG_FORMAT=${DEAP_LOG_FORMAT:-plain}
+      # Advanced surface (Setup → Advanced): dependency-install panel + custom
+      # script submission. Arbitrary code/command execution by design — keep the
+      # service on localhost. Set DEAP_ENABLE_ADVANCED=0 to disable.
+      # CAVEAT: packages installed via the panel land in this container's
+      # site-packages and are LOST on `docker compose build`/rebuild. Add
+      # permanent deps to Dockerfile.server instead.
+      - DEAP_ENABLE_ADVANCED=${DEAP_ENABLE_ADVANCED:-1}
     restart: unless-stopped
     # Cap the docker json-file log so container stdout can't grow unbounded.
     logging:
