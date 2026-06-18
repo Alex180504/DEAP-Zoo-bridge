@@ -77,33 +77,35 @@ class TestFitnessConfig:
 
 
 # ---------------------------------------------------------------------------
-# RecordingConfig.max_recordings allocation
+# RecordingConfig mode + ProgressEvent.env_steps
 # ---------------------------------------------------------------------------
 
 
-class TestRecordingSchedule:
-    def test_none_means_cadence(self):
-        assert RecordingConfig().planned_record_iterations(10) is None
+class TestRecordingConfigMode:
+    def test_default_mode_is_count(self):
+        from deap_pettingzoo.baselines.base import RecordingMode
 
-    def test_one_records_only_final(self):
-        sched = RecordingConfig(max_recordings=1).planned_record_iterations(10)
-        assert sched == frozenset({10})
+        assert RecordingConfig().mode is RecordingMode.COUNT
 
-    def test_n_ge_total_records_all(self):
-        sched = RecordingConfig(max_recordings=20).planned_record_iterations(5)
-        assert sched == frozenset({1, 2, 3, 4, 5})
+    def test_str_mode_coerces_to_enum(self):
+        from deap_pettingzoo.baselines.base import RecordingMode
 
-    def test_even_spacing_includes_first_and_last(self):
-        sched = RecordingConfig(max_recordings=3).planned_record_iterations(9)
-        assert 1 in sched and 9 in sched
-        assert len(sched) == 3
+        assert RecordingConfig(mode="every").mode is RecordingMode.EVERY
 
-    def test_zero_total(self):
-        assert RecordingConfig(max_recordings=3).planned_record_iterations(0) == frozenset()
+    def test_interval_mode_requires_every_n_steps(self):
+        from deap_pettingzoo.baselines.base import RecordingMode
+
+        with pytest.raises(ValueError):
+            RecordingConfig(enabled=True, mode=RecordingMode.INTERVAL)
 
     def test_invalid_max_recordings_rejected(self):
         with pytest.raises(ValueError):
             RecordingConfig(max_recordings=0)
+
+    def test_progress_event_carries_env_steps(self):
+        ev = ProgressEvent(unit="generation", current=2, total=10, env_steps=500)
+        assert ev.env_steps == 500
+        assert ev.to_dict()["env_steps"] == 500
 
 
 # ---------------------------------------------------------------------------

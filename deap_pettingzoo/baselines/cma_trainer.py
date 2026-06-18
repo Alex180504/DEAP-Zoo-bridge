@@ -32,7 +32,7 @@ from deap_pettingzoo.baselines.ea_trainer import (
     GenomePolicyWrapper,
     _resolve_shared_action_space,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.cma_integration import (
@@ -62,9 +62,6 @@ class CMAESTrainer(BaselineTrainer):
     under identical budget/environment configurations via
     :func:`compare_baselines`.
     """
-
-    # CMA-ES iterates per generation just like EA, so the natural recording cadence is one artefact per generation.
-    _default_recording_every_n: ClassVar[int] = 1
 
     @staticmethod
     def describe_hyperparameters():
@@ -243,54 +240,20 @@ class CMAESTrainer(BaselineTrainer):
 
         fitness_history = []
 
-        # Logger + optional FrameRecorder
+        # Logger + unified champion-rollout recording.
         log = build_logger(config, algorithm="cma-es")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_schedule = recording_cfg.planned_record_iterations(
-            num_generations
+        env_steps_per_iteration = self.population_size * max_steps_per_episode
+        self._recorder = RecordingController(
+            config, log, max_steps=max_steps_per_episode,
+            seed=config.algorithm_params.get("seed"),
         )
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=max_steps_per_episode,
-                    frame_recorder=recorder,
-                )
 
-        def _record_champion_if_due(gen: int) -> None:
-            """One champion-rollout episode per recording cadence (1-indexed)."""
-            if recording_evaluator is None or len(hof) == 0:
-                return
-            if recording_schedule is not None:
-                if gen not in recording_schedule:
-                    return
-            elif gen % recording_cadence != 0:
-                return
-            try:
-                best = hof[0]
-                champ_policy = GenomePolicyWrapper(
-                    best.genome, config.env_name, action_space=action_space
-                )
-                rollout_seed = config.algorithm_params.get("seed")
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed) if rollout_seed is not None else None,
-                    env_config=dict(config.env_config) if config.env_config else None,
-                    iteration=gen,
-                    env_steps=gen * self.population_size * max_steps_per_episode,
-                )
-            except Exception:
-                pass
+        def _cma_champion():
+            if len(hof) == 0:
+                return None
+            return GenomePolicyWrapper(
+                hof[0].genome, config.env_name, action_space=action_space
+            )
 
         # Parallel evaluation setup
         requested = config.algorithm_params.get("num_workers", self.num_workers)
@@ -346,31 +309,34 @@ class CMAESTrainer(BaselineTrainer):
                 record = stats.compile(population)
                 fitness_history.append(
                     {
-                        "generation": gen,
+                        "generation": gen + 1,
                         "mean": record["avg"],
                         "std": record["std"],
                         "min": record["min"],
                         "max": record["max"],
                     }
                 )
-                # gen is 0-indexed in this loop - fire callback with 1-indexed.
-                _record_champion_if_due(gen + 1)
-                if progress_callback is not None:
-                    self._emit_progress(
-                        progress_callback,
-                        ProgressEvent(
-                            unit="generation",
-                            current=gen + 1,
-                            total=num_generations,
-                            best_fitness=record["max"],
-                            mean_fitness=record["avg"],
-                            wall_time_s=time.time() - start_time,
-                        ),
-                    )
+                # gen is 0-indexed in this loop - report 1-indexed.
+                self._on_progress(
+                    progress_callback,
+                    ProgressEvent(
+                        unit="generation",
+                        current=gen + 1,
+                        total=num_generations,
+                        env_steps=(gen + 1) * env_steps_per_iteration,
+                        best_fitness=record["max"],
+                        mean_fitness=record["avg"],
+                        wall_time_s=time.time() - start_time,
+                    ),
+                    champion=_cma_champion,
+                )
 
         env.close()
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.finalize(
+            _cma_champion, iteration=num_generations,
+            env_steps=num_generations * env_steps_per_iteration,
+        )
+        self._recorder.close()
         training_time = time.time() - start_time
 
         best_individual = hof[0]

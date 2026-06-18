@@ -216,8 +216,6 @@ class AgileRLTrainer(BaselineTrainer):
     ALGORITHM_IMPORT: Tuple[str, str] = ("agilerl", "")
     ON_POLICY: bool = False
 
-    _default_recording_every_n: ClassVar[int] = 10
-
     # Default hyperparameters; subclasses may override.
     DEFAULT_PARAMS: Dict[str, Any] = {
         "batch_size": 64,
@@ -241,8 +239,8 @@ class AgileRLTrainer(BaselineTrainer):
         ``learning_delay``, ``learn_step``) and the on-policy ``rollout_steps``
         are both surfaced; the inactive ones are ignored by the running
         algorithm. Optimiser passthroughs (``lr_actor`` / ``lr_critic`` /
-        ``gamma`` / ``tau``) are nullable — left unset, AgileRL's own defaults
-        apply.
+        ``gamma`` / ``tau``) default to AgileRL's own values
+        (1e-3 / 1e-2 / 0.95 / 0.01).
         """
         from deap_pettingzoo.catalog.schema import (
             ParamSpec,
@@ -276,18 +274,18 @@ class AgileRLTrainer(BaselineTrainer):
             ParamSpec("rollout_steps", I, 256, minimum=1, step=1, target=AP,
                       group="Learning", advanced=True,
                       help="Steps collected per update (on-policy / IPPO)."),
-            ParamSpec("lr_actor", F, None, minimum=0.0, target=AP,
-                      group="Learning", advanced=True, nullable=True,
-                      help="Actor learning rate (unset = AgileRL default)."),
-            ParamSpec("lr_critic", F, None, minimum=0.0, target=AP,
-                      group="Learning", advanced=True, nullable=True,
-                      help="Critic learning rate (unset = AgileRL default)."),
-            ParamSpec("gamma", F, None, minimum=0.0, maximum=1.0, target=AP,
-                      group="Learning", advanced=True, nullable=True,
-                      help="Discount factor (unset = AgileRL default)."),
-            ParamSpec("tau", F, None, minimum=0.0, maximum=1.0, target=AP,
-                      group="Learning", advanced=True, nullable=True,
-                      help="Target-network soft-update rate (off-policy)."),
+            ParamSpec("lr_actor", F, 1e-3, minimum=0.0, step=1e-4, target=AP,
+                      group="Learning", advanced=True,
+                      help="Actor learning rate (AgileRL default: 1e-3)."),
+            ParamSpec("lr_critic", F, 1e-2, minimum=0.0, step=1e-4, target=AP,
+                      group="Learning", advanced=True,
+                      help="Critic learning rate (AgileRL default: 1e-2)."),
+            ParamSpec("gamma", F, 0.95, minimum=0.0, maximum=1.0, step=0.01, target=AP,
+                      group="Learning", advanced=True,
+                      help="Discount factor (AgileRL default: 0.95)."),
+            ParamSpec("tau", F, 0.01, minimum=0.0, maximum=1.0, step=0.001, target=AP,
+                      group="Learning", advanced=True,
+                      help="Target-network soft-update rate (AgileRL default: 0.01)."),
             ParamSpec("device", E, "cpu", target=TR, group="Runtime",
                       choices=("cpu", "cuda"),
                       help="Torch device for training."),
@@ -407,115 +405,48 @@ class AgileRLTrainer(BaselineTrainer):
             build_logger,
             write_summary,
         )
-        from deap_pettingzoo.utils.logging.experiment_logger import NoOpLogger
+        from deap_pettingzoo.baselines.recording import RecordingController
 
-        recording_cfg = config.recording
         with build_logger(config, algorithm=self.ALGORITHM_NAME) as log:
             run_dir_str = (
                 str(log.run_dir) if config.output_dir is not None else None
             )
-            recorder = None
-            record_every_n_steps: Optional[int] = None
-            record_state = {"episode_idx": 0}
 
-            # Frame-recording setup. Recording is best-effort: errors are
-            # caught (and a traceback is printed) so they cannot break
-            # training.
-            if recording_cfg.enabled and not isinstance(log, NoOpLogger):
-                try:
-                    recorder = log.get_frame_recorder(
-                        fps=recording_cfg.fps,
-                        fmt=recording_cfg.fmt,
-                        max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                        max_dim=recording_cfg.max_dim,
-                        episode_prefix=recording_cfg.episode_prefix or "train_",
-                    )
-                except Exception:  # pragma: no cover - best-effort
-                    import traceback as _tb
-                    _tb.print_exc()
-                    recorder = None
-
-            if recorder is not None and recorder.enabled:
-                # Resolve the mid-training cadence. ``every_n_steps`` (env
-                # steps) wins outright; otherwise ``every_n_generations`` is
-                # interpreted as "every N learn iterations" and converted to
-                # env steps via ``learn_step``. ``None`` on both → no
-                # mid-training recording (final rollout still emitted).
-                if recording_cfg.every_n_steps is not None:
-                    record_every_n_steps = int(recording_cfg.every_n_steps)
-                elif recording_cfg.every_n_generations is not None:
-                    learn_step = int(
-                        params.get(
-                            "learn_step", self.DEFAULT_PARAMS.get("learn_step", 1)
-                        )
-                    )
-                    record_every_n_steps = max(
-                        1, int(recording_cfg.every_n_generations) * learn_step
-                    )
-
-            from deap_pettingzoo.baselines.unified_evaluator import (
-                UnifiedEvaluator,
+            # Unified champion-rollout recording. The cadence is decided by
+            # the controller from the run's RecordingMode on the shared
+            # env-step axis (RL has no generations). The champion is the live
+            # ``policy`` wrapper around ``agent`` (weights update in place).
+            # Use the env's natural episode length for the recording rollout,
+            # NOT max_steps_per_episode from algorithm_params — that's a
+            # training knob (episode-reset frequency) that users often set
+            # to small values for off-policy efficiency.
+            _env_cfg = config.env_config or {}
+            _rec_max_steps = int(
+                config.recording.max_frames_per_episode
+                or _env_cfg.get("max_cycles")
+                or _env_cfg.get("max_time_steps")
+                or 500
+            )
+            self._recorder = RecordingController(
+                config, log,
+                max_steps=_rec_max_steps,
+                seed=seed,
             )
 
-            def _record_episode(env_steps: Optional[int] = None) -> None:
-                """Run one champion-rollout episode through ``recorder``.
-
-                Reuses the already-built ``recorder`` (and therefore the
-                same ``run_dir``). The episode index increments per
-                successful call so artefacts are named
-                ``{prefix}episode_NNNN.{mp4,gif}`` with monotonically
-                increasing N.
-
-                ``env_steps`` is the cumulative env-step count at the moment
-                of recording; RL has no generations so it doubles as the
-                ``iteration`` axis written to the recorder's sidecar (it
-                matches the synthesized-metrics ``env_steps`` column).
-                """
-                if recorder is None or not recorder.enabled:
-                    return
-                ep_idx = record_state["episode_idx"]
-                record_state["episode_idx"] = ep_idx + 1
-                try:
-                    rec_eval = UnifiedEvaluator(
-                        max_steps=int(params.get("max_steps_per_episode", 100)),
-                        frame_recorder=recorder,
-                        record_episode_offset=ep_idx,
-                    )
-                    try:
-                        rec_eval.evaluate(
-                            policy=policy,
-                            env_name=config.env_name,
-                            num_episodes=1,
-                            seed=seed + ep_idx,
-                            env_config=dict(config.env_config)
-                            if config.env_config
-                            else None,
-                            iteration=int(env_steps)
-                            if env_steps is not None
-                            else None,
-                            env_steps=int(env_steps)
-                            if env_steps is not None
-                            else None,
-                        )
-                    finally:
-                        rec_eval.close()
-                except Exception:  # pragma: no cover - best-effort
-                    import traceback as _tb
-                    _tb.print_exc()
+            def _champion():
+                return policy
 
             start = time.time()
             if self.ON_POLICY:
                 metrics = self._run_on_policy(
                     env, agent, agent_ids, budget_steps, params, seed,
-                    record_callback=_record_episode if recorder is not None else None,
-                    record_every_n_steps=record_every_n_steps,
+                    champion=_champion,
                     progress_callback=progress_callback,
                 )
             else:
                 metrics = self._run_off_policy(
                     env, agent, agent_ids, budget_steps, params, seed,
-                    record_callback=_record_episode if recorder is not None else None,
-                    record_every_n_steps=record_every_n_steps,
+                    champion=_champion,
                     progress_callback=progress_callback,
                 )
             training_time = time.time() - start
@@ -528,12 +459,12 @@ class AgileRLTrainer(BaselineTrainer):
             except Exception:  # pragma: no cover
                 pass
 
-            # Always emit one end-of-training rollout when recording is
-            # enabled, regardless of mid-training cadence — guarantees at
-            # least one mp4 even on tight budgets where the cadence never
-            # fires.
-            if recorder is not None and recorder.enabled:
-                _record_episode(budget_steps)
+            # Always emit one end-of-training rollout — guarantees at least one
+            # artefact even on tight budgets where no mid-run checkpoint fired.
+            self._recorder.finalize(
+                _champion, iteration=budget_steps, env_steps=budget_steps
+            )
+            self._recorder.close()
 
             ep_rewards = list(metrics.get("episode_rewards", []) or [])
             for idx, r in enumerate(ep_rewards):
@@ -817,8 +748,7 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
         *,
-        record_callback: Optional[Any] = None,
-        record_every_n_steps: Optional[int] = None,
+        champion: Optional[Any] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """Hand-rolled off-policy loop using AgileRL's replay buffer.
@@ -1027,7 +957,11 @@ class AgileRLTrainer(BaselineTrainer):
                     flush=True,
                 )
 
-            if progress_callback is not None and (
+            # Fire the unified progress+recording hook on the emit cadence,
+            # independent of whether a progress_callback is set (recording must
+            # still happen on a headless run). _on_progress no-ops the emit when
+            # the callback is None and lets the controller decide on recording.
+            if (
                 progress_steps // progress_emit_interval
                 > prev_steps // progress_emit_interval
                 or progress_steps >= budget_steps
@@ -1039,32 +973,19 @@ class AgileRLTrainer(BaselineTrainer):
                 _emit_best = (
                     float(max(episode_rewards)) if episode_rewards else None
                 )
-                self._emit_progress(
+                self._on_progress(
                     progress_callback,
                     ProgressEvent(
                         unit="env_step",
                         current=int(progress_steps),
                         total=int(budget_steps),
+                        env_steps=int(progress_steps),
                         best_fitness=_emit_best,
                         mean_fitness=_emit_mean,
                         wall_time_s=time.time() - loop_start,
                     ),
+                    champion=champion,
                 )
-
-            # Mid-training champion-rollout recording. Triggered every
-            # ``record_every_n_steps`` env steps when both a callback and a
-            # cadence are set; the callback is responsible for catching
-            # its own errors (see ``_record_episode`` in ``train()``).
-            if (
-                record_callback is not None
-                and record_every_n_steps
-            ):
-                crossed_record_boundaries = (
-                    progress_steps // record_every_n_steps
-                    - prev_steps // record_every_n_steps
-                )
-                for _ in range(max(0, crossed_record_boundaries)):
-                    record_callback(progress_steps)
 
         if not episode_rewards:
             episode_rewards.append(float(ep_reward.sum()))
@@ -1089,8 +1010,7 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
         *,
-        record_callback: Optional[Any] = None,
-        record_every_n_steps: Optional[int] = None,
+        champion: Optional[Any] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """On-policy rollout loop for IPPO.
@@ -1336,41 +1256,30 @@ class AgileRLTrainer(BaselineTrainer):
                 + loss_str
             )
 
-            if progress_callback is not None:
-                _emit_mean = (
-                    float(np.mean(episode_rewards[-10:]))
-                    if episode_rewards else None
-                )
-                _emit_best = (
-                    float(max(episode_rewards)) if episode_rewards else None
-                )
-                self._emit_progress(
-                    progress_callback,
-                    ProgressEvent(
-                        unit="env_step",
-                        current=int(progress_steps),
-                        total=int(budget_steps),
-                        best_fitness=_emit_best,
-                        mean_fitness=_emit_mean,
-                        wall_time_s=time.time() - on_policy_start,
-                    ),
-                )
-
-            # Mid-training champion-rollout recording. ``steps_done`` is
-            # checked at learn-iteration boundaries (rollout chunks of
-            # ``learn_step``) so for on-policy trainers the cadence is
-            # quantised to the rollout size: a 256-step learn_step with
-            # ``record_every_n_steps=200`` records once per learn iteration
-            # rather than mid-rollout. This keeps the recording episode
-            # off-thread from the on-policy data collection.
-            if (
-                record_callback is not None
-                and record_every_n_steps
-                and progress_steps % record_every_n_steps < learn_step
-                and (progress_steps // record_every_n_steps)
-                > ((max(progress_steps - learn_step, 0)) // record_every_n_steps)
-            ):
-                record_callback(progress_steps)
+            # Fire the unified progress+recording hook on every learn-iteration
+            # boundary, independent of whether a progress_callback is set
+            # (recording must still happen on a headless run). _on_progress
+            # no-ops the emit when the callback is None.
+            _emit_mean = (
+                float(np.mean(episode_rewards[-10:]))
+                if episode_rewards else None
+            )
+            _emit_best = (
+                float(max(episode_rewards)) if episode_rewards else None
+            )
+            self._on_progress(
+                progress_callback,
+                ProgressEvent(
+                    unit="env_step",
+                    current=int(progress_steps),
+                    total=int(budget_steps),
+                    env_steps=int(progress_steps),
+                    best_fitness=_emit_best,
+                    mean_fitness=_emit_mean,
+                    wall_time_s=time.time() - on_policy_start,
+                ),
+                champion=champion,
+            )
 
         # Flush any in-progress sub-env episodes (e.g. budget exhausted
         # mid-episode) so callers see the partial reward rather than

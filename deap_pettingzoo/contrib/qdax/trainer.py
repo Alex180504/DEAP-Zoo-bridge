@@ -909,38 +909,22 @@ def _maybe_record_qdax_champion(
     if champion_policy is None:
         return
 
-    recording_cfg = config.recording
-    if not recording_cfg.enabled:
-        return
+    from deap_pettingzoo.baselines.recording import RecordingController
 
-    from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
-
-    recorder = log.get_frame_recorder(
-        fps=recording_cfg.fps,
-        fmt=recording_cfg.fmt,
-        max_frames_per_episode=recording_cfg.max_frames_per_episode,
-        max_dim=recording_cfg.max_dim,
-        episode_prefix=recording_cfg.episode_prefix or "train_",
-    )
-    if not recorder.enabled:
-        return
-
-    evaluator = UnifiedEvaluator(
+    # QDax's scoring loop is JAX-vectorised and can't be hooked mid-run, so
+    # the controller is driven via finalize() to capture just the final
+    # champion (matched to the last QDax iteration row in the sidecar).
+    controller = RecordingController(
+        config, log,
         max_steps=int(recording_max_steps or 500),
-        frame_recorder=recorder,
+        seed=config.algorithm_params.get("seed"),
     )
-    try:
-        rollout_seed = config.algorithm_params.get("seed")
-        evaluator.evaluate(
-            policy=champion_policy,
-            env_name=config.env_name,
-            num_episodes=1,
-            seed=int(rollout_seed) if rollout_seed is not None else None,
-            env_config=dict(config.env_config) if config.env_config else None,
-            iteration=iteration,
-        )
-    except Exception:
-        pass
+    controller.finalize(
+        lambda: champion_policy,
+        iteration=int(iteration) if iteration is not None else 0,
+        env_steps=0,
+    )
+    controller.close()
 
 
 def _persist_qdax_results(

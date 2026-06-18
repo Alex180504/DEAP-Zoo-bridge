@@ -49,8 +49,6 @@ class EvolveHPOTrainer(AgileRLTrainer):
     https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html
     """
 
-    _default_recording_every_n: ClassVar[int] = 5
-
     def __init__(
         self,
         population_size: int = 6,

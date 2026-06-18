@@ -76,7 +76,8 @@ class RecordingSettingsModel(BaseModel):
     enabled: bool = False
     fps: int = Field(default=20, gt=0)
     fmt: str = "mp4"
-    every_n_generations: Optional[int] = None
+    mode: str = "count"
+    every_n_steps: Optional[int] = Field(default=None, ge=1)
     max_recordings: Optional[int] = Field(default=None, ge=1)
     max_dim: Optional[int] = None
 
@@ -87,13 +88,22 @@ class RecordingSettingsModel(BaseModel):
             raise ValueError("fmt must be 'mp4' or 'gif'")
         return v
 
+    @field_validator("mode")
+    @classmethod
+    def _check_mode(cls, v):
+        valid = {"count", "every", "interval", "final"}
+        if v not in valid:
+            raise ValueError(f"mode must be one of {sorted(valid)}")
+        return v
+
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import RecordingSettings
         return RecordingSettings(
             enabled=self.enabled,
             fps=self.fps,
             fmt=self.fmt,
-            every_n_generations=self.every_n_generations,
+            mode=self.mode,
+            every_n_steps=self.every_n_steps,
             max_recordings=self.max_recordings,
             max_dim=self.max_dim,
         )

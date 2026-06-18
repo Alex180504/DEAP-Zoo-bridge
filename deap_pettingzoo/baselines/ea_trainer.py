@@ -25,7 +25,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingResult,
     PolicyProtocol,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.deap_integration import (
@@ -146,11 +146,6 @@ class EATrainer(BaselineTrainer):
     Wraps the existing DEAP integration to provide a unified
     training interface compatible with BaselineTrainer.
     """
-
-    #: Per-generation cadence is the natural fit for EA — every
-    #: generation produces one champion-rollout artefact when
-    #: ``TrainingConfig.recording.enabled`` is set.
-    _default_recording_every_n: ClassVar[int] = 1
 
     @staticmethod
     def describe_hyperparameters():
@@ -506,80 +501,49 @@ class EATrainer(BaselineTrainer):
         fitness_history = []
 
         log = build_logger(config, algorithm="ea")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_schedule = recording_cfg.planned_record_iterations(
-            num_generations
+        env_steps_per_iteration = self.population_size * max_steps_per_episode
+        self._recorder = RecordingController(
+            config, log, max_steps=max_steps_per_episode,
+            seed=config.algorithm_params.get('seed'),
         )
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
+
+        def _ea_champion():
+            """Lazy champion provider for the recording controller."""
+            items = hof.items if isinstance(hof, tools.ParetoFront) else hof
+            if not items:
+                return None
+            return GenomePolicyWrapper(
+                self._mo_champion(hof).genome,
+                config.env_name,
+                action_space=action_space,
             )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=max_steps_per_episode,
-                    frame_recorder=recorder,
-                )
 
-        def _record_champion_if_due(gen: int) -> None:
-            """Record one champion-rollout episode when cadence hits.
-
-            Best-effort: any failure is swallowed so recording can't
-            break a long training run.
-            """
-            if recording_evaluator is None:
-                return
-            if not hof.items if isinstance(hof, tools.ParetoFront) else (not hof):
-                return
-            if recording_schedule is not None:
-                if gen not in recording_schedule:
-                    return
-            elif gen % recording_cadence != 0:
-                return
-            try:
-                best = self._mo_champion(hof)
-                champ_policy = GenomePolicyWrapper(
-                    best.genome, config.env_name, action_space=action_space
-                )
-                rollout_seed = config.algorithm_params.get('seed')
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed) if rollout_seed is not None else None,
-                    env_config=dict(config.env_config) if config.env_config else None,
-                    iteration=gen,
-                    env_steps=gen * self.population_size * max_steps_per_episode,
-                )
-            except Exception:
-                pass
+        def _make_event(gen: int) -> Optional[ProgressEvent]:
+            if not fitness_history:
+                return None
+            entry = fitness_history[-1]
+            return ProgressEvent(
+                unit="generation",
+                current=gen,
+                total=num_generations,
+                env_steps=gen * env_steps_per_iteration,
+                best_fitness=entry.get("max"),
+                mean_fitness=entry.get("mean"),
+                wall_time_s=time.time() - start_time,
+            )
 
         def _emit_gen_progress(gen: int) -> None:
-            """Emit a per-generation ProgressEvent from the latest stats row."""
-            if progress_callback is None or not fitness_history:
-                return
-            entry = fitness_history[-1]
-            self._emit_progress(
-                progress_callback,
-                ProgressEvent(
-                    unit="generation",
-                    current=gen,
-                    total=num_generations,
-                    best_fitness=entry.get("max"),
-                    mean_fitness=entry.get("mean"),
-                    wall_time_s=time.time() - start_time,
-                ),
-            )
+            """Emit progress only (no recording) — used at gen 0 and for the
+            DEAP-internal μ±λ strategies whose hof is only final."""
+            event = _make_event(gen)
+            if event is not None:
+                self._emit_progress(progress_callback, event)
 
         def _on_generation(gen: int) -> None:
-            """Combined per-generation hook: champion recording + progress."""
-            _record_champion_if_due(gen)
-            _emit_gen_progress(gen)
+            """Per-generation hook: emit progress **and** maybe record."""
+            event = _make_event(gen)
+            if event is not None:
+                self._on_progress(progress_callback, event, champion=_ea_champion)
 
         requested = config.algorithm_params.get("num_workers", self.num_workers)
         effective_workers = resolve_num_workers(requested)
@@ -657,6 +621,12 @@ class EATrainer(BaselineTrainer):
                     eval_population=_eval_population,
                     on_generation=_on_generation,
                 )
+                # Safety net: guarantee a final capture even if the last
+                # per-gen hook didn't land exactly on fraction 1.0 (dedups).
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
                     population, toolbox,
@@ -677,8 +647,12 @@ class EATrainer(BaselineTrainer):
                         'max': record['max'],
                     })
                     _emit_gen_progress(gen)
-                # eaMu*Lambda doesn't expose a per-gen hook; record once against the final hall-of-fame champion.
-                _record_champion_if_due(num_generations)
+                # eaMu*Lambda doesn't expose a per-gen hook and hof holds only
+                # the final champion; record once at the end.
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
                     population, toolbox,
@@ -699,14 +673,16 @@ class EATrainer(BaselineTrainer):
                         'max': record['max'],
                     })
                     _emit_gen_progress(gen)
-                _record_champion_if_due(num_generations)
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
 
         # Clean up
         env.close()
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.close()
         
         training_time = time.time() - start_time
         
