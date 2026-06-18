@@ -176,6 +176,7 @@ class HyperNEATTrainer(NEATTrainer):
                     num_episodes=1,
                     seed=int(rollout_seed),
                     env_config=dict(config.env_config) if config.env_config else None,
+                    iteration=gen,
                 )
 
             pop.add_reporter(
@@ -408,6 +409,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                     num_episodes=1,
                     seed=int(rollout_seed),
                     env_config=dict(config.env_config) if config.env_config else None,
+                    iteration=gen,
                 )
 
             pop.add_reporter(

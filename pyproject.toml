@@ -114,6 +114,11 @@ ui = [
 ]
 service = [
     "deap-pettingzoo[rl-baselines]",
+    # The service process runs the trainers, so it owns artefact logging:
+    # imageio/imageio-ffmpeg (frame recording) + pyarrow (trajectories).
+    # Without this, FrameRecorder.end_episode() silently no-ops and no
+    # `frames/` videos are produced.
+    "deap-pettingzoo[logging]",
     "fastapi>=0.100",
     "python-multipart>=0.0.5",
     "uvicorn[standard]>=0.22",

@@ -1029,7 +1029,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             obs_dict = record_env.reset(
                 seed=int(seed) + gen if seed is not None else None
             )
-            recorder.start_episode(gen)
+            recorder.start_episode(gen, iteration=gen)
             try:
                 frame = record_env.render()
                 if frame is not None:

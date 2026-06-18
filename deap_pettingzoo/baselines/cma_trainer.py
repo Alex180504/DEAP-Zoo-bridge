@@ -286,6 +286,8 @@ class CMAESTrainer(BaselineTrainer):
                     num_episodes=1,
                     seed=int(rollout_seed) if rollout_seed is not None else None,
                     env_config=dict(config.env_config) if config.env_config else None,
+                    iteration=gen,
+                    env_steps=gen * self.population_size * max_steps_per_episode,
                 )
             except Exception:
                 pass

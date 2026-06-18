@@ -32,12 +32,18 @@ class _StubFrameRecorder:
     def __init__(self) -> None:
         self.enabled = True
         self.episode_calls: List[int] = []
+        self.meta_calls: List[Dict[str, Any]] = []
         self.frames_per_episode: List[int] = []
         self.end_calls: int = 0
         self._current_count: Optional[int] = None
 
-    def start_episode(self, idx: int) -> None:
+    def start_episode(
+        self, idx: int, *, iteration=None, env_steps=None, extra=None
+    ) -> None:
         self.episode_calls.append(int(idx))
+        self.meta_calls.append(
+            {"iteration": iteration, "env_steps": env_steps, "extra": extra}
+        )
         self._current_count = 0
 
     def add_frame(self, frame: Any) -> None:
@@ -194,3 +200,58 @@ def test_real_frame_recorder_writes_artifact(tmp_path: Path):
     assert len(artefacts) == 1
     assert artefacts[0].suffix in {".mp4", ".gif"}
     assert artefacts[0].name.startswith("train_episode_0000")
+
+
+def test_unified_evaluator_passes_iteration_metadata():
+    """evaluate(iteration=..., env_steps=...) reaches the recorder."""
+    recorder = _StubFrameRecorder()
+    evaluator = UnifiedEvaluator(max_steps=10, frame_recorder=recorder)
+    env = _StubEnv(ep_len=2)
+    _inject_stub_env(evaluator, env)
+
+    evaluator.evaluate(
+        _StubPolicy(),
+        env_name="stub_env",
+        num_episodes=1,
+        seed=0,
+        iteration=7,
+        env_steps=12345,
+        record_extra={"side": "predators"},
+    )
+    assert recorder.meta_calls == [
+        {"iteration": 7, "env_steps": 12345, "extra": {"side": "predators"}}
+    ]
+
+
+def test_frame_recorder_writes_recordings_sidecar(tmp_path: Path):
+    """A real FrameRecorder records iteration metadata in recordings.json."""
+    import json
+
+    pytest.importorskip("imageio")
+    recorder = FrameRecorder(run_dir=tmp_path, episode_prefix="train_")
+    evaluator = UnifiedEvaluator(max_steps=10, frame_recorder=recorder)
+    env = _StubEnv(ep_len=3)
+    _inject_stub_env(evaluator, env)
+
+    # Two generations recorded with distinct iteration metadata.
+    evaluator.evaluate(
+        _StubPolicy(), env_name="stub_env", num_episodes=1, seed=0,
+        iteration=2, env_steps=200,
+    )
+    evaluator.evaluate(
+        _StubPolicy(), env_name="stub_env", num_episodes=1, seed=1,
+        iteration=5, env_steps=500,
+    )
+
+    sidecar = tmp_path / "frames" / "recordings.json"
+    assert sidecar.is_file()
+    entries = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert len(entries) == 2
+    by_iter = {e["iteration"]: e for e in entries}
+    assert by_iter[2]["env_steps"] == 200
+    assert by_iter[2]["file"].startswith("train_episode_0000")
+    assert by_iter[5]["env_steps"] == 500
+    assert by_iter[5]["file"].startswith("train_episode_0001")
+    # Filenames recorded in the sidecar exist on disk.
+    for e in entries:
+        assert (tmp_path / "frames" / e["file"]).is_file()

@@ -145,19 +145,13 @@ _RECORDING_PARAMS: List[Dict[str, Any]] = [
         "advanced": True,
         "label": "Format",
     },
-    {
-        "name": "max_dim",
-        "type": "int",
-        "default": None,
-        "nullable": True,
-        "minimum": 1,
-        "step": 100,
-        "group": "Advanced",
-        "advanced": True,
-        "label": "Max dimension",
-        "help": "Downscale longer side of rendered frames to this many pixels.",
-    },
+    # NOTE: ``max_dim`` is rendered with custom widgets in the Recording tab
+    # (a "full resolution" toggle + a 512-default cap) because the generic
+    # nullable-int widget cannot emit ``None`` and would force a tiny cap.
 ]
+
+#: Default downscale cap (longest frame side, px) for UI recordings.
+_DEFAULT_MAX_DIM = 512
 
 #: Parallelism param specs.
 _PARALLELISM_PARAMS: List[Dict[str, Any]] = [
@@ -614,6 +608,45 @@ with tab_rec:
     rec_ctx = WidgetContext(values=dict(_prev_recording))
     _render_param_group(_RECORDING_PARAMS, rec_ctx)
     recording_values, _ = coerce_touched(_RECORDING_PARAMS, rec_ctx.values)
+
+    # --- Resolution control (custom: the generic int widget can't emit None) ---
+    # ``max_dim`` downscales the longer side of each rendered frame. Default to
+    # 512 px; offer a full-resolution toggle (max_dim=None) for pixel-exact
+    # replays, gated behind a memory/perf warning since frames are buffered
+    # uncompressed in RAM.
+    _prev_max_dim = _prev_recording.get("max_dim", _DEFAULT_MAX_DIM)
+    _prev_full_res = "max_dim" in _prev_recording and _prev_max_dim is None
+    full_res = st.checkbox(
+        "Record without compression (full resolution)",
+        value=bool(_prev_full_res),
+        help=(
+            "Skip frame downscaling and record at the environment's native "
+            "render resolution."
+        ),
+    )
+    if full_res:
+        st.warning(
+            "Full-resolution recording buffers every frame uncompressed in "
+            "RAM before encoding. In large / high-resolution environments "
+            "(e.g. aquarium at 6000×6000) this can consume a lot of memory "
+            "and slow training noticeably. Prefer a max-dimension cap unless "
+            "you need pixel-exact replays."
+        )
+        recording_values["max_dim"] = None
+    else:
+        _md_default = (
+            int(_prev_max_dim)
+            if isinstance(_prev_max_dim, int) and _prev_max_dim > 0
+            else _DEFAULT_MAX_DIM
+        )
+        max_dim = st.number_input(
+            "Max dimension (px)",
+            value=_md_default,
+            min_value=64,
+            step=64,
+            help="Downscale the longer side of rendered frames to this many pixels.",
+        )
+        recording_values["max_dim"] = int(max_dim)
 
 # ===========================================================================
 # Tab 6 — Coevolution

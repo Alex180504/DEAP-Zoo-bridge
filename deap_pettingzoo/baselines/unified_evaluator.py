@@ -5,7 +5,7 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Mapping, Tuple
 import json
 import logging
 import numpy as np
@@ -62,9 +62,12 @@ class UnifiedEvaluator(BaselineEvaluator):
         seed: Optional[int] = None,
         render: bool = False,
         env_config: Optional[Dict[str, Any]] = None,
+        iteration: Optional[int] = None,
+        env_steps: Optional[int] = None,
+        record_extra: Optional[Mapping[str, Any]] = None,
     ) -> EvalResult:
         """Evaluate a policy on the given environment.
-        
+
         Args:
             policy: Trained policy satisfying PolicyProtocol.
             env_name: PettingZoo environment name.
@@ -74,7 +77,14 @@ class UnifiedEvaluator(BaselineEvaluator):
             env_config: Optional environment configuration dict. Must match
                 the config used during training so observation/action shapes
                 are consistent.
-            
+            iteration: Optional training iteration/generation that produced
+                ``policy``. When recording, it is written to the recorder's
+                ``frames/recordings.json`` sidecar so the UI can associate
+                the artefact with its metrics row.
+            env_steps: Optional cumulative env-step count at this iteration
+                (the meaningful axis for RL runs). Also written to the sidecar.
+            record_extra: Optional extra metadata dict for the sidecar entry.
+
         Returns:
             EvalResult with reward statistics.
         
@@ -118,7 +128,12 @@ class UnifiedEvaluator(BaselineEvaluator):
                 ep_seed = None
 
             if recording:
-                recorder.start_episode(self.record_episode_offset + ep_idx)
+                recorder.start_episode(
+                    self.record_episode_offset + ep_idx,
+                    iteration=iteration,
+                    env_steps=env_steps,
+                    extra=record_extra,
+                )
 
             # Run episode
             total_reward, length = self._run_episode(
