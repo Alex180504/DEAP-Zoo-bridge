@@ -897,8 +897,15 @@ def _maybe_record_qdax_champion(
     *,
     champion_policy,
     recording_max_steps: Optional[int],
+    iteration: Optional[int] = None,
 ) -> None:
-    """Record one final champion rollout when recording is enabled."""
+    """Record one final champion rollout when recording is enabled.
+
+    ``iteration`` is the QDax iteration the recorded champion corresponds
+    to (typically the final iteration). It is written to the recorder's
+    ``frames/recordings.json`` sidecar so the UI can associate the artefact
+    with its metrics row (carrying ``qd_score``, ``coverage``, etc.).
+    """
     if champion_policy is None:
         return
 
@@ -930,6 +937,7 @@ def _maybe_record_qdax_champion(
             num_episodes=1,
             seed=int(rollout_seed) if rollout_seed is not None else None,
             env_config=dict(config.env_config) if config.env_config else None,
+            iteration=iteration,
         )
     except Exception:
         pass
@@ -985,11 +993,16 @@ def _persist_qdax_results(
                     continue
             log.row("metrics", row)
 
+        try:
+            n_iters = len(history)
+        except TypeError:
+            n_iters = 0
         _maybe_record_qdax_champion(
             log,
             config,
             champion_policy=champion_policy,
             recording_max_steps=recording_max_steps,
+            iteration=(n_iters - 1) if n_iters else None,
         )
 
         full_summary = {"algorithm": algorithm, **summary}

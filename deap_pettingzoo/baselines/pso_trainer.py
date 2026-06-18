@@ -303,6 +303,8 @@ class PSOTrainer(BaselineTrainer):
                                 seed=int(rs) if rs is not None else None,
                                 env_config=dict(config.env_config)
                                 if config.env_config else None,
+                                iteration=gen,
+                                env_steps=gen * self.population_size * max_steps,
                             )
                         except Exception:
                             pass

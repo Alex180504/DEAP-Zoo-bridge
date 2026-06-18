@@ -457,7 +457,7 @@ class AgileRLTrainer(BaselineTrainer):
                 UnifiedEvaluator,
             )
 
-            def _record_episode() -> None:
+            def _record_episode(env_steps: Optional[int] = None) -> None:
                 """Run one champion-rollout episode through ``recorder``.
 
                 Reuses the already-built ``recorder`` (and therefore the
@@ -465,6 +465,11 @@ class AgileRLTrainer(BaselineTrainer):
                 successful call so artefacts are named
                 ``{prefix}episode_NNNN.{mp4,gif}`` with monotonically
                 increasing N.
+
+                ``env_steps`` is the cumulative env-step count at the moment
+                of recording; RL has no generations so it doubles as the
+                ``iteration`` axis written to the recorder's sidecar (it
+                matches the synthesized-metrics ``env_steps`` column).
                 """
                 if recorder is None or not recorder.enabled:
                     return
@@ -484,6 +489,12 @@ class AgileRLTrainer(BaselineTrainer):
                             seed=seed + ep_idx,
                             env_config=dict(config.env_config)
                             if config.env_config
+                            else None,
+                            iteration=int(env_steps)
+                            if env_steps is not None
+                            else None,
+                            env_steps=int(env_steps)
+                            if env_steps is not None
                             else None,
                         )
                     finally:
@@ -522,7 +533,7 @@ class AgileRLTrainer(BaselineTrainer):
             # least one mp4 even on tight budgets where the cadence never
             # fires.
             if recorder is not None and recorder.enabled:
-                _record_episode()
+                _record_episode(budget_steps)
 
             ep_rewards = list(metrics.get("episode_rewards", []) or [])
             for idx, r in enumerate(ep_rewards):
@@ -1053,7 +1064,7 @@ class AgileRLTrainer(BaselineTrainer):
                     - prev_steps // record_every_n_steps
                 )
                 for _ in range(max(0, crossed_record_boundaries)):
-                    record_callback()
+                    record_callback(progress_steps)
 
         if not episode_rewards:
             episode_rewards.append(float(ep_reward.sum()))
@@ -1359,7 +1370,7 @@ class AgileRLTrainer(BaselineTrainer):
                 and (progress_steps // record_every_n_steps)
                 > ((max(progress_steps - learn_step, 0)) // record_every_n_steps)
             ):
-                record_callback()
+                record_callback(progress_steps)
 
         # Flush any in-progress sub-env episodes (e.g. budget exhausted
         # mid-episode) so callers see the partial reward rather than
