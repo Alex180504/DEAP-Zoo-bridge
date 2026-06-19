@@ -52,10 +52,21 @@ def featurize_aquarium_observation(
     observation: np.ndarray,
     predator_observe_count: int,
     prey_observe_count: int,
+    wall_features: int = 0,
 ) -> np.ndarray:
-    """Project a raw aquarium observation onto local relative features."""
+    """Project a raw aquarium observation onto local relative features.
+
+    Args:
+        observation: Raw aquarium observation vector.
+        predator_observe_count: ``predator_observe_count`` env kwarg.
+        prey_observe_count: ``prey_observe_count`` env kwarg.
+        wall_features: 4 when ``observable_walls=True``, 0 otherwise.
+    """
     obs = np.asarray(observation, dtype=np.float32).ravel()
-    layout = aquarium_obs_layout(predator_observe_count, prey_observe_count)
+    layout = aquarium_obs_layout(
+        predator_observe_count, prey_observe_count,
+        wall_features=wall_features,
+    )
 
     self_block = obs[layout["self"]]
     heading_x, heading_y = _scaled_direction_to_unit_vector(self_block[3])
@@ -133,6 +144,11 @@ class AquariumObservationFeatureWrapper:
         self._agent_index = {a: i for i, a in enumerate(self.possible_agents)}
         self.id_size = len(self.possible_agents) if self.append_agent_id else 0
 
+        # Detect wall features from the raw env so featurization slices
+        # the observation correctly in both torus and rectangle modes.
+        _raw = getattr(inner, "_raw_env", None)
+        self._wall_features = 4 if getattr(_raw, "observable_walls", False) else 0
+
         feat_size = aquarium_feature_size(
             self.predator_observe_count,
             self.prey_observe_count,
@@ -176,6 +192,7 @@ class AquariumObservationFeatureWrapper:
             observation,
             self.predator_observe_count,
             self.prey_observe_count,
+            wall_features=self._wall_features,
         )
         if self.id_size == 0:
             return feats

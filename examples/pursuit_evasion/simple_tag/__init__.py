@@ -1,4 +1,4 @@
-"""Honours-project pursuit-evasion research code.
+"""Honours-project pursuit-evasion research code (MPE simple_tag).
 
 Specialises ``mpe2.simple_tag_v3`` for equal-ability pursuer / evader
 experiments with:
@@ -10,9 +10,11 @@ experiments with:
 * :class:`ObsLayout` — observation-slice metadata consumed by scripted policies.
 * :class:`APFEvaderPolicy` — scripted artificial-potential-field evader.
 
-This module is **not** part of the env-agnostic core of deap-bridge.
-Importing it registers ``pursuit_evasion`` in the env registry so it can
-be used with the generic baseline trainers / evaluators.
+This is *experiment-side* research code, **not** part of the
+env-agnostic ``deap_pettingzoo`` library; it only consumes the library's
+generic env registry. Importing this package registers ``pursuit_evasion``
+in that registry so it can be used with the generic baseline trainers /
+evaluators.
 """
 
 from __future__ import annotations

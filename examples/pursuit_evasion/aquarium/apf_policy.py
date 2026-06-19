@@ -2,7 +2,7 @@
 
 The policy is a deterministic, scripted prey ("fish") controller that
 flees from observed predators ("sharks").  It mirrors the MPE APF
-controller in :mod:`deap_pettingzoo.contrib.pursuit_evasion.apf_policy`
+controller in :mod:`examples.pursuit_evasion.simple_tag.apf_policy`
 but is rewritten against the aquarium observation layout, which differs
 in slice shape and field semantics.
 
@@ -86,6 +86,17 @@ class AquariumAPFConfig:
     """Optional gain on inverse-square repulsion from teammate prey
     (default 0 — pure flight policy, no flock cohesion)."""
 
+    k_wall: float = 1.5
+    """Gain on inverse-distance repulsion from nearby walls.  Lower than
+    ``k_predator`` so predator avoidance always takes priority.  Uses 1/d
+    (not 1/d²) falloff so the force is strong right at the wall but fades
+    quickly — a "get unstuck" nudge, not a persistent steering force."""
+
+    wall_threshold: float = 0.3
+    """Normalised distance (``[0,1]``, 0=at wall) below which wall
+    avoidance activates.  Only walls within this fraction of the agent's
+    view distance are considered."""
+
     separation_cap_ratio: float = 0.3
     """Maximum magnitude of the prey-separation force as a fraction of the
     predator-flee force magnitude.  Without this cap, coincident teammates
@@ -107,6 +118,7 @@ class AquariumAPFConfig:
 def aquarium_obs_layout(
     predator_observe_count: int,
     prey_observe_count: int,
+    wall_features: int = 0,
 ) -> Dict[str, slice]:
     """Return per-block slices for a prey agent's observation vector.
 
@@ -114,19 +126,22 @@ def aquarium_obs_layout(
         predator_observe_count: Same as the env kwarg of the same name —
             how many predators each prey may observe in one frame.
         prey_observe_count: Same as the env kwarg.
+        wall_features: Number of wall-distance features appended to the
+            self-block (4 when ``observable_walls=True``, 0 otherwise).
 
     Returns:
         Dict of named slices into the prey observation vector::
 
             {
-                "self":      slice(0, 5),
-                "predators": slice(5, 5 + 6*P),
-                "prey":      slice(5 + 6*P, 5 + 6*P + 6*Q),
+                "self":      slice(0, 5 + wall_features),
+                "predators": slice(5 + wall_features, 5 + wall_features + 6*P),
+                "prey":      slice(5 + wall_features + 6*P, ...),
             }
     """
     p = int(predator_observe_count)
     q = int(prey_observe_count)
-    self_end = 5
+    w = int(wall_features)
+    self_end = 5 + w
     pred_end = self_end + 6 * p
     prey_end = pred_end + 6 * q
     return {
@@ -193,14 +208,17 @@ class AquariumAPFEvaderPolicy:
         prey_observe_count: int,
         action_count: int = 16,
         config: Optional[AquariumAPFConfig] = None,
+        wall_features: int = 0,
     ) -> None:
         self.predator_observe_count = int(predator_observe_count)
         self.prey_observe_count = int(prey_observe_count)
         self.action_count = int(action_count)
         self.config = config or AquariumAPFConfig()
         self._layout = aquarium_obs_layout(
-            self.predator_observe_count, self.prey_observe_count
+            self.predator_observe_count, self.prey_observe_count,
+            wall_features=wall_features,
         )
+        self._wall_features = int(wall_features)
         self._turn_sign: int = 1  # randomised on each reset()
 
     # PolicyProtocol -------------------------------------------------------
@@ -292,6 +310,15 @@ class AquariumAPFEvaderPolicy:
             pred_fx = -cfg.k_predator * ux * inv_sq
             pred_fy = -cfg.k_predator * uy * inv_sq
 
+        # Wall avoidance (lower priority than predator flee).  Uses 1/d
+        # falloff so it is strong when stuck right against a wall but
+        # fades quickly beyond the threshold — a "get unstuck" nudge that
+        # doesn't interfere with normal pursuit/evasion behaviour.
+        if cfg.k_wall > 0.0 and self._wall_features > 0:
+            wfx, wfy = self._compute_wall_avoidance(obs)
+            pred_fx += wfx
+            pred_fy += wfy
+
         # Optional separation from other prey.  Only applied when at least
         # one predator is visible — separation is a tie-breaker that keeps
         # the flock from collapsing onto a single safe corridor when under
@@ -321,6 +348,44 @@ class AquariumAPFEvaderPolicy:
             return pred_fx + sep_fx, pred_fy + sep_fy, any_predator_visible
 
         return pred_fx, pred_fy, any_predator_visible
+
+    def _compute_wall_avoidance(self, obs: np.ndarray) -> Tuple[float, float]:
+        """Return a repulsive force away from nearby walls.
+
+        Reads the 4 wall-distance features from the observer's self-block
+        (indices 5–8 when ``observable_walls=True``).  Uses 1/d falloff
+        so the force is strong when stuck at a wall but fades quickly
+        beyond ``wall_threshold`` — a "get unstuck" nudge that does not
+        interfere with normal steering.
+
+        Args:
+            obs: Full agent observation vector.
+
+        Returns:
+            ``(force_x, force_y)`` in the continuous heading space.
+        """
+        cfg = self.config
+        self_block = obs[self._layout["self"]]
+        # Wall features: [left, right, top, bottom], 0=at wall, 1=far.
+        left = float(self_block[5])
+        right = float(self_block[6])
+        top = float(self_block[7])
+        bottom = float(self_block[8])
+        fx, fy = 0.0, 0.0
+        thresh = cfg.wall_threshold
+        # Left wall: push right (+x).
+        if left < thresh:
+            fx += cfg.k_wall / max(left, cfg.softening)
+        # Right wall: push left (-x).
+        if right < thresh:
+            fx -= cfg.k_wall / max(right, cfg.softening)
+        # Top wall: push down (+y in screen coords).
+        if top < thresh:
+            fy += cfg.k_wall / max(top, cfg.softening)
+        # Bottom wall: push up (-y in screen coords).
+        if bottom < thresh:
+            fy -= cfg.k_wall / max(bottom, cfg.softening)
+        return fx, fy
 
     @staticmethod
     def _iter_entries(block: np.ndarray, expected_type: int) -> List[Optional[Tuple[float, float]]]:

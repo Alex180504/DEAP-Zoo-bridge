@@ -441,8 +441,7 @@ class _QDaxSideConfig:
     line_sigma: float
     sigma_g: float
     episode_length: int
-    descriptor_name: str
-    descriptor_kwargs: dict
+    descriptor_fn: Any
     seed: int
     pool_mode: str
     pool_temperature: float
@@ -458,8 +457,11 @@ _DEFAULT_QDAX_SIDE_CONFIG: dict = {
     "line_sigma": 0.05,
     "sigma_g": 0.1,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    # Required: a behavioural-descriptor callable exposing min_bd/max_bd/
+    # output_shape.  Concrete descriptors live outside the library
+    # (e.g. examples/qdax/descriptors.py); the experiment builds one with
+    # the correct per-side agent counts and injects it here.
+    "descriptor_fn": None,
     # Optional callable ``(obs_dict, env_wrapper) -> Optional[np.ndarray]``
     # returning an ``(N, 2)`` position array for one timestep.
     # When ``None`` (default), descriptors fall back to the zero-centre
@@ -548,7 +550,6 @@ class QDaxSideState(SideState):
                 init_flax_mlp_params,
                 make_flax_mlp,
             )
-            from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
             from deap_pettingzoo.contrib.qdax.trainer import _compute_centroids
 
         self._env = env
@@ -568,23 +569,22 @@ class QDaxSideState(SideState):
         self._module = make_flax_mlp(layer_sizes, activation=cfg["activation"])
         self._action_space = action_space
 
-        # Descriptor
-        side_agents = [
-            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
-        ]
-        desc_kwargs = {
-            "num_pursuers": len(side_agents),
-            "num_evaders": max(1, len(env.possible_agents) - len(side_agents)),
-            **cfg["descriptor_kwargs"],
-        }
-        if cfg["descriptor"] == "pursuit_evasion_2d":
-            self._descriptor_fn = pe.formation_spread_and_mean_distance(**desc_kwargs)
-        elif cfg["descriptor"] == "pursuit_evasion_3d":
-            self._descriptor_fn = pe.with_capture_efficiency(**desc_kwargs)
-        else:
+        # Descriptor: injected by the experiment, which owns the
+        # pursuit/evasion semantics (agent partition + descriptor choice).
+        # Concrete descriptors live outside the library.
+        descriptor_fn = cfg.get("descriptor_fn")
+        if descriptor_fn is None or not (
+            callable(descriptor_fn)
+            and hasattr(descriptor_fn, "min_bd")
+            and hasattr(descriptor_fn, "max_bd")
+        ):
             raise ValueError(
-                f"QDaxSideState: unknown descriptor {cfg['descriptor']!r}."
+                "QDaxSideState requires optimizer_config['descriptor_fn']: a "
+                "callable (trajectory) -> array exposing 'min_bd'/'max_bd' "
+                "(e.g. from examples.qdax.descriptors). Build it with the "
+                f"side's agent counts; got {descriptor_fn!r}."
             )
+        self._descriptor_fn = descriptor_fn
 
         min_bd = tuple(self._descriptor_fn.min_bd)
         max_bd = tuple(self._descriptor_fn.max_bd)
@@ -742,9 +742,8 @@ class QDaxSideState(SideState):
             )
 
         For environments whose observation vectors do not encode raw
-        positions (e.g. marl-aquarium), use
-        :func:`~deap_pettingzoo.contrib.qdax.position_extractors.make_aquarium_extractor`
-        or supply a custom callable.
+        positions, supply a custom callable that reads positions from the
+        underlying env state (defined in the experiment layer).
         """
         import jax
 

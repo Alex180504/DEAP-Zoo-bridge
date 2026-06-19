@@ -10,6 +10,7 @@ used as apples-to-apples evolutionary-search baselines.
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -17,7 +18,6 @@ from typing import Any, Dict
 import numpy as np
 from deap import creator, tools
 
-from deap_pettingzoo.contrib.pursuit_evasion import PursuitEvasionConfig, PursuitEvasionEnv
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.integration import (
@@ -27,12 +27,20 @@ from deap_pettingzoo.integration import (
     setup_cma_strategy,
     setup_deap_creators,
 )
-from deap_pettingzoo.policies import (
+from deap_pettingzoo.policies import FeedforwardNeuralPolicy
+from deap_pettingzoo.utils.logging import ExperimentLogger
+
+# Allow running as a plain script *or* as a module (-m).
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from examples.pursuit_evasion.simple_tag import (
     APFConfig,
     APFEvaderPolicy,
-    FeedforwardNeuralPolicy,
+    PursuitEvasionConfig,
+    PursuitEvasionEnv,
 )
-from deap_pettingzoo.utils.logging import ExperimentLogger
 
 
 # ---------------------------------------------------------------------------

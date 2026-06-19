@@ -4,7 +4,7 @@ Implements the baseline methodology described in the project's research
 protocol:
 
 * Equal-ability pursuit-evasion in ``simple_tag_v3`` (mpe2) via
-  :class:`~deap_pettingzoo.contrib.pursuit_evasion.PursuitEvasionEnv`
+  :class:`~examples.pursuit_evasion.simple_tag.env.PursuitEvasionEnv`
   (K-nearest partial observability, boundary penalty, optional curriculum)
 * Scripted APF evaders (deterministic, non-learning) so the pursuers train
   against a *stationary* target — isolating algorithmic efficiency from
@@ -17,8 +17,8 @@ protocol:
 
 This script showcases the deap-bridge API end-to-end:
 
-* :class:`~deap_pettingzoo.contrib.pursuit_evasion.PursuitEvasionEnv`
-* :class:`~deap_pettingzoo.contrib.pursuit_evasion.APFEvaderPolicy`
+* :class:`~examples.pursuit_evasion.simple_tag.env.PursuitEvasionEnv`
+* :class:`~examples.pursuit_evasion.simple_tag.apf_policy.APFEvaderPolicy`
 * :class:`~deap_pettingzoo.policies.FeedforwardNeuralPolicy`
 * :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`
 * :mod:`~deap_pettingzoo.integration.deap_integration`
@@ -27,6 +27,7 @@ This script showcases the deap-bridge API end-to-end:
 from __future__ import annotations
 
 import os
+import sys
 import time
 import types
 from pathlib import Path
@@ -35,12 +36,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from deap import tools
 
-from deap_pettingzoo.contrib.pursuit_evasion import (
-    APFConfig,
-    APFEvaderPolicy,
-    PursuitEvasionConfig,
-    PursuitEvasionEnv,
-)
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import (
@@ -64,6 +59,18 @@ from deap_pettingzoo.policies.action_heads import ActionHead
 from deap_pettingzoo.utils.logging import ExperimentLogger
 from deap_pettingzoo.utils.logging.replay import FrameRecorder
 from deap_pettingzoo.utils.parallel import make_executor
+
+# Allow running as a plain script *or* as a module (-m).
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from examples.pursuit_evasion.simple_tag import (
+    APFConfig,
+    APFEvaderPolicy,
+    PursuitEvasionConfig,
+    PursuitEvasionEnv,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -597,11 +604,18 @@ def run_evolution(
         max_steps=ENV_CONFIG.max_cycles,
     )
 
-    # Pursuer observation/action sizing (derived from evaluator's validated env).
+    # Pursuer observation/action sizing.  The factory-path evaluator nulls its
+    # ``env_wrapper`` after validation (each episode builds its own env), so
+    # size the network and read the layout from a throwaway env instead.
     pursuer_id = evaluator.learner_agents[0]
-    input_size = int(evaluator.env_wrapper.reset(seed=SEED)[pursuer_id].shape[0])
-    act_space = evaluator.env_wrapper.action_space(pursuer_id)
-    output_size = act_space.n if hasattr(act_space, "n") else act_space.shape[0]
+    _sizing_env = build_env()
+    try:
+        input_size = int(_sizing_env.reset(seed=SEED)[pursuer_id].shape[0])
+        act_space = _sizing_env.action_space(pursuer_id)
+        output_size = act_space.n if hasattr(act_space, "n") else act_space.shape[0]
+        pursuer_layout = _sizing_env.get_layout(pursuer_id)
+    finally:
+        _sizing_env.close()
     print(f"  Pursuer NN:  in={input_size}  hidden={HIDDEN_SIZE}  out={output_size}")
 
     # DEAP toolbox built from the bridge's integration helpers.
@@ -658,7 +672,6 @@ def run_evolution(
     # 32 * 100 = 3,200 evaluations is far too small a budget to discover
     # pursuit from random init in a 357-weight network.
     rng = np.random.default_rng(SEED)
-    pursuer_layout = evaluator.env_wrapper.get_layout(pursuer_id)
     population = _make_oracle_seeded_population(
         toolbox=toolbox,
         population_size=POPULATION_SIZE,
@@ -815,8 +828,10 @@ def run_evolution(
                 except Exception:
                     pass
 
-    # Close the evaluator's validation env (built during factory-path __init__).
-    evaluator.env_wrapper.close()
+    # The factory-path evaluator already closed its validation env during
+    # __init__ (and nulled ``env_wrapper``); close only if a live one remains.
+    if evaluator.env_wrapper is not None:
+        evaluator.env_wrapper.close()
 
     return {
         "best_genome": hof[0].genome,
@@ -856,7 +871,10 @@ def evaluate_best(
             learner_rewards.append(res.learner_reward)
             scripted_rewards.append(res.scripted_reward)
     finally:
-        evaluator.env_wrapper.close()
+        # Factory-path evaluator builds/closes a fresh env per episode and
+        # nulls ``env_wrapper``; close only if a live wrapper is present.
+        if evaluator.env_wrapper is not None:
+            evaluator.env_wrapper.close()
 
     return {
         "pursuer_mean": float(np.mean(learner_rewards)),

@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from deap_pettingzoo.contrib.pursuit_evasion import (
+from examples.pursuit_evasion.simple_tag import (
     PursuitEvasionEnv,
     PursuitEvasionConfig,
     ObsLayout,

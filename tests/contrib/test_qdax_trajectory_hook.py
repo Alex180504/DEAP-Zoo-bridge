@@ -115,7 +115,9 @@ def test_obs_indices_extractor() -> None:
 
 
 def test_aquarium_extractor_reads_entity_positions() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     extractor = make_aquarium_extractor(arena_width=2000.0, arena_height=3000.0)
@@ -131,7 +133,9 @@ def test_aquarium_extractor_reads_entity_positions() -> None:
 
 
 def test_aquarium_extractor_reads_vector_positions() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithVectorEntities()
     extractor = make_aquarium_extractor(arena_width=2000.0, arena_height=3000.0)
@@ -143,7 +147,9 @@ def test_aquarium_extractor_reads_vector_positions() -> None:
 
 
 def test_aquarium_extractor_can_put_prey_first() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     extractor = make_aquarium_extractor(
@@ -159,7 +165,9 @@ def test_aquarium_extractor_can_put_prey_first() -> None:
 
 
 def test_aquarium_extractor_skips_frames_after_entity_removal() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     env.possible_agents = ["predator_0", "predator_1", "prey_0"]
@@ -285,7 +293,9 @@ def test_qdax_generation_stats_use_current_batch_not_archive() -> None:
 
 def test_aquarium_extractor_walks_wrapper_chain() -> None:
     """Extractor should find entities through a one-level wrapper."""
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     class _Wrapper:
         def __init__(self):
