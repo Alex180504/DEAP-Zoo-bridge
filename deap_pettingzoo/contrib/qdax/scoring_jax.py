@@ -65,8 +65,11 @@ def make_jax_scoring_function(
             ``(trajectory_summary: Dict[str, Array]) -> Array`` with
             ``output_shape`` attribute. See
             :mod:`deap_pettingzoo.contrib.qdax.descriptors`.
-        action_type: ``"discrete"`` (argmax over output logits) or
-            ``"continuous"`` (tanh-rescale; env must accept Box actions).
+        action_type: ``"discrete"`` (argmax over output logits),
+            ``"multidiscrete"`` (split ``sum(nvec)`` logits into one chunk
+            per sub-action and argmax each; env must accept MultiDiscrete
+            actions), or ``"continuous"`` (tanh-rescale; env must accept Box
+            actions).
         agents: Optional override for the agent ordering. Defaults to
             ``jax_env.agents``.
         extract_state_fn: Optional pure function
@@ -81,9 +84,10 @@ def make_jax_scoring_function(
     import jax
     import jax.numpy as jnp
 
-    if action_type not in ("discrete", "continuous"):
+    if action_type not in ("discrete", "continuous", "multidiscrete"):
         raise ValueError(
-            f"action_type must be 'discrete' or 'continuous'; got {action_type!r}."
+            "action_type must be 'discrete', 'multidiscrete' or 'continuous'; "
+            f"got {action_type!r}."
         )
     agent_list = list(agents if agents is not None else jax_env.agents)
     # Agents present in the env but NOT in agent_list need noop actions so
@@ -144,9 +148,29 @@ def make_jax_scoring_function(
 
     extract = extract_state_fn or _extract_positions_velocities
 
+    # For MultiDiscrete, precompute static (start, stop) logit chunk bounds
+    # (one per sub-action) from a policy agent's nvec (homogeneous team).
+    _md_bounds: Optional[list] = None
+    if action_type == "multidiscrete":
+        md_space = _get_action_space(agent_list[0])
+        if md_space is None or not hasattr(md_space, "nvec"):
+            raise ValueError(
+                "multidiscrete action_type requires a MultiDiscrete action "
+                "space exposing 'nvec'."
+            )
+        _md_bounds = []
+        _off = 0
+        for _n in (int(x) for x in md_space.nvec):
+            _md_bounds.append((_off, _off + _n))
+            _off += _n
+
     def _action(raw):
         if action_type == "discrete":
             return jnp.argmax(raw).astype(jnp.int32)
+        if action_type == "multidiscrete":
+            return jnp.stack(
+                [jnp.argmax(raw[lo:hi]).astype(jnp.int32) for lo, hi in _md_bounds]
+            )
         return jnp.tanh(raw)
 
     def _single_rollout(params, key):

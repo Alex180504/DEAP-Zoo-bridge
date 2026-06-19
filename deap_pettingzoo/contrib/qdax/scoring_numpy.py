@@ -74,6 +74,8 @@ class _RolloutSpec:
     eval_episodes: int = 1
     extract_state_fn: Optional[Callable] = None
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
+    #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
+    nvec: Optional[tuple] = None
 
 
 # Module-global cache populated lazily on each worker. Same pattern
@@ -128,6 +130,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
         tuple(spec.layer_sizes),
         spec.activation,
         spec.action_type,
+        spec.nvec,
         _extract_key,
         _worker_imports,
     )
@@ -218,6 +221,19 @@ def _rollout_once(
     episode_length = int(spec.episode_length)
     action_type = spec.action_type
 
+    # Precompute static (start, stop) logit chunk bounds for MultiDiscrete.
+    md_bounds = None
+    if action_type == "multidiscrete":
+        if not spec.nvec:
+            raise ValueError(
+                "multidiscrete action_type requires spec.nvec to be set."
+            )
+        md_bounds = []
+        _off = 0
+        for _n in (int(x) for x in spec.nvec):
+            md_bounds.append((_off, _off + _n))
+            _off += _n
+
     while not done and steps < episode_length and env.agents:
         actions = {}
         for a in env.agents:
@@ -226,6 +242,11 @@ def _rollout_once(
             )
             if action_type == "discrete":
                 actions[a] = int(np.argmax(raw))
+            elif action_type == "multidiscrete":
+                actions[a] = np.array(
+                    [int(np.argmax(raw[lo:hi])) for lo, hi in md_bounds],
+                    dtype=np.int64,
+                )
             else:
                 actions[a] = np.tanh(raw)
         obs, rewards, terms, truncs, _infos = env.step(actions)
@@ -298,6 +319,7 @@ def make_numpy_scoring_function(
     *,
     env_config: Optional[dict] = None,
     action_type: str = "discrete",
+    nvec: Optional[Sequence[int]] = None,
     extract_state_fn: Optional[Callable] = None,
     activation: str = "tanh",
     num_workers: int = 1,
@@ -320,7 +342,11 @@ def make_numpy_scoring_function(
             calling. Must be a **top-level** callable (or a closure
             over picklable state) when ``num_workers > 1``.
         env_config: Optional env kwargs.
-        action_type: ``"discrete"`` (argmax) or ``"continuous"`` (tanh).
+        action_type: ``"discrete"`` (argmax), ``"multidiscrete"`` (per
+            sub-action argmax over ``sum(nvec)`` logits), or
+            ``"continuous"`` (tanh).
+        nvec: Per-sub-action choice counts; required when
+            ``action_type == "multidiscrete"``.
         extract_state_fn: Optional observation → (positions, velocities)
             extractor. Must be picklable when ``num_workers > 1``.
         eval_episodes: Number of rollout episodes to average per genotype.
@@ -371,6 +397,7 @@ def make_numpy_scoring_function(
         eval_episodes=max(1, int(eval_episodes)),
         descriptor_fn=descriptor_fn,
         action_type=action_type,
+        nvec=tuple(int(x) for x in nvec) if nvec is not None else None,
         extract_state_fn=extract_state_fn,
         worker_imports=tuple(str(name) for name in worker_imports),
     )

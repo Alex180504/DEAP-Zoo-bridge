@@ -535,6 +535,9 @@ class BaselineTrainer(ABC):
             Dictionary with keys:
             - 'discrete_action': bool (supports discrete action spaces)
             - 'continuous_action': bool (supports continuous action spaces)
+            - 'multidiscrete_action': bool (supports MultiDiscrete action
+              spaces; defaults to False when omitted, so MultiDiscrete envs
+              are rejected unless the algorithm opts in)
             - 'needs_global_state': bool (requires centralized state)
             - 'on_policy': bool (on-policy vs off-policy)
             - 'supports_turn_based': bool (default True; set False for

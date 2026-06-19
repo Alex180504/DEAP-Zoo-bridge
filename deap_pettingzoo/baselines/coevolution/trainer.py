@@ -978,6 +978,9 @@ class CoEvolutionTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # Evolutionary sides support MultiDiscrete; an RL side is
+            # validated per-optimizer by the co-evolution validator.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": False,
             "supports_turn_based": True,

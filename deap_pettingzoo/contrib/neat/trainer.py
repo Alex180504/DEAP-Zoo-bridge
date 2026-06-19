@@ -82,6 +82,11 @@ def _action_space_hint(action_space: Any) -> Dict[str, Any]:
 
     if isinstance(action_space, spaces.Discrete):
         return {"type": "discrete", "args": {"n": int(action_space.n)}}
+    if isinstance(action_space, spaces.MultiDiscrete):
+        return {
+            "type": "multidiscrete",
+            "args": {"nvec": [int(x) for x in action_space.nvec]},
+        }
     if isinstance(action_space, spaces.Box):
         return {
             "type": "continuous",
@@ -93,7 +98,8 @@ def _action_space_hint(action_space: Any) -> Dict[str, Any]:
         }
     raise NotImplementedError(
         f"NEAT parallel evaluation does not support action space "
-        f"{type(action_space).__name__}. Only Discrete and Box are supported."
+        f"{type(action_space).__name__}. Only Discrete, MultiDiscrete and Box "
+        "are supported."
     )
 
 
@@ -137,6 +143,7 @@ class NEATTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "multi_agent": True,
             "multi_objective": False,
             "parallel_training": self._num_workers > 1,

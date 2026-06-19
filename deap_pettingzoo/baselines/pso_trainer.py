@@ -342,6 +342,7 @@ class PSOTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": False,
             "supports_turn_based": True,

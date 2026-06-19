@@ -64,6 +64,12 @@ package "deap_pettingzoo.policies" {
         -- mask illegal logits to -inf before argmax --
     }
 
+    class MultiDiscreteHead {
+        + nvec: np.ndarray
+        + decode(raw) -> np.int64[len(nvec)]
+        -- per-sub-action argmax over sum(nvec) logits --
+    }
+
     class BoxHead {
         + low, high: np.ndarray
         + decode(raw) -> np.ndarray  (tanh → rescale)
@@ -74,6 +80,7 @@ package "deap_pettingzoo.policies" {
 
     DiscreteHead --|> ActionHead
     MaskedDiscreteHead --|> DiscreteHead
+    MultiDiscreteHead --|> ActionHead
     BoxHead --|> ActionHead
     make_head ..> ActionHead : constructs
     FeedforwardNeuralPolicy --> FixedTopologyGenome : uses

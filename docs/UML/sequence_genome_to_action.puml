@@ -123,6 +123,13 @@ alt Discrete Action Space
       select action with
       highest activation
     end note
+else MultiDiscrete Action Space
+    Policy -> Policy : split sum(nvec) logits\ninto chunks; argmax each
+    note right
+      For MultiDiscrete, one
+      chunk per sub-action ->
+      np.int64 integer vector
+    end note
 else Continuous Action Space
     Policy -> Policy : clip(tanh(output),\naction_low, action_high)
     note right

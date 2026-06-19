@@ -1315,6 +1315,9 @@ class MADDPGTrainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's DeterministicActor supports only Box/Discrete, so
+            # MADDPG cannot train MultiDiscrete envs (gated by compatibility).
+            "multidiscrete_action": False,
             "needs_global_state": False,
             "on_policy": False,
             # MADDPG's centralized-critic replay buffer assumes every
@@ -1334,6 +1337,8 @@ class MATD3Trainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # Same DeterministicActor limitation as MADDPG: no MultiDiscrete.
+            "multidiscrete_action": False,
             "needs_global_state": False,
             "on_policy": False,
             # Same centralized-critic simultaneity assumption as MADDPG.
@@ -1352,6 +1357,8 @@ class IPPOTrainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's StochasticActor (PPO) natively supports MultiDiscrete.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": True,
@@ -1387,6 +1394,8 @@ class GroupedIPPOTrainer(IPPOTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's StochasticActor (PPO) natively supports MultiDiscrete.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": True,
