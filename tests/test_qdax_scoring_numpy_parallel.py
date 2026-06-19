@@ -25,7 +25,7 @@ pytest.importorskip("pettingzoo.mpe")
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
-from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+from examples.qdax import descriptors as pe
 from deap_pettingzoo.contrib.qdax.policy import (
     init_flax_mlp_params,
     make_flax_mlp,

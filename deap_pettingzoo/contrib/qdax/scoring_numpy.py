@@ -3,8 +3,7 @@
 Lets QDax drive a **PettingZoo** env through the slow per-step
 numpy<->JAX boundary. Positioned as a validation / debugging tool: it
 trades the ~100x speed advantage of JAX-native rollouts for the
-ability to reuse any registered PettingZoo env (MPE2, aquarium,
-pursuit-evasion, OpenSpiel...).
+ability to reuse any registered PettingZoo env (MPE2, OpenSpiel...).
 
 Contract mirrors :func:`make_jax_scoring_function` so QDax trainers
 can dispatch between the two implementations on
@@ -56,9 +55,8 @@ class _RolloutSpec:
     * ``layer_sizes`` + ``activation`` — worker rebuilds the Flax MLP
       module on first call.
     * ``descriptor_fn`` — must itself be a module-top-level callable
-      (pickleable). The factories in
-      :mod:`deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion`
-      return such callables (closures over numeric constants only).
+      (pickleable), i.e. a top-level class instance rather than a
+      lambda/closure, so it survives cross-process transport.
         * ``extract_state_fn`` — same pickle constraint; default is the
             numpy extractor in this module.
         * ``worker_imports`` — optional module names imported in the worker

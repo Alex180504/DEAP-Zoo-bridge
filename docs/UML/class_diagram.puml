@@ -80,7 +80,7 @@ package "deap_pettingzoo.policies" {
     FeedforwardNeuralPolicy --> ActionHead : optional head
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion (APF)" {
+package "examples.pursuit_evasion.simple_tag (APF)" {
     class APFConfig <<dataclass>> {
         + k_pursuer: float
         + k_landmark: float
@@ -207,7 +207,7 @@ package "deap_pettingzoo.contrib.openspiel" {
     openspiel ..> registry : register_env
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion" {
+package "examples.pursuit_evasion.simple_tag" {
     class PursuitEvasionConfig <<dataclass>> {
         + num_adversaries: int
         + num_good: int
@@ -851,9 +851,8 @@ package "deap_pettingzoo.contrib.qdax" {
     }
 
     class "descriptors <<module>>" as qdax_descriptors {
-        + formation_spread_and_mean_distance(num_pursuers, num_evaders)
-        + with_capture_efficiency(num_pursuers, num_evaders, capture_radius)
-        -- each returns a callable with\n   output_shape / min_bd / max_bd --
+        + DescriptorProtocol
+        -- generic contract only: a callable\n   (trajectory) -> array with\n   output_shape / min_bd / max_bd.\n   Concrete descriptors are caller-supplied\n   (e.g. examples/qdax/descriptors.py). --
     }
 
     class "scoring <<module>>" as qdax_scoring {
@@ -879,8 +878,8 @@ package "deap_pettingzoo.contrib.qdax" {
     CMAMETrainer     --|> BaselineTrainer
     MAPElitesTrainer ..> qdax_scoring : uses
     CMAMETrainer     ..> qdax_scoring : uses
-    MAPElitesTrainer ..> qdax_descriptors : resolves by name
-    CMAMETrainer     ..> qdax_descriptors : resolves by name
+    MAPElitesTrainer ..> qdax_descriptors : injected descriptor_fn
+    CMAMETrainer     ..> qdax_descriptors : injected descriptor_fn
     MAPElitesTrainer ..> FlaxPolicyAdapter : produces best
     CMAMETrainer     ..> FlaxPolicyAdapter : produces best
 }

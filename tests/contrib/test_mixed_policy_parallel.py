@@ -19,7 +19,7 @@ import pytest
 pytest.importorskip("deap")
 pytest.importorskip("pettingzoo.mpe")
 
-from deap_pettingzoo.contrib.pursuit_evasion import (
+from examples.pursuit_evasion.simple_tag import (
     APFConfig,
     APFEvaderPolicy,
     PursuitEvasionConfig,

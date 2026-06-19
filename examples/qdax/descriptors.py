@@ -1,10 +1,24 @@
-"""Pursuit-evasion behavioural descriptors.
+"""Pursuit-evasion behavioural descriptors for QDax experiments.
+
+These descriptors are *experiment-side* code: they encode the pursuit-evasion
+research semantics (formation spread, mean distance to opponents, capture
+efficiency) and are **not** part of the generic ``deap_pettingzoo`` library.
+They are consumed by both the JaxMARL experiments in :mod:`examples.qdax` and
+the marl-aquarium experiments in :mod:`examples.pursuit_evasion`.
+
+Pass the factory output to a QDax trainer via
+``algorithm_params["descriptor_fn"]`` (standalone ``MAPElitesTrainer`` /
+``CMAMETrainer``) or ``optimizer_config["descriptor_fn"]`` (co-evolution
+``QDaxSideState``). The library only requires the generic
+:class:`~deap_pettingzoo.contrib.qdax.descriptors.DescriptorProtocol` contract:
+a callable ``(trajectory_summary) -> array`` exposing ``output_shape``,
+``min_bd`` and ``max_bd``.
 
 Two variants ship:
 
-* :func:`formation_spread_and_mean_distance` \u2014 2-D, recommended v1
+* :func:`formation_spread_and_mean_distance` — 2-D, recommended v1
   descriptor. Cheap, interpretable, low-collinearity axes.
-* :func:`with_capture_efficiency` \u2014 3-D extension adding a
+* :func:`with_capture_efficiency` — 3-D extension adding a
   capture-efficiency axis for experiments where QD archives should
   separate "tight formations that capture" from "tight formations
   that do not".
@@ -263,4 +277,3 @@ __all__ = [
     "single_team_formation",
     "with_capture_efficiency",
 ]
-

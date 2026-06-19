@@ -19,7 +19,7 @@ def _positions(T: int, n_p: int, n_e: int) -> np.ndarray:
 
 
 def test_formation_spread_and_mean_distance_shape_and_range() -> None:
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
 
     fn = pe.formation_spread_and_mean_distance(num_pursuers=2, num_evaders=1)
     assert fn.output_shape == 2
@@ -31,7 +31,7 @@ def test_formation_spread_and_mean_distance_shape_and_range() -> None:
 
 
 def test_with_capture_efficiency_is_3d() -> None:
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
 
     fn = pe.with_capture_efficiency(num_pursuers=2, num_evaders=1)
     assert fn.output_shape == 3
@@ -41,7 +41,7 @@ def test_with_capture_efficiency_is_3d() -> None:
 
 
 def test_formation_spread_raises_on_empty_teams() -> None:
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
 
     with pytest.raises(ValueError):
         pe.formation_spread_and_mean_distance(num_pursuers=0, num_evaders=1)
@@ -54,7 +54,7 @@ def test_formation_spread_raises_on_empty_teams() -> None:
 
 def test_norm_scale_default_matches_mpe_diagonal() -> None:
     """Default norm (2*sqrt(2)) should normalise MPE-world positions into [0,1]."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
     import math
 
     fn_default = pe.formation_spread_and_mean_distance(num_pursuers=2, num_evaders=1)
@@ -69,7 +69,7 @@ def test_norm_scale_default_matches_mpe_diagonal() -> None:
 
 def test_norm_scale_large_arena_saturates_less() -> None:
     """A large norm_scale should yield smaller (unsaturated) descriptor values."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
 
     # Positions with pursuer spread ~1 unit: with default MPE norm ~0.35
     fn_mpe = pe.formation_spread_and_mean_distance(num_pursuers=2, num_evaders=1)
@@ -85,7 +85,7 @@ def test_norm_scale_large_arena_saturates_less() -> None:
 
 def test_with_capture_efficiency_norm_scale_propagates() -> None:
     """norm_scale should propagate through with_capture_efficiency's base descriptor."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+    from examples.qdax import descriptors as pe
     import math
 
     fn = pe.with_capture_efficiency(

@@ -91,8 +91,7 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "iso_sigma": 0.005,
     "line_sigma": 0.05,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -113,8 +112,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "sigma_g": 0.1,
     "num_emitters": 1,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -125,64 +123,29 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
 }
 
 
-def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any]):
-    """Instantiate a descriptor factory by short name."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe_desc
+def _require_descriptor_fn(params: Dict[str, Any]):
+    """Return the injected ``descriptor_fn`` callable, validating its contract.
 
-    agents = list(env.possible_agents)
-
-    # --- single_team: no pursuer/evader split needed ----------------------
-    if name == "single_team":
-        num_agents = int(kwargs.pop("num_agents", len(agents)))
-        norm_scale = float(kwargs.pop("norm_scale", 1.0))
-        return pe_desc.single_team_formation(num_agents=num_agents, norm_scale=norm_scale)
-
-    # --- pursuit_evasion_*: resolve pursuer/evader counts -----------------
-    pursuers = [a for a in agents if a.startswith("adversary")]
-    evaders = [a for a in agents if not a.startswith("adversary")]
-
-    if pursuers and evaders:
-        default_kwargs = {
-            "num_pursuers": len(pursuers),
-            "num_evaders": len(evaders),
-        }
-    else:
-        default_kwargs = {}
-        if "num_pursuers" not in kwargs or "num_evaders" not in kwargs:
-            raise ValueError(
-                "Could not infer a consistent pursuit/evasion agent partition "
-                f"from env.possible_agents={agents!r}. Automatic inference only "
-                "works for tag-style envs with agent names prefixed by "
-                "'adversary'. Please pass explicit descriptor_kwargs with both "
-                "'num_pursuers' and 'num_evaders'."
-            )
-
-    merged = {**default_kwargs, **kwargs}
-    num_pursuers = int(merged["num_pursuers"])
-    num_evaders = int(merged["num_evaders"])
-    # Only validate the agent-count sum when the counts were *auto-inferred*
-    # from agent-name prefixes.  When the user passes explicit kwargs they
-    # know their environment (e.g. scripted opponents may hide some agents
-    # from env.possible_agents).
-    if default_kwargs and (num_pursuers + num_evaders != len(agents)):
+    The qdax trainers are environment-agnostic: the caller must supply a
+    behavioural-descriptor callable in ``algorithm_params['descriptor_fn']``.
+    Concrete descriptors live outside the library (e.g.
+    ``examples/qdax/descriptors.py``).
+    """
+    descriptor_fn = params.get("descriptor_fn")
+    if descriptor_fn is None:
         raise ValueError(
-            "Descriptor agent counts must sum to the number of possible "
-            f"agents: num_pursuers={num_pursuers}, num_evaders={num_evaders}, "
-            f"len(env.possible_agents)={len(agents)}."
+            "algorithm_params['descriptor_fn'] is required. Pass a callable "
+            "(trajectory) -> array exposing 'min_bd'/'max_bd'/'output_shape' "
+            "(e.g. from examples.qdax.descriptors)."
         )
-    merged["num_pursuers"] = num_pursuers
-    merged["num_evaders"] = num_evaders
-
-    if name == "pursuit_evasion_2d":
-        return pe_desc.formation_spread_and_mean_distance(**merged)
-    if name == "pursuit_evasion_3d":
-        return pe_desc.with_capture_efficiency(**merged)
-    raise ValueError(
-        f"Unknown descriptor {name!r}. Supported: "
-        "'pursuit_evasion_2d', 'pursuit_evasion_3d', 'single_team'. "
-        "Pass a callable directly via algorithm_params['descriptor_fn'] "
-        "to use a custom one."
-    )
+    if not callable(descriptor_fn) or not (
+        hasattr(descriptor_fn, "min_bd") and hasattr(descriptor_fn, "max_bd")
+    ):
+        raise ValueError(
+            "descriptor_fn must be callable and expose 'min_bd' and 'max_bd' "
+            f"tuples; got {descriptor_fn!r}."
+        )
+    return descriptor_fn
 
 
 def _infer_layer_sizes(env: PettingZooWrapper, hidden: tuple) -> tuple:
@@ -367,9 +330,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     layer_sizes = params["layer_sizes"] or _infer_layer_sizes(env, hidden)
     module = make_flax_mlp(layer_sizes, activation=params["activation"])
 
-    descriptor_fn = params.get("descriptor_fn") or _resolve_descriptor(
-        params["descriptor"], env, params.get("descriptor_kwargs", {})
-    )
+    descriptor_fn = _require_descriptor_fn(params)
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
@@ -633,7 +594,7 @@ class MAPElitesTrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -664,7 +625,7 @@ class MAPElitesTrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
@@ -837,7 +798,7 @@ class CMAMETrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -865,7 +826,7 @@ class CMAMETrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
