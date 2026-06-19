@@ -156,3 +156,56 @@ class TestIPPOLive:
         # Per-sub-env episode tracking should produce at least one entry
         # in a 256-step run with 25-step MPE episodes across 2 envs.
         assert result.metrics["num_episodes"] >= 1
+
+
+class TestIPPOMultiDiscreteLive:
+    """IPPO end-to-end on a synthetic homogeneous MultiDiscrete env."""
+
+    @pytest.fixture(autouse=True)
+    def _md_env(self):
+        from deap_pettingzoo.environments.registry import (
+            is_registered,
+            unregister_env,
+        )
+        from tests.multidiscrete_env import MD_ENV_NAME, register_md_env
+
+        register_md_env()
+        yield MD_ENV_NAME
+        if is_registered(MD_ENV_NAME):
+            unregister_env(MD_ENV_NAME)
+
+    def _config(self):
+        from tests.multidiscrete_env import MD_ENV_NAME
+
+        return TrainingConfig(
+            env_name=MD_ENV_NAME,
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=128,
+            algorithm_params={"seed": 0, "rollout_steps": 64},
+        )
+
+    def test_trains_and_produces_valid_multidiscrete_actions(self):
+        import numpy as np
+
+        from deap_pettingzoo.environments import PettingZooWrapper
+        from tests.multidiscrete_env import MD_ENV_NAME
+
+        result = IPPOTrainer().train(self._config())
+        assert result.algorithm == "ippo"
+        assert isinstance(result.policy, AgileRLPolicyWrapper)
+
+        env = PettingZooWrapper(MD_ENV_NAME)
+        try:
+            obs = env.reset(seed=1)
+            agent = env.possible_agents[0]
+            action = np.asarray(result.policy.get_action(obs[agent]))
+            assert action.shape == (2,)
+            assert 0 <= action[0] < 3 and 0 <= action[1] < 4
+        finally:
+            env.close()
+
+    # Note: a frozen-CPU-snapshot round-trip for IPPO is *not* tested here —
+    # AgileRL's StochasticActor cannot be ``deepcopy``'d (non-leaf tensors),
+    # which ``make_frozen_cpu_snapshot`` requires, independently of the action
+    # space. The MultiDiscrete decode of the frozen wrapper itself is covered
+    # by a stub-actor unit test in ``tests/test_agilerl_policy.py``.

@@ -45,9 +45,8 @@ _MPE_NOTES = {
         "Heterogeneous agents (adversary vs good). One genome per role."
     ),
     "simple_reference_v3": (
-        "MultiDiscrete action space (movement + communication). "
-        "FeedforwardNeuralPolicy does NOT support MultiDiscrete — use "
-        "AgileRL trainers."
+        "Homogeneous Discrete(50) action space (movement x communication "
+        "flattened into a single Discrete). Trainable by all backends."
     ),
     "simple_speaker_listener_v3": (
         "Heterogeneous: speaker has Discrete comm-only action, listener has "
@@ -57,9 +56,10 @@ _MPE_NOTES = {
     "simple_spread_v3": "",
     "simple_tag_v3": "",
     "simple_world_comm_v3": (
-        "MultiDiscrete action space and heterogeneous agents. "
-        "FeedforwardNeuralPolicy does NOT support MultiDiscrete — use "
-        "AgileRL trainers."
+        "Heterogeneous Discrete action spaces across roles "
+        "(leadadversary/adversary/agent differ). FeedforwardNeuralPolicy "
+        "requires one genome per role; use MixedPolicyEvaluator or an "
+        "AgileRL trainer."
     ),
 }
 

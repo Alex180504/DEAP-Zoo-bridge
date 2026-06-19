@@ -308,6 +308,27 @@ def _print_qdax_metrics(
     logger.info("%s", msg)
 
 
+def _resolve_action_decoding(action_space, continuous: bool):
+    """Return ``(action_type, nvec)`` for a shared (homogeneous) action space.
+
+    ``nvec`` is a list of per-sub-action choice counts when the space is
+    MultiDiscrete, else ``None``.
+    """
+    if continuous:
+        return "continuous", None
+    if action_space is not None and hasattr(action_space, "nvec"):
+        return "multidiscrete", [int(x) for x in action_space.nvec]
+    return "discrete", None
+
+
+def _jax_action_space(jax_env, agent):
+    """Best-effort action-space lookup for a JAX-native env."""
+    if hasattr(jax_env, "action_space"):
+        return jax_env.action_space(agent)
+    action_spaces = getattr(jax_env, "action_spaces", None)
+    return action_spaces[agent] if action_spaces is not None else None
+
+
 def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     """Construct env + scoring function, auto-dispatching fast vs slow path."""
     _require_qdax()
@@ -371,12 +392,15 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             module = make_flax_mlp(layer_sizes, activation=params["activation"])
             _matching = [a for a in _all_agents
                          if int(_obs0[a].shape[0]) == actual_in_dim]
+        jax_action_type, _ = _resolve_action_decoding(
+            _jax_action_space(raw_jax_env, _matching[0]), config.continuous
+        )
         scoring_fn = make_jax_scoring_function(
             raw_jax_env,
             module,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=jax_action_type,
             agents=_matching,
         )
     else:
@@ -387,13 +411,17 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             UserWarning,
             stacklevel=2,
         )
+        np_action_type, np_nvec = _resolve_action_decoding(
+            env.action_space(env.possible_agents[0]), config.continuous
+        )
         scoring_fn = make_numpy_scoring_function(
             config.env_name,
             layer_sizes=layer_sizes,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
             env_config=config.env_config,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=np_action_type,
+            nvec=np_nvec,
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
@@ -467,6 +495,7 @@ class MAPElitesTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,
@@ -659,6 +688,7 @@ class CMAMETrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,

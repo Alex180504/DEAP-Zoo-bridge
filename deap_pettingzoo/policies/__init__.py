@@ -5,6 +5,7 @@ from .action_heads import (
     ActionHead,
     BoxHead,
     DiscreteHead,
+    MultiDiscreteHead,
     make_head,
     required_output_size,
 )
@@ -14,6 +15,7 @@ __all__ = [
     'ActionHead',
     'BoxHead',
     'DiscreteHead',
+    'MultiDiscreteHead',
     'make_head',
     'required_output_size',
 ]

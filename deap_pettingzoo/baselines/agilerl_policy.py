@@ -292,12 +292,29 @@ class AgileRLPolicyWrapper:
             ) from exc
 
         is_discrete = bool(getattr(self._agent, "discrete_actions", False))
+
+        # Per-slot MultiDiscrete nvecs (aligned to agent_ids) so the frozen
+        # wrapper can shape MultiDiscrete actions correctly. None for slots
+        # whose action space is not MultiDiscrete.
+        multidiscrete_nvecs = None
+        spaces_map = getattr(self._agent, "possible_action_spaces", None)
+        if isinstance(spaces_map, dict):
+            slots = [
+                tuple(int(x) for x in spaces_map[a].nvec)
+                if a in spaces_map and hasattr(spaces_map[a], "nvec")
+                else None
+                for a in self._agent_ids
+            ]
+            if any(s is not None for s in slots):
+                multidiscrete_nvecs = slots
+
         return FrozenRLPolicyWrapper(
             actors=frozen,
             agent_ids=self._agent_ids,
             full_roster=self._full_agent_roster(),
             algorithm_name=self._algorithm_name,
             is_discrete=is_discrete,
+            multidiscrete_nvecs=multidiscrete_nvecs,
         )
 
 
@@ -320,9 +337,15 @@ class FrozenRLPolicyWrapper:
         full_roster: Full agent roster expected by the actor modules
             (may be equal to or a superset of ``agent_ids``).
         algorithm_name: Human-readable label (e.g. ``"matd3"``).
-        is_discrete: If ``True``, actor output is treated as logits over a
-            discrete action space and the argmax is returned.  If ``False``
-            (default), the raw actor output is returned for continuous spaces.
+        is_discrete: If ``True``, a bare-tensor (deterministic) actor output
+            is treated as logits over a discrete action space and the argmax
+            is returned.  If ``False`` (default), the raw actor output is
+            returned for continuous spaces.  Ignored when the actor returns a
+            distribution tuple (stochastic actors already sample the action).
+        multidiscrete_nvecs: Optional per-slot ``nvec`` tuples (aligned to
+            ``agent_ids``); ``None`` for non-MultiDiscrete slots.  Used to
+            shape MultiDiscrete actions as an integer array of length
+            ``len(nvec)``.
     """
 
     def __init__(
@@ -332,12 +355,14 @@ class FrozenRLPolicyWrapper:
         full_roster: List[str],
         algorithm_name: str,
         is_discrete: bool = False,
+        multidiscrete_nvecs: "Optional[List[Optional[tuple]]]" = None,
     ) -> None:
         self._actors = list(actors)
         self._agent_ids = list(agent_ids)
         self._full_roster = list(full_roster)
         self._algorithm_name = algorithm_name
         self._is_discrete = is_discrete
+        self._md_nvecs = list(multidiscrete_nvecs) if multidiscrete_nvecs else None
         self._call_index = 0
         self._obs_cache: Dict[str, np.ndarray] = {}
 
@@ -362,6 +387,24 @@ class FrozenRLPolicyWrapper:
         obs_t = torch.from_numpy(self._obs_cache[agent_id]).unsqueeze(0)  # (1, obs_dim)
         with torch.no_grad():
             output = actor(obs_t)  # (1, action_dim) or (1, n_actions)
+
+        slot_nvec = (
+            self._md_nvecs[self._agent_ids.index(agent_id)]
+            if self._md_nvecs is not None
+            else None
+        )
+
+        # Stochastic actors (IPPO/PPO) return ``(action, log_prob, entropy)``
+        # with the action already sampled and in the env's action space — an
+        # int index (Discrete), an integer vector (MultiDiscrete), or a float
+        # vector (Box). No argmax/rescale is needed in that case.
+        if isinstance(output, tuple):
+            sampled = output[0].squeeze(0).detach().cpu().numpy()
+            if slot_nvec is not None:
+                return np.asarray(sampled, dtype=np.int64).reshape(len(slot_nvec))
+            if sampled.shape == ():
+                return int(sampled) if self._is_discrete else float(sampled)
+            return sampled
 
         # Rescale continuous actions from the network's output range to the
         # declared action-space bounds.  AgileRL's DeterministicActor stores

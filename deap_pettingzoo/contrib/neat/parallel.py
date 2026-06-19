@@ -84,6 +84,13 @@ def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
     if spec.action_space_type == "discrete":
         n = int(spec.action_space_args.get("n", spec.output_size))
         return spaces.Discrete(n)
+    if spec.action_space_type == "multidiscrete":
+        nvec = spec.action_space_args.get("nvec")
+        if nvec is None:
+            raise ValueError(
+                "MultiDiscrete action_space_args must include 'nvec'."
+            )
+        return spaces.MultiDiscrete(np.asarray(nvec, dtype=np.int64))
     if spec.action_space_type == "continuous":
         shape = tuple(spec.action_space_args.get("shape", (spec.output_size,)))
         low = np.asarray(spec.action_space_args.get("low", -1.0), dtype=np.float32)

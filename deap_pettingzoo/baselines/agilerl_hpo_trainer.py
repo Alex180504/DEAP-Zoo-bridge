@@ -268,6 +268,9 @@ class EvolveHPOTrainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # Only the on-policy (StochasticActor / PPO) base supports
+            # MultiDiscrete; the deterministic off-policy bases do not.
+            "multidiscrete_action": self.ON_POLICY,
             "needs_global_state": False,
             "on_policy": self.ON_POLICY,
             "supports_turn_based": False,
