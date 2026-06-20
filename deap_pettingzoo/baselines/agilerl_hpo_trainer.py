@@ -15,6 +15,7 @@ AgileRL or PyTorch.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, ClassVar, Dict, List, Optional
 
@@ -24,9 +25,12 @@ from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.baselines.base import (
     BudgetMode,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class EvolveHPOTrainer(AgileRLTrainer):
@@ -182,65 +186,154 @@ class EvolveHPOTrainer(AgileRLTrainer):
         generation = 0
         fitness_history: List[Dict[str, Any]] = []
 
-        # Main loop: evolve for budget_steps.
-        while steps_done < budget_steps:
-            generation += 1
-            gen_fitnesses: List[float] = []
+        from deap_pettingzoo.baselines._logging_helpers import build_logger, write_summary
+        from deap_pettingzoo.baselines.recording import RecordingController
+        from deap_pettingzoo.utils.logging import save_agilerl_agent
 
-            # Train each agent for evo_every steps.
-            for agent in population:
-                gen_steps = self._train_one_agent(
-                    agent, env, agent_ids, is_vec, max_steps,
-                    evo_every, seed, rng,
+        algo_tag = f"{self.ALGORITHM_NAME}-hpo"
+        with build_logger(config, algorithm=algo_tag) as log:
+            _env_cfg = config.env_config or {}
+            _rec_max_steps = int(
+                config.recording.max_frames_per_episode
+                or _env_cfg.get("max_cycles")
+                or _env_cfg.get("max_time_steps")
+                or 500
+            )
+            # Champion tracks the live best-agent wrapper (updated each gen).
+            _champion_agent: Any = population[0] if population else None
+            _champion_policy: Any = AgileRLPolicyWrapper(
+                _champion_agent, agent_ids, algorithm_name=algo_tag,
+            ) if _champion_agent is not None else None
+
+            def _champion():
+                return _champion_policy
+
+            self._recorder = RecordingController(
+                config, log,
+                max_steps=_rec_max_steps,
+                seed=seed,
+            )
+
+            # Main loop: evolve for budget_steps.
+            while steps_done < budget_steps:
+                generation += 1
+                gen_fitnesses: List[float] = []
+
+                # Train each agent for evo_every steps.
+                for agent in population:
+                    gen_steps = self._train_one_agent(
+                        agent, env, agent_ids, is_vec, max_steps,
+                        evo_every, seed, rng,
+                    )
+                    steps_done += gen_steps
+
+                # Evaluate all agents.
+                for agent in population:
+                    fit = self._evaluate_agent(
+                        agent, env, agent_ids, max_steps,
+                        seed, rng, num_episodes=3,
+                    )
+                    gen_fitnesses.append(fit)
+
+                # Record stats.
+                best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
+                mean_fit = float(np.mean(gen_fitnesses)) if gen_fitnesses else 0.0
+                std_fit = float(np.std(gen_fitnesses)) if gen_fitnesses else 0.0
+                min_fit = min(gen_fitnesses) if gen_fitnesses else 0.0
+                fitness_history.append({
+                    "generation": generation,
+                    "steps": steps_done,
+                    "mean": mean_fit,
+                    "max": best_fit,
+                    "min": min_fit,
+                    "std": std_fit,
+                })
+
+                elapsed = time.time() - start_time
+                log.row("metrics", {
+                    "iteration": generation,
+                    "env_steps": steps_done,
+                    "wall_time_s": elapsed,
+                    "mean": mean_fit,
+                    "std": std_fit,
+                    "min": min_fit,
+                    "max": best_fit,
+                    "mean_loss": None,
+                })
+
+                if self.verbose:
+                    print(
+                        f"[{algo_tag}] gen {generation} "
+                        f"steps={steps_done:,} mean={mean_fit:+.2f} "
+                        f"max={best_fit:+.2f}"
+                    )
+
+                # Tournament selection + mutation.
+                _, population = tournament.select(population)
+                population = mutations.mutation(population)
+
+                # Update champion reference for the recording controller.
+                best_idx_gen = int(np.argmax(gen_fitnesses)) if gen_fitnesses else 0
+                _champion_agent = population[best_idx_gen % len(population)]
+                _champion_policy = AgileRLPolicyWrapper(
+                    _champion_agent, agent_ids, algorithm_name=algo_tag,
                 )
-                steps_done += gen_steps
-
-            # Evaluate all agents.
-            for i, agent in enumerate(population):
-                fit = self._evaluate_agent(
-                    agent, env, agent_ids, max_steps,
-                    seed, rng, num_episodes=3,
-                )
-                gen_fitnesses.append(fit)
-
-            # Record stats.
-            best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
-            mean_fit = float(np.mean(gen_fitnesses)) if gen_fitnesses else 0.0
-            fitness_history.append({
-                "generation": generation,
-                "steps": steps_done,
-                "mean": mean_fit,
-                "max": best_fit,
-                "min": min(gen_fitnesses) if gen_fitnesses else 0.0,
-                "std": float(np.std(gen_fitnesses)) if gen_fitnesses else 0.0,
-            })
-
-            if self.verbose:
-                print(
-                    f"[{self.ALGORITHM_NAME}-HPO] gen {generation} "
-                    f"steps={steps_done:,} mean={mean_fit:+.2f} "
-                    f"max={best_fit:+.2f}"
+                self._on_progress(
+                    None,
+                    ProgressEvent(
+                        unit="env_step",
+                        current=min(steps_done, budget_steps),
+                        total=budget_steps,
+                        env_steps=min(steps_done, budget_steps),
+                        best_fitness=best_fit,
+                        mean_fitness=mean_fit,
+                        wall_time_s=elapsed,
+                    ),
+                    champion=_champion,
                 )
 
-            # Tournament selection + mutation.
-            _, population = tournament.select(population)
-            population = mutations.mutation(population)
+            # Champion = best agent by fitness.
+            champ_fits = [
+                self._evaluate_agent(a, env, agent_ids, max_steps, seed, rng, num_episodes=5)
+                for a in population
+            ]
+            champ_idx = int(np.argmax(champ_fits))
+            champion = population[champ_idx]
 
-        # Champion = best agent by fitness.
-        champ_fits = [
-            self._evaluate_agent(a, env, agent_ids, max_steps, seed, rng, num_episodes=5)
-            for a in population
-        ]
-        champ_idx = int(np.argmax(champ_fits))
-        champion = population[champ_idx]
+            policy = AgileRLPolicyWrapper(
+                champion, agent_ids, algorithm_name=algo_tag,
+            )
+            training_time = time.time() - start_time
 
-        policy = AgileRLPolicyWrapper(
-            champion, agent_ids, algorithm_name=f"{self.ALGORITHM_NAME}-hpo",
-        )
-        training_time = time.time() - start_time
+            self._recorder.finalize(_champion, iteration=generation, env_steps=steps_done)
+            self._recorder.close()
+
+            save_agilerl_agent(
+                log,
+                champion,
+                extra={
+                    "algorithm": algo_tag,
+                    "env_name": config.env_name,
+                    "agent_ids": list(agent_ids),
+                    "num_generations": generation,
+                    "population_size": pop_size,
+                },
+            )
+            write_summary(
+                log,
+                {
+                    "algorithm": algo_tag,
+                    "num_generations": generation,
+                    "population_size": pop_size,
+                    "final_fitness": champ_fits[champ_idx],
+                    "total_env_steps": steps_done,
+                    "mutation_probs": mut_probs,
+                },
+                training_time_s=training_time,
+            )
 
         return TrainingResult(
-            algorithm=f"{self.ALGORITHM_NAME}-hpo",
+            algorithm=algo_tag,
             policy=policy,
             metrics={
                 "fitness_history": fitness_history,
@@ -413,8 +506,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     try:
                         experiences = memory.sample(batch_size)
                         agent.learn(experiences)
-                    except Exception:
-                        pass
+                    except Exception:  # pragma: no cover - version drift
+                        logger.warning(
+                            "[%s-hpo] _train_one_agent: agent.learn() failed",
+                            self.ALGORITHM_NAME, exc_info=True,
+                        )
 
                 if done:
                     break

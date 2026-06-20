@@ -32,8 +32,18 @@ note right of API: log_config=None so uvicorn\ndoes not clobber our handlers
 API -> Root: logger.info / warning / exception(...)
 Runner -> Cfg: configure_logging(log_file=None)  // console only
 Runner -> Root: build_configs INFO (components active),\nsub-run progress, logger.exception on failure
-group warnings.warn(...)  (parallel / device / coevolution / catalog)
-    Root -> Root: routed to py.warnings @ WARNING
+group warnings.warn(...)  (parallel / device / coevolution / catalog / rl_side / rl_hpo_side / agilerl_hpo_trainer)
+    Root -> Root: routed to py.warnings @ WARNING\n(no stack trace)
+end
+group Dual-emit pattern (exception sites in RL training code)
+    note over Root
+      At every except...as exc: block that calls warnings.warn(),
+      RL code (rl_side.py, rl_hpo_side.py, agilerl_hpo_trainer.py)
+      also calls logger.warning(..., exc_info=True) FIRST so the
+      full stack trace lands in service.log, then warnings.warn()
+      for the user-visible console message.
+      Reference implementation: recording.py:88, agilerl_trainer.py:926.
+    end note
 end
 Root -> Console: format + write
 Root -> FileH: format + write (app process only)

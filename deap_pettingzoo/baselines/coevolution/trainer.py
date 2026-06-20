@@ -652,13 +652,23 @@ class CoEvolutionTrainer(BaselineTrainer):
 
         has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
         if has_rl_side and resolved_workers > 1:
+            has_onpolicy_rl = any(
+                isinstance(s, RLSideState) and getattr(s, "is_on_policy", False)
+                for s in states.values()
+            )
+            rl_detail = (
+                "On-policy RL learners (IPPO/GroupedIPPO) collect their own "
+                "rollouts serially — the live actor+critic must produce the "
+                "log_prob/value the actor-only snapshot cannot."
+                if has_onpolicy_rl
+                else "Off-policy RL rollout collection also parallelizes."
+            )
             warnings.warn(
                 "CoEvolutionConfig: num_workers="
                 f"{coev_cfg.num_workers} but an RL side is present. "
-                "EA/CMA learner sides will evaluate against RL opponents "
-                "in parallel via FrozenRLPolicyWrapper CPU snapshots. "
-                "The RL learner itself still collects rollouts serially "
-                "(parallel RL rollout collection is Phase 2).",
+                "EA/CMA learner sides evaluate against RL opponents in "
+                "parallel via FrozenRLPolicyWrapper CPU snapshots. "
+                + rl_detail,
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -874,8 +884,8 @@ class CoEvolutionTrainer(BaselineTrainer):
                         "metrics",
                         {
                             "iteration": int(s.generation),
-                            "env_steps": 0,
-                            "wall_time": 0.0,
+                            "env_steps": int(s.env_steps),
+                            "wall_time": float(s.wall_time_s),
                             "side": name,
                             "mean": s.mean,
                             "std": s.std,

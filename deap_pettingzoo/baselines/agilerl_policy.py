@@ -21,10 +21,12 @@ that receives one observation at a time with no agent id.
 
 :class:`FrozenRLPolicyWrapper` is a CPU-only, picklable inference-only
 snapshot created by :meth:`AgileRLPolicyWrapper.make_frozen_cpu_snapshot`.
-It holds deepcopied CPU actor ``nn.Module`` objects and implements the
-same :class:`PolicyProtocol` interface without any optimizer, replay
-buffer, or CUDA state, making it safe to ship across ``ProcessPoolExecutor``
-spawn boundaries for parallel co-evolution evaluation.
+It holds CPU actor ``nn.Module`` objects rebuilt from their ``state_dict``
+(so it works for IPPO's ``StochasticActor`` too, which ``copy.deepcopy``
+rejects) and implements the same :class:`PolicyProtocol` interface without
+any optimizer, replay buffer, or CUDA state, making it safe to ship across
+``ProcessPoolExecutor`` spawn boundaries for parallel co-evolution
+evaluation.
 """
 
 from typing import Any, Dict, Iterable, List, Optional
@@ -76,6 +78,122 @@ def _ensure_agilerl_imports() -> None:
         import agilerl.networks  # noqa: F401
     except Exception:
         pass  # best-effort; pickle.loads will raise a clear error if needed
+
+
+def _serialize_actor(actor: Any) -> Dict[str, Any]:
+    """Capture an actor module as pure, picklable data.
+
+    AgileRL evolvable actors (those exposing ``init_dict`` + ``state_dict``)
+    are captured as their class, a CPU-forced deep copy of ``init_dict``
+    (constructor args — gym spaces, net-config dicts, and scalars; never
+    tensors or a cached distribution), and a CPU ``state_dict``.  Rebuilding
+    from these is the exact contract AgileRL's own
+    :meth:`EvolvableModule.clone` relies on, so it round-trips both
+    ``DeterministicActor`` (MADDPG/MATD3) and ``StochasticActor``
+    (IPPO/GroupedIPPO).  Unlike :func:`copy.deepcopy` it never touches the
+    live module's cached distribution / non-leaf tensors, so it works for the
+    on-policy actors ``deepcopy`` rejects.
+
+    Any other module (e.g. a plain ``nn.Module`` test stub) falls back to a
+    ``cloudpickle`` byte dump, which handles library classes, locally-defined
+    classes, and bound-method closures that standard pickle cannot.
+    """
+    import copy
+
+    init_dict = None
+    try:
+        candidate = actor.init_dict
+        if candidate is not None and hasattr(actor, "load_state_dict"):
+            init_dict = candidate
+    except Exception:
+        init_dict = None
+
+    if init_dict is not None:
+        try:
+            init = copy.deepcopy(dict(init_dict))
+            if "device" in init:
+                init["device"] = "cpu"
+            state = {k: v.detach().to("cpu") for k, v in actor.state_dict().items()}
+            return {"mode": "evolvable", "cls": type(actor), "init": init, "state": state}
+        except Exception:
+            pass  # fall through to the generic byte-dump path
+
+    import io
+
+    try:
+        import cloudpickle as _cp  # type: ignore[import]
+    except ImportError as exc:
+        raise ImportError(
+            "FrozenRLPolicyWrapper serialization of a non-AgileRL actor "
+            "requires cloudpickle. Install with: pip install cloudpickle"
+        ) from exc
+
+    buf = io.BytesIO()
+    _cp.dump(actor, buf)
+    return {"mode": "raw", "bytes": buf.getvalue()}
+
+
+def _rebuild_actor(data: Dict[str, Any]) -> Any:
+    """Rebuild a frozen, CPU, eval-mode inference actor from :func:`_serialize_actor` data.
+
+    Evolvable actors are reconstructed from the captured ``init_dict`` then
+    have their weights loaded (``strict=False`` mirrors AgileRL's own
+    ``clone()`` tolerance; the architecture is identical so keys match in
+    practice).  Raw actors are loaded back from their ``cloudpickle`` bytes.
+    """
+    if data.get("mode") == "raw":
+        import pickle
+
+        actor = pickle.loads(data["bytes"])
+    else:
+        actor = data["cls"](**data["init"])
+        actor.load_state_dict(data["state"], strict=False)
+
+    actor = actor.to("cpu")
+    actor.eval()
+    for p in actor.parameters():
+        p.requires_grad_(False)
+    return actor
+
+
+def _build_agent_actor_index(
+    agent: Any, agent_ids: List[str], actor_keys: "Optional[List[Any]]"
+) -> "Optional[List[int]]":
+    """Map each agent slot to its actor's index in the extracted actors list.
+
+    Handles grouped IPPO (shared actors keyed by group) and independent
+    actors (one per agent) alike: for each agent id it resolves the actor
+    key (the agent's group id when grouped, else the agent id itself) and
+    records the position of that key in ``actor_keys``.
+
+    Returns ``None`` — signalling the caller to fall back to positional
+    ``index % len(actors)`` indexing — whenever ``actor_keys`` is empty or
+    any agent fails to resolve, preserving the legacy behaviour for
+    MADDPG/MATD3 and independent IPPO.
+    """
+    if not actor_keys:
+        return None
+    get_group = getattr(agent, "get_group_id", None)
+    has_grouped = getattr(agent, "has_grouped_agents", None)
+    try:
+        grouped = bool(has_grouped()) if callable(has_grouped) else False
+    except Exception:
+        grouped = False
+
+    idx_map: List[int] = []
+    for aid in agent_ids:
+        key: Any = None
+        if grouped and callable(get_group):
+            try:
+                key = get_group(aid)
+            except Exception:
+                key = None
+        if key is None or key not in actor_keys:
+            key = aid
+        if key not in actor_keys:
+            return None
+        idx_map.append(actor_keys.index(key))
+    return idx_map
 
 
 class AgileRLPolicyWrapper:
@@ -233,28 +351,30 @@ class AgileRLPolicyWrapper:
     def make_frozen_cpu_snapshot(self) -> "FrozenRLPolicyWrapper":
         """Create a picklable, CPU-only inference snapshot of this policy.
 
-        Deep-copies every actor ``nn.Module`` from the underlying AgileRL
-        agent, moves them to CPU, and sets them to ``eval()`` mode with
-        gradient computation disabled.  The resulting
+        Rebuilds every actor ``nn.Module`` from the underlying AgileRL agent
+        via its ``init_dict`` + ``state_dict`` (CPU-resident, ``eval()`` mode,
+        gradients disabled) rather than ``copy.deepcopy`` — the latter rejects
+        AgileRL's ``StochasticActor`` (IPPO/GroupedIPPO), which caches a torch
+        distribution built from non-leaf tensors.  The resulting
         :class:`FrozenRLPolicyWrapper` is safe to pickle across
-        ``ProcessPoolExecutor`` spawn boundaries — it carries no
-        optimizer state, replay buffer, or CUDA device references.
+        ``ProcessPoolExecutor`` spawn boundaries — it carries no optimizer
+        state, replay buffer, or CUDA device references.
 
         Supports both *list-of-actors* layouts (``agent.actors``) and
         *single-actor* layouts (``agent.actor``).  Falls back gracefully
-        when neither attribute is present.
+        when neither attribute is present.  For grouped IPPO (shared actors
+        keyed by group), the per-agent → actor mapping is preserved so each
+        agent slot is driven by the correct shared actor.
 
         Returns:
             FrozenRLPolicyWrapper — a self-contained CPU inference policy.
 
         Raises:
             ImportError: if PyTorch is not installed.
-            RuntimeError: if actor extraction or the deepcopy/cpu move fails.
+            RuntimeError: if actor extraction or the state_dict rebuild fails.
         """
-        import copy
-
         try:
-            import torch  # type: ignore[import]
+            import torch  # type: ignore[import]  # noqa: F401
         except ImportError as exc:
             raise ImportError(
                 "make_frozen_cpu_snapshot requires PyTorch. "
@@ -262,8 +382,11 @@ class AgileRLPolicyWrapper:
             ) from exc
 
         actors_raw = getattr(self._agent, "actors", None)
+        actor_keys: Optional[List[Any]] = None
         if hasattr(actors_raw, "values"):
-            # ModuleDict or plain dict — extract the module values, not keys.
+            # ModuleDict or plain dict — keep keys (group/agent ids) so we can
+            # route each agent slot to the right (possibly shared) actor.
+            actor_keys = list(actors_raw.keys())
             actors: List[Any] = list(actors_raw.values())
         elif isinstance(actors_raw, (list, tuple)) and len(actors_raw) > 0:
             actors = list(actors_raw)
@@ -277,19 +400,22 @@ class AgileRLPolicyWrapper:
                 "(single module). Cannot extract actor networks."
             )
 
+        # State_dict-based reconstruction instead of copy.deepcopy: the latter
+        # rejects AgileRL's StochasticActor (cached distribution / non-leaf
+        # tensors), while init_dict + state_dict round-trips every actor type.
         try:
-            frozen: List[Any] = []
-            for a in actors:
-                cpu_actor = copy.deepcopy(a).cpu()
-                cpu_actor.eval()
-                for p in cpu_actor.parameters():
-                    p.requires_grad_(False)
-                frozen.append(cpu_actor)
+            frozen: List[Any] = [_rebuild_actor(_serialize_actor(a)) for a in actors]
         except Exception as exc:
             raise RuntimeError(
-                f"make_frozen_cpu_snapshot: failed to deepcopy/move actors "
+                f"make_frozen_cpu_snapshot: failed to rebuild actors "
                 f"from {type(self._agent).__name__!r}: {exc}"
             ) from exc
+
+        # Per-agent → actor index map (handles grouped IPPO shared actors);
+        # None falls back to positional indexing in FrozenRLPolicyWrapper.
+        agent_actor_idx = _build_agent_actor_index(
+            self._agent, self._agent_ids, actor_keys
+        )
 
         is_discrete = bool(getattr(self._agent, "discrete_actions", False))
 
@@ -315,6 +441,7 @@ class AgileRLPolicyWrapper:
             algorithm_name=self._algorithm_name,
             is_discrete=is_discrete,
             multidiscrete_nvecs=multidiscrete_nvecs,
+            agent_actor_idx=agent_actor_idx,
         )
 
 
@@ -322,9 +449,9 @@ class FrozenRLPolicyWrapper:
     """Inference-only RL policy — CPU-resident and picklable.
 
     Created by :meth:`AgileRLPolicyWrapper.make_frozen_cpu_snapshot`.
-    Holds deepcopied CPU ``torch.nn.Module`` actor objects with no
-    optimizer, replay buffer, or CUDA state, making it safe to pickle
-    across ``ProcessPoolExecutor`` spawn boundaries.
+    Holds CPU ``torch.nn.Module`` actor objects rebuilt from their
+    ``state_dict`` with no optimizer, replay buffer, or CUDA state, making
+    it safe to pickle across ``ProcessPoolExecutor`` spawn boundaries.
 
     Implements the same round-robin / obs-cache :class:`PolicyProtocol`
     interface as :class:`AgileRLPolicyWrapper` so it can be used as a
@@ -346,6 +473,10 @@ class FrozenRLPolicyWrapper:
             ``agent_ids``); ``None`` for non-MultiDiscrete slots.  Used to
             shape MultiDiscrete actions as an integer array of length
             ``len(nvec)``.
+        agent_actor_idx: Optional per-slot index into ``actors`` (aligned to
+            ``agent_ids``) routing each agent to its (possibly shared) actor,
+            as needed for grouped IPPO.  ``None`` ⇒ positional
+            ``index % len(actors)`` fallback (one actor per agent).
     """
 
     def __init__(
@@ -356,6 +487,7 @@ class FrozenRLPolicyWrapper:
         algorithm_name: str,
         is_discrete: bool = False,
         multidiscrete_nvecs: "Optional[List[Optional[tuple]]]" = None,
+        agent_actor_idx: "Optional[List[int]]" = None,
     ) -> None:
         self._actors = list(actors)
         self._agent_ids = list(agent_ids)
@@ -363,6 +495,9 @@ class FrozenRLPolicyWrapper:
         self._algorithm_name = algorithm_name
         self._is_discrete = is_discrete
         self._md_nvecs = list(multidiscrete_nvecs) if multidiscrete_nvecs else None
+        # Per-agent actor index (grouped IPPO shares actors across agents);
+        # None ⇒ positional ``index % len(actors)`` fallback.
+        self._actor_idx_map = list(agent_actor_idx) if agent_actor_idx else None
         self._call_index = 0
         self._obs_cache: Dict[str, np.ndarray] = {}
 
@@ -381,7 +516,12 @@ class FrozenRLPolicyWrapper:
         self._call_index += 1
         self._obs_cache[agent_id] = np.asarray(observation, dtype=np.float32)
 
-        actor_idx = self._agent_ids.index(agent_id) % len(self._actors)
+        slot = self._agent_ids.index(agent_id)
+        actor_idx = (
+            self._actor_idx_map[slot]
+            if self._actor_idx_map is not None
+            else slot % len(self._actors)
+        )
         actor = self._actors[actor_idx]
 
         obs_t = torch.from_numpy(self._obs_cache[agent_id]).unsqueeze(0)  # (1, obs_dim)
@@ -403,7 +543,12 @@ class FrozenRLPolicyWrapper:
             if slot_nvec is not None:
                 return np.asarray(sampled, dtype=np.int64).reshape(len(slot_nvec))
             if sampled.shape == ():
-                return int(sampled) if self._is_discrete else float(sampled)
+                # StochasticActor already returns the env-native type: an int64
+                # index for Discrete, a float for Box. Preserve it (the agent's
+                # ``discrete_actions`` flag is unreliable across AgileRL algos).
+                if np.issubdtype(sampled.dtype, np.integer) or self._is_discrete:
+                    return int(sampled)
+                return float(sampled)
             return sampled
 
         # Rescale continuous actions from the network's output range to the
@@ -448,41 +593,26 @@ class FrozenRLPolicyWrapper:
         self._call_index = 0
         self._obs_cache = {}
 
-    # Pickle support — EvolvableMLP uses instance-bound methods that
-    # standard pickle cannot serialize.  We serialise each actor with
-    # cloudpickle (which handles closures / bound methods) and store the
-    # resulting bytes in the state dict.  cloudpickle output is always
-    # readable by standard pickle.loads, so the bytes survive
-    # multiprocessing's ForkingPickler transparently.
+    # Pickle support — instead of pickling the live actor modules (which may
+    # hold instance-bound methods or a cached torch distribution), each actor
+    # is serialised as pure data via :func:`_serialize_actor` (class +
+    # init_dict + CPU state_dict) and rebuilt with :func:`_rebuild_actor` on
+    # the far side.  This is standard-pickle-safe (no cloudpickle) and immune
+    # to non-leaf / cached-distribution tensors, so it survives
+    # multiprocessing's ForkingPickler for both deterministic and stochastic
+    # actors.
 
     def __getstate__(self) -> dict:
-        import io
-        try:
-            import cloudpickle as _cp  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "FrozenRLPolicyWrapper pickling requires cloudpickle. "
-                "Install with: pip install cloudpickle"
-            ) from exc
-
-        serialized: List[bytes] = []
-        for actor in self._actors:
-            buf = io.BytesIO()
-            _cp.dump(actor, buf)
-            serialized.append(buf.getvalue())
-
         state = {k: v for k, v in self.__dict__.items() if k != "_actors"}
-        state["_serialized_actors"] = serialized
+        state["_actor_states"] = [_serialize_actor(a) for a in self._actors]
         return state
 
     def __setstate__(self, state: dict) -> None:
-        import pickle
-
         _ensure_agilerl_imports()
 
-        serialized: List[bytes] = state.pop("_serialized_actors", [])
+        actor_states = state.pop("_actor_states", [])
         self.__dict__.update(state)
-        self._actors = [pickle.loads(b) for b in serialized]
+        self._actors = [_rebuild_actor(d) for d in actor_states]
 
     # Introspection
 

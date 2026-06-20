@@ -222,7 +222,9 @@ class TestAlgorithmCatalog:
         assert catalog.get_algorithm("cma-es").coevolution_optimizer == "cma"
         assert catalog.get_algorithm("pso").coevolution_optimizer == "pso"
         assert catalog.get_algorithm("maddpg").coevolution_optimizer == "rl"
-        assert catalog.get_algorithm("ippo").coevolution_optimizer is None
+        # On-policy IPPO / GroupedIPPO are now valid co-evolution RL sides.
+        assert catalog.get_algorithm("ippo").coevolution_optimizer == "rl"
+        assert catalog.get_algorithm("ippo-grouped").coevolution_optimizer == "rl"
 
     def test_marl_algorithms_require_extras(self):
         maddpg = catalog.get_algorithm("maddpg")
