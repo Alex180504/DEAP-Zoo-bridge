@@ -161,6 +161,10 @@ class GenerationStats:
     archive_best_fitness: Optional[float] = None
     filled_niches: Optional[int] = None
     total_niches: Optional[int] = None
+    #: Cumulative env interactions this side has performed up to this generation.
+    env_steps: int = 0
+    #: Wall-clock seconds this ``step_generation`` call took.
+    wall_time_s: float = 0.0
 
 
 class SideState:

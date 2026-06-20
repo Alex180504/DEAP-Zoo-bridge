@@ -5,8 +5,7 @@
 # Deliberately NOT pinned here (handled in the workflow instead):
 #   * torch        — local is a CUDA build; CI installs the CPU wheel (==2.6.0)
 #   * fastrand,
-#     pymunk       — the local versions have no manylinux wheel; let them float
-#                    so CI uses a wheeled version instead of a source build
+#   * pymunk       — the local versions have no manylinux wheel; 
 #
 # Regenerate after changing the local venv:
 #   .\.venv\Scripts\python.exe -m pip freeze \

@@ -478,6 +478,8 @@ class AgileRLTrainer(BaselineTrainer):
                         "success": -1,
                     },
                 )
+            for entry in metrics.get("metrics_history", []):
+                log.row("metrics", entry)
             from deap_pettingzoo.utils.logging import save_agilerl_agent
             save_agilerl_agent(
                 log,
@@ -793,6 +795,7 @@ class AgileRLTrainer(BaselineTrainer):
         ep_reward = np.zeros(num_envs, dtype=np.float64)
         losses: List[float] = []
         steps_done = 0
+        metrics_history: List[Dict[str, Any]] = []
 
         def _expand_placeholder(value: Any) -> Any:
             if isinstance(value, dict):
@@ -966,6 +969,7 @@ class AgileRLTrainer(BaselineTrainer):
                 > prev_steps // progress_emit_interval
                 or progress_steps >= budget_steps
             ):
+                elapsed = time.time() - loop_start
                 _emit_mean = (
                     float(np.mean(episode_rewards[-10:]))
                     if episode_rewards else None
@@ -973,6 +977,17 @@ class AgileRLTrainer(BaselineTrainer):
                 _emit_best = (
                     float(max(episode_rewards)) if episode_rewards else None
                 )
+                _window = episode_rewards[-10:] if episode_rewards else []
+                metrics_history.append({
+                    "iteration": len(metrics_history),
+                    "env_steps": int(progress_steps),
+                    "wall_time_s": elapsed,
+                    "mean": _emit_mean,
+                    "std": float(np.std(_window)) if _window else None,
+                    "min": float(min(_window)) if _window else None,
+                    "max": _emit_best,
+                    "mean_loss": float(losses[-1]) if losses else None,
+                })
                 self._on_progress(
                     progress_callback,
                     ProgressEvent(
@@ -982,7 +997,7 @@ class AgileRLTrainer(BaselineTrainer):
                         env_steps=int(progress_steps),
                         best_fitness=_emit_best,
                         mean_fitness=_emit_mean,
-                        wall_time_s=time.time() - loop_start,
+                        wall_time_s=elapsed,
                     ),
                     champion=champion,
                 )
@@ -999,6 +1014,7 @@ class AgileRLTrainer(BaselineTrainer):
             "num_episodes": len(episode_rewards),
             "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
+            "metrics_history": metrics_history,
         }
 
     def _run_on_policy(
@@ -1044,6 +1060,7 @@ class AgileRLTrainer(BaselineTrainer):
         losses: List[float] = []
         steps_done = 0
         step_size = num_envs if is_vec else 1
+        metrics_history: List[Dict[str, Any]] = []
 
         # Per-(sub-)env running episode-reward accumulator. For the
         # single-env case this is a scalar in a length-1 array; for the
@@ -1248,6 +1265,7 @@ class AgileRLTrainer(BaselineTrainer):
                 )
 
             progress_steps = min(steps_done, budget_steps)
+            elapsed_op = time.time() - on_policy_start
             loss_str = f" | mean_loss={losses[-1]:.4f}" if losses else ""
             print(
                 f"[{self.ALGORITHM_NAME}] {progress_steps:,}/{budget_steps:,} steps"
@@ -1267,6 +1285,17 @@ class AgileRLTrainer(BaselineTrainer):
             _emit_best = (
                 float(max(episode_rewards)) if episode_rewards else None
             )
+            _window = episode_rewards[-10:] if episode_rewards else []
+            metrics_history.append({
+                "iteration": len(metrics_history),
+                "env_steps": int(progress_steps),
+                "wall_time_s": elapsed_op,
+                "mean": _emit_mean,
+                "std": float(np.std(_window)) if _window else None,
+                "min": float(min(_window)) if _window else None,
+                "max": _emit_best,
+                "mean_loss": float(losses[-1]) if losses else None,
+            })
             self._on_progress(
                 progress_callback,
                 ProgressEvent(
@@ -1276,7 +1305,7 @@ class AgileRLTrainer(BaselineTrainer):
                     env_steps=int(progress_steps),
                     best_fitness=_emit_best,
                     mean_fitness=_emit_mean,
-                    wall_time_s=time.time() - on_policy_start,
+                    wall_time_s=elapsed_op,
                 ),
                 champion=champion,
             )
@@ -1298,6 +1327,7 @@ class AgileRLTrainer(BaselineTrainer):
             "num_episodes": len(episode_rewards),
             "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
+            "metrics_history": metrics_history,
         }
 
 

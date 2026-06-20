@@ -65,23 +65,39 @@ def _rl_cfg(algo: str = "maddpg", **overrides) -> dict:
     return base
 
 
-def _tcfg(coev_cfg: CoEvolutionConfig, budget: int = 12) -> TrainingConfig:
+def _tcfg(
+    coev_cfg: CoEvolutionConfig,
+    budget: int = 12,
+    env_config: dict | None = None,
+) -> TrainingConfig:
     return TrainingConfig(
         env_name="simple_tag_v3",
-        env_config={"continuous_actions": True},
+        env_config={"continuous_actions": True} if env_config is None else env_config,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
         algorithm_params={"coevolution": coev_cfg},
     )
 
 
-def _build_rl_wrapper(env_name: str = "simple_tag_v3") -> AgileRLPolicyWrapper:
-    """Initialise an AgileRLPolicyWrapper by running a minimal RLSideState."""
-    from deap_pettingzoo.baselines.coevolution import RLSideState, make_side_state
+def _build_rl_wrapper(
+    env_name: str = "simple_tag_v3",
+    *,
+    algo: str = "maddpg",
+    role: tuple = ("agent",),
+    env_config: dict | None = None,
+) -> AgileRLPolicyWrapper:
+    """Initialise an AgileRLPolicyWrapper by running a minimal RLSideState.
 
-    side = Side("evaders", ("agent",), "rl", _rl_cfg("maddpg"))
+    ``algo="ippo"`` with ``role=("adversary",)`` exercises a grouped
+    StochasticActor (shared across the homogeneous adversaries).
+    """
+    from deap_pettingzoo.baselines.coevolution import make_side_state
+
+    if env_config is None:
+        env_config = {} if algo.startswith("ippo") else {"continuous_actions": True}
+    side = Side("side", role, "rl", _rl_cfg(algo))
     state = make_side_state(side)
-    env = PettingZooWrapper(env_name, env_config={"continuous_actions": True})
+    env = PettingZooWrapper(env_name, env_config=env_config)
     state.initialise(env, rng=np.random.default_rng(0))
     assert isinstance(state._wrapper, AgileRLPolicyWrapper)
     return state._wrapper
@@ -128,6 +144,44 @@ class TestFrozenWrapper:
         for actor in frozen._actors:
             if isinstance(actor, nn.Module):
                 assert not actor.training, "Actor must be in eval mode"
+
+
+class TestFrozenWrapperIPPO:
+    """IPPO (on-policy StochasticActor) frozen snapshots — previously blocked
+    by copy.deepcopy, now built via state_dict reconstruction."""
+
+    def test_ippo_snapshot_builds_without_fallback(self):
+        """make_frozen_cpu_snapshot must succeed for an IPPO StochasticActor
+        (grouped across the homogeneous adversaries) — no exception/warning."""
+        wrapper = _build_rl_wrapper(algo="ippo", role=("adversary",))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            frozen = wrapper.make_frozen_cpu_snapshot()
+        assert isinstance(frozen, FrozenRLPolicyWrapper)
+
+    def test_ippo_frozen_picklable_and_acts(self):
+        """Frozen IPPO snapshot round-trips through pickle and yields a valid
+        discrete (int) action for the env's action space."""
+        wrapper = _build_rl_wrapper(algo="ippo", role=("adversary",))
+        frozen = pickle.loads(pickle.dumps(wrapper.make_frozen_cpu_snapshot()))
+        assert isinstance(frozen, FrozenRLPolicyWrapper)
+
+        env = PettingZooWrapper("simple_tag_v3", env_config={})
+        adversaries = [a for a in env.possible_agents if a.startswith("adversary")]
+        obs = env.observation_space(adversaries[0]).sample()
+        act = frozen.get_action(obs)
+        assert isinstance(act, int)
+        assert 0 <= act < env.action_space(adversaries[0]).n
+
+    def test_ippo_grouped_actor_mapping(self):
+        """A grouped IPPO shares one actor across adversaries; the frozen
+        wrapper must carry the per-agent → actor index map."""
+        wrapper = _build_rl_wrapper(algo="ippo", role=("adversary",))
+        frozen = wrapper.make_frozen_cpu_snapshot()
+        # 3 adversaries share a single actor.
+        assert len(frozen._actors) < len(frozen.agent_ids)
+        assert frozen._actor_idx_map is not None
+        assert len(frozen._actor_idx_map) == len(frozen.agent_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -268,4 +322,36 @@ class TestEAvsRLParallel:
             seed=1,
         )
         result = CoEvolutionTrainer().train(_tcfg(cfg, budget=8))
+        assert result.best_policy is not None
+
+    def test_ea_vs_ippo_num_workers_2_succeeds(self):
+        """On-policy IPPO RL side co-evolving against an EA side, with the EA
+        evaluating in parallel against the frozen IPPO opponent snapshot.
+
+        The IPPO side controls the homogeneous adversaries (grouped actor);
+        the run must complete and never fall back to the live-policy snapshot
+        path (which is what would break parallel pickling)."""
+        cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side("pursuers", ("adversary",), "rl",
+                     _rl_cfg("ippo", rollout_episodes_per_gen=2)),
+                Side("evaders", ("agent",), "ea", _ea_cfg(3)),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=10,
+            num_workers=2,
+            seed=7,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = CoEvolutionTrainer().train(
+                _tcfg(cfg, budget=8, env_config={})
+            )
+        fallback = [
+            str(w.message) for w in caught
+            if w.category is RuntimeWarning
+            and "make_frozen_cpu_snapshot failed" in str(w.message)
+        ]
+        assert not fallback, f"unexpected snapshot fallback: {fallback}"
         assert result.best_policy is not None

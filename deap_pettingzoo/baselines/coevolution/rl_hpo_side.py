@@ -10,7 +10,11 @@ exposed to opponent sides each generation (via a frozen CPU snapshot).
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -24,6 +28,8 @@ from .sides import GenerationStats, Side, SideState
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3_hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
+    "ippo_hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
 }
 
 
@@ -32,7 +38,8 @@ class RLEvolveHPOSideState(SideState):
 
     Accepted ``optimizer_config`` keys:
 
-    * ``algorithm`` (required) — ``"maddpg_hpo"`` or ``"matd3_hpo"``.
+    * ``algorithm`` (required) — ``"maddpg_hpo"`` / ``"matd3_hpo"``
+      (off-policy) or ``"ippo_hpo"`` / ``"grouped_ippo_hpo"`` (on-policy).
     * ``population_size`` (default 6)
     * ``evo_every_n_steps`` (default 20_000 — coevolution generations
       are typically shorter than standalone HPO)
@@ -58,10 +65,6 @@ class RLEvolveHPOSideState(SideState):
         self._algo_module, self._algo_class, self._on_policy = (
             SUPPORTED_HPO_RL_ALGORITHMS[algo]
         )
-        if self._on_policy:  # pragma: no cover — safety net
-            raise NotImplementedError(
-                "On-policy HPO co-evolution is not yet supported."
-            )
 
         self.population_size = int(cfg.get("population_size", 6))
         self.evo_every = int(cfg.get("evo_every_n_steps", 20_000))
@@ -132,6 +135,8 @@ class RLEvolveHPOSideState(SideState):
             hp_config=hp_config,
         )
         self._population = pop
+        if self._on_policy:
+            self._maybe_apply_grouping_patch()
         self._champion_wrapper = AgileRLPolicyWrapper(
             self._population[0], self._learner_ids,
             algorithm_name=self._algo_key,
@@ -144,17 +149,26 @@ class RLEvolveHPOSideState(SideState):
         batch_eval_fn=None,
     ) -> GenerationStats:
         self.generation += 1
+        _gen_t0 = time.time()
 
         # 1. Train each agent for evo_every steps against current opponents.
         evaluator = evaluator_factory(self)
         env = evaluator._env  # type: ignore[attr-defined]
         for agent in self._population:
-            self._train_agent(
-                agent=agent,
-                env=env,
-                learner_ids=self._learner_ids,
-                target_steps=self.evo_every,
-            )
+            if self._on_policy:
+                self._train_agent_on_policy(
+                    agent=agent,
+                    env=env,
+                    learner_ids=self._learner_ids,
+                    target_steps=self.evo_every,
+                )
+            else:
+                self._train_agent(
+                    agent=agent,
+                    env=env,
+                    learner_ids=self._learner_ids,
+                    target_steps=self.evo_every,
+                )
 
         # 2. Evaluate fitnesses.
         fitnesses: List[float] = []
@@ -214,6 +228,8 @@ class RLEvolveHPOSideState(SideState):
             min=min(fitnesses),
             max=best,
             best_fitness=best,
+            env_steps=self.generation * self.evo_every,
+            wall_time_s=time.time() - _gen_t0,
         )
         self.history.append(stats)
         return stats
@@ -337,13 +353,144 @@ class RLEvolveHPOSideState(SideState):
                         try:
                             experiences = memory.sample(batch_size)
                             agent.learn(experiences)
-                        except Exception:
-                            pass
+                        except Exception:  # pragma: no cover - version drift
+                            logging.getLogger(__name__).warning(
+                                "RLEvolveHPOSideState._train_agent: agent.learn() failed",
+                                exc_info=True,
+                            )
 
                 if all(terms.get(a, False) for a in learner_ids) or all(
                     truncs.get(a, False) for a in learner_ids
                 ):
                     break
+
+    def _maybe_apply_grouping_patch(self) -> None:
+        """Install AgileRL's grouped-IPPO advantage/state flattening fix.
+
+        Same rationale as :meth:`RLSideState._maybe_apply_grouping_patch`:
+        AgileRL shares one actor/critic across same-role agents, which
+        triggers a flattening bug in ``IPPO._learn_individual``. No-op unless
+        the population's agents are actually grouped.
+        """
+        grouped = self._algo_key == "grouped_ippo_hpo"
+        if not grouped and self._population:
+            has = getattr(self._population[0], "has_grouped_agents", None)
+            try:
+                grouped = bool(has()) if callable(has) else False
+            except Exception:
+                grouped = False
+        if not grouped:
+            return
+        try:
+            from deap_pettingzoo.baselines.agilerl_trainer import (
+                _apply_agilerl_grouping_patch,
+            )
+
+            _apply_agilerl_grouping_patch()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("RLEvolveHPOSideState: could not apply grouped-IPPO patch", exc_info=True)
+
+    @staticmethod
+    def _train_agent_on_policy(
+        agent: Any,
+        env: Any,
+        learner_ids: List[str],
+        target_steps: int,
+    ) -> None:
+        """On-policy (IPPO) training for one population member.
+
+        Collects ``(obs, action, log_prob, value, reward, done)`` tuples from
+        the live policy into an
+        :class:`~deap_pettingzoo.baselines.agilerl_onpolicy.OnPolicyRolloutBuffer`
+        and calls ``agent.learn`` once per ``learn_step`` worth of transitions
+        (AgileRL computes GAE internally). Mirrors the env-stepping contract of
+        :meth:`_train_agent` but for the policy-gradient update path.
+        """
+        from deap_pettingzoo.baselines.agilerl_onpolicy import (
+            OnPolicyRolloutBuffer,
+            sanitize_obs,
+        )
+
+        learn_step = int(getattr(agent, "learn_step", 128))
+        steps = 0
+        buf = OnPolicyRolloutBuffer(learner_ids)
+        prev_done = {a: np.zeros(1, dtype=np.float32) for a in learner_ids}
+        bootstrap: Dict[str, np.ndarray] = {}
+
+        def _flush() -> None:
+            nonlocal buf, prev_done
+            if len(buf) > 0:
+                try:
+                    agent.learn(buf.experiences(bootstrap, prev_done))
+                except Exception:  # pragma: no cover - version drift
+                    logging.getLogger(__name__).warning(
+                        "RLEvolveHPOSideState._train_agent_on_policy: agent.learn() failed",
+                        exc_info=True,
+                    )
+                buf = OnPolicyRolloutBuffer(learner_ids)
+                prev_done = {a: np.zeros(1, dtype=np.float32) for a in learner_ids}
+
+        while steps < target_steps:
+            obs, info = env.reset()
+            info = info or {}
+            episode_over = False
+            while steps < target_steps and not episode_over:
+                action_obs = {
+                    a: sanitize_obs(obs[a]) for a in learner_ids if a in obs
+                }
+                if not action_obs:
+                    break
+                if len(action_obs) < len(learner_ids):
+                    ref = next(iter(action_obs.values()))
+                    for a in learner_ids:
+                        action_obs.setdefault(a, np.zeros_like(ref))
+
+                res = agent.get_action(
+                    action_obs,
+                    infos={a: info.get(a, {}) for a in learner_ids},
+                )
+                if not (isinstance(res, tuple) and len(res) >= 4):
+                    return  # not an on-policy agent — nothing to train
+                action, log_prob, _entropy, value = res[:4]
+
+                env_actions: Dict[str, Any] = {}
+                for a in learner_ids:
+                    act = action.get(a)
+                    if act is None:
+                        continue
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                    env_actions[a] = arr.item() if arr.shape == () else arr
+
+                next_obs, rewards, terms, truncs, info = env.step(env_actions)
+                info = info or {}
+                reward = {a: float(rewards.get(a, 0.0)) for a in learner_ids}
+                cur_done = {
+                    a: np.array(
+                        [1.0 if (terms.get(a, False) or truncs.get(a, False)) else 0.0],
+                        dtype=np.float32,
+                    )
+                    for a in learner_ids
+                }
+
+                buf.add(action_obs, action, log_prob, value, reward, prev_done)
+                prev_done = cur_done
+                for a in learner_ids:
+                    bootstrap[a] = (
+                        next_obs[a] if a in next_obs else np.zeros_like(action_obs[a])
+                    )
+
+                obs = next_obs
+                steps += 1
+                if all(terms.get(a, False) for a in learner_ids) or all(
+                    truncs.get(a, False) for a in learner_ids
+                ):
+                    episode_over = True
+                if len(buf) >= learn_step:
+                    _flush()
+
+        _flush()
 
     @staticmethod
     def _eval_agent(
@@ -362,7 +509,16 @@ class RLEvolveHPOSideState(SideState):
                 except TypeError:
                     actions = agent.get_action(obs)
                 result = actions[0] if isinstance(actions, tuple) else actions
-                next_obs, rews, terms, truncs, _ = env.step(result)
+                # Squeeze the leading (1,) batch dim so discrete envs receive
+                # scalar actions (on-policy get_action returns (1,)-shaped
+                # arrays); harmless for already-unbatched off-policy actions.
+                step_actions: Dict[str, Any] = {}
+                for a, act in result.items():
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                    step_actions[a] = arr.item() if arr.shape == () else arr
+                next_obs, rews, terms, truncs, _ = env.step(step_actions)
                 total += sum(float(rews.get(a, 0.0)) for a in learner_ids)
                 obs = next_obs
                 if all(terms.get(a, False) for a in learner_ids) or all(

@@ -204,8 +204,31 @@ class TestIPPOMultiDiscreteLive:
         finally:
             env.close()
 
-    # Note: a frozen-CPU-snapshot round-trip for IPPO is *not* tested here —
-    # AgileRL's StochasticActor cannot be ``deepcopy``'d (non-leaf tensors),
-    # which ``make_frozen_cpu_snapshot`` requires, independently of the action
-    # space. The MultiDiscrete decode of the frozen wrapper itself is covered
-    # by a stub-actor unit test in ``tests/test_agilerl_policy.py``.
+    def test_frozen_snapshot_roundtrip_multidiscrete(self):
+        """IPPO frozen CPU snapshots now build via state_dict reconstruction
+        (``StochasticActor`` is no longer ``deepcopy``'d) and decode
+        MultiDiscrete actions correctly through a pickle round-trip."""
+        import pickle
+
+        import numpy as np
+
+        from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+        from deap_pettingzoo.environments import PettingZooWrapper
+        from tests.multidiscrete_env import MD_ENV_NAME
+
+        result = IPPOTrainer().train(self._config())
+        assert isinstance(result.policy, AgileRLPolicyWrapper)
+
+        frozen = result.policy.make_frozen_cpu_snapshot()
+        frozen = pickle.loads(pickle.dumps(frozen))
+        assert isinstance(frozen, FrozenRLPolicyWrapper)
+
+        env = PettingZooWrapper(MD_ENV_NAME)
+        try:
+            obs = env.reset(seed=2)
+            agent = env.possible_agents[0]
+            action = np.asarray(frozen.get_action(obs[agent]))
+            assert action.shape == (2,)
+            assert 0 <= action[0] < 3 and 0 <= action[1] < 4
+        finally:
+            env.close()
