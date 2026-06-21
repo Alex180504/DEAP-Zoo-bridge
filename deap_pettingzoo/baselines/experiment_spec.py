@@ -632,18 +632,23 @@ def _build_coevolution_plan(
     for seed_idx in range(num_seeds):
         sides: List[Side] = []
         for side_spec in coev.sides:
+            optimizer_config = dict(side_spec.hyperparameters)
             if side_spec.algorithm == "frozen":
                 optimizer = "frozen"
             else:
                 optimizer = cat_algorithms.coevolution_optimizer_for(
                     side_spec.algorithm
                 ) or side_spec.algorithm
+                # RL / RL-HPO sides resolve their concrete AgileRL algorithm
+                # from ``optimizer_config['algorithm']``; inject the catalog name
+                # the user picked (the UI sends empty per-side hyperparameters).
+                optimizer_config.setdefault("algorithm", side_spec.algorithm)
             sides.append(
                 Side(
                     name=side_spec.name,
                     role_prefixes=tuple(side_spec.role_prefixes),
                     optimizer=optimizer,
-                    optimizer_config=dict(side_spec.hyperparameters),
+                    optimizer_config=optimizer_config,
                 )
             )
         coev_config = CoEvolutionConfig(

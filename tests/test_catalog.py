@@ -185,6 +185,10 @@ _EXPECTED_ALGORITHMS = {
     "matd3",
     "ippo",
     "ippo-grouped",
+    "maddpg-hpo",
+    "matd3-hpo",
+    "ippo-hpo",
+    "ippo-grouped-hpo",
 }
 
 
@@ -225,6 +229,23 @@ class TestAlgorithmCatalog:
         # On-policy IPPO / GroupedIPPO are now valid co-evolution RL sides.
         assert catalog.get_algorithm("ippo").coevolution_optimizer == "rl"
         assert catalog.get_algorithm("ippo-grouped").coevolution_optimizer == "rl"
+        # AgileRL HPO variants route to the evolutionary-HPO co-evolution side.
+        for name in ("maddpg-hpo", "matd3-hpo", "ippo-hpo", "ippo-grouped-hpo"):
+            assert catalog.get_algorithm(name).coevolution_optimizer == "rl_hpo"
+
+    def test_hpo_variants_registered_in_comparison_registry(self):
+        from deap_pettingzoo.baselines.comparison import _TRAINER_REGISTRY
+
+        for name in ("maddpg-hpo", "matd3-hpo", "ippo-hpo", "ippo-grouped-hpo"):
+            assert name in _TRAINER_REGISTRY
+
+    def test_hpo_overlay_exposes_population_knobs(self):
+        spec = catalog.get_algorithm("ippo-hpo")
+        for knob in ("population_size", "evo_every_n_steps", "tournament_size",
+                     "prob_rl_hp"):
+            assert spec.hyperparameter(knob) is not None, knob
+        # population_size is a constructor (TRAINER-target) knob.
+        assert spec.hyperparameter("population_size").target is ParamTarget.TRAINER
 
     def test_marl_algorithms_require_extras(self):
         maddpg = catalog.get_algorithm("maddpg")
@@ -346,7 +367,47 @@ class TestCoevolutionCatalog:
         opts = catalog.get_coevolution_options()
         assert {m["name"] for m in opts["modes"]} == set(cat_coevolution.COEV_MODES)
         optimizers = {entry["optimizer"] for entry in opts["side_optimizers"]}
-        assert {"ea", "cma", "pso", "rl", "frozen"} <= optimizers
+        assert {"ea", "cma", "pso", "rl", "rl_hpo", "frozen"} <= optimizers
+
+
+class TestCoevolutionAlgorithmInjection:
+    """``_build_coevolution_plan`` must inject the chosen algorithm into each
+    RL/HPO side's ``optimizer_config`` (the UI sends empty per-side params)."""
+
+    def _plan(self, side_algo: str):
+        from deap_pettingzoo.baselines.experiment_spec import (
+            ExperimentSpec,
+            build_configs,
+        )
+
+        spec = ExperimentSpec.from_dict({
+            "environment": "simple_tag_v3",
+            "budget": {"mode": "env_steps", "value": 100, "num_seeds": 1},
+            "coevolution": {
+                "enabled": True,
+                "mode": "competitive_2pop",
+                "sides": [
+                    {"name": "pred", "algorithm": side_algo,
+                     "role_prefixes": ["adversary"]},
+                    {"name": "prey", "algorithm": "ea",
+                     "role_prefixes": ["agent"]},
+                ],
+            },
+        })
+        plan = build_configs(spec, output_root=None)
+        coev = plan.sub_runs[0].config.algorithm_params["coevolution"]
+        return {s.name: s for s in coev.sides}
+
+    def test_hpo_side_algorithm_injected(self):
+        sides = self._plan("ippo-hpo")
+        assert sides["pred"].optimizer == "rl_hpo"
+        assert sides["pred"].optimizer_config["algorithm"] == "ippo-hpo"
+
+    def test_rl_side_algorithm_injected(self):
+        # The same injection fixes the non-HPO RL menu path too.
+        sides = self._plan("maddpg")
+        assert sides["pred"].optimizer == "rl"
+        assert sides["pred"].optimizer_config["algorithm"] == "maddpg"
 
 
 # ---------------------------------------------------------------------------

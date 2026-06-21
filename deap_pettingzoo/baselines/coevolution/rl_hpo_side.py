@@ -26,10 +26,18 @@ from .pools import OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
+    # Underscore keys (historical / programmatic).
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3_hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
     "ippo_hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
     "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
+    # Hyphenated catalog names (injected into ``optimizer_config['algorithm']``
+    # by ``experiment_spec._build_coevolution_plan``). Mirrors the dual-key
+    # pattern ``rl_side.SUPPORTED_RL_ALGORITHMS`` uses for grouped IPPO.
+    "maddpg-hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
+    "matd3-hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
+    "ippo-hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "ippo-grouped-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
 }
 
 
@@ -399,98 +407,19 @@ class RLEvolveHPOSideState(SideState):
     ) -> None:
         """On-policy (IPPO) training for one population member.
 
-        Collects ``(obs, action, log_prob, value, reward, done)`` tuples from
-        the live policy into an
-        :class:`~deap_pettingzoo.baselines.agilerl_onpolicy.OnPolicyRolloutBuffer`
-        and calls ``agent.learn`` once per ``learn_step`` worth of transitions
-        (AgileRL computes GAE internally). Mirrors the env-stepping contract of
-        :meth:`_train_agent` but for the policy-gradient update path.
+        Thin wrapper over the shared
+        :func:`~deap_pettingzoo.baselines.agilerl_onpolicy.train_agent_on_policy`
+        helper, so this side and the standalone
+        :class:`~deap_pettingzoo.baselines.agilerl_hpo_trainer.EvolveHPOTrainer`
+        share one rollout-and-learn implementation.
         """
         from deap_pettingzoo.baselines.agilerl_onpolicy import (
-            OnPolicyRolloutBuffer,
-            sanitize_obs,
+            train_agent_on_policy,
         )
 
-        learn_step = int(getattr(agent, "learn_step", 128))
-        steps = 0
-        buf = OnPolicyRolloutBuffer(learner_ids)
-        prev_done = {a: np.zeros(1, dtype=np.float32) for a in learner_ids}
-        bootstrap: Dict[str, np.ndarray] = {}
-
-        def _flush() -> None:
-            nonlocal buf, prev_done
-            if len(buf) > 0:
-                try:
-                    agent.learn(buf.experiences(bootstrap, prev_done))
-                except Exception:  # pragma: no cover - version drift
-                    logging.getLogger(__name__).warning(
-                        "RLEvolveHPOSideState._train_agent_on_policy: agent.learn() failed",
-                        exc_info=True,
-                    )
-                buf = OnPolicyRolloutBuffer(learner_ids)
-                prev_done = {a: np.zeros(1, dtype=np.float32) for a in learner_ids}
-
-        while steps < target_steps:
-            obs, info = env.reset()
-            info = info or {}
-            episode_over = False
-            while steps < target_steps and not episode_over:
-                action_obs = {
-                    a: sanitize_obs(obs[a]) for a in learner_ids if a in obs
-                }
-                if not action_obs:
-                    break
-                if len(action_obs) < len(learner_ids):
-                    ref = next(iter(action_obs.values()))
-                    for a in learner_ids:
-                        action_obs.setdefault(a, np.zeros_like(ref))
-
-                res = agent.get_action(
-                    action_obs,
-                    infos={a: info.get(a, {}) for a in learner_ids},
-                )
-                if not (isinstance(res, tuple) and len(res) >= 4):
-                    return  # not an on-policy agent — nothing to train
-                action, log_prob, _entropy, value = res[:4]
-
-                env_actions: Dict[str, Any] = {}
-                for a in learner_ids:
-                    act = action.get(a)
-                    if act is None:
-                        continue
-                    arr = np.asarray(act)
-                    if arr.ndim > 0 and arr.shape[0] == 1:
-                        arr = arr[0]
-                    env_actions[a] = arr.item() if arr.shape == () else arr
-
-                next_obs, rewards, terms, truncs, info = env.step(env_actions)
-                info = info or {}
-                reward = {a: float(rewards.get(a, 0.0)) for a in learner_ids}
-                cur_done = {
-                    a: np.array(
-                        [1.0 if (terms.get(a, False) or truncs.get(a, False)) else 0.0],
-                        dtype=np.float32,
-                    )
-                    for a in learner_ids
-                }
-
-                buf.add(action_obs, action, log_prob, value, reward, prev_done)
-                prev_done = cur_done
-                for a in learner_ids:
-                    bootstrap[a] = (
-                        next_obs[a] if a in next_obs else np.zeros_like(action_obs[a])
-                    )
-
-                obs = next_obs
-                steps += 1
-                if all(terms.get(a, False) for a in learner_ids) or all(
-                    truncs.get(a, False) for a in learner_ids
-                ):
-                    episode_over = True
-                if len(buf) >= learn_step:
-                    _flush()
-
-        _flush()
+        train_agent_on_policy(
+            agent, env, learner_ids, target_steps, logger=logger,
+        )
 
     @staticmethod
     def _eval_agent(

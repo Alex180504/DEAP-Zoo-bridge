@@ -573,20 +573,33 @@ package "deap_pettingzoo.baselines" {
     }
 
     class EvolveHPOTrainer {
-        # _hp_config: dict
-        # _population: list
-        -- AgileRL HPO base.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
-        + train(config) -> TrainingResult
+        # _hpo_population_size: int
+        # _evo_every_n_steps: int
+        # _mutation_probs: dict
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
+        + train(config, *, progress_callback) -> TrainingResult
+        + describe_hyperparameters() : adds HPO + mutation knobs
+        # _train_one_agent(...) : off-policy replay loop
+        # _train_one_agent_on_policy(...) : shared IPPO rollout
+        # _prepare_population_build(...) : grouping hook
         # _build_hp_config(spec) -> HyperparameterConfig
         # _build_population(...) -> list
     }
 
     class MADDPGHPOTrainer {
-        -- MADDPG with evolvable architecture + HPO
+        -- MADDPG HPO (off-policy)
     }
 
     class MATD3HPOTrainer {
-        -- MATD3 with evolvable architecture + HPO
+        -- MATD3 HPO (off-policy)
+    }
+
+    class IPPOHPOTrainer {
+        -- IPPO HPO (on-policy)
+    }
+
+    class GroupedIPPOHPOTrainer {
+        -- Prefix-grouped IPPO HPO (on-policy).\nValidates grouping + applies patch.
     }
 
     NEATTrainer --|> BaselineTrainer
@@ -595,6 +608,8 @@ package "deap_pettingzoo.baselines" {
     EvolveHPOTrainer --|> AgileRLTrainer
     MADDPGHPOTrainer --|> EvolveHPOTrainer
     MATD3HPOTrainer --|> EvolveHPOTrainer
+    IPPOHPOTrainer --|> EvolveHPOTrainer
+    GroupedIPPOHPOTrainer --|> IPPOHPOTrainer
 
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str

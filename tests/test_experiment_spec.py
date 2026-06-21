@@ -263,15 +263,32 @@ class TestCoevolutionValidation:
         assert any(i.code == "uncovered_team" for i in report.errors)
 
     def test_ineligible_optimizer(self):
+        # Every standalone catalog algorithm (including IPPO -> "rl" and the
+        # AgileRL HPO variants -> "rl_hpo") now maps to an eligible co-evolution
+        # optimizer, so an *unknown* algorithm is what has no eligible optimizer.
         report = validate_spec(
             self._coev_spec(
                 sides=[
-                    CoevolutionSideSpec("pred", "ippo", ("adversary",)),
+                    CoevolutionSideSpec("pred", "not-a-real-algo", ("adversary",)),
                     CoevolutionSideSpec("prey", "ea", ("agent",)),
                 ]
             )
         )
         assert any(i.code == "ineligible_optimizer" for i in report.errors)
+
+    def test_hpo_side_is_eligible_optimizer(self):
+        # Regression: AgileRL HPO variants are valid co-evolution sides.
+        report = validate_spec(
+            self._coev_spec(
+                sides=[
+                    CoevolutionSideSpec("pred", "maddpg-hpo", ("adversary",)),
+                    CoevolutionSideSpec("prey", "ea", ("agent",)),
+                ]
+            )
+        )
+        assert not any(
+            i.code == "ineligible_optimizer" for i in report.errors
+        ), [i.message for i in report.errors]
 
     def test_build_coevolution_plan(self):
         plan = build_configs(self._coev_spec(), output_root=None)
