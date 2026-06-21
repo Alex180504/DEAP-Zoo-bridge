@@ -329,6 +329,26 @@ class TestRunner:
         # output_dir is None → run_dirs may be empty; run_dir is None since
         # the spec didn't set an output_dir. That's normal for no-disk-output runs.
 
+    def test_hpo_algorithm_validates_and_splits_params(self):
+        """An AgileRL HPO algorithm is a valid catalog choice; its population
+        knobs route to ``trainer_params`` (TRAINER target). No agilerl needed."""
+        spec = ExperimentSpec.from_dict({
+            "environment": "simple_spread_v3",
+            "algorithms": ["maddpg-hpo"],
+            "budget": {"mode": "env_steps", "value": 200, "num_seeds": 1},
+            "hyperparameters": {
+                "maddpg-hpo": {"population_size": 4, "evo_every_n_steps": 200}
+            },
+        })
+        report = validate_spec(spec)
+        assert report.ok, [i.message for i in report.errors]
+
+        plan = build_configs(spec, output_root=None)
+        sub = plan.sub_runs[0]
+        assert sub.algorithm == "maddpg-hpo"
+        assert sub.trainer_params.get("population_size") == 4
+        assert sub.trainer_params.get("evo_every_n_steps") == 200
+
     def test_runner_validation_fails(self, tmp_experiment_dir):
         """Bad spec -> failed with validation errors."""
         spec_file = tmp_experiment_dir / "_spec.json"

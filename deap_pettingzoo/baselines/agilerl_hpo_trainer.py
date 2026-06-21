@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, ClassVar, Dict, List, Optional
+import warnings
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -25,12 +26,27 @@ from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.baselines.base import (
     BudgetMode,
+    ProgressCallback,
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Mutation-probability keys understood by AgileRL's ``Mutations`` and the
+#: order in which the flat ``prob_*`` form-knobs map onto them.
+_MUTATION_PROB_KEYS = (
+    "no_mutation",
+    "architecture",
+    "new_layer_prob",
+    "parameters",
+    "activation",
+    "rl_hp",
+)
+
+#: Form-group name for the per-mutation-probability knobs.
+_MUT_GROUP = "HPO / Mutation"
 
 
 class EvolveHPOTrainer(AgileRLTrainer):
@@ -77,10 +93,94 @@ class EvolveHPOTrainer(AgileRLTrainer):
         self._mutation_probs.setdefault("rl_hp", 0.2)
 
     # ------------------------------------------------------------------
+    # Catalog hyperparameter surface
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        Extends the inherited AgileRL surface
+        (:meth:`AgileRLTrainer.describe_hyperparameters`) with the
+        population-level HPO knobs. ``population_size`` and
+        ``evo_every_n_steps`` are routed to the constructor
+        (:class:`~deap_pettingzoo.catalog.schema.ParamTarget.TRAINER`) so the
+        constructor's ``population_size >= 2`` validation runs; the remaining
+        knobs flow through ``algorithm_params`` and are read in :meth:`train`.
+        The six ``prob_*`` floats are reassembled into the AgileRL
+        ``Mutations`` probability dict by :meth:`_assemble_mutation_probs`.
+        """
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F = ParamType.INT, ParamType.FLOAT
+        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        base = list(AgileRLTrainer.describe_hyperparameters())
+        hpo = (
+            ParamSpec("population_size", I, 6, minimum=2, step=1, target=TR,
+                      group="HPO",
+                      help="Number of AgileRL agents evolved in parallel."),
+            ParamSpec("evo_every_n_steps", I, 50_000, minimum=1, step=1000,
+                      target=TR, group="HPO",
+                      help="Env steps each agent trains between generations."),
+            ParamSpec("tournament_size", I, 2, minimum=1, step=1, target=AP,
+                      group="HPO",
+                      help="Tournament size for survivor selection."),
+            ParamSpec("mutation_sd", F, 0.1, minimum=0.0, step=0.01, target=AP,
+                      group="HPO", advanced=True,
+                      help="Standard deviation of parameter mutations."),
+            ParamSpec("prob_no_mutation", F, 0.4, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of leaving an agent unmutated."),
+            ParamSpec("prob_architecture", F, 0.2, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of an architecture mutation."),
+            ParamSpec("prob_new_layer_prob", F, 0.2, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of adding/removing a layer."),
+            ParamSpec("prob_parameters", F, 0.2, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of a weight-parameter mutation."),
+            ParamSpec("prob_activation", F, 0.0, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of an activation-function mutation."),
+            ParamSpec("prob_rl_hp", F, 0.2, minimum=0.0, maximum=1.0,
+                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
+                      help="Relative probability of an RL-hyperparameter mutation."),
+        )
+        return tuple(base) + hpo
+
+    def _assemble_mutation_probs(
+        self, algorithm_params: Dict[str, Any]
+    ) -> Dict[str, float]:
+        """Merge constructor defaults, a nested ``mutation_probs`` dict and the
+        flat ``prob_*`` form-knobs into the AgileRL ``Mutations`` probability dict.
+
+        Precedence (lowest → highest): constructor defaults <
+        ``algorithm_params['mutation_probs']`` (programmatic) <
+        ``algorithm_params['prob_<key>']`` (UI form).
+        """
+        mut_probs = dict(self._mutation_probs)
+        mut_probs.update(algorithm_params.get("mutation_probs", {}))
+        for key in _MUTATION_PROB_KEYS:
+            flat = algorithm_params.get(f"prob_{key}")
+            if flat is not None:
+                mut_probs[key] = float(flat)
+        return mut_probs
+
+    # ------------------------------------------------------------------
     # BaselineTrainer
     # ------------------------------------------------------------------
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Run evolutionary HPO training.
 
         Args:
@@ -153,14 +253,16 @@ class EvolveHPOTrainer(AgileRLTrainer):
             if key in config.algorithm_params:
                 ctor_kwargs[key] = config.algorithm_params[key]
 
+        # Algorithm-specific pre-flight (e.g. grouped-IPPO patch + validation).
+        self._prepare_population_build(obs_spaces, act_spaces, agent_ids)
+
         population = self._build_population(
             alg_cls, pop_size, obs_spaces, act_spaces, agent_ids,
             net_config, hp_config, ctor_kwargs,
         )
 
         # ---- HPO machinery ----
-        mut_probs = dict(self._mutation_probs)
-        mut_probs.update(config.algorithm_params.get("mutation_probs", {}))
+        mut_probs = self._assemble_mutation_probs(config.algorithm_params)
         mutations = Mutations(
             no_mutation=mut_probs["no_mutation"],
             architecture=mut_probs["architecture"],
@@ -218,14 +320,38 @@ class EvolveHPOTrainer(AgileRLTrainer):
             while steps_done < budget_steps:
                 generation += 1
                 gen_fitnesses: List[float] = []
+                gen_progress = 0
 
-                # Train each agent for evo_every steps.
+                # Train each agent for evo_every steps. On-policy (IPPO) and
+                # off-policy (MADDPG/MATD3) take different rollout/learn paths.
                 for agent in population:
-                    gen_steps = self._train_one_agent(
-                        agent, env, agent_ids, is_vec, max_steps,
-                        evo_every, seed, rng,
-                    )
+                    if self.ON_POLICY:
+                        gen_steps = self._train_one_agent_on_policy(
+                            agent, env, agent_ids, evo_every, rng,
+                        )
+                    else:
+                        gen_steps = self._train_one_agent(
+                            agent, env, agent_ids, is_vec, max_steps,
+                            evo_every, seed, rng,
+                        )
                     steps_done += gen_steps
+                    gen_progress += gen_steps
+
+                # Guard against a non-progressing population (e.g. an agent that
+                # is not actually trainable) so the budget loop can never spin
+                # forever.
+                if gen_progress == 0:
+                    logger.warning(
+                        "[%s] generation %d consumed 0 env steps; stopping early",
+                        algo_tag, generation,
+                    )
+                    warnings.warn(
+                        f"{algo_tag}: HPO generation made no progress; "
+                        "stopping early.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    break
 
                 # Evaluate all agents.
                 for agent in population:
@@ -279,7 +405,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     _champion_agent, agent_ids, algorithm_name=algo_tag,
                 )
                 self._on_progress(
-                    None,
+                    progress_callback,
                     ProgressEvent(
                         unit="env_step",
                         current=min(steps_done, budget_steps),
@@ -439,8 +565,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 pop.append(agent)
             return pop
 
-    @staticmethod
     def _train_one_agent(
+        self,
         agent: Any,
         env: Any,
         agent_ids: List[str],
@@ -450,7 +576,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         seed: Optional[int],
         rng: np.random.Generator,
     ) -> int:
-        """Run rollout-and-learn for one agent, returning steps consumed."""
+        """Run off-policy rollout-and-learn for one agent, returning steps consumed."""
         steps = 0
         learn_step = getattr(agent, "learn_step", 100)
         batch_size = getattr(agent, "batch_size", 64)
@@ -518,6 +644,39 @@ class EvolveHPOTrainer(AgileRLTrainer):
         if hasattr(agent, "_total_transitions"):
             object.__setattr__(agent, "_total_transitions", total_transitions)
         return steps
+
+    def _train_one_agent_on_policy(
+        self,
+        agent: Any,
+        env: Any,
+        agent_ids: List[str],
+        target_steps: int,
+        rng: np.random.Generator,
+    ) -> int:
+        """Run on-policy (IPPO) rollout-and-learn for one agent.
+
+        Delegates to the shared
+        :func:`~deap_pettingzoo.baselines.agilerl_onpolicy.train_agent_on_policy`
+        helper (also used by
+        :class:`~deap_pettingzoo.baselines.coevolution.rl_hpo_side.RLEvolveHPOSideState`)
+        so the on-policy population path cannot drift between the two.
+        """
+        from deap_pettingzoo.baselines.agilerl_onpolicy import (
+            train_agent_on_policy,
+        )
+
+        return train_agent_on_policy(
+            agent, env, agent_ids, target_steps, logger=logger, rng=rng,
+        )
+
+    def _prepare_population_build(
+        self, obs_spaces: Any, act_spaces: Any, agent_ids: List[str]
+    ) -> None:
+        """Algorithm-specific pre-flight before the population is built.
+
+        Default no-op. :class:`GroupedIPPOHPOTrainer` overrides this to install
+        AgileRL's grouped-IPPO flattening patch and validate the agent grouping.
+        """
 
     @staticmethod
     def _evaluate_agent(
@@ -599,3 +758,59 @@ class MATD3HPOTrainer(EvolveHPOTrainer):
     ALGORITHM_NAME = "matd3"
     ALGORITHM_IMPORT = ("agilerl.algorithms.matd3", "MATD3")
     ON_POLICY = False
+
+
+class IPPOHPOTrainer(EvolveHPOTrainer):
+    """IPPO with evolutionary HPO (on-policy population evolution).
+
+    Uses the shared on-policy rollout/learn path
+    (:meth:`EvolveHPOTrainer._train_one_agent_on_policy`) instead of the
+    replay-buffer path, since PPO updates must be computed from freshly
+    collected on-policy rollouts.
+    """
+
+    ALGORITHM_NAME = "ippo"
+    ALGORITHM_IMPORT = ("agilerl.algorithms.ippo", "IPPO")
+    ON_POLICY = True
+
+
+class GroupedIPPOHPOTrainer(IPPOHPOTrainer):
+    """Prefix-grouped IPPO with evolutionary HPO.
+
+    Mirrors :class:`~deap_pettingzoo.baselines.agilerl_trainer.GroupedIPPOTrainer`:
+    agents whose ids share a prefix share one actor/critic network. The
+    grouped-IPPO flattening patch is installed and the grouping is validated
+    up-front (via :meth:`_prepare_population_build`) before the population is
+    built — no silent fallback to per-agent networks.
+    """
+
+    ALGORITHM_NAME = "ippo-grouped"
+
+    def _prepare_population_build(
+        self, obs_spaces: Any, act_spaces: Any, agent_ids: List[str]
+    ) -> None:
+        """Install AgileRL's grouped-IPPO patch and validate the grouping.
+
+        Reuses :class:`GroupedIPPOTrainer`'s patch + validation helpers so the
+        standalone and HPO grouped-IPPO paths enforce the same rules. Raises
+        loudly when the environment's agents cannot be sensibly grouped.
+        """
+        from deap_pettingzoo.baselines.agilerl_trainer import (
+            GroupedIPPOTrainer,
+            _apply_agilerl_grouping_patch,
+        )
+
+        _apply_agilerl_grouping_patch()
+        # extract_space_metadata may return lists or dicts; the validator wants
+        # per-agent-id dicts (same coercion GroupedIPPOTrainer._build_agent uses).
+        val_obs = (
+            dict(zip(agent_ids, obs_spaces))
+            if isinstance(obs_spaces, (list, tuple))
+            else obs_spaces
+        )
+        val_act = (
+            dict(zip(agent_ids, act_spaces))
+            if isinstance(act_spaces, (list, tuple))
+            else act_spaces
+        )
+        GroupedIPPOTrainer._validate_grouping(agent_ids, val_obs, val_act)

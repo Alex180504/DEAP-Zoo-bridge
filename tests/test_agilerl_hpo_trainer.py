@@ -11,8 +11,12 @@ import pytest
 
 _AGILERL_AVAILABLE = importlib.util.find_spec("agilerl") is not None
 
+import inspect
+
 from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
     EvolveHPOTrainer,
+    GroupedIPPOHPOTrainer,
+    IPPOHPOTrainer,
     MADDPGHPOTrainer,
     MATD3HPOTrainer,
 )
@@ -65,6 +69,59 @@ class TestConcreteTrainers:
             caps = t.get_capabilities()
             assert caps["discrete_action"] is True
             assert caps["continuous_action"] is True
+
+    def test_ippo_hpo_name(self):
+        t = IPPOHPOTrainer()
+        assert t.ALGORITHM_NAME == "ippo"
+        assert t.ON_POLICY
+
+    def test_grouped_ippo_hpo_name(self):
+        t = GroupedIPPOHPOTrainer()
+        assert t.ALGORITHM_NAME == "ippo-grouped"
+        assert t.ON_POLICY
+
+    def test_ippo_hpo_capabilities(self):
+        for cls in (IPPOHPOTrainer, GroupedIPPOHPOTrainer):
+            caps = cls().get_capabilities()
+            assert caps["on_policy"] is True
+            # On-policy bases support MultiDiscrete; HPO is never turn-based.
+            assert caps["multidiscrete_action"] is True
+            assert caps["supports_turn_based"] is False
+
+
+class TestTrainSignature:
+    def test_train_accepts_progress_callback(self):
+        # The runner always calls train(config, progress_callback=...), so the
+        # HPO override must accept it (regression for the missing-kwarg crash).
+        sig = inspect.signature(EvolveHPOTrainer.train)
+        assert "progress_callback" in sig.parameters
+        assert sig.parameters["progress_callback"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+class TestHyperparameterOverlay:
+    def test_includes_hpo_knobs(self):
+        names = {p.name for p in EvolveHPOTrainer.describe_hyperparameters()}
+        for knob in ("population_size", "evo_every_n_steps", "tournament_size",
+                     "mutation_sd", "prob_no_mutation", "prob_rl_hp"):
+            assert knob in names, knob
+        # The inherited AgileRL surface is still present.
+        assert "seed" in names
+        assert "batch_size" in names
+
+    def test_mutation_probs_from_flat_keys(self):
+        t = EvolveHPOTrainer()
+        probs = t._assemble_mutation_probs(
+            {"prob_no_mutation": 0.7, "prob_rl_hp": 0.1}
+        )
+        assert probs["no_mutation"] == 0.7
+        assert probs["rl_hp"] == 0.1
+        # Untouched keys keep the constructor defaults.
+        assert "architecture" in probs
+
+    def test_nested_mutation_probs_still_supported(self):
+        t = EvolveHPOTrainer()
+        probs = t._assemble_mutation_probs({"mutation_probs": {"architecture": 0.5}})
+        assert probs["architecture"] == 0.5
 
 
 @pytest.mark.skipif(not _AGILERL_AVAILABLE, reason="rl-baselines extra not installed")
