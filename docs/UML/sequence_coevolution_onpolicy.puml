@@ -28,7 +28,7 @@ loop for each generation
   RP -> W : make_frozen_cpu_snapshot()
   W -> F : rebuild actors via init_dict + state_dict\n(no copy.deepcopy; grouped actor map)
   RP -->> EA : OpponentSnapshot(FrozenRLPolicyWrapper)
-  EA -> WK : executor.map(rollout, payloads)\n(frozen snapshot pickled per worker)
+  EA -> WK : executor.map(rollout, payloads)\n(frozen snapshot + registry_snapshot pickled per worker;\nworkers replay_registry_snapshot_once for custom envs)
   WK -> F : get_action(obs)  -- actor-only inference
   WK -->> EA : per-opponent fitness
   EA -> EA : DEAP select + crossover + mutate

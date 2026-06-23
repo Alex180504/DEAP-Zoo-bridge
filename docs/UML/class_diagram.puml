@@ -150,7 +150,8 @@ package "deap_pettingzoo.environments" {
         + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot / replay_registry_snapshot:\n   propagate custom envs into spawn workers --
+        + {static} replay_registry_snapshot_once(snapshot) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process) --
     }
 
     class builtin <<module>> {
@@ -365,7 +366,11 @@ package "deap_pettingzoo.integration" {
         + make_mixed_parallel_evaluate_map(executor,
             evaluator, *, eval_episodes=1) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
-           qualnames; picklable across spawn workers --
+           qualnames + a registry_snapshot; picklable
+           across spawn workers. Workers replay the
+           snapshot via replay_registry_snapshot_once
+           so SCOOP/Dask (no initializer hook) get
+           custom envs too --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -400,7 +405,10 @@ package "deap_pettingzoo.baselines" {
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
+        + num_workers: int = 1
+        + parallel_backend: str = "process"
         + recording: RecordingConfig
+        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
     }
 
     class RecordingConfig <<dataclass>> {
@@ -789,10 +797,12 @@ note bottom of registry
 
   get_registry_snapshot() + replay_registry_snapshot()
   propagate custom envs registered in the main
-  process into spawned worker subprocesses:
-  trainers pass them as initializer/initargs
-  to make_executor so every worker re-registers
-  all custom envs before executing any tasks.
+  process into worker subprocesses. The process pool
+  passes them as initializer/initargs to make_executor;
+  SCOOP/Dask have no initializer hook, so trainers also
+  ship the snapshot on each worker spec/payload and the
+  worker calls replay_registry_snapshot_once (idempotent,
+  guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
 end note

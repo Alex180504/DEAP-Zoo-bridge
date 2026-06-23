@@ -545,24 +545,35 @@ class EATrainer(BaselineTrainer):
             if event is not None:
                 self._on_progress(progress_callback, event, champion=_ea_champion)
 
-        requested = config.algorithm_params.get("num_workers", self.num_workers)
-        effective_workers = resolve_num_workers(requested)
-        backend = config.algorithm_params.get(
-            "parallel_backend", self.parallel_backend
+        # num_workers / parallel_backend are first-class TrainingConfig fields;
+        # the trainer-constructor value is the fallback used only when the
+        # config leaves them at their defaults.
+        requested = (
+            config.num_workers if config.num_workers != 1 else self.num_workers
         )
+        effective_workers = resolve_num_workers(requested)
+        backend = (
+            config.parallel_backend
+            if config.parallel_backend != "process"
+            else self.parallel_backend
+        )
+        # One snapshot, reused for the process-pool initializer and shipped on
+        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot()
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
             max_steps=max_steps_per_episode,
             aggregation_method=config.fitness.aggregation_method,
             team_mapping=config.fitness.team_mapping,
+            registry_snapshot=registry_snapshot,
         )
 
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
-            initargs=(get_registry_snapshot(),),
+            initargs=(registry_snapshot,),
         ) as executor:
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
             if effective_workers > 1:

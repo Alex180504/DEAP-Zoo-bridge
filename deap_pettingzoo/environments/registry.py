@@ -586,9 +586,10 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
         SCOOP and Dask backends do not expose a per-worker
         ``initializer`` hook.  :func:`make_executor` accepts but
         silently ignores ``initializer``/``initargs`` for those
-        backends.  Custom environments will therefore *not* be
-        available in SCOOP/Dask workers unless the environment package
-        is imported at module level in the worker script.
+        backends.  To propagate custom environments there, the snapshot
+        is instead carried on each picklable worker spec/payload and
+        replayed lazily in the worker via
+        :func:`replay_registry_snapshot_once`.
 
     .. note::
         Entries whose ``factory`` is not picklable (e.g. built-in envs
@@ -641,6 +642,41 @@ def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
         )
 
 
+# Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
+# of env names a snapshot carries, which is stable across pickled copies (each
+# task ships its own copy of the snapshot), so a worker replays a given snapshot
+# at most once even when it has no evaluator cache to gate on.
+_REPLAYED_SNAPSHOT_KEYS: set = set()
+
+
+def replay_registry_snapshot_once(
+    snapshot: Optional[List[Tuple[str, "EnvSpec"]]],
+) -> None:
+    """Replay ``snapshot`` at most once per worker process.
+
+    Worker payloads carry a :func:`get_registry_snapshot` result so SCOOP /
+    Dask workers (which have no per-worker ``initializer`` hook) can
+    re-register custom environments before building any env. This wrapper
+    makes that cheap to call on every task: the first call for a given set of
+    env names replays the snapshot; later calls are no-ops.
+
+    ``replay_registry_snapshot`` is itself idempotent (``overwrite=True``), so
+    the guard is a performance optimisation rather than a correctness
+    requirement. A ``None`` or empty snapshot is ignored.
+
+    Args:
+        snapshot: A :func:`get_registry_snapshot` result, or ``None`` when the
+            caller ran serially / did not populate one.
+    """
+    if not snapshot:
+        return
+    key = tuple(sorted(name for name, _ in snapshot))
+    if key in _REPLAYED_SNAPSHOT_KEYS:
+        return
+    replay_registry_snapshot(snapshot)
+    _REPLAYED_SNAPSHOT_KEYS.add(key)
+
+
 __all__ = [
     "EnvSpec",
     "build_env_from_spec",
@@ -655,4 +691,5 @@ __all__ = [
     "clear_registry",
     "get_registry_snapshot",
     "replay_registry_snapshot",
+    "replay_registry_snapshot_once",
 ]

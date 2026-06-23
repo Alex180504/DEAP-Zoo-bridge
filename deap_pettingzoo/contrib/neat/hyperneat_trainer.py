@@ -189,6 +189,7 @@ class HyperNEATTrainer(NEATTrainer):
                 substrate_spec=_substrate_to_spec(substrate),
                 phenotype_activation=activation,
                 weight_threshold=weight_threshold,
+                registry_snapshot=snapshot,
             )
 
             with make_executor(
@@ -409,6 +410,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 seed=seed if seed is not None else 0,
                 substrate_spec=_substrate_to_spec(substrate),
                 es_params=dict(es_params),
+                registry_snapshot=snapshot,
             )
 
             with make_executor(
