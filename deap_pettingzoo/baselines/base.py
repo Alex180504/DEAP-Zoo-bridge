@@ -267,6 +267,13 @@ class TrainingConfig:
             raised rather than silently preferring one.
         output_dir: Directory for saving checkpoints and logs.
         render: Whether to render episodes during training.
+        num_workers: Parallel evaluation workers for population-based
+            trainers (EA / CMA-ES / PSO). ``0`` / ``1`` run serially. The
+            trainer-constructor value is used only when this is left at the
+            default of ``1``.
+        parallel_backend: Executor backend for parallel evaluation — one of
+            ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
+            value is used only when this is left at the default ``"process"``.
     """
     env_name: str
     budget_mode: BudgetMode
@@ -277,6 +284,8 @@ class TrainingConfig:
     continuous: bool = False
     output_dir: Optional[Path] = None
     render: bool = False
+    num_workers: int = 1
+    parallel_backend: str = "process"
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
@@ -286,6 +295,18 @@ class TrainingConfig:
             raise ValueError(f"budget_value must be positive, got {self.budget_value}")
         if self.num_seeds <= 0:
             raise ValueError(f"num_seeds must be positive, got {self.num_seeds}")
+        if self.num_workers < 0:
+            raise ValueError(
+                f"num_workers must be >= 0 (or 1 for serial), got "
+                f"{self.num_workers}."
+            )
+        from deap_pettingzoo.utils.parallel import SUPPORTED_BACKENDS
+
+        if self.parallel_backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"Unknown parallel_backend {self.parallel_backend!r}. "
+                f"Expected one of {SUPPORTED_BACKENDS}."
+            )
         if isinstance(self.budget_mode, str):
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):

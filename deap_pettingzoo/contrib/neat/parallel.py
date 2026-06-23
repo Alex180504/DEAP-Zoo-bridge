@@ -75,6 +75,9 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
+    #: any worker missing a runtime registration) can resolve ``env_name``.
+    registry_snapshot: Optional[List] = None
 
 
 def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
@@ -130,8 +133,15 @@ def _neat_worker_evaluate(payload: tuple) -> float:
     from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
     from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     genome, spec = payload
+
+    # Re-register custom envs so SCOOP/Dask workers can resolve env_name; no-op
+    # on repeat calls and for built-in-only snapshots.
+    replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,
     # standard config for plain NEAT.

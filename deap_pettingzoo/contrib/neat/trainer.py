@@ -251,6 +251,7 @@ class NEATTrainer(BaselineTrainer):
                 action_space_args=_act_hint.get("args", {}),
                 eval_episodes_per_genome=eval_eps,
                 seed=seed if seed is not None else 0,
+                registry_snapshot=snapshot,
             )
             _executor = make_executor(
                 self._num_workers,

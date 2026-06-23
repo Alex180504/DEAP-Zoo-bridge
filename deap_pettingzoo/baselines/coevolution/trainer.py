@@ -473,11 +473,14 @@ class CoEvolutionTrainer(BaselineTrainer):
             )
         self._resolved_workers = resolved_workers
 
+        # One snapshot, reused for the process-pool initializer and shipped on
+        # episode payloads so SCOOP/Dask workers can re-register custom envs too.
+        self._registry_snapshot = get_registry_snapshot()
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
             initializer=_prewarm_and_replay,
-            initargs=(get_registry_snapshot(),),
+            initargs=(self._registry_snapshot,),
         ) as executor:
             self._executor = executor
             # Keep side initialisation inside the executor scope. This
@@ -1157,6 +1160,9 @@ class CoEvolutionTrainer(BaselineTrainer):
                             side_role_prefixes=side_role_prefixes,
                             episode_seed=None,
                             max_steps=max_steps,
+                            registry_snapshot=getattr(
+                                self, "_registry_snapshot", None
+                            ),
                         )
                     )
             # Dispatch all N×k episodes in parallel.
@@ -1271,6 +1277,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 executor=rl_executor,
                 env_name=self._env_name,
                 env_config=self._env_config,
+                registry_snapshot=getattr(self, "_registry_snapshot", None),
             )
         assert (
             learner_state.side.optimizer != "frozen"
@@ -1317,6 +1324,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             env_name=getattr(self, "_env_name", None),
             env_config=getattr(self, "_env_config", None),
             learner_masked=bool(getattr(learner_state, "masked", False)),
+            registry_snapshot=getattr(self, "_registry_snapshot", None),
         )
         trainer_rng = self._rng
 

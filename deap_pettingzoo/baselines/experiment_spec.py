@@ -576,12 +576,15 @@ def build_configs(
             "Resolved hyperparameters for %s: trainer=%s, algo=%s",
             algo, trainer_params, base_algo_params,
         )
-        # Population-based trainers accept parallelism on the constructor.
+        # Population-based trainers consume parallelism via first-class
+        # TrainingConfig fields; MARL trainers ignore them (they parallelise
+        # via num_envs), so leave those at the serial defaults.
         if algo_spec.family == "evolutionary":
-            trainer_params.setdefault("num_workers", spec.parallelism.num_workers)
-            trainer_params.setdefault(
-                "parallel_backend", spec.parallelism.parallel_backend
-            )
+            cfg_num_workers = spec.parallelism.num_workers
+            cfg_parallel_backend = spec.parallelism.parallel_backend
+        else:
+            cfg_num_workers = 1
+            cfg_parallel_backend = "process"
         for seed_idx in range(num_seeds):
             algo_params = dict(base_algo_params)
             algo_params["seed"] = seed_idx
@@ -598,6 +601,8 @@ def build_configs(
                 algorithm_params=algo_params,
                 env_config=dict(env_config),
                 output_dir=out_dir,
+                num_workers=cfg_num_workers,
+                parallel_backend=cfg_parallel_backend,
                 recording=recording_config,
                 fitness=fitness_config,
             )
@@ -838,6 +843,29 @@ def _validate_parallelism(spec, report):
             f"Backend {par.parallel_backend!r} is not supported. Choose one "
             f"of {list(_SUPPORTED_BACKENDS)}.",
         )
+        return
+    # Warn (non-blocking) when a real parallel backend is selected but its
+    # optional package is not installed — it would otherwise only fail at run
+    # time with an ImportError. The service shares the trainer environment, so
+    # its install state is authoritative.
+    if par.num_workers and par.num_workers > 1:
+        from deap_pettingzoo.catalog.availability import module_available
+
+        _backend_requirement = {
+            "scoop": ("scoop", "deap-pettingzoo[scoop]"),
+            "dask": ("dask.distributed", "deap-pettingzoo[dask]"),
+        }
+        req = _backend_requirement.get(par.parallel_backend)
+        if req is not None and not module_available(req[0]):
+            module_name, extra = req
+            report.add(
+                "parallelism.parallel_backend",
+                "backend_not_installed",
+                f"Backend {par.parallel_backend!r} is selected but the "
+                f"{module_name!r} package is not installed; the run will fail "
+                f"at start. Install it with `pip install '{extra}'`.",
+                severity="warning",
+            )
 
 
 def _validate_hyperparameters(spec, report, algo, algo_spec):

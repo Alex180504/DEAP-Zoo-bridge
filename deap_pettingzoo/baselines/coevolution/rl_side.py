@@ -93,6 +93,8 @@ class _RLDriverContext:
     env_name: Optional[str] = None
     #: Env kwargs forwarded to :class:`PettingZooWrapper`.
     env_config: Optional[Dict[str, Any]] = None
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +150,8 @@ class _RLRolloutPayload:
     opponent_snapshots: Dict[str, Any]  # Dict[str, OpponentSnapshot]
     #: Maps opponent side name → role_prefixes.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
@@ -172,7 +176,9 @@ def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
     from deap_pettingzoo.baselines.coevolution.pools import rebuild_opponent_policy
     from deap_pettingzoo.evaluators.mixed_policy import _invoke_get_action
 
-    env = _resolve_worker_env(payload.env_name, payload.env_config)
+    env = _resolve_worker_env(
+        payload.env_name, payload.env_config, payload.registry_snapshot
+    )
     possible_agents = list(env.possible_agents)
 
     # RL-side agent IDs come directly from the payload (set at build time
@@ -666,6 +672,7 @@ class RLSideState(SideState):
                 rl_role_prefixes=self.side.role_prefixes,
                 opponent_snapshots=opp_snapshots,
                 side_role_prefixes=side_role_prefixes,
+                registry_snapshot=ctx.registry_snapshot,
             )
             for _ in range(self.rollout_episodes_per_gen)
         ]

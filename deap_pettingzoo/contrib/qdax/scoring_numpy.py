@@ -76,6 +76,9 @@ class _RolloutSpec:
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
     #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
     nvec: Optional[tuple] = None
+    #: Registry snapshot replayed in the worker so SCOOP/Dask (and the
+    #: initializer-less process path here) can resolve runtime-registered envs.
+    registry_snapshot: Optional[list] = None
 
 
 # Module-global cache populated lazily on each worker. Same pattern
@@ -144,8 +147,13 @@ def _ensure_worker_context(spec: _RolloutSpec):
 
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
     from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     _import_worker_modules(_worker_imports)
+    # Re-register runtime-registered custom envs (no initializer hook here).
+    replay_registry_snapshot_once(spec.registry_snapshot)
     module = make_flax_mlp(spec.layer_sizes, activation=spec.activation)
     env = PettingZooWrapper(spec.env_name, env_config=spec.env_config or {})
     extract = spec.extract_state_fn or _extract_positions_velocities_np
@@ -382,6 +390,7 @@ def make_numpy_scoring_function(
     import numpy as np
 
     from deap_pettingzoo.contrib.qdax.policy import pytree_to_flat
+    from deap_pettingzoo.environments.registry import get_registry_snapshot
     from deap_pettingzoo.utils.parallel import (
         make_executor,
         resolve_num_workers,
@@ -400,6 +409,8 @@ def make_numpy_scoring_function(
         nvec=tuple(int(x) for x in nvec) if nvec is not None else None,
         extract_state_fn=extract_state_fn,
         worker_imports=tuple(str(name) for name in worker_imports),
+        # Propagate runtime-registered custom envs to workers (no init hook).
+        registry_snapshot=get_registry_snapshot(),
     )
 
     # Local (in-process) fallback for the serial path — avoids the

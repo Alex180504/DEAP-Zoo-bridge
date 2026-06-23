@@ -42,8 +42,8 @@ Trainer -> Pop: add_reporter(recording_reporter)
 == Parallel or sequential eval ==
 alt num_workers > 1
     Trainer -> Trainer: get_registry_snapshot()
-    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, ...)
-    Trainer -> Executor: make_executor(n_workers,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))
+    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint,\n  registry_snapshot=snapshot, ...)
+    Trainer -> Executor: make_executor(n_workers,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))\n  note: snapshot also rides on the spec so SCOOP/Dask\n  workers replay it (replay_registry_snapshot_once)
 
     loop n_generations
         Trainer -> Pop: run(parallel_eval_function, n=1)
