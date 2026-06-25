@@ -27,10 +27,11 @@ import neat  # guarded by _require_neat
 
 from deap_pettingzoo.baselines._logging_helpers import build_logger
 from deap_pettingzoo.baselines.base import (
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
 
@@ -127,25 +128,11 @@ class HyperNEATTrainer(NEATTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + optional FrameRecorder -----------------------------
+        # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="hyperneat")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=500,
-                    frame_recorder=recorder,
-                )
+        self._recorder = RecordingController(
+            config, log, max_steps=500, seed=seed,
+        )
 
         # --- Create population -------------------------------------------
         pop = neat.Population(neat_config, seed=seed)
@@ -155,32 +142,28 @@ class HyperNEATTrainer(NEATTrainer):
         weight_threshold = float(params.get("weight_threshold", 0.1))
 
         # --- Recording reporter ------------------------------------------
-        if recording_evaluator is not None:
-            _substrate = substrate
-            _activation = activation
-            _wthresh = weight_threshold
+        def _hn_champion(best_genome):
+            return HyperNeatPolicy(
+                best_genome,
+                neat_config,
+                substrate,
+                action_space=shared_action_space,
+                activation=activation,
+                weight_threshold=weight_threshold,
+            )
+
+        if self._recorder.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                champ_policy = HyperNeatPolicy(
-                    best_genome,
-                    neat_config,
-                    _substrate,
-                    action_space=shared_action_space,
-                    activation=_activation,
-                    weight_threshold=_wthresh,
-                )
-                rollout_seed = seed if seed is not None else 0
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed),
-                    env_config=dict(config.env_config) if config.env_config else None,
+                self._recorder.observe(
+                    ProgressEvent(
+                        unit="generation", current=gen,
+                        total=n_generations, env_steps=gen * 500,
+                    ),
+                    lambda: _hn_champion(best_genome),
                 )
 
-            pop.add_reporter(
-                _RecordingReporter(_record_champion, cadence=recording_cadence)
-            )
+            pop.add_reporter(_RecordingReporter(_record_champion))
 
         # --- Parallel or sequential eval -------------------------------------
         if self._num_workers > 1:
@@ -206,6 +189,7 @@ class HyperNEATTrainer(NEATTrainer):
                 substrate_spec=_substrate_to_spec(substrate),
                 phenotype_activation=activation,
                 weight_threshold=weight_threshold,
+                registry_snapshot=snapshot,
             )
 
             with make_executor(
@@ -283,15 +267,19 @@ class HyperNEATTrainer(NEATTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        self._recorder.finalize(
+            lambda: _hn_champion(best_genome),
+            iteration=n_generations, env_steps=n_generations * 500,
+        )
+
         try:
             env.close()
         except Exception:
             pass
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.close()
 
         self._log(config, best_genome, pop_size, elapsed, algorithm="HyperNEAT")
-        if recording_cfg.enabled:
+        if config.recording.enabled:
             log.close()
 
         return TrainingResult(
@@ -361,25 +349,11 @@ class ESHyperNEATTrainer(NEATTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + optional FrameRecorder -----------------------------
+        # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="es-hyperneat")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=500,
-                    frame_recorder=recorder,
-                )
+        self._recorder = RecordingController(
+            config, log, max_steps=500, seed=seed,
+        )
 
         pop = neat.Population(neat_config, seed=seed)
 
@@ -389,29 +363,28 @@ class ESHyperNEATTrainer(NEATTrainer):
         )
 
         # --- Recording reporter ------------------------------------------
-        if recording_evaluator is not None:
-            _substrate = substrate
-            _es_params = es_params
+        def _esn_champion(best_genome):
+            return ESHyperNeatPolicy(
+                best_genome,
+                neat_config,
+                substrate,
+                action_space=shared_action_space,
+                es_params=es_params,
+            )
+
+        if self._recorder.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                champ_policy = ESHyperNeatPolicy(
-                    best_genome,
-                    neat_config,
-                    _substrate,
-                    action_space=shared_action_space,
-                    es_params=_es_params,
-                )
-                rollout_seed = seed if seed is not None else 0
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed),
-                    env_config=dict(config.env_config) if config.env_config else None,
+                self._recorder.observe(
+                    ProgressEvent(
+                        unit="generation", current=gen,
+                        total=n_generations, env_steps=gen * 500,
+                    ),
+                    lambda: _esn_champion(best_genome),
                 )
 
             pop.add_reporter(
-                _RecordingReporter(_record_champion, cadence=recording_cadence)
+                _RecordingReporter(_record_champion)
             )
 
         # --- Parallel or sequential eval -------------------------------------
@@ -437,6 +410,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 seed=seed if seed is not None else 0,
                 substrate_spec=_substrate_to_spec(substrate),
                 es_params=dict(es_params),
+                registry_snapshot=snapshot,
             )
 
             with make_executor(
@@ -512,15 +486,19 @@ class ESHyperNEATTrainer(NEATTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        self._recorder.finalize(
+            lambda: _esn_champion(best_genome),
+            iteration=n_generations, env_steps=n_generations * 500,
+        )
+
         try:
             env.close()
         except Exception:
             pass
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.close()
 
         self._log(config, best_genome, pop_size, elapsed, algorithm="ES-HyperNEAT")
-        if recording_cfg.enabled:
+        if config.recording.enabled:
             log.close()
 
         return TrainingResult(

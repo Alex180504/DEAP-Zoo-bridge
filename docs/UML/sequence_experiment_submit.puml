@@ -1,0 +1,89 @@
+@startuml sequence_experiment_submit
+!theme plain
+title Experiment Submit – Setup -> Queue
+
+actor User
+participant "Setup Page\n(Streamlit)" as Setup
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+participant "Dispatcher\n(asyncio loop)" as Disp
+participant "Runner\n(subprocess)" as Runner
+participant "Trainer\n(baselines)" as Trainer
+
+== Form fill & validate ==
+User -> Setup: fill tabs (env, algos, params, budget, ...)
+Setup -> Setup: coerce values\n(bound checks, type casts)
+User -> Setup: click "Validate"
+Setup -> Client: POST /experiments/validate\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec)\n(table-driven: env, algo, params, budget, ...)
+API --> Client: 200 {ok, errors[], warnings[]}
+Client --> Setup: ValidationReport
+Setup --> User: render errors/warnings by tab
+
+== Submit ==
+User -> Setup: click "Submit"
+Setup -> Client: POST /experiments\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec) (defense in depth)
+note right of API: 422 if invalid
+API -> DB: insert_experiment(spec, status="queued")
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+Client --> Setup: SubmitResponse
+Setup --> User: success toast + navigate to Queue
+
+== Submit (custom script — Setup → Advanced) ==
+note over Setup, API: gated by DEAP_ENABLE_ADVANCED (else 403)
+User -> Setup: Advanced tab → paste script → "Submit to queue"
+Setup -> Client: POST /experiments/script {script, label}
+Client -> API: HTTP POST
+API -> API: validate_script_source(script)\n(ast.parse + structural checks)
+note right of API: 422 {ok:false, issues} if syntax error
+API -> DB: insert_experiment(\n  {kind:"script", environment:"(custom script)", script}, queued)
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+
+== Dispatch ==
+Disp -> Disp: _loop: poll every 1s
+Disp -> DB: dequeue_next()\n(min enqueue_seq, not paused)
+DB --> Disp: experiment (spec_json, id)
+Disp -> Disp: parse spec_json → kind ("spec" | "script")
+Disp -> DB: set_running(id)
+Disp -> Disp: open _stdout.log
+
+alt kind == "script"
+    Disp -> Disp: write user_script.py
+    Disp -> Runner: Popen([python, user_script.py],\n  cwd=<experiment-dir>, env=PYTHONPATH+=DEAP_PROJECT_ROOT,\n  stdout=_stdout.log)
+else kind == "spec" (default)
+    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  stdout=_stdout.log)
+end
+note right of Disp: logger.info "Experiment {id} running (pid, log)"\n(diagnostic log — see sequence_logging_pipeline.puml)
+
+== Training ==
+Runner -> Runner: configure_logging()\n(console only; level inherited via DEAP_LOG_LEVEL env)
+Runner -> Runner: load spec → re-validate
+Runner -> Runner: build_configs(spec) → [SubRun, ...]
+note right of Runner: logger.info component activation\n(env, algorithms, budget, parallelism, coevolution)
+loop for each SubRun (algo × seed)
+    Runner -> Runner: print + logger.info "Starting [i/N] {algo} seed"
+    Runner -> Trainer: trainer.train(config, progress_callback=writer.cb)
+    activate Trainer
+    Trainer -> Runner: progress_callback(ProgressEvent)
+    Runner -> Runner: atomic write _progress.json\n(tmp + os.replace)
+    deactivate Trainer
+end
+note right of Runner: on failure: logger.exception(...) before _result.json
+Runner -> Runner: write _result.json\n{status, run_dirs[], error?}
+Runner --> Disp: exit 0 (success) or 1 (failure)
+
+== Completion ==
+Disp -> Runner: await proc.wait()
+note right of Disp: kind=="script": synthesise _result.json from exit code\n+ run_dirs discovered via rglob("manifest.json")
+Disp -> Disp: read _result.json
+Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
+note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
+Disp --> DB: done
+
+@enduml

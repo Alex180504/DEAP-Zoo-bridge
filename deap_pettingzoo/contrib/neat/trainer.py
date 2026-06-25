@@ -34,10 +34,11 @@ from deap_pettingzoo.baselines._logging_helpers import (
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
 
@@ -46,20 +47,19 @@ from .policy import NeatPolicy
 
 
 class _RecordingReporter(neat.reporting.BaseReporter):
-    """NEAT reporter that records champion-rollout episodes during training.
+    """NEAT reporter that forwards each generation's champion to the
+    recording controller, which decides (per RecordingMode) whether to
+    capture it.
 
     Parameters
     ----------
     record_fn : callable
-        ``record_fn(generation: int, best_genome) -> None`` — called
-        every ``cadence`` generations with the current best genome.
-    cadence : int
-        Record every N generations (1-indexed).
+        ``record_fn(generation: int, best_genome) -> None`` — called once
+        per generation with the current best genome.
     """
 
-    def __init__(self, record_fn, cadence: int = 1):
+    def __init__(self, record_fn):
         self._record_fn = record_fn
-        self._cadence = max(1, int(cadence))
         self._gen = 0
 
     def start_generation(self, generation: int) -> None:
@@ -68,7 +68,7 @@ class _RecordingReporter(neat.reporting.BaseReporter):
     def post_evaluate(
         self, config, population, species_set, best_genome
     ) -> None:
-        if self._gen <= 0 or self._gen % self._cadence != 0:
+        if self._gen <= 0:
             return
         try:
             self._record_fn(self._gen, best_genome)
@@ -82,6 +82,11 @@ def _action_space_hint(action_space: Any) -> Dict[str, Any]:
 
     if isinstance(action_space, spaces.Discrete):
         return {"type": "discrete", "args": {"n": int(action_space.n)}}
+    if isinstance(action_space, spaces.MultiDiscrete):
+        return {
+            "type": "multidiscrete",
+            "args": {"nvec": [int(x) for x in action_space.nvec]},
+        }
     if isinstance(action_space, spaces.Box):
         return {
             "type": "continuous",
@@ -93,7 +98,8 @@ def _action_space_hint(action_space: Any) -> Dict[str, Any]:
         }
     raise NotImplementedError(
         f"NEAT parallel evaluation does not support action space "
-        f"{type(action_space).__name__}. Only Discrete and Box are supported."
+        f"{type(action_space).__name__}. Only Discrete, MultiDiscrete and Box "
+        "are supported."
     )
 
 
@@ -119,10 +125,6 @@ class NEATTrainer(BaselineTrainer):
       ``"sum"``.
     """
 
-    # NEAT typically needs more generations than EA; record every gen
-    # by default is too noisy but consistent with other trainers.
-    _default_recording_every_n: ClassVar[int] = 1
-
     def __init__(self, num_workers: int = 1) -> None:
         self._fitness_history: List[float] = []
         self._generation_num: int = 0
@@ -141,6 +143,7 @@ class NEATTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "multi_agent": True,
             "multi_objective": False,
             "parallel_training": self._num_workers > 1,
@@ -192,25 +195,11 @@ class NEATTrainer(BaselineTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + optional FrameRecorder ---------------------------------
+        # --- Logger + unified champion-rollout recording ---------------------
         log = build_logger(config, algorithm="neat")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=500,
-                    frame_recorder=recorder,
-                )
+        self._recorder = RecordingController(
+            config, log, max_steps=500, seed=seed,
+        )
 
         # --- Create initial population ---------------------------------------
         pop = neat.Population(neat_config, seed=seed)
@@ -223,24 +212,25 @@ class NEATTrainer(BaselineTrainer):
         _act_hint = _action_space_hint(shared_action_space)
 
         # --- Recording reporter ----------------------------------------------
-        if recording_evaluator is not None:
+        def _neat_champion(best_genome):
+            return NeatPolicy(
+                best_genome, neat_config, action_space=shared_action_space
+            )
+
+        if self._recorder.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                champ_policy = NeatPolicy(
-                    best_genome, neat_config, action_space=shared_action_space
-                )
-                rollout_seed = seed if seed is not None else 0
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed),
-                    env_config=dict(config.env_config) if config.env_config else None,
+                self._recorder.observe(
+                    ProgressEvent(
+                        unit="generation",
+                        current=gen,
+                        total=n_generations,
+                        env_steps=gen * 500,
+                    ),
+                    lambda: _neat_champion(best_genome),
                 )
 
-            pop.add_reporter(
-                _RecordingReporter(_record_champion, cadence=recording_cadence)
-            )
+            pop.add_reporter(_RecordingReporter(_record_champion))
 
         # --- Parallel or sequential eval -------------------------------------
         if self._num_workers > 1:
@@ -261,6 +251,7 @@ class NEATTrainer(BaselineTrainer):
                 action_space_args=_act_hint.get("args", {}),
                 eval_episodes_per_genome=eval_eps,
                 seed=seed if seed is not None else 0,
+                registry_snapshot=snapshot,
             )
             _executor = make_executor(
                 self._num_workers,
@@ -353,15 +344,21 @@ class NEATTrainer(BaselineTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        # Guarantee a final capture (dedups against the last per-gen one).
+        self._recorder.finalize(
+            lambda: _neat_champion(best_genome),
+            iteration=n_generations,
+            env_steps=n_generations * 500,
+        )
+
         try:
             env.close()
         except Exception:
             pass
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.close()
 
         self._log(config, best_genome, pop_size, elapsed, algorithm="NEAT")
-        if recording_cfg.enabled:
+        if config.recording.enabled:
             log.close()
 
         return TrainingResult(

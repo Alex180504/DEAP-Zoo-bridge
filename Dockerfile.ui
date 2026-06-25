@@ -1,0 +1,56 @@
+# Dockerfile.ui — DEAP-bridge Streamlit UI 
+# ===========================================================================
+
+FROM python:3.11-slim-bookworm
+
+# --- Build arguments -------------------------------------------------------
+ARG DEAP_RESULTS_ROOT=/app/results
+ARG FASTAPI_URL=http://127.0.0.1:8100
+ARG STREAMLIT_PORT=8501
+
+# --- System dependencies ---------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Streamlit's file watcher and Plotly image export sometimes need these.
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Create non-root user --------------------------------------------------
+RUN groupadd --system deap && \
+    useradd --system --no-log-init --gid deap --create-home deap
+
+# --- Application directory -------------------------------------------------
+WORKDIR /app
+
+# --- Install the package ---------------------------------------------------
+# Copy only what pip needs first (layer caching).
+COPY pyproject.toml README.md LICENSE.txt ./
+COPY deap_pettingzoo/ deap_pettingzoo/
+COPY .streamlit/ .streamlit/
+
+# Install the [ui] extra.  No torch / agilerl / jax here — the UI
+# communicates with the backend exclusively over HTTP.
+RUN pip install --no-cache-dir ".[ui]"
+
+# --- Runtime setup ---------------------------------------------------------
+RUN mkdir -p /app/results && chown deap:deap /app/results
+
+ENV DEAP_RESULTS_ROOT=${DEAP_RESULTS_ROOT}
+ENV FASTAPI_URL=${FASTAPI_URL}
+ENV STREAMLIT_PORT=${STREAMLIT_PORT}
+
+# Streamlit's default port; configurable at runtime.
+EXPOSE ${STREAMLIT_PORT}
+
+USER deap
+
+# Streamlit serves a liveness endpoint at /_stcore/health
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${STREAMLIT_PORT}/_stcore/health')" || exit 1
+
+ENTRYPOINT ["python", "-m", "streamlit", "run", \
+            "deap_pettingzoo/ui/app.py", \
+            "--server.port", "8501", \
+            "--server.address", "0.0.0.0", \
+            "--server.headless", "true", \
+            "--server.maxUploadSize", "5000", \
+            "--browser.gatherUsageStats", "false"]

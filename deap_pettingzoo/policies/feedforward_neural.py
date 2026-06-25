@@ -34,6 +34,8 @@ class FeedforwardNeuralPolicy:
         action_space: Optional[Any] = None,
         head: Optional[ActionHead] = None,
         masked: bool = False,
+        *,
+        rng: Optional[np.random.Generator] = None,
     ) -> None:
         """
         Initialize policy from genome.
@@ -49,6 +51,12 @@ class FeedforwardNeuralPolicy:
                 construct a :class:`MaskedDiscreteHead` so that
                 :meth:`get_action` can accept an ``action_mask`` kwarg.
                 Ignored when ``head`` is supplied explicitly.
+            rng: Optional :class:`numpy.random.Generator` used for
+                stochastic action noise when ``deterministic=False``.
+                Defaults to a fresh ``np.random.default_rng()`` so the
+                policy never touches the global legacy RNG.  Only
+                relevant for the ``deterministic=False`` exploration
+                branch, which production evaluators do not exercise.
 
         Raises:
             ValueError: If ``genome`` is ``None``.
@@ -68,6 +76,7 @@ class FeedforwardNeuralPolicy:
         if not isinstance(genome, FixedTopologyGenome):
             raise TypeError(f"Expected FixedTopologyGenome, got {type(genome)}")
         self.genome = genome
+        self._rng: np.random.Generator = rng if rng is not None else np.random.default_rng()
         if head is not None:
             self.head: Optional[ActionHead] = head
         elif action_space is not None:
@@ -210,7 +219,7 @@ class FeedforwardNeuralPolicy:
         if not deterministic:
             # Add small Gaussian noise for exploration
             # Note: this should not be used with DEAP, which has its own mutation operators
-            noise = np.random.normal(0, 0.1, size=action.shape)
+            noise = self._rng.normal(0, 0.1, size=action.shape)
             action = action + noise
 
         if self.head is not None:

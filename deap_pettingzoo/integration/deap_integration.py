@@ -677,9 +677,10 @@ class _EvalWorkerSpec:
     max_steps: int
     aggregation_method: str
     team_mapping: Optional[Dict[str, str]] = None
+    registry_snapshot: Optional[list] = None
 
 
-# Module-global cache populated lazily on each worker. 
+# Module-global cache populated lazily on each worker.
 _WORKER_CACHE: Dict[str, Any] = {}
 
 
@@ -689,6 +690,14 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     evaluator = _WORKER_CACHE.get("evaluator")
     if evaluator is not None and cached_spec == spec:
         return evaluator
+
+    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # build them; no-op on repeat calls and for built-in-only snapshots.
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
+
+    replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild if first call on this worker, or spec changed since last build.
     from deap_pettingzoo.environments import PettingZooWrapper
@@ -879,6 +888,7 @@ class _MixedWorkerSpec:
     layer_sizes: Tuple[int, ...]
     activation: str
     output_activation: str
+    registry_snapshot: Optional[list] = None
 
 
 _MIXED_WORKER_CACHE: Dict[str, Any] = {}
@@ -923,8 +933,15 @@ def _mixed_worker_evaluate(
     platforms (including Windows spawn).
     """
     from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     payload, spec = payload_and_spec
+
+    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # resolve the env factory; no-op on repeat calls.
+    replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild genome from payload.
     genome = FixedTopologyGenome(
@@ -1066,6 +1083,12 @@ def make_mixed_parallel_evaluate_map(
         if evaluator.env_wrapper is None:
             temp_env.close()
 
+    from deap_pettingzoo.environments.registry import get_registry_snapshot
+
+    # Snapshot custom env registrations once so SCOOP/Dask workers (no
+    # initializer hook) can resolve the env factory.
+    registry_snapshot = get_registry_snapshot()
+
     spec = _MixedWorkerSpec(
         env_factory_qualname=_qualname(evaluator.env_factory),
         scripted_factory_qualname=_qualname(evaluator.scripted_policy_factory),
@@ -1076,6 +1099,7 @@ def make_mixed_parallel_evaluate_map(
         layer_sizes=(input_size, output_size),  # placeholder; overridden per-genome
         activation="tanh",  # placeholder; overridden per-genome
         output_activation="tanh",  # placeholder; overridden per-genome
+        registry_snapshot=registry_snapshot,
     )
 
     def _pmap(_evaluate_ignored, individuals):
@@ -1093,6 +1117,7 @@ def make_mixed_parallel_evaluate_map(
                 layer_sizes=tuple(genome.layer_sizes),
                 activation=genome.activation,
                 output_activation=getattr(genome, "output_activation", genome.activation),
+                registry_snapshot=spec.registry_snapshot,
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
         return list(executor.map(_mixed_worker_evaluate, payloads))

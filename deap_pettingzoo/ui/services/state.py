@@ -29,6 +29,15 @@ class UIState:
     ci_level: float = 0.95
     n_resamples: int = 2000
     pairwise_test: str = "mann_whitney"
+    #: The last experiment config edited on the Setup page (serialised to JSON
+    #: before persisting so it survives hot-reloads).
+    setup_config: Optional[str] = None
+    #: Which experiment detail is expanded on the Queue page.
+    queue_expanded: str = ""
+    #: Last source in the Setup → Advanced script editor (persisted as text).
+    advanced_script: str = ""
+    #: Which Advanced subwindow is selected ("install" or "script").
+    advanced_view: str = "install"
 
     _backing: Optional[MutableMapping[str, Any]] = None
 
@@ -51,6 +60,10 @@ class UIState:
             ci_level=float(stored.get("ci_level", 0.95)),
             n_resamples=int(stored.get("n_resamples", 2000)),
             pairwise_test=str(stored.get("pairwise_test", "mann_whitney")),
+            setup_config=stored.get("setup_config"),
+            queue_expanded=str(stored.get("queue_expanded", "")),
+            advanced_script=str(stored.get("advanced_script", "")),
+            advanced_view=str(stored.get("advanced_view", "install")),
         )
         instance._backing = state
         return instance
@@ -74,6 +87,10 @@ class UIState:
             "ci_level": float(self.ci_level),
             "n_resamples": int(self.n_resamples),
             "pairwise_test": self.pairwise_test,
+            "setup_config": self.setup_config,
+            "queue_expanded": self.queue_expanded,
+            "advanced_script": self.advanced_script,
+            "advanced_view": self.advanced_view,
         }
 
     def update_selected(self, run_ids: Iterable[str]) -> None:

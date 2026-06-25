@@ -182,8 +182,15 @@ class _DaskExecutor:
         if client is None:
             from dask.distributed import Client
 
+            # One thread per worker: the project's worker-side caches
+            # (``_WORKER_CACHE`` and friends) and the rebuilt envs are not
+            # thread-safe — they assume one task at a time per process, like
+            # ``ProcessPoolExecutor`` and SCOOP. Dask's multi-threaded default
+            # would let concurrent tasks corrupt a shared cached env. Inject
+            # your own ``Client`` if you need a different layout.
             client = Client(
                 n_workers=max(2, num_workers),
+                threads_per_worker=1,
                 processes=True,
                 dashboard_address=None,
             )

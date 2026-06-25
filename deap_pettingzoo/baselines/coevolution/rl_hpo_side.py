@@ -10,7 +10,11 @@ exposed to opponent sides each generation (via a frozen CPU snapshot).
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -22,8 +26,18 @@ from .pools import OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
+    # Underscore keys (historical / programmatic).
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3_hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
+    "ippo_hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
+    # Hyphenated catalog names (injected into ``optimizer_config['algorithm']``
+    # by ``experiment_spec._build_coevolution_plan``). Mirrors the dual-key
+    # pattern ``rl_side.SUPPORTED_RL_ALGORITHMS`` uses for grouped IPPO.
+    "maddpg-hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
+    "matd3-hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
+    "ippo-hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "ippo-grouped-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
 }
 
 
@@ -32,7 +46,8 @@ class RLEvolveHPOSideState(SideState):
 
     Accepted ``optimizer_config`` keys:
 
-    * ``algorithm`` (required) — ``"maddpg_hpo"`` or ``"matd3_hpo"``.
+    * ``algorithm`` (required) — ``"maddpg_hpo"`` / ``"matd3_hpo"``
+      (off-policy) or ``"ippo_hpo"`` / ``"grouped_ippo_hpo"`` (on-policy).
     * ``population_size`` (default 6)
     * ``evo_every_n_steps`` (default 20_000 — coevolution generations
       are typically shorter than standalone HPO)
@@ -58,14 +73,11 @@ class RLEvolveHPOSideState(SideState):
         self._algo_module, self._algo_class, self._on_policy = (
             SUPPORTED_HPO_RL_ALGORITHMS[algo]
         )
-        if self._on_policy:  # pragma: no cover — safety net
-            raise NotImplementedError(
-                "On-policy HPO co-evolution is not yet supported."
-            )
 
         self.population_size = int(cfg.get("population_size", 6))
         self.evo_every = int(cfg.get("evo_every_n_steps", 20_000))
-        self.device = cfg.get("device", "cpu")
+        from deap_pettingzoo.utils.device_check import resolve_device
+        self.device = resolve_device(cfg.get("device", "cpu"))
         self.seed = cfg.get("seed", None)
         self.agent_ctor_kwargs = dict(cfg.get("agent_ctor_kwargs", {}))
         self.net_config = cfg.get("net_config", {})
@@ -131,6 +143,8 @@ class RLEvolveHPOSideState(SideState):
             hp_config=hp_config,
         )
         self._population = pop
+        if self._on_policy:
+            self._maybe_apply_grouping_patch()
         self._champion_wrapper = AgileRLPolicyWrapper(
             self._population[0], self._learner_ids,
             algorithm_name=self._algo_key,
@@ -143,17 +157,26 @@ class RLEvolveHPOSideState(SideState):
         batch_eval_fn=None,
     ) -> GenerationStats:
         self.generation += 1
+        _gen_t0 = time.time()
 
         # 1. Train each agent for evo_every steps against current opponents.
         evaluator = evaluator_factory(self)
         env = evaluator._env  # type: ignore[attr-defined]
         for agent in self._population:
-            self._train_agent(
-                agent=agent,
-                env=env,
-                learner_ids=self._learner_ids,
-                target_steps=self.evo_every,
-            )
+            if self._on_policy:
+                self._train_agent_on_policy(
+                    agent=agent,
+                    env=env,
+                    learner_ids=self._learner_ids,
+                    target_steps=self.evo_every,
+                )
+            else:
+                self._train_agent(
+                    agent=agent,
+                    env=env,
+                    learner_ids=self._learner_ids,
+                    target_steps=self.evo_every,
+                )
 
         # 2. Evaluate fitnesses.
         fitnesses: List[float] = []
@@ -213,6 +236,8 @@ class RLEvolveHPOSideState(SideState):
             min=min(fitnesses),
             max=best,
             best_fitness=best,
+            env_steps=self.generation * self.evo_every,
+            wall_time_s=time.time() - _gen_t0,
         )
         self.history.append(stats)
         return stats
@@ -336,13 +361,65 @@ class RLEvolveHPOSideState(SideState):
                         try:
                             experiences = memory.sample(batch_size)
                             agent.learn(experiences)
-                        except Exception:
-                            pass
+                        except Exception:  # pragma: no cover - version drift
+                            logging.getLogger(__name__).warning(
+                                "RLEvolveHPOSideState._train_agent: agent.learn() failed",
+                                exc_info=True,
+                            )
 
                 if all(terms.get(a, False) for a in learner_ids) or all(
                     truncs.get(a, False) for a in learner_ids
                 ):
                     break
+
+    def _maybe_apply_grouping_patch(self) -> None:
+        """Install AgileRL's grouped-IPPO advantage/state flattening fix.
+
+        Same rationale as :meth:`RLSideState._maybe_apply_grouping_patch`:
+        AgileRL shares one actor/critic across same-role agents, which
+        triggers a flattening bug in ``IPPO._learn_individual``. No-op unless
+        the population's agents are actually grouped.
+        """
+        grouped = self._algo_key == "grouped_ippo_hpo"
+        if not grouped and self._population:
+            has = getattr(self._population[0], "has_grouped_agents", None)
+            try:
+                grouped = bool(has()) if callable(has) else False
+            except Exception:
+                grouped = False
+        if not grouped:
+            return
+        try:
+            from deap_pettingzoo.baselines.agilerl_trainer import (
+                _apply_agilerl_grouping_patch,
+            )
+
+            _apply_agilerl_grouping_patch()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("RLEvolveHPOSideState: could not apply grouped-IPPO patch", exc_info=True)
+
+    @staticmethod
+    def _train_agent_on_policy(
+        agent: Any,
+        env: Any,
+        learner_ids: List[str],
+        target_steps: int,
+    ) -> None:
+        """On-policy (IPPO) training for one population member.
+
+        Thin wrapper over the shared
+        :func:`~deap_pettingzoo.baselines.agilerl_onpolicy.train_agent_on_policy`
+        helper, so this side and the standalone
+        :class:`~deap_pettingzoo.baselines.agilerl_hpo_trainer.EvolveHPOTrainer`
+        share one rollout-and-learn implementation.
+        """
+        from deap_pettingzoo.baselines.agilerl_onpolicy import (
+            train_agent_on_policy,
+        )
+
+        train_agent_on_policy(
+            agent, env, learner_ids, target_steps, logger=logger,
+        )
 
     @staticmethod
     def _eval_agent(
@@ -361,7 +438,16 @@ class RLEvolveHPOSideState(SideState):
                 except TypeError:
                     actions = agent.get_action(obs)
                 result = actions[0] if isinstance(actions, tuple) else actions
-                next_obs, rews, terms, truncs, _ = env.step(result)
+                # Squeeze the leading (1,) batch dim so discrete envs receive
+                # scalar actions (on-policy get_action returns (1,)-shaped
+                # arrays); harmless for already-unbatched off-policy actions.
+                step_actions: Dict[str, Any] = {}
+                for a, act in result.items():
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                    step_actions[a] = arr.item() if arr.shape == () else arr
+                next_obs, rews, terms, truncs, _ = env.step(step_actions)
                 total += sum(float(rews.get(a, 0.0)) for a in learner_ids)
                 obs = next_obs
                 if all(terms.get(a, False) for a in learner_ids) or all(

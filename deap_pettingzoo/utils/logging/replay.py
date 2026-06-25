@@ -8,8 +8,10 @@ training loops fast.
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 
@@ -78,12 +80,39 @@ class FrameRecorder:
         self._episode_idx: Optional[int] = None
         self._frames_dir = self.run_dir / "frames"
         self._warned_fallback = False
+        # Sidecar metadata: every successfully written artefact appends an
+        # entry to ``self._recordings`` and the list is mirrored to
+        # ``frames/recordings.json`` so the UI can associate a recording
+        # with the training iteration/generation it captured.
+        self._recordings: List[Dict[str, Any]] = []
+        self._pending_meta: Dict[str, Any] = {}
+        self._t0 = time.time()
 
     # -- lifecycle ---------------------------------------------------
 
-    def start_episode(self, episode_idx: int) -> None:
+    def start_episode(
+        self,
+        episode_idx: int,
+        *,
+        iteration: Optional[int] = None,
+        env_steps: Optional[int] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Begin buffering frames for a new episode.
+
+        ``iteration``/``env_steps``/``extra`` are optional metadata stashed
+        for the upcoming :meth:`end_episode` call: they let the recorder
+        record *which* training iteration/generation this artefact captured
+        in the ``frames/recordings.json`` sidecar. Omitting them still
+        produces a coherent sidecar entry (filename + episode index only).
+        """
         self._episode_idx = int(episode_idx)
         self._frames = []
+        self._pending_meta = {
+            "iteration": int(iteration) if iteration is not None else None,
+            "env_steps": int(env_steps) if env_steps is not None else None,
+            "extra": dict(extra) if extra else None,
+        }
 
     def add_frame(self, frame: Any) -> None:
         if not self.enabled or self._episode_idx is None or frame is None:
@@ -102,8 +131,12 @@ class FrameRecorder:
             h, w = arr.shape[:2]
             if max(h, w) > self.max_dim:
                 scale = self.max_dim / max(h, w)
-                nh = max(1, int(h * scale))
-                nw = max(1, int(w * scale))
+                # Floor each side at 2px: H.264 needs even, >=2 dimensions,
+                # so a too-small max_dim (e.g. 1) would otherwise yield a
+                # 1x1 frame the encoder rejects ("width not divisible by 2"),
+                # producing a silent 0-frame mp4.
+                nh = max(2, int(h * scale))
+                nw = max(2, int(w * scale))
                 ri = np.linspace(0, h - 1, nh, dtype=int)
                 ci = np.linspace(0, w - 1, nw, dtype=int)
                 arr = arr[np.ix_(ri, ci)]
@@ -123,8 +156,21 @@ class FrameRecorder:
         try:
             import imageio.v2 as imageio  # type: ignore
         except ImportError:
+            if not self._warned_fallback:
+                import warnings
+
+                warnings.warn(
+                    "FrameRecorder: `imageio` is not installed, so no replay "
+                    "videos will be written. Install the logging extra "
+                    "(`pip install deap-pettingzoo[logging]`) to enable "
+                    "frame recording.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                self._warned_fallback = True
             self._frames = []
             self._episode_idx = None
+            self._pending_meta = {}
             return None
 
         self._frames_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +210,37 @@ class FrameRecorder:
             else:
                 path = None  # type: ignore[assignment]
 
+        if path is not None:
+            self._append_recording(path, ep)
+
         self._frames = []
         self._episode_idx = None
+        self._pending_meta = {}
         return path
+
+    # -- sidecar metadata --------------------------------------------
+
+    def _append_recording(self, path: Path, episode_idx: int) -> None:
+        """Record ``path`` in ``frames/recordings.json`` (best-effort).
+
+        Associates the just-written artefact with the iteration/generation
+        metadata stashed by :meth:`start_episode`. Any I/O error is
+        swallowed so recording can never break a training run.
+        """
+        meta = self._pending_meta or {}
+        entry: Dict[str, Any] = {
+            "file": path.name,
+            "episode_idx": int(episode_idx),
+            "iteration": meta.get("iteration"),
+            "env_steps": meta.get("env_steps"),
+            "wall_time": round(time.time() - self._t0, 3),
+        }
+        if meta.get("extra"):
+            entry["extra"] = meta["extra"]
+        self._recordings.append(entry)
+        try:
+            tmp = self._frames_dir / "recordings.json.tmp"
+            tmp.write_text(json.dumps(self._recordings, indent=2), encoding="utf-8")
+            tmp.replace(self._frames_dir / "recordings.json")
+        except Exception:  # pragma: no cover - best-effort sidecar
+            pass

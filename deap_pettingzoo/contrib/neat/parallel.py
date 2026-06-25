@@ -75,6 +75,9 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
+    #: any worker missing a runtime registration) can resolve ``env_name``.
+    registry_snapshot: Optional[List] = None
 
 
 def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
@@ -84,6 +87,13 @@ def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
     if spec.action_space_type == "discrete":
         n = int(spec.action_space_args.get("n", spec.output_size))
         return spaces.Discrete(n)
+    if spec.action_space_type == "multidiscrete":
+        nvec = spec.action_space_args.get("nvec")
+        if nvec is None:
+            raise ValueError(
+                "MultiDiscrete action_space_args must include 'nvec'."
+            )
+        return spaces.MultiDiscrete(np.asarray(nvec, dtype=np.int64))
     if spec.action_space_type == "continuous":
         shape = tuple(spec.action_space_args.get("shape", (spec.output_size,)))
         low = np.asarray(spec.action_space_args.get("low", -1.0), dtype=np.float32)
@@ -123,8 +133,15 @@ def _neat_worker_evaluate(payload: tuple) -> float:
     from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
     from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     genome, spec = payload
+
+    # Re-register custom envs so SCOOP/Dask workers can resolve env_name; no-op
+    # on repeat calls and for built-in-only snapshots.
+    replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,
     # standard config for plain NEAT.

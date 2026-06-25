@@ -200,7 +200,7 @@ class TestPayloadPickleability:
         pytest.importorskip("flax")
         import pickle
 
-        from deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion import (
+        from examples.qdax.descriptors import (
             _FormationSpreadAndMeanDistance,
             formation_spread_and_mean_distance,
         )

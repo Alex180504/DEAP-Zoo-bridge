@@ -8,6 +8,7 @@ from .apf_policy import (
     AquariumAPFEvaderPolicy,
     aquarium_obs_layout,
 )
+from .qdax_position_extractor import make_aquarium_extractor
 from .scripted_opponent_env import (
     ScriptedOpponentEnvWrapper,
     register_scripted_aquarium,
@@ -17,6 +18,7 @@ __all__ = [
     "AquariumAPFConfig",
     "AquariumAPFEvaderPolicy",
     "aquarium_obs_layout",
+    "make_aquarium_extractor",
     "ScriptedOpponentEnvWrapper",
     "register_scripted_aquarium",
 ]

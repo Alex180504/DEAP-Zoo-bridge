@@ -221,6 +221,39 @@ class TestFeedforwardNeuralPolicyActionSelection:
         differences = [not np.allclose(sa, deterministic_action) for sa in stochastic_actions]
         assert any(differences), "Stochastic actions should differ from deterministic"
 
+    def test_get_action_stochastic_reproducible_with_seeded_rng(self):
+        """Identical seeded generators produce identical stochastic action sequences."""
+        genome = FixedTopologyGenome([10, 64, 4], random_seed=42)
+        observation = np.ones(10)
+
+        policy_a = FeedforwardNeuralPolicy(genome, rng=np.random.default_rng(123))
+        policy_b = FeedforwardNeuralPolicy(genome, rng=np.random.default_rng(123))
+
+        for _ in range(5):
+            np.testing.assert_array_equal(
+                policy_a.get_action(observation, deterministic=False),
+                policy_b.get_action(observation, deterministic=False),
+            )
+
+    def test_get_action_stochastic_unaffected_by_global_rng(self):
+        """Policy draws are isolated from the global legacy RNG stream."""
+        genome = FixedTopologyGenome([10, 64, 4], random_seed=42)
+        observation = np.ones(10)
+
+        rng_a = np.random.default_rng(99)
+        rng_b = np.random.default_rng(99)
+
+        policy_a = FeedforwardNeuralPolicy(genome, rng=rng_a)
+        action_a = policy_a.get_action(observation, deterministic=False)
+
+        # Perturb the global legacy RNG between the two calls
+        np.random.seed(999)
+
+        policy_b = FeedforwardNeuralPolicy(genome, rng=rng_b)
+        action_b = policy_b.get_action(observation, deterministic=False)
+
+        np.testing.assert_array_equal(action_a, action_b)
+
 class TestFeedforwardNeuralPolicyWeightUpdates:
     """Test policy behavior with weight updates."""
     

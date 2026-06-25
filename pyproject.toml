@@ -63,8 +63,13 @@ rl-baselines = [
     # deap_pettingzoo/baselines/agilerl_trainer.py targets AgileRL's
     # internal `concatenate_experiences_into_batches`. It is verified
     # against the 2.6.x series and fails loudly on signature drift.
-    "agilerl>=2.6,<3",
     "torch>=2.0.0",
+    # agilerl is installed separately by install.bat (or manually with
+    # --no-deps) because it pins pettingzoo~=1.23.1 which conflicts
+    # with mpe2's pettingzoo>=1.24.3.  AgileRL works fine at runtime
+    # with newer pettingzoo — the pin is just conservative upstream.
+    #   install.bat service          (recommended)
+    #   pip install --no-deps "agilerl>=2.6,<3" && pip install -e ".[service]"
 ]
 aquarium = [
     "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
@@ -99,20 +104,36 @@ dask = [
 ]
 ui = [
     "deap-pettingzoo[analysis]",
-    "streamlit>=1.30",
+    "streamlit>=1.37",  # st.fragment (Queue/Advanced live panels) + st.container(height=...)
+    "streamlit-code-editor>=0.1.20",  # Setup → Advanced script editor (opt-in; reliable st.text_area fallback)
     "plotly>=5.0",
     "pillow>=10.0",
     "imageio>=2.31",
+    "httpx>=0.24",
+    "pyyaml>=6.0",
+]
+service = [
+    "deap-pettingzoo[rl-baselines]",
+    # The service process runs the trainers, so it owns artefact logging:
+    # imageio/imageio-ffmpeg (frame recording) + pyarrow (trajectories).
+    # Without this, FrameRecorder.end_episode() silently no-ops and no
+    # `frames/` videos are produced.
+    "deap-pettingzoo[logging]",
+    "fastapi>=0.100",
+    "python-multipart>=0.0.5",
+    "uvicorn[standard]>=0.22",
+    "pydantic>=2",
+    "supersuit>=3.9",
+]
+ui-full = [
+    "deap-pettingzoo[ui,service]",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui,service,ui-full]"
 ]
 
-[tool.setuptools]
-packages = ["deap_pettingzoo"]
-
-[tool.setuptools.package-data]
-deap_pettingzoo = ["py.typed"]
+[tool.setuptools.packages.find]
+include = ["deap_pettingzoo", "deap_pettingzoo.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -121,6 +142,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "scoop: marks tests that launch a real `python -m scoop` subprocess (needs the scoop extra)",
 ]
 addopts = [
     "--verbose",

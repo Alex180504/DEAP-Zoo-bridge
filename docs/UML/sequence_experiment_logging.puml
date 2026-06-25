@@ -1,0 +1,56 @@
+@startuml sequence_experiment_logging
+title Experiment (Results / Metrics) Logging Pipeline – Trainer → Sinks → Disk
+
+' NOTE: This is the *experiment-results* pipeline (metrics / checkpoints /
+' manifests).  For backend *diagnostic* logging (exceptions, warnings,
+' lifecycle, the --verbose switch, GET /logs) see sequence_logging_pipeline.puml.
+
+actor "Researcher" as R
+participant "EATrainer\n(or any baseline trainer)" as T
+participant "build_logger\n(_logging_helpers)" as BL
+participant "ExperimentLogger" as EL
+participant "MultiSink" as MS
+participant "JsonManifestSink" as JMS
+participant "CsvScalarSink" as CSV
+participant "RunManifest" as RM
+participant "Filesystem\n<run_dir>/" as FS
+
+R -> T: train(config)
+activate T
+T -> BL: build_logger(config, algorithm)
+BL -> EL: ExperimentLogger.from_config(...)
+alt config.output_dir is None
+    EL --> BL: NoOpLogger()
+    BL --> T: noop
+else output_dir set
+    EL -> RM: RunManifest(\n  run_id, algorithm, env_name,\n  seed, hyperparams, ...,\n  environment=capture_environment_metadata())
+    EL -> MS: open(run_dir)
+    MS -> JMS: open(run_dir)
+    MS -> CSV: open(run_dir)
+    EL --> BL: logger
+    BL --> T: logger
+end
+
+loop per iteration
+    T -> EL: row("metrics", {iteration, env_steps, wall_time, best, ...})
+    EL -> MS: log_row("metrics", row)
+    MS -> JMS: log_row("metrics", row)
+    note right of JMS: ignored\n(table not in whitelist)
+    MS -> CSV: log_row("metrics", row)
+    CSV -> FS: append metrics.csv
+end
+
+T -> EL: row("summary", final_summary)
+EL -> MS: log_row("summary", row)
+MS -> JMS: log_row("summary", row)
+JMS -> FS: write summary.json (atomic .tmp → replace)
+
+T -> EL: close()
+EL -> RM: write(<run_dir>/manifest.json)
+RM -> FS: manifest.json
+EL -> MS: close()
+MS -> CSV: close()
+MS -> JMS: close()
+deactivate T
+
+@enduml

@@ -7,7 +7,7 @@ unified BaselineTrainer interface.
 
 import time
 from pathlib import Path
-from typing import Dict, Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 import numpy as np
 from deap import algorithms, tools
 
@@ -19,11 +19,13 @@ from deap_pettingzoo.baselines._logging_helpers import (
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
     PolicyProtocol,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.deap_integration import (
@@ -145,10 +147,92 @@ class EATrainer(BaselineTrainer):
     training interface compatible with BaselineTrainer.
     """
 
-    #: Per-generation cadence is the natural fit for EA — every
-    #: generation produces one champion-rollout artefact when
-    #: ``TrainingConfig.recording.enabled`` is set.
-    _default_recording_every_n: ClassVar[int] = 1
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        Returns the :class:`~deap_pettingzoo.catalog.schema.ParamSpec` tuple
+        describing every UI-configurable knob of this trainer. The
+        :class:`~deap_pettingzoo.catalog.schema.ParamTarget` of each spec tells
+        :func:`~deap_pettingzoo.baselines.experiment_spec.build_configs` whether
+        the value is a trainer-constructor argument (``trainer_params``) or a
+        per-run ``algorithm_params`` entry.
+
+        Dict-valued knobs (``selection_params`` / ``crossover_params`` /
+        ``mutation_params``) and ``fitness_spec`` are intentionally omitted —
+        they are raw-config / Python-API territory (see the UI-overhaul spec).
+        """
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
+        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        return (
+            ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
+                      group="Architecture",
+                      help="Hidden layer width of the evolved MLP."),
+            ParamSpec("population_size", I, 50, minimum=2, step=1, target=TR,
+                      group="Population",
+                      help="Number of individuals evaluated per generation."),
+            ParamSpec("strategy", E, "simple", target=TR, group="Strategy",
+                      choices=("simple", "mu_plus_lambda", "mu_comma_lambda"),
+                      help="Evolutionary driver / generational loop."),
+            ParamSpec("mu", I, None, minimum=1, step=1, target=TR,
+                      group="Strategy", advanced=True, nullable=True,
+                      help="Parents kept between generations "
+                           "(mu_*_lambda strategies). Defaults to population."),
+            ParamSpec("lambda_", I, None, minimum=1, step=1, target=TR,
+                      group="Strategy", advanced=True, nullable=True,
+                      help="Offspring per generation (mu_*_lambda strategies)."),
+            ParamSpec("selection_method", E, "tournament", target=TR,
+                      group="Selection", advanced=True,
+                      choices=("tournament", "roulette", "best", "random",
+                               "nsga2", "spea2"),
+                      help="Parent-selection operator."),
+            ParamSpec("tournament_size", I, 3, minimum=1, step=1, target=TR,
+                      group="Selection", advanced=True,
+                      help="Tournament size (tournament selection only)."),
+            ParamSpec("crossover_method", E, "blend", target=TR,
+                      group="Operators", advanced=True,
+                      choices=("blend", "one_point", "two_point", "uniform",
+                               "sbx", "es_blend"),
+                      help="Crossover operator."),
+            ParamSpec("crossover_rate", F, 0.7, minimum=0.0, maximum=1.0,
+                      step=0.05, target=TR, group="Operators",
+                      help="Probability of applying crossover."),
+            ParamSpec("crossover_alpha", F, 0.5, minimum=0.0, maximum=1.0,
+                      step=0.05, target=TR, group="Operators", advanced=True,
+                      help="Blend-crossover alpha (blend / es_blend only)."),
+            ParamSpec("mutation_method", E, "gaussian", target=TR,
+                      group="Operators", advanced=True,
+                      choices=("gaussian", "polynomial_bounded"),
+                      help="Mutation operator."),
+            ParamSpec("mutation_rate", F, 0.3, minimum=0.0, maximum=1.0,
+                      step=0.05, target=TR, group="Operators",
+                      help="Probability of mutating a child."),
+            ParamSpec("mutation_sigma", F, 0.2, minimum=0.0, step=0.05,
+                      target=TR, group="Operators", advanced=True,
+                      help="Gaussian mutation standard deviation."),
+            ParamSpec("mutation_indpb", F, 0.1, minimum=0.0, maximum=1.0,
+                      step=0.05, target=TR, group="Operators", advanced=True,
+                      help="Per-weight independent mutation probability."),
+            ParamSpec("num_workers", I, 1, minimum=0, step=1, target=TR,
+                      group="Parallelism",
+                      help="Parallel evaluation workers (1 = serial)."),
+            ParamSpec("parallel_backend", E, "process", target=TR,
+                      group="Parallelism", advanced=True,
+                      choices=("process", "scoop", "dask"),
+                      help="Parallel executor backend."),
+            ParamSpec("seed", I, None, minimum=0, step=1,
+                      target=AP, group="Run", nullable=True,
+                      help="Random seed for this run (None = unseeded)."),
+            ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
+                      target=AP, group="Run",
+                      help="Hard cap on environment steps per rollout."),
+        )
 
     def __init__(
         self,
@@ -299,11 +383,19 @@ class EATrainer(BaselineTrainer):
             return max(pareto_or_hof.items, key=lambda ind: ind.fitness.values[0])
         return pareto_or_hof[0]
     
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train EA with the given configuration.
 
         Args:
             config: Training configuration.
+            progress_callback: Optional per-generation progress hook (fires for
+                the ``"simple"`` strategy live; for ``mu_*_lambda`` strategies
+                the events are emitted after DEAP's hidden loop returns).
 
         Returns:
             TrainingResult with best genome wrapped as policy.
@@ -334,7 +426,8 @@ class EATrainer(BaselineTrainer):
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
             max_steps=max_steps_per_episode,
-            aggregation_method='sum',
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
             fitness_spec=self.fitness_spec,
         )
         
@@ -408,69 +501,79 @@ class EATrainer(BaselineTrainer):
         fitness_history = []
 
         log = build_logger(config, algorithm="ea")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=max_steps_per_episode,
-                    frame_recorder=recorder,
-                )
-
-        def _record_champion_if_due(gen: int) -> None:
-            """Record one champion-rollout episode when cadence hits.
-
-            Best-effort: any failure is swallowed so recording can't
-            break a long training run.
-            """
-            if recording_evaluator is None:
-                return
-            if not hof.items if isinstance(hof, tools.ParetoFront) else (not hof):
-                return
-            if gen % recording_cadence != 0:
-                return
-            try:
-                best = self._mo_champion(hof)
-                champ_policy = GenomePolicyWrapper(
-                    best.genome, config.env_name, action_space=action_space
-                )
-                rollout_seed = config.algorithm_params.get('seed')
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed) if rollout_seed is not None else None,
-                    env_config=dict(config.env_config) if config.env_config else None,
-                )
-            except Exception:
-                pass
-
-        requested = config.algorithm_params.get("num_workers", self.num_workers)
-        effective_workers = resolve_num_workers(requested)
-        backend = config.algorithm_params.get(
-            "parallel_backend", self.parallel_backend
+        env_steps_per_iteration = self.population_size * max_steps_per_episode
+        self._recorder = RecordingController(
+            config, log, max_steps=max_steps_per_episode,
+            seed=config.algorithm_params.get('seed'),
         )
+
+        def _ea_champion():
+            """Lazy champion provider for the recording controller."""
+            items = hof.items if isinstance(hof, tools.ParetoFront) else hof
+            if not items:
+                return None
+            return GenomePolicyWrapper(
+                self._mo_champion(hof).genome,
+                config.env_name,
+                action_space=action_space,
+            )
+
+        def _make_event(gen: int) -> Optional[ProgressEvent]:
+            if not fitness_history:
+                return None
+            entry = fitness_history[-1]
+            return ProgressEvent(
+                unit="generation",
+                current=gen,
+                total=num_generations,
+                env_steps=gen * env_steps_per_iteration,
+                best_fitness=entry.get("max"),
+                mean_fitness=entry.get("mean"),
+                wall_time_s=time.time() - start_time,
+            )
+
+        def _emit_gen_progress(gen: int) -> None:
+            """Emit progress only (no recording) — used at gen 0 and for the
+            DEAP-internal μ±λ strategies whose hof is only final."""
+            event = _make_event(gen)
+            if event is not None:
+                self._emit_progress(progress_callback, event)
+
+        def _on_generation(gen: int) -> None:
+            """Per-generation hook: emit progress **and** maybe record."""
+            event = _make_event(gen)
+            if event is not None:
+                self._on_progress(progress_callback, event, champion=_ea_champion)
+
+        # num_workers / parallel_backend are first-class TrainingConfig fields;
+        # the trainer-constructor value is the fallback used only when the
+        # config leaves them at their defaults.
+        requested = (
+            config.num_workers if config.num_workers != 1 else self.num_workers
+        )
+        effective_workers = resolve_num_workers(requested)
+        backend = (
+            config.parallel_backend
+            if config.parallel_backend != "process"
+            else self.parallel_backend
+        )
+        # One snapshot, reused for the process-pool initializer and shipped on
+        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot()
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
             max_steps=max_steps_per_episode,
-            aggregation_method="sum",
-            team_mapping=None,
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
+            registry_snapshot=registry_snapshot,
         )
 
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
-            initargs=(get_registry_snapshot(),),
+            initargs=(registry_snapshot,),
         ) as executor:
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
             if effective_workers > 1:
@@ -519,6 +622,7 @@ class EATrainer(BaselineTrainer):
                 'min': record['min'],
                 'max': record['max'],
             })
+            _emit_gen_progress(0)
 
             # Evolution loop — strategy-dependent.
             if self.strategy == "simple":
@@ -526,7 +630,13 @@ class EATrainer(BaselineTrainer):
                     population, toolbox, stats, hof, fitness_history,
                     num_generations, rng,
                     eval_population=_eval_population,
-                    on_generation=_record_champion_if_due,
+                    on_generation=_on_generation,
+                )
+                # Safety net: guarantee a final capture even if the last
+                # per-gen hook didn't land exactly on fraction 1.0 (dedups).
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
@@ -547,8 +657,13 @@ class EATrainer(BaselineTrainer):
                         'min': record['min'],
                         'max': record['max'],
                     })
-                # eaMu*Lambda doesn't expose a per-gen hook; record once against the final hall-of-fame champion.
-                _record_champion_if_due(num_generations)
+                    _emit_gen_progress(gen)
+                # eaMu*Lambda doesn't expose a per-gen hook and hof holds only
+                # the final champion; record once at the end.
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
                     population, toolbox,
@@ -568,14 +683,17 @@ class EATrainer(BaselineTrainer):
                         'min': record['min'],
                         'max': record['max'],
                     })
-                _record_champion_if_due(num_generations)
+                    _emit_gen_progress(gen)
+                self._recorder.finalize(
+                    _ea_champion, iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
 
         # Clean up
         env.close()
-        if recording_evaluator is not None:
-            recording_evaluator.close()
+        self._recorder.close()
         
         training_time = time.time() - start_time
         
@@ -655,6 +773,7 @@ class EATrainer(BaselineTrainer):
                 },
                 'num_workers': effective_workers,
                 'parallel_backend': backend,
+                'run_dir': str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
             pareto_front=pareto_front,
@@ -680,6 +799,7 @@ class EATrainer(BaselineTrainer):
         return {
             'discrete_action': True,
             'continuous_action': True,
+            'multidiscrete_action': True,
             'needs_global_state': False,
             'on_policy': False,  # EA is not on/off-policy (different paradigm)
             'supports_turn_based': True,

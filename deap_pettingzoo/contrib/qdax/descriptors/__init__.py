@@ -18,23 +18,28 @@ The trajectory summary dict conventionally carries:
 * ``captures``: shape ``(T,)`` or ``(T, n_evaders)`` \u2014 boolean or
   integer indicators of capture events (env-specific).
 
-Pursuit-evasion descriptors live in :mod:`.pursuit_evasion`; new
-scenarios add new modules alongside it.
+Concrete descriptor implementations are *experiment-side* code and live
+outside the library (e.g. ``examples/qdax/descriptors.py``). The library
+only requires the generic :class:`DescriptorProtocol` contract below.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Tuple
 
 
 class DescriptorProtocol(Protocol):
     """Structural type for a descriptor function.
 
     A callable ``(trajectory_summary: Dict[str, Array]) -> Array`` with
-    a fixed output shape declared via :attr:`output_shape`.
+    a fixed output shape declared via :attr:`output_shape`. The
+    :attr:`min_bd` / :attr:`max_bd` bounds are used by the trainers to
+    build the archive centroids.
     """
 
     output_shape: int  # length of the returned 1-D array
+    min_bd: Tuple[float, ...]  # lower bounds of the behaviour-descriptor space
+    max_bd: Tuple[float, ...]  # upper bounds of the behaviour-descriptor space
 
     def __call__(self, trajectory): ...
 
