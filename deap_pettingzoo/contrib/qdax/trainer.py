@@ -16,6 +16,7 @@ See each trainer's ``_DEFAULT_PARAMS`` for the keys and defaults.
 
 from __future__ import annotations
 
+import logging
 import pickle
 import time
 import warnings
@@ -38,6 +39,8 @@ from deap_pettingzoo.contrib.qdax.progress import (
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level flag so we only emit the "frame recording is unsupported
@@ -88,8 +91,7 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "iso_sigma": 0.005,
     "line_sigma": 0.05,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -110,8 +112,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "sigma_g": 0.1,
     "num_emitters": 1,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -122,51 +123,29 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
 }
 
 
-def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any]):
-    """Instantiate a descriptor factory by short name."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe_desc
+def _require_descriptor_fn(params: Dict[str, Any]):
+    """Return the injected ``descriptor_fn`` callable, validating its contract.
 
-    agents = list(env.possible_agents)
-    pursuers = [a for a in agents if a.startswith("adversary")]
-    evaders = [a for a in agents if not a.startswith("adversary")]
-
-    if pursuers and evaders:
-        default_kwargs = {
-            "num_pursuers": len(pursuers),
-            "num_evaders": len(evaders),
-        }
-    else:
-        default_kwargs = {}
-        if "num_pursuers" not in kwargs or "num_evaders" not in kwargs:
-            raise ValueError(
-                "Could not infer a consistent pursuit/evasion agent partition "
-                f"from env.possible_agents={agents!r}. Automatic inference only "
-                "works for tag-style envs with agent names prefixed by "
-                "'adversary'. Please pass explicit descriptor_kwargs with both "
-                "'num_pursuers' and 'num_evaders'."
-            )
-
-    merged = {**default_kwargs, **kwargs}
-    num_pursuers = int(merged["num_pursuers"])
-    num_evaders = int(merged["num_evaders"])
-    if num_pursuers + num_evaders != len(agents):
+    The qdax trainers are environment-agnostic: the caller must supply a
+    behavioural-descriptor callable in ``algorithm_params['descriptor_fn']``.
+    Concrete descriptors live outside the library (e.g.
+    ``examples/qdax/descriptors.py``).
+    """
+    descriptor_fn = params.get("descriptor_fn")
+    if descriptor_fn is None:
         raise ValueError(
-            "Descriptor agent counts must sum to the number of possible "
-            f"agents: num_pursuers={num_pursuers}, num_evaders={num_evaders}, "
-            f"len(env.possible_agents)={len(agents)}."
+            "algorithm_params['descriptor_fn'] is required. Pass a callable "
+            "(trajectory) -> array exposing 'min_bd'/'max_bd'/'output_shape' "
+            "(e.g. from examples.qdax.descriptors)."
         )
-    merged["num_pursuers"] = num_pursuers
-    merged["num_evaders"] = num_evaders
-
-    if name == "pursuit_evasion_2d":
-        return pe_desc.formation_spread_and_mean_distance(**merged)
-    if name == "pursuit_evasion_3d":
-        return pe_desc.with_capture_efficiency(**merged)
-    raise ValueError(
-        f"Unknown descriptor {name!r}. Supported: "
-        "'pursuit_evasion_2d', 'pursuit_evasion_3d'. Pass a callable "
-        "directly via algorithm_params['descriptor_fn'] to use a custom one."
-    )
+    if not callable(descriptor_fn) or not (
+        hasattr(descriptor_fn, "min_bd") and hasattr(descriptor_fn, "max_bd")
+    ):
+        raise ValueError(
+            "descriptor_fn must be callable and expose 'min_bd' and 'max_bd' "
+            f"tuples; got {descriptor_fn!r}."
+        )
+    return descriptor_fn
 
 
 def _infer_layer_sizes(env: PettingZooWrapper, hidden: tuple) -> tuple:
@@ -275,12 +254,13 @@ def _print_qdax_plan(
     num_iters: int,
     num_workers: int,
 ) -> None:
-    print(
+    msg = (
         f"[{label}] init_batch={init_batch_size}  batch={batch_size}  "
         f"eval_eps={eval_episodes}  ep_len={episode_length}  "
-        f"iters={num_iters}  workers={num_workers}",
-        flush=True,
+        f"iters={num_iters}  workers={num_workers}"
     )
+    print(msg, flush=True)
+    logger.info("%s", msg)
 
 
 def _validate_jax_parallel_settings(num_workers: int, eval_episodes: int) -> None:
@@ -323,10 +303,30 @@ def _print_qdax_metrics(
         batch_best=batch_best,
         batch_mean=batch_mean,
     )
-    print(
-        f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)",
-        flush=True,
-    )
+    msg = f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)"
+    print(msg, flush=True)
+    logger.info("%s", msg)
+
+
+def _resolve_action_decoding(action_space, continuous: bool):
+    """Return ``(action_type, nvec)`` for a shared (homogeneous) action space.
+
+    ``nvec`` is a list of per-sub-action choice counts when the space is
+    MultiDiscrete, else ``None``.
+    """
+    if continuous:
+        return "continuous", None
+    if action_space is not None and hasattr(action_space, "nvec"):
+        return "multidiscrete", [int(x) for x in action_space.nvec]
+    return "discrete", None
+
+
+def _jax_action_space(jax_env, agent):
+    """Best-effort action-space lookup for a JAX-native env."""
+    if hasattr(jax_env, "action_space"):
+        return jax_env.action_space(agent)
+    action_spaces = getattr(jax_env, "action_spaces", None)
+    return action_spaces[agent] if action_spaces is not None else None
 
 
 def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
@@ -351,9 +351,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     layer_sizes = params["layer_sizes"] or _infer_layer_sizes(env, hidden)
     module = make_flax_mlp(layer_sizes, activation=params["activation"])
 
-    descriptor_fn = params.get("descriptor_fn") or _resolve_descriptor(
-        params["descriptor"], env, params.get("descriptor_kwargs", {})
-    )
+    descriptor_fn = _require_descriptor_fn(params)
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
@@ -394,12 +392,15 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             module = make_flax_mlp(layer_sizes, activation=params["activation"])
             _matching = [a for a in _all_agents
                          if int(_obs0[a].shape[0]) == actual_in_dim]
+        jax_action_type, _ = _resolve_action_decoding(
+            _jax_action_space(raw_jax_env, _matching[0]), config.continuous
+        )
         scoring_fn = make_jax_scoring_function(
             raw_jax_env,
             module,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=jax_action_type,
             agents=_matching,
         )
     else:
@@ -410,13 +411,17 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             UserWarning,
             stacklevel=2,
         )
+        np_action_type, np_nvec = _resolve_action_decoding(
+            env.action_space(env.possible_agents[0]), config.continuous
+        )
         scoring_fn = make_numpy_scoring_function(
             config.env_name,
             layer_sizes=layer_sizes,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
             env_config=config.env_config,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=np_action_type,
+            nvec=np_nvec,
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
@@ -490,6 +495,7 @@ class MAPElitesTrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,
@@ -617,7 +623,7 @@ class MAPElitesTrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -648,7 +654,7 @@ class MAPElitesTrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
@@ -682,6 +688,7 @@ class CMAMETrainer(BaselineTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,
@@ -821,7 +828,7 @@ class CMAMETrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -849,7 +856,7 @@ class CMAMETrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=int(params["episode_length"]),
             repertoire_path=Path(metadata["repertoire_path"])
@@ -881,42 +888,34 @@ def _maybe_record_qdax_champion(
     *,
     champion_policy,
     recording_max_steps: Optional[int],
+    iteration: Optional[int] = None,
 ) -> None:
-    """Record one final champion rollout when recording is enabled."""
+    """Record one final champion rollout when recording is enabled.
+
+    ``iteration`` is the QDax iteration the recorded champion corresponds
+    to (typically the final iteration). It is written to the recorder's
+    ``frames/recordings.json`` sidecar so the UI can associate the artefact
+    with its metrics row (carrying ``qd_score``, ``coverage``, etc.).
+    """
     if champion_policy is None:
         return
 
-    recording_cfg = config.recording
-    if not recording_cfg.enabled:
-        return
+    from deap_pettingzoo.baselines.recording import RecordingController
 
-    from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
-
-    recorder = log.get_frame_recorder(
-        fps=recording_cfg.fps,
-        fmt=recording_cfg.fmt,
-        max_frames_per_episode=recording_cfg.max_frames_per_episode,
-        max_dim=recording_cfg.max_dim,
-        episode_prefix=recording_cfg.episode_prefix or "train_",
-    )
-    if not recorder.enabled:
-        return
-
-    evaluator = UnifiedEvaluator(
+    # QDax's scoring loop is JAX-vectorised and can't be hooked mid-run, so
+    # the controller is driven via finalize() to capture just the final
+    # champion (matched to the last QDax iteration row in the sidecar).
+    controller = RecordingController(
+        config, log,
         max_steps=int(recording_max_steps or 500),
-        frame_recorder=recorder,
+        seed=config.algorithm_params.get("seed"),
     )
-    try:
-        rollout_seed = config.algorithm_params.get("seed")
-        evaluator.evaluate(
-            policy=champion_policy,
-            env_name=config.env_name,
-            num_episodes=1,
-            seed=int(rollout_seed) if rollout_seed is not None else None,
-            env_config=dict(config.env_config) if config.env_config else None,
-        )
-    except Exception:
-        pass
+    controller.finalize(
+        lambda: champion_policy,
+        iteration=int(iteration) if iteration is not None else 0,
+        env_steps=0,
+    )
+    controller.close()
 
 
 def _persist_qdax_results(
@@ -969,11 +968,16 @@ def _persist_qdax_results(
                     continue
             log.row("metrics", row)
 
+        try:
+            n_iters = len(history)
+        except TypeError:
+            n_iters = 0
         _maybe_record_qdax_champion(
             log,
             config,
             champion_policy=champion_policy,
             recording_max_steps=recording_max_steps,
+            iteration=(n_iters - 1) if n_iters else None,
         )
 
         full_summary = {"algorithm": algorithm, **summary}

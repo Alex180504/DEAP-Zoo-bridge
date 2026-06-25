@@ -1,8 +1,9 @@
 """Tests for :mod:`deap_pettingzoo.policies.action_heads`.
 
 Covers :class:`DiscreteHead`, :class:`BoxHead` (tanh-squash + rescale),
-and :func:`make_head` — including the deliberate ``NotImplementedError``
-for :class:`MultiDiscrete` / :class:`Tuple` / :class:`Dict` spaces.
+:class:`MultiDiscreteHead` (per-sub-action argmax), and :func:`make_head`
+— including the deliberate ``NotImplementedError`` for :class:`Tuple` /
+:class:`Dict` spaces.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from gymnasium import spaces
 from deap_pettingzoo.policies.action_heads import (
     BoxHead,
     DiscreteHead,
+    MultiDiscreteHead,
     make_head,
 )
 
@@ -63,6 +65,41 @@ class TestBoxHead:
         assert np.isfinite(out).all()
 
 
+class TestMultiDiscreteHead:
+    def test_output_size_is_sum_of_nvec(self):
+        head = MultiDiscreteHead([3, 4, 2])
+        assert head.output_size == 9
+
+    def test_per_subaction_argmax(self):
+        head = MultiDiscreteHead([3, 4, 2])
+        # chunk0=[0,9,0]->1, chunk1=[0,0,0,7]->3, chunk2=[5,0]->0
+        logits = np.array([0, 9, 0, 0, 0, 0, 7, 5, 0], dtype=np.float32)
+        out = head.decode(logits)
+        np.testing.assert_array_equal(out, [1, 3, 0])
+
+    def test_decode_returns_int_array_in_range(self):
+        head = MultiDiscreteHead([5, 3])
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            out = head.decode(rng.standard_normal(head.output_size))
+            assert out.dtype == np.int64
+            assert out.shape == (2,)
+            assert 0 <= out[0] < 5 and 0 <= out[1] < 3
+
+    def test_wrong_size_raises(self):
+        head = MultiDiscreteHead([3, 4])
+        with pytest.raises(ValueError, match="size 7"):
+            head.decode(np.zeros(5))
+
+    def test_empty_nvec_raises(self):
+        with pytest.raises(ValueError):
+            MultiDiscreteHead([])
+
+    def test_invalid_nvec_entry_raises(self):
+        with pytest.raises(ValueError):
+            MultiDiscreteHead([3, 0])
+
+
 class TestMakeHead:
     def test_discrete_space(self):
         head = make_head(spaces.Discrete(5))
@@ -74,9 +111,10 @@ class TestMakeHead:
         assert isinstance(head, BoxHead)
         assert head.output_size == 3
 
-    def test_multidiscrete_raises(self):
-        with pytest.raises(NotImplementedError, match="MultiDiscrete"):
-            make_head(spaces.MultiDiscrete([5, 3]))
+    def test_multidiscrete_space(self):
+        head = make_head(spaces.MultiDiscrete([5, 3]))
+        assert isinstance(head, MultiDiscreteHead)
+        assert head.output_size == 8
 
     def test_tuple_raises(self):
         with pytest.raises(NotImplementedError):
@@ -110,13 +148,20 @@ class TestFeedforwardNeuralPolicyWithHead:
         assert isinstance(action, int)
         assert 0 <= action < 3
 
-    def test_multidiscrete_rejected_at_construction(self):
+    def test_multidiscrete_space_produces_int_array(self):
         from deap_pettingzoo.genomes import FixedTopologyGenome
         from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 
-        genome = FixedTopologyGenome([4, 8, 2], activation="tanh")
-        with pytest.raises(NotImplementedError, match="MultiDiscrete"):
-            FeedforwardNeuralPolicy(genome, action_space=spaces.MultiDiscrete([3, 3]))
+        # nvec [3, 4] -> sum(nvec) = 7 output units.
+        genome = FixedTopologyGenome([4, 8, 7], activation="tanh")
+        policy = FeedforwardNeuralPolicy(
+            genome, action_space=spaces.MultiDiscrete([3, 4])
+        )
+        action = policy.get_action(np.zeros(4, dtype=np.float32))
+        assert isinstance(action, np.ndarray)
+        assert action.dtype == np.int64
+        assert action.shape == (2,)
+        assert 0 <= action[0] < 3 and 0 <= action[1] < 4
 
     def test_no_head_returns_raw_output(self):
         """Backwards-compat: without ``action_space`` the raw array is returned."""

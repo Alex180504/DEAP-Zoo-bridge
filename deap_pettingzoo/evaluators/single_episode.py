@@ -1,9 +1,12 @@
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .base_evaluator import BaseEvaluator
 from ..environments import PettingZooWrapper
 from ..policies import FeedforwardNeuralPolicy
+
+logger = logging.getLogger(__name__)
 
 
 class SingleEpisodeEvaluator(BaseEvaluator):
@@ -171,6 +174,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
             return (aggregated,)
         except Exception as e:
             # Log error and re-raise with context
+            logger.exception("Error during episode evaluation")
             raise RuntimeError(f"Error during episode evaluation: {e}") from e
     
     def _create_policies(

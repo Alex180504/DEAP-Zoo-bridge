@@ -158,7 +158,14 @@ class ScriptedOpponentEnvWrapper:
         self.agents: List[str] = list(self.possible_agents)
         self._all_possible_agents = list(self.inner.possible_agents)
 
+        # Must resolve raw env before creating APF policies so we can
+        # detect ``observable_walls`` and set the correct obs layout.
+        self._raw_env = self._find_raw_env(inner_env)
+
         # Per-prey APF policy + last-observation cache.
+        # Detect wall-feature count from the raw env so the APF policy
+        # slices its observation correctly in both torus and rectangle modes.
+        _wf = 4 if getattr(self._raw_env, "observable_walls", False) else 0
         self._scripted_policies: Dict[str, AquariumAPFEvaderPolicy] = {}
         self._scripted_last_obs: Dict[str, np.ndarray] = {}
         for agent_id in self._all_possible_agents:
@@ -168,20 +175,13 @@ class ScriptedOpponentEnvWrapper:
                     prey_observe_count=self.prey_observe_count,
                     action_count=self.action_count,
                     config=self._apf_config,
+                    wall_features=_wf,
                 )
 
         # Per-episode catch counter (sparse fitness signal).
         self.prey_caught: int = 0
         self.last_team_reward: float = 0.0
         self._prev_min_prey_distances: Dict[str, Optional[float]] = {}
-
-        # Navigate to the raw env so we can read ``prey.recently_died``.
-        # When aquarium is configured with ``keep_prey_count_constant=True``
-        # (the default), caught prey are respawned instead of removed, so
-        # the internal ``catches`` list stays empty and predator rewards are
-        # always 0.  We compensate by detecting catches via the flag and
-        # injecting the correct reward in ``step()``.
-        self._raw_env = self._find_raw_env(inner_env)
 
         # Public observation/action space dicts (PettingZoo convention),
         # filtered to learner side only.

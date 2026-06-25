@@ -2,13 +2,6 @@
 
 The :mod:`.registry` module is the single source of truth for env names;
 :mod:`.builtin` auto-registers MPE2 envs and ``aquarium_v0`` on import.
-
-Legacy ``PursuitEvasionEnv`` / ``PursuitEvasionConfig`` / ``ObsLayout``
-symbols were previously re-exported from this package.  They now live in
-:mod:`deap_pettingzoo.contrib.pursuit_evasion`; the shim module
-``deap_pettingzoo.environments.pursuit_evasion`` forwards them with a
-``DeprecationWarning`` for one release cycle.  New code should import
-from the contrib subpackage directly.
 """
 
 # Side-effect import: populate the open env registry.
@@ -41,26 +34,3 @@ __all__ = [
     'JaxEnvProtocol',
     'JaxEnvToPettingZooAdapter',
 ]
-
-
-# PEP 562: lazy attribute forwarding for legacy names (one-release shim).
-def __getattr__(name):  # pragma: no cover - trivial forwarder
-    if name in ("PursuitEvasionEnv", "PursuitEvasionConfig", "ObsLayout"):
-        import warnings
-        warnings.warn(
-            f"{name} moved to deap_pettingzoo.contrib.pursuit_evasion; "
-            "update your imports.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        from deap_pettingzoo.contrib.pursuit_evasion.env import (
-            PursuitEvasionEnv,
-            PursuitEvasionConfig,
-            ObsLayout,
-        )
-        return {
-            "PursuitEvasionEnv": PursuitEvasionEnv,
-            "PursuitEvasionConfig": PursuitEvasionConfig,
-            "ObsLayout": ObsLayout,
-        }[name]
-    raise AttributeError(f"module 'deap_pettingzoo.environments' has no attribute {name!r}")

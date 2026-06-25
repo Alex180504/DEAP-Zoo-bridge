@@ -1,0 +1,47 @@
+@startuml sequence_export_experiment
+!theme plain
+title Experiment Export – Browse -> Backend -> Browser Download
+
+actor User
+participant "Browse Page\n(Streamlit)" as Browse
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+participant "export_import.py\n(zip builder)" as Export
+participant "File System\n(results)" as FS
+participant "Browser\n(download)" as Browser
+
+== User selects runs / experiment ==
+User -> Browse: select runs in table
+Browse -> Browse: user opens "📦 Export / Import" sidebar
+Browse -> Browse: choose artifact checkboxes\n(☐ frames, ☐ TensorBoard, ☐ trajectories)
+
+== Individual run export ==
+User -> Browse: click "⬇ Download selected runs"
+Browse -> Browse: build_run_export_url(run_dirs, flags)
+Browse -> Browser: st.link_button(url=<backend>/runs/export?...)
+Browser -> API: GET /runs/export?run_dirs=...&include_frames=...
+API -> Export: build_run_export_zip(run_dirs, flags)
+Export -> FS: read manifest.json, metrics.csv, summary.json
+opt include_frames
+    Export -> FS: read frames/*.png
+end
+Export --> API: zip bytes (StreamingResponse)
+API --> Browser: application/zip (streamed chunks)
+Browser --> Browser: native download with progress bar
+
+== Full experiment export ==
+User -> Browse: click "Export experiment" (grouped view)
+Browse -> Browse: build_experiment_export_url(exp_id, flags)
+Browse -> Browser: st.link_button(url=<backend>/experiments/{id}/export?...)
+Browser -> API: GET /experiments/{exp_id}/export?include_frames=...
+API -> DB: get_experiment(exp_id)
+DB --> API: experiment record (spec, status, run_dirs, ...)
+API -> Export: create_experiment_export_zip_generator(...)
+Export -> FS: read _spec.json, _result.json
+Export -> FS: read each run_dir (manifest, metrics, optional artifacts)
+Export -> Export: build zip in temp file
+Export --> API: yield 1 MiB chunks
+API --> Browser: StreamingResponse (chunked)
+Browser --> Browser: native download with progress bar
+
+@enduml

@@ -1,0 +1,50 @@
+@startuml sequence_coevolution_onpolicy
+!theme plain
+title Co-evolution — one generation, EA side vs on-policy IPPO RL side
+
+actor User
+participant "CoEvolutionTrainer" as T
+participant "SideState\n(evaders, EA)" as EA
+participant "RLSideState\n(pursuers, IPPO)" as RL
+participant "RLPolicyPool\n(pursuers)" as RP
+participant "AgileRLPolicyWrapper" as W
+participant "FrozenRLPolicyWrapper" as F
+participant "ProcessPool\nworkers" as WK
+participant "AgileRL IPPO\n(actor + critic)" as AG
+participant "env (PettingZoo)" as ENV
+
+User -> T : train(TrainingConfig, num_workers>1)
+T -> RL : initialise(env, rng)
+note over RL
+  on-policy: build IPPO, apply grouped-IPPO
+  patch, NO replay buffer
+end note
+T -> RL : current_pool() -> RP
+
+loop for each generation
+  == EA side evaluates IN PARALLEL vs frozen RL opponent ==
+  T -> EA : step_generation(evaluator, opponents={pursuers: RP})
+  EA -> RP : snapshot_opponents(rng, k)
+  RP -> W : make_frozen_cpu_snapshot()
+  W -> F : rebuild actors via init_dict + state_dict\n(no copy.deepcopy; grouped actor map)
+  RP -->> EA : OpponentSnapshot(FrozenRLPolicyWrapper)
+  EA -> WK : executor.map(rollout, payloads)\n(frozen snapshot + registry_snapshot pickled per worker;\nworkers replay_registry_snapshot_once for custom envs)
+  WK -> F : get_action(obs)  -- actor-only inference
+  WK -->> EA : per-opponent fitness
+  EA -> EA : DEAP select + crossover + mutate
+
+  == RL side collects SERIALLY (live actor+critic) ==
+  T -> RL : step_generation(evaluator, opponents={evaders})
+  loop rollout_episodes_per_gen episodes
+    RL -> AG : get_action(obs) -> (action, log_prob, entropy, value)
+    RL -> ENV : step(rl_actions + opponent_actions)
+    ENV -->> RL : next_obs, reward, done
+    RL -> RL : OnPolicyRolloutBuffer.add(...)
+  end
+  RL -> AG : learn(experiences 8-tuple)\n(AgileRL computes GAE internally)
+  RL -> W : refresh wrapper + RP.update(W)
+end
+
+T -->> User : TrainingResult(policy, metrics)
+
+@enduml

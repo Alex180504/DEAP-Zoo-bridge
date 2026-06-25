@@ -1,0 +1,119 @@
+
+#
+#   MODE 1 (full stack, default)  →  docker compose up
+#       Both the FastAPI service AND the Streamlit UI run as containers.
+#       Results are persisted in a named Docker volume.
+#
+#   MODE 2 (native backend)  →  docker compose --profile native-backend up
+#       Only the Streamlit UI is containerised; it connects to a FastAPI
+#       service running natively on the host.
+
+
+services:
+  service:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: deap-bridge-service:latest
+    container_name: deap-service
+    networks:
+      - deap-net
+    expose:
+      - "8100"
+    # Expose the service port to the host so browser-facing export links
+    # (st.link_button) work.  Bind to localhost for trusted-input safety.
+    ports:
+      - "127.0.0.1:${SERVICE_PORT:-8100}:8100"
+    volumes:
+      - results:/app/results
+    environment:
+      - DEAP_RESULTS_ROOT=/app/results
+      - SERVICE_HOST=0.0.0.0
+      - SERVICE_PORT=8100
+      # Diagnostic logging.  Default "warning" logs only warnings + exceptions;
+      # set DEAP_LOG_LEVEL=info for normal-operation (verbose) logs, or "debug"
+      # for full detail.  Logs go to stdout (docker compose logs) AND a rotating
+      # file at /app/results/_logs/service.log (persisted on the volume) and are
+      # also tailable via the GET /logs endpoint.
+      - DEAP_LOG_LEVEL=${DEAP_LOG_LEVEL:-warning}
+      - DEAP_LOG_FORMAT=${DEAP_LOG_FORMAT:-plain}
+      # Advanced surface (Setup → Advanced): dependency-install panel + custom
+      # script submission. Arbitrary code/command execution by design — keep the
+      # service on localhost. Set DEAP_ENABLE_ADVANCED=0 to disable.
+      # CAVEAT: packages installed via the panel land in this container's
+      # site-packages and are LOST on `docker compose build`/rebuild. Add
+      # permanent deps to Dockerfile.server instead.
+      - DEAP_ENABLE_ADVANCED=${DEAP_ENABLE_ADVANCED:-1}
+    restart: unless-stopped
+    # Cap the docker json-file log so container stdout can't grow unbounded.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  # Streamlit UI (no ML deps — talks to service over HTTP)
+  # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: deap-bridge-ui:latest
+    container_name: deap-ui
+    networks:
+      - deap-net
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    volumes:
+      - results:/app/results:ro
+    environment:
+      - FASTAPI_URL=http://service:8100
+      - DEAP_BROWSER_API_URL=http://localhost:${SERVICE_PORT:-8100}
+      - DEAP_RESULTS_ROOT=/app/results
+      - STREAMLIT_PORT=8501
+    depends_on:
+      service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # UI-only variant for MODE 2 (native backend).
+  ui-native:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: deap-bridge-ui:latest
+    container_name: deap-ui-native
+    profiles:
+      - native-backend
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    volumes:
+      # When the backend runs natively, the UI still needs access to the
+      # results directory for Browse / Compare / etc.  Mount the host
+      # results directory (set RESULTS_HOST_DIR) or a named volume.
+      - ${RESULTS_HOST_DIR:-./results}:/app/results:ro
+    environment:
+
+      - FASTAPI_URL=${FASTAPI_URL:-http://host.docker.internal:8100}
+      - DEAP_RESULTS_ROOT=/app/results
+      - STREAMLIT_PORT=8501
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+
+networks:
+  deap-net:
+    driver: bridge
+
+
+volumes:
+  results:
+    driver: local

@@ -11,7 +11,10 @@ agilerl = pytest.importorskip(
 )
 pytestmark = pytest.mark.slow
 
-from deap_pettingzoo.baselines.agilerl_hpo_trainer import MATD3HPOTrainer
+from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
+    IPPOHPOTrainer,
+    MATD3HPOTrainer,
+)
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 
 
@@ -40,3 +43,18 @@ class TestMATD3HPOLive:
         assert result.policy is not None
         history = result.metrics["fitness_history"]
         assert len(history) >= 1
+
+
+class TestIPPOHPOLive:
+    def test_smoke_on_policy_train_produces_policy(self):
+        trainer = IPPOHPOTrainer(population_size=3, device="cpu")
+        events = []
+        result = trainer.train(
+            _tiny_config(seed=0),
+            progress_callback=events.append,
+        )
+        assert result.algorithm == "ippo-hpo"
+        assert result.policy is not None
+        assert len(result.metrics["fitness_history"]) >= 1
+        # Progress must reach the callback the runner wires in.
+        assert len(events) >= 1

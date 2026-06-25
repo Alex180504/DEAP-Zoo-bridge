@@ -72,6 +72,17 @@ def test_get_action_squeezes_leading_vec_dim(raw_shape, expected_ndim):
         )
 
 
+def test_get_action_multidiscrete_vector_preserved():
+    """A MultiDiscrete action ``(1, k)`` must come back as a ``(k,)`` vector."""
+    raw = np.array([[1, 2]], dtype=np.int64)  # (1, 2) batched MultiDiscrete action
+    agent = _StubAgent(raw, agent_ids=["a"])
+    wrapper = AgileRLPolicyWrapper(agent, agent_ids=["a"])
+
+    out = np.asarray(wrapper.get_action(np.zeros(3, dtype=np.float32)))
+    assert out.shape == (2,)
+    np.testing.assert_array_equal(out, [1, 2])
+
+
 def test_get_action_discrete_scalar_stays_scalar():
     """A 0-d (true scalar) action must come back as a Python scalar."""
     raw = np.asarray(3, dtype=np.int64)  # ndim==0
@@ -308,6 +319,71 @@ def test_frozen_wrapper_reset():
     fw.reset()
     assert fw._call_index == 0
     assert fw._obs_cache == {}
+
+
+@_skip_frozen
+def test_frozen_wrapper_get_action_multidiscrete():
+    """Stochastic (PPO) actors return ``(action, log_prob, entropy)`` with the
+    action already sampled; the frozen wrapper must shape a MultiDiscrete
+    action as an int vector of length ``len(nvec)``.
+    """
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    class _StochActor(nn.Module):
+        def __init__(self, action_vec):
+            super().__init__()
+            self.register_buffer(
+                "_a", torch.tensor([action_vec], dtype=torch.long)  # (1, k)
+            )
+            self.lin = nn.Linear(4, 1)  # gives the module parameters
+
+        def forward(self, obs, action_mask=None):
+            return self._a, torch.zeros(1), torch.zeros(1)
+
+    actor = _StochActor([1, 2])
+    fw = FrozenRLPolicyWrapper(
+        actors=[actor],
+        agent_ids=["agent_0"],
+        full_roster=["agent_0"],
+        algorithm_name="ippo",
+        is_discrete=False,
+        multidiscrete_nvecs=[(3, 4)],
+    )
+    out = np.asarray(fw.get_action(np.zeros(4, dtype=np.float32)))
+    assert out.dtype == np.int64
+    assert out.shape == (2,)
+    np.testing.assert_array_equal(out, [1, 2])
+
+
+@_skip_frozen
+def test_frozen_wrapper_get_action_stochastic_discrete_int():
+    """Stochastic actor + Discrete slot returns a Python int."""
+    import torch
+    import torch.nn as nn
+
+    from deap_pettingzoo.baselines.agilerl_policy import FrozenRLPolicyWrapper
+
+    class _StochActor(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(4, 1)
+
+        def forward(self, obs, action_mask=None):
+            return torch.tensor([2]), torch.zeros(1), torch.zeros(1)  # (1,) sample
+
+    fw = FrozenRLPolicyWrapper(
+        actors=[_StochActor()],
+        agent_ids=["agent_0"],
+        full_roster=["agent_0"],
+        algorithm_name="ippo",
+        is_discrete=True,
+    )
+    out = fw.get_action(np.zeros(4, dtype=np.float32))
+    assert isinstance(out, int)
+    assert out == 2
 
 
 @_skip_frozen

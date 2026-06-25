@@ -56,7 +56,9 @@ def _hashable_env_config(env_config: Optional[Dict[str, Any]]) -> Tuple[Any, ...
 
 
 def _resolve_worker_env(
-    env_name: str, env_config: Optional[Dict[str, Any]]
+    env_name: str,
+    env_config: Optional[Dict[str, Any]],
+    registry_snapshot: Optional[list] = None,
 ) -> PettingZooWrapper:
     """Return a process-local :class:`PettingZooWrapper`, cached by key.
 
@@ -66,7 +68,16 @@ def _resolve_worker_env(
         lazily on first use and reuse it for the rest of the worker's
         lifetime.  Mirrors the ``_NUMPY_WORKER_CACHE`` pattern in
         ``contrib/qdax/scoring_numpy.py``.
+
+        ``registry_snapshot`` is replayed once per worker before the env
+        is built so SCOOP/Dask workers (no initializer hook) can resolve
+        runtime-registered custom envs.
     """
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
+
+    replay_registry_snapshot_once(registry_snapshot)
     key: Tuple[Any, ...] = (env_name, _hashable_env_config(env_config))
     cached = _COEV_WORKER_ENV_CACHE.get(key)
     if cached is not None:
@@ -98,6 +109,8 @@ class _EpisodePayload:
     side_role_prefixes: Dict[str, Tuple[str, ...]]
     episode_seed: Optional[int]
     max_steps: int
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 @dataclass
@@ -126,7 +139,9 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
     """
     from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 
-    env = _resolve_worker_env(payload.env_name, payload.env_config)
+    env = _resolve_worker_env(
+        payload.env_name, payload.env_config, payload.registry_snapshot
+    )
     agents = list(env.possible_agents)
 
     # Partition agents by role prefix (re-derived per episode; cheap).
@@ -296,6 +311,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         env_name: Optional[str] = None,
         env_config: Optional[Dict[str, Any]] = None,
         learner_masked: bool = False,
+        registry_snapshot: Optional[list] = None,
     ) -> None:
         """Build a co-evolution evaluator.
 
@@ -348,6 +364,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._env_name = env_name
         self._env_config = env_config
         self._learner_masked = bool(learner_masked)
+        self._registry_snapshot = registry_snapshot
 
         self._partition_agents()
         #: Populated after each :meth:`run` call for trainer logging.
@@ -527,6 +544,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
                     side_role_prefixes=side_role_prefixes,
                     episode_seed=episode_seed,
                     max_steps=self.max_steps,
+                    registry_snapshot=self._registry_snapshot,
                 )
             )
 

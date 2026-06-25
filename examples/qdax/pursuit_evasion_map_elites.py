@@ -3,8 +3,7 @@
 Runs :class:`MAPElitesTrainer` on a JaxMARL ``MPE_simple_tag_v3`` env
 registered through :func:`register_jaxmarl_env`. The 2-D descriptor
 ``(formation_spread, mean_distance_to_evader)`` from
-:mod:`deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion` carves
-the archive.
+:mod:`examples.qdax.descriptors` carves the archive.
 
 Usage::
 
@@ -20,9 +19,16 @@ Requires the ``[qdax]`` extra: ``pip install 'deap-pettingzoo[qdax]'``.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
+
+# Allow running as a plain script *or* as a module (-m) so the
+# experiment-side descriptor package resolves either way.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 def main() -> None:
@@ -36,6 +42,8 @@ def main() -> None:
     from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
     from deap_pettingzoo.contrib.jaxmarl import register_jaxmarl_env
     from deap_pettingzoo.contrib.qdax.trainer import MAPElitesTrainer
+
+    from examples.qdax.descriptors import formation_spread_and_mean_distance
 
     register_jaxmarl_env(
         "jaxmarl_simple_tag",
@@ -70,7 +78,10 @@ def main() -> None:
             "batch_size": batch_size,
             "grid_shape": grid_shape,
             "episode_length": episode_length,
-            "descriptor": "pursuit_evasion_2d",
+            # simple_tag = 3 adversaries (pursuers) + 1 good agent (evader).
+            "descriptor_fn": formation_spread_and_mean_distance(
+                num_pursuers=3, num_evaders=1
+            ),
             "seed": args.seed,
         },
     )

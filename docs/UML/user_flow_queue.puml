@@ -1,0 +1,63 @@
+@startuml user_flow_queue
+!theme plain
+title Experiment Queue – User Flow
+
+skinparam state {
+  BackgroundColor #F5F8FA
+  BorderColor #4A5568
+}
+
+[*] --> QueuePage
+
+state QueuePage {
+    state "Queue control bar" as Ctrl {
+        Ctrl : Pause / Resume button
+        Ctrl : Worker limit indicator
+    }
+    state "Active experiment panel" as Active {
+        Active : Progress bar (run k/N, gen g/G)
+        Active : Metric cards (best fitness, mean fitness, wall time)
+        Active : Live stdout expander (tails _stdout.log)
+        Active : Cancel button
+    }
+    state "All experiments table" as Table {
+        Table : Status badge (queued / running / completed / failed / cancelled)
+        Table : Algorithm + environment labels
+        Table : Submission time
+        Table : Delete button (terminal states only)
+    }
+    Ctrl --> Active : running experiment
+    Ctrl --> Table
+    Active --> Table
+}
+
+state "Experiment lifecycle" as Lifecycle {
+    [*] --> Queued
+    Queued --> Running : dispatcher dequeues
+    Running --> Completed : runner exit 0
+    Running --> Failed : runner exit ≠0
+    Running --> Cancelled : user cancels (SIGTERM)
+    Queued --> Cancelled : user cancels (skip)
+}
+
+note right of Active
+  Polls every ~2s via st.rerun():
+  • GET /queue → paused/running/queued
+  • GET /experiments/{id}/progress → bar + metrics
+  • GET /experiments/{id}/stdout → log tail
+  • GET /experiments → table data
+end note
+
+note right of Lifecycle
+  Queue-level pause:
+  • Pause → dispatcher stops dequeueing
+  • Running experiment continues
+  • Resume → dispatcher resumes
+
+  Cancel:
+  • Queued → status = cancelled (skip)
+  • Running → proc.terminate() (+ kill timeout)
+  • Partial results preserved in experiment dir
+end note
+
+@enduml

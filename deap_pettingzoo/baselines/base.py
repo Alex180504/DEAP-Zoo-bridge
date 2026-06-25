@@ -9,7 +9,18 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Protocol, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Union,
+)
+import warnings
+
 import numpy as np
 
 
@@ -18,6 +29,30 @@ class BudgetMode(Enum):
     ENV_STEPS = "env_steps"
     EVAL_EPISODES = "eval_episodes"
     WALL_CLOCK = "wall_clock"
+
+
+class RecordingMode(str, Enum):
+    """Champion-rollout recording cadence policy (algorithm-agnostic).
+
+    The cadence is expressed once, in terms every trainer shares — the
+    normalized training progress (:attr:`ProgressEvent.fraction`) and the
+    cumulative env-step count (:attr:`ProgressEvent.env_steps`) — so EA
+    "generations" and RL "iterations" behave identically.
+
+    * ``COUNT`` — record :attr:`RecordingConfig.max_recordings` videos spread
+      evenly across the run (the default).
+    * ``EVERY`` — record on **every** generation/iteration, with no cap.
+    * ``INTERVAL`` — record every :attr:`RecordingConfig.every_n_steps` env steps.
+    * ``FINAL`` — record only the single end-of-run champion rollout.
+
+    A ``str`` enum so it serializes transparently to/from the catalog JSON,
+    experiment spec, and REST payloads.
+    """
+
+    COUNT = "count"
+    EVERY = "every"
+    INTERVAL = "interval"
+    FINAL = "final"
 
 
 @dataclass
@@ -31,19 +66,14 @@ class RecordingConfig:
 
     Attributes:
         enabled: Master on/off switch. When False all trainers skip recording.
-        every_n_generations: Recording cadence in generations / iterations.
-            ``None`` defers to the trainer's class-level
-            ``_default_recording_every_n`` (1 for EA / CMA-ES / Coevolution,
-            10 for AgileRL family). For AgileRL trainers this is interpreted
-            as "every N learn iterations" (i.e. every
-            ``every_n_generations * learn_step`` env steps); use
-            :attr:`every_n_steps` for explicit env-step cadence.
-        every_n_steps: AgileRL-only. When set, record one champion-rollout
-            episode every ``every_n_steps`` env steps during training (in
-            addition to the always-emitted end-of-training rollout). Takes
-            precedence over :attr:`every_n_generations` for AgileRL. Ignored
-            by EA / CMA-ES / Coevolution trainers, which use generation
-            cadence.
+        mode: Cadence policy (:class:`RecordingMode`), uniform across all
+            algorithm families. ``COUNT`` (default) records
+            :attr:`max_recordings` videos spread evenly over the run; ``EVERY``
+            records every generation/iteration with no cap; ``INTERVAL`` records
+            every :attr:`every_n_steps` env steps; ``FINAL`` records only the
+            end-of-run champion. See :class:`~deap_pettingzoo.baselines.recording.RecordingController`.
+        every_n_steps: Env-step interval used by ``INTERVAL`` mode (applies to
+            every algorithm, since all trainers report cumulative env steps).
         fps: Frames-per-second for the encoded artefact.
         fmt: Container format. ``"mp4"`` (requires ``imageio[ffmpeg]``) or
             ``"gif"`` (base ``imageio``). ``mp4`` falls back to ``gif`` if
@@ -60,20 +90,22 @@ class RecordingConfig:
             ``frames/`` directory.
     """
     enabled: bool = False
-    every_n_generations: Optional[int] = None
+    mode: RecordingMode = RecordingMode.COUNT
     every_n_steps: Optional[int] = None
     fps: int = 20
     fmt: str = "mp4"
     max_frames_per_episode: Optional[int] = None
     max_dim: Optional[int] = None
     episode_prefix: str = ""
+    #: Number of champion-rollout recordings to produce over a whole run when
+    #: :attr:`mode` is ``COUNT``: the first is allocated to the start of the
+    #: run, the last to the end, and any remaining are spread evenly in
+    #: between. ``1`` records only the final rollout.
+    max_recordings: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.every_n_generations is not None and self.every_n_generations <= 0:
-            raise ValueError(
-                "RecordingConfig.every_n_generations must be positive or None, "
-                f"got {self.every_n_generations}"
-            )
+        if not isinstance(self.mode, RecordingMode):
+            self.mode = RecordingMode(str(self.mode))
         if self.every_n_steps is not None and self.every_n_steps <= 0:
             raise ValueError(
                 "RecordingConfig.every_n_steps must be positive or None, "
@@ -100,6 +132,117 @@ class RecordingConfig:
                 "RecordingConfig.max_dim must be positive or None, "
                 f"got {self.max_dim}"
             )
+        if self.max_recordings is not None and self.max_recordings < 1:
+            raise ValueError(
+                "RecordingConfig.max_recordings must be >= 1 or None, "
+                f"got {self.max_recordings}"
+            )
+        if self.mode is RecordingMode.INTERVAL and self.every_n_steps is None:
+            raise ValueError(
+                "RecordingConfig.mode='interval' requires every_n_steps to be set."
+            )
+
+
+@dataclass
+class FitnessConfig:
+    """Fitness-aggregation configuration nested on :class:`TrainingConfig`.
+
+    Population-based trainers (EA / CMA-ES / PSO) collapse the per-agent
+    rewards of a rollout into a single scalar fitness via
+    :class:`~deap_pettingzoo.evaluators.SingleEpisodeEvaluator`. Historically
+    every trainer hard-coded ``'sum'``; this config surfaces the other
+    aggregation methods (``mean`` / ``min`` / ``max`` / ``team``) through the
+    unified API so the experiment-setup UI can configure them.
+
+    Attributes:
+        aggregation_method: One of ``SingleEpisodeEvaluator.VALID_AGGREGATIONS``
+            (``'sum'`` / ``'mean'`` / ``'min'`` / ``'max'`` / ``'team'``).
+        team_mapping: Required for ``'team'`` aggregation — maps each agent id
+            to a team name. ``None`` for the scalar methods.
+    """
+
+    aggregation_method: str = "sum"
+    team_mapping: Optional[Dict[str, str]] = None
+
+    _VALID: ClassVar[frozenset] = frozenset(
+        {"sum", "mean", "min", "max", "team"}
+    )
+
+    def __post_init__(self) -> None:
+        if self.aggregation_method not in self._VALID:
+            raise ValueError(
+                f"FitnessConfig.aggregation_method must be one of "
+                f"{sorted(self._VALID)}, got {self.aggregation_method!r}"
+            )
+        if self.aggregation_method == "team" and not self.team_mapping:
+            raise ValueError(
+                "FitnessConfig.aggregation_method='team' requires a non-empty "
+                "team_mapping (agent_id -> team_name)."
+            )
+
+
+@dataclass
+class ProgressEvent:
+    """A single per-iteration training-progress snapshot.
+
+    Emitted by trainers through the optional ``progress_callback`` so the
+    subprocess runner / FastAPI service can stream live progress to the UI
+    queue page. Deliberately logger-independent: it is built from in-loop
+    variables and fires even when ``output_dir is None`` (no run directory).
+
+    Attributes:
+        unit: ``"generation"`` for population-based trainers, ``"env_step"``
+            for the step-based AgileRL trainers.
+        current: Current 1-based generation (or completed env-step count).
+        total: Total generations (or budgeted env steps).
+        env_steps: Cumulative env steps consumed so far — the
+            algorithm-agnostic progress axis. Generation trainers fill
+            ``generation * env_steps_per_iteration``; step-based trainers fill
+            their running step count. Consumed by the recording controller and
+            written to the replay sidecar.
+        best_fitness: Best fitness / return so far (``None`` if unknown).
+        mean_fitness: Population-mean fitness this iteration (``None`` if N/A).
+        wall_time_s: Seconds elapsed since training started.
+        extra: Free-form trainer-specific extras (e.g. ``{"side": "..."}``).
+    """
+
+    unit: str
+    current: int
+    total: int
+    env_steps: int = 0
+    best_fitness: Optional[float] = None
+    mean_fitness: Optional[float] = None
+    wall_time_s: float = 0.0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fraction(self) -> float:
+        """Completion in ``[0, 1]`` (0 when ``total <= 0``)."""
+        if self.total <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.current / self.total))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "unit": self.unit,
+            "current": int(self.current),
+            "total": int(self.total),
+            "env_steps": int(self.env_steps),
+            "fraction": self.fraction,
+            "best_fitness": (
+                None if self.best_fitness is None else float(self.best_fitness)
+            ),
+            "mean_fitness": (
+                None if self.mean_fitness is None else float(self.mean_fitness)
+            ),
+            "wall_time_s": float(self.wall_time_s),
+            "extra": dict(self.extra),
+        }
+
+
+#: Type alias for the optional per-iteration progress hook accepted by
+#: :meth:`BaselineTrainer.train`.
+ProgressCallback = Callable[["ProgressEvent"], None]
 
 
 @dataclass
@@ -124,6 +267,13 @@ class TrainingConfig:
             raised rather than silently preferring one.
         output_dir: Directory for saving checkpoints and logs.
         render: Whether to render episodes during training.
+        num_workers: Parallel evaluation workers for population-based
+            trainers (EA / CMA-ES / PSO). ``0`` / ``1`` run serially. The
+            trainer-constructor value is used only when this is left at the
+            default of ``1``.
+        parallel_backend: Executor backend for parallel evaluation — one of
+            ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
+            value is used only when this is left at the default ``"process"``.
     """
     env_name: str
     budget_mode: BudgetMode
@@ -134,7 +284,10 @@ class TrainingConfig:
     continuous: bool = False
     output_dir: Optional[Path] = None
     render: bool = False
+    num_workers: int = 1
+    parallel_backend: str = "process"
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -142,6 +295,18 @@ class TrainingConfig:
             raise ValueError(f"budget_value must be positive, got {self.budget_value}")
         if self.num_seeds <= 0:
             raise ValueError(f"num_seeds must be positive, got {self.num_seeds}")
+        if self.num_workers < 0:
+            raise ValueError(
+                f"num_workers must be >= 0 (or 1 for serial), got "
+                f"{self.num_workers}."
+            )
+        from deap_pettingzoo.utils.parallel import SUPPORTED_BACKENDS
+
+        if self.parallel_backend not in SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"Unknown parallel_backend {self.parallel_backend!r}. "
+                f"Expected one of {SUPPORTED_BACKENDS}."
+            )
         if isinstance(self.budget_mode, str):
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
@@ -296,34 +461,76 @@ class BaselineTrainer(ABC):
     
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
-    
-    Note:
-        Default recording cadence (in generations / iterations) used when ``TrainingConfig.recording.every_n_generations`` is ``None``.
-        EA / CMA-ES / Coevolution leave this at 1 (record every generation);
-        AgileRL-family trainers override to 10 since they iterate hundreds of times per run.
     """
-    
-    _default_recording_every_n: ClassVar[int] = 1
 
-    def _resolve_recording_every_n(self, config: TrainingConfig) -> int:
-        """Resolve the recording cadence honouring the trainer-aware default.
+    #: Set by :meth:`train` to a
+    #: :class:`~deap_pettingzoo.baselines.recording.RecordingController`.
+    #: ``None`` (default) means no recording wiring; :meth:`_on_progress`
+    #: then only emits progress.
+    _recorder: ClassVar[Any] = None
 
-        User-supplied ``config.recording.every_n_generations`` always wins;
-        ``None`` falls back to the class-level
-        :attr:`_default_recording_every_n`.
+    def _on_progress(
+        self,
+        callback: Optional[ProgressCallback],
+        event: ProgressEvent,
+        champion: Optional[Callable[[], Any]] = None,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Single per-iteration hook: emit progress **and** maybe record.
+
+        Trainers call this wherever they previously emitted a
+        :class:`ProgressEvent`. When a :class:`RecordingController` has been
+        attached to ``self._recorder`` and a ``champion`` provider is given,
+        the controller decides — from the run's :class:`RecordingMode` — whether
+        this ``event`` warrants a champion-rollout recording. ``champion`` is
+        called lazily (only when a recording is actually due) and returns the
+        policy (or per-agent policy map) to roll out, or ``None`` to skip.
         """
-        explicit = config.recording.every_n_generations
-        if explicit is not None:
-            return int(explicit)
-        return int(type(self)._default_recording_every_n)
+        self._emit_progress(callback, event)
+        recorder = getattr(self, "_recorder", None)
+        if recorder is not None and champion is not None:
+            recorder.observe(event, champion, extra=extra)
+
+    @staticmethod
+    def _emit_progress(
+        callback: Optional[ProgressCallback],
+        event: ProgressEvent,
+    ) -> None:
+        """Invoke ``callback`` with ``event``, swallowing any exception.
+
+        Progress reporting must never be able to crash a long training run, so
+        a misbehaving callback only raises a :class:`RuntimeWarning`. Mirrors
+        the error-isolation idiom used by the co-evolution generation hook.
+        """
+        if callback is None:
+            return
+        try:
+            callback(event)
+        except Exception as exc:  # noqa: BLE001 - intentional isolation
+            warnings.warn(
+                f"progress_callback raised {exc!r}; ignoring this update",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     @abstractmethod
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train the algorithm with the given configuration.
-        
+
         Args:
             config: Training configuration including budget and hyperparameters.
-            
+            progress_callback: Optional hook invoked once per generation /
+                progress interval with a :class:`ProgressEvent`. Additive and
+                error-isolated (see :meth:`_emit_progress`); ``None`` disables
+                progress reporting. Not every trainer emits progress — those
+                that do are the standard UI-exposed algorithms.
+
         Returns:
             TrainingResult containing the trained policy and metrics.
         """
@@ -349,6 +556,9 @@ class BaselineTrainer(ABC):
             Dictionary with keys:
             - 'discrete_action': bool (supports discrete action spaces)
             - 'continuous_action': bool (supports continuous action spaces)
+            - 'multidiscrete_action': bool (supports MultiDiscrete action
+              spaces; defaults to False when omitted, so MultiDiscrete envs
+              are rejected unless the algorithm opts in)
             - 'needs_global_state': bool (requires centralized state)
             - 'on_policy': bool (on-policy vs off-policy)
             - 'supports_turn_based': bool (default True; set False for

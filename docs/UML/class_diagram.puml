@@ -64,6 +64,12 @@ package "deap_pettingzoo.policies" {
         -- mask illegal logits to -inf before argmax --
     }
 
+    class MultiDiscreteHead {
+        + nvec: np.ndarray
+        + decode(raw) -> np.int64[len(nvec)]
+        -- per-sub-action argmax over sum(nvec) logits --
+    }
+
     class BoxHead {
         + low, high: np.ndarray
         + decode(raw) -> np.ndarray  (tanh → rescale)
@@ -74,13 +80,14 @@ package "deap_pettingzoo.policies" {
 
     DiscreteHead --|> ActionHead
     MaskedDiscreteHead --|> DiscreteHead
+    MultiDiscreteHead --|> ActionHead
     BoxHead --|> ActionHead
     make_head ..> ActionHead : constructs
     FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
     FeedforwardNeuralPolicy --> ActionHead : optional head
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion (APF)" {
+package "examples.pursuit_evasion.simple_tag (APF)" {
     class APFConfig <<dataclass>> {
         + k_pursuer: float
         + k_landmark: float
@@ -143,7 +150,8 @@ package "deap_pettingzoo.environments" {
         + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot / replay_registry_snapshot:\n   propagate custom envs into spawn workers --
+        + {static} replay_registry_snapshot_once(snapshot) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process) --
     }
 
     class builtin <<module>> {
@@ -207,7 +215,7 @@ package "deap_pettingzoo.contrib.openspiel" {
     openspiel ..> registry : register_env
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion" {
+package "examples.pursuit_evasion.simple_tag" {
     class PursuitEvasionConfig <<dataclass>> {
         + num_adversaries: int
         + num_good: int
@@ -358,7 +366,11 @@ package "deap_pettingzoo.integration" {
         + make_mixed_parallel_evaluate_map(executor,
             evaluator, *, eval_episodes=1) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
-           qualnames; picklable across spawn workers --
+           qualnames + a registry_snapshot; picklable
+           across spawn workers. Workers replay the
+           snapshot via replay_registry_snapshot_once
+           so SCOOP/Dask (no initializer hook) get
+           custom envs too --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -393,19 +405,44 @@ package "deap_pettingzoo.baselines" {
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
+        + num_workers: int = 1
+        + parallel_backend: str = "process"
         + recording: RecordingConfig
+        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
     }
 
     class RecordingConfig <<dataclass>> {
         + enabled: bool
-        + every_n_generations: Optional[int]
+        + mode: RecordingMode
         + every_n_steps: Optional[int]
+        + max_recordings: Optional[int]
         + fps: int
         + fmt: str
         + max_frames_per_episode: Optional[int]
         + max_dim: Optional[int]
         + episode_prefix: str
     }
+
+    enum RecordingMode {
+        COUNT
+        EVERY
+        INTERVAL
+        FINAL
+    }
+
+    class RecordingController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        --
+        Algorithm-agnostic cadence: decides per
+        RecordingMode whether a ProgressEvent
+        warrants a champion-rollout recording via
+        UnifiedEvaluator (single or per-agent policy_map).
+    }
+    RecordingConfig *-- RecordingMode : mode
+    RecordingController ..> RecordingConfig : reads
+    RecordingController ..> UnifiedEvaluator : drives
 
     class TrainingResult <<dataclass>> {
         + algorithm: str
@@ -523,9 +560,11 @@ package "deap_pettingzoo.baselines" {
 
     class _RecordingReporter <<neat.reporting.BaseReporter>> {
         - _record_fn: Callable
-        - _cadence: int
         + start_generation(generation)
         + post_evaluate(config, population, species, best_genome)
+        --
+        Forwards each generation's champion to
+        RecordingController.observe (which decides per mode).
     }
 
     class HyperNEATTrainer {
@@ -542,20 +581,33 @@ package "deap_pettingzoo.baselines" {
     }
 
     class EvolveHPOTrainer {
-        # _hp_config: dict
-        # _population: list
-        -- AgileRL HPO base
-        + train(config) -> TrainingResult
+        # _hpo_population_size: int
+        # _evo_every_n_steps: int
+        # _mutation_probs: dict
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
+        + train(config, *, progress_callback) -> TrainingResult
+        + describe_hyperparameters() : adds HPO + mutation knobs
+        # _train_one_agent(...) : off-policy replay loop
+        # _train_one_agent_on_policy(...) : shared IPPO rollout
+        # _prepare_population_build(...) : grouping hook
         # _build_hp_config(spec) -> HyperparameterConfig
         # _build_population(...) -> list
     }
 
     class MADDPGHPOTrainer {
-        -- MADDPG with evolvable architecture + HPO
+        -- MADDPG HPO (off-policy)
     }
 
     class MATD3HPOTrainer {
-        -- MATD3 with evolvable architecture + HPO
+        -- MATD3 HPO (off-policy)
+    }
+
+    class IPPOHPOTrainer {
+        -- IPPO HPO (on-policy)
+    }
+
+    class GroupedIPPOHPOTrainer {
+        -- Prefix-grouped IPPO HPO (on-policy).\nValidates grouping + applies patch.
     }
 
     NEATTrainer --|> BaselineTrainer
@@ -564,6 +616,8 @@ package "deap_pettingzoo.baselines" {
     EvolveHPOTrainer --|> AgileRLTrainer
     MADDPGHPOTrainer --|> EvolveHPOTrainer
     MATD3HPOTrainer --|> EvolveHPOTrainer
+    IPPOHPOTrainer --|> EvolveHPOTrainer
+    GroupedIPPOHPOTrainer --|> IPPOHPOTrainer
 
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str
@@ -576,8 +630,9 @@ package "deap_pettingzoo.baselines" {
         + {abstract} get_capabilities() -> dict
         # _import_algorithm() -> type
         # _build_agent(obs_spaces, act_spaces, agent_ids, kwargs)
-        # _run_off_policy(env, agent, ...) -> dict
-        # _run_on_policy(env, agent, ...) -> dict
+        # _run_off_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per emit interval)
+        # _run_on_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per rollout cycle)
+        -- Both loops: logger.warning(exc_info=True)\n   on learn() failure + warnings.warn()
     }
 
     class MADDPGTrainer {
@@ -608,7 +663,7 @@ package "deap_pettingzoo.baselines" {
         --
         + get_action(obs) -> Any
         + reset() -> None
-        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper
+        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper\n   (rebuilds actors via init_dict + state_dict,\n    not copy.deepcopy -> works for IPPO\n    StochasticActor; carries grouped actor map)
     }
 
     class FrozenRLPolicyWrapper {
@@ -617,11 +672,14 @@ package "deap_pettingzoo.baselines" {
         - _full_roster: list[str]
         - _algorithm_name: str
         - _is_discrete: bool
+        - _md_nvecs: list | None
+        - _actor_idx_map: list[int] | None
         - _call_index: int
         - _obs_cache: dict
         --
         + get_action(obs, **kwargs) -> Any
         + reset() -> None
+        + __getstate__/__setstate__ : state_dict serialization\n   (no cloudpickle for AgileRL actors)
         + agent_ids: list[str]
         + algorithm_name: str
         + is_discrete: bool
@@ -739,10 +797,12 @@ note bottom of registry
 
   get_registry_snapshot() + replay_registry_snapshot()
   propagate custom envs registered in the main
-  process into spawned worker subprocesses:
-  trainers pass them as initializer/initargs
-  to make_executor so every worker re-registers
-  all custom envs before executing any tasks.
+  process into worker subprocesses. The process pool
+  passes them as initializer/initargs to make_executor;
+  SCOOP/Dask have no initializer hook, so trainers also
+  ship the snapshot on each worker spec/payload and the
+  worker calls replay_registry_snapshot_once (idempotent,
+  guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
 end note
@@ -827,9 +887,8 @@ package "deap_pettingzoo.contrib.qdax" {
     }
 
     class "descriptors <<module>>" as qdax_descriptors {
-        + formation_spread_and_mean_distance(num_pursuers, num_evaders)
-        + with_capture_efficiency(num_pursuers, num_evaders, capture_radius)
-        -- each returns a callable with\n   output_shape / min_bd / max_bd --
+        + DescriptorProtocol
+        -- generic contract only: a callable\n   (trajectory) -> array with\n   output_shape / min_bd / max_bd.\n   Concrete descriptors are caller-supplied\n   (e.g. examples/qdax/descriptors.py). --
     }
 
     class "scoring <<module>>" as qdax_scoring {
@@ -855,8 +914,8 @@ package "deap_pettingzoo.contrib.qdax" {
     CMAMETrainer     --|> BaselineTrainer
     MAPElitesTrainer ..> qdax_scoring : uses
     CMAMETrainer     ..> qdax_scoring : uses
-    MAPElitesTrainer ..> qdax_descriptors : resolves by name
-    CMAMETrainer     ..> qdax_descriptors : resolves by name
+    MAPElitesTrainer ..> qdax_descriptors : injected descriptor_fn
+    CMAMETrainer     ..> qdax_descriptors : injected descriptor_fn
     MAPElitesTrainer ..> FlaxPolicyAdapter : produces best
     CMAMETrainer     ..> FlaxPolicyAdapter : produces best
 }
@@ -1024,7 +1083,7 @@ package "deap_pettingzoo.baselines.coevolution" {
   }
 
   class RLSideState {
-    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learning_steps_per_gen learn() calls.\n   v1: MADDPG / MATD3 only.
+    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learn step(s).\n   off-policy (MADDPG/MATD3): replay buffer +\n   learning_steps_per_gen learn() calls.\n   on-policy (IPPO/GroupedIPPO): no replay\n   buffer; serial rollout -> 1 PPO learn().
     +algorithm: str
     +is_on_policy: bool
     +rollout_episodes_per_gen: int
@@ -1032,6 +1091,7 @@ package "deap_pettingzoo.baselines.coevolution" {
     +resolved_device: str
     + current_pool(): RLPolicyPool
     + best_policy(): AgileRLPolicyWrapper
+    - _collect_onpolicy_rollout(ctx): list[float]
   }
 
   RLPolicyPool ..|> OpponentPool
@@ -1450,6 +1510,294 @@ package "deap_pettingzoo.ui" {
         + load_settings(*, results_root=None) -> UISettings
     }
 }
+
+package "deap_pettingzoo.catalog (v0.2+)" #F0F8FF {
+    class ParamSpec <<dataclass>> {
+        + name: str
+        + type: ParamType (int|float|bool|str|enum|list)
+        + default: Any
+        + min: float | None
+        + max: float | None
+        + step: float | None
+        + choices: list | None
+        + group: str
+        + label: str
+        + help: str
+        + advanced: bool
+        --
+        + coerce(value) -> Any
+        + validate(value) -> list[str]
+        + to_dict() -> dict
+    }
+
+    class AlgorithmSpec <<dataclass>> {
+        + name: str
+        + aliases: list[str]
+        + family: str
+        + hyperparameters: list[ParamSpec]
+        + capabilities: dict
+        + coevolution_optimizer: bool
+        + required_extras: list[str]
+        + supported_budget_modes: list[str]
+        + supported_aggregations: list[str]
+        --
+        + {static} canonical_name(name) -> str
+    }
+
+    class EnvironmentSpec <<dataclass>> {
+        + name: str
+        + env_config: list[ParamSpec]
+        + teams: list[TeamSpec]
+        + api: str
+        + continuous_default: bool
+        + tags: set[str]
+        + required_extras: list[str]
+    }
+
+    class TeamSpec <<dataclass>> {
+        + name: str
+        + agent_prefixes: list[str]
+    }
+
+    class ValidationReport <<dataclass>> {
+        + ok: bool
+        + errors: list[ValidationIssue]
+        + warnings: list[ValidationIssue]
+    }
+
+    class Catalog <<facade>> {
+        + list_algorithms() -> list[AlgorithmSpec]
+        + get_algorithm(name) -> AlgorithmSpec
+        + list_environments() -> list[EnvironmentSpec]
+        + get_environment(name) -> EnvironmentSpec
+        + get_coevolution_options() -> dict
+        + compatible_algorithms(env, algos) -> dict
+        + to_json() -> dict
+    }
+
+    class availability <<module>> {
+        + module_available(extra_name) -> bool
+    }
+}
+
+package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
+    class ExperimentSpecModel <<pydantic>> {
+        + env_name: str
+        + algorithms: list[str]
+        + hyperparameters: dict
+        + budget: BudgetSpecModel
+        + fitness: FitnessSettingsModel
+        + recording: RecordingSettingsModel
+        + coevolution: CoevolutionSettingsModel | None
+        + parallelism: ParallelismSettingsModel
+        + raw_config: str | None
+        + num_seeds: int
+        + label: str
+        --
+        + to_dataclass() -> ExperimentSpec
+    }
+
+    class SubmitResponse <<pydantic>> {
+        + id: str
+        + status: str
+        + position: int
+    }
+
+    class ExperimentRecord <<pydantic>> {
+        + id: str
+        + label: str
+        + status: str
+        + created_at: float
+        + started_at: float | None
+        + finished_at: float | None
+        + run_dirs: list[str] | None
+        + error: str | None
+        + origin: str = "ui"
+    }
+
+    class ProgressSnapshot <<pydantic>> {
+        + run_index: int
+        + total_runs: int
+        + algo: str
+        + seed: int
+        + unit: str
+        + current: int
+        + total: int
+        + best_fitness: float | None
+        + mean_fitness: float | None
+        + wall_time_s: float
+    }
+
+    class InstallRequest <<pydantic>> {
+        + manager: str  ' pip | git
+        + action: str   ' install | uninstall | clone
+        + args: list[str]
+    }
+
+    class ScriptSubmitModel <<pydantic>> {
+        + script: str
+        + label: str
+        + entry: str = "script"
+    }
+
+    class install_jobs <<module>> {
+        + build_command(manager, action, args) -> argv  ' allowlist + reject metachars
+        + start_install(manager, action, args) -> job_id  ' detached subprocess
+        + get_status(job_id, offset, limit, lines) -> dict  ' read_tail(install.log)
+        + InstallValidationError
+    }
+
+    class script_validate <<module>> {
+        + validate_script_source(src) -> {ok, issues}  ' ast.parse + structure
+    }
+
+    class advanced <<module>> {
+        + advanced_enabled() -> bool  ' DEAP_ENABLE_ADVANCED (default True)
+    }
+
+    class Dispatcher {
+        - _running: Task | None
+        - _paused: bool
+        - _worker_limit: int = 1
+        --
+        + start()
+        + cancel(experiment_id)
+        + shutdown()
+        .. _run_one branches on spec "kind" ..
+        ' kind=="script": Popen([python, user_script.py], cwd=exp_dir)
+        '   then synthesise _result.json (rglob manifest.json)
+    }
+
+    class Runner <<subprocess>> {
+        + run_experiment(spec_file, experiment_dir) -> int
+        + ProgressWriter (callback -> _progress.json)
+    }
+
+    class FastAPIApp <<FastAPI>> {
+        + GET /health  ' incl. advanced_enabled
+        + GET /catalog
+        + POST /experiments
+        + POST /experiments/validate
+        + POST /env/install  ' gated
+        + GET /env/install/{job_id}  ' gated
+        + POST /experiments/script  ' gated, kind="script"
+        + POST /experiments/script/validate  ' gated
+        + GET /experiments/{id}
+        + GET /experiments/{id}/progress
+        + GET /experiments/{id}/stdout
+        + GET /logs
+        + GET /experiments/{id}/export
+        + GET /experiments/{id}/spec
+        + DELETE /experiments/{id}
+        + POST /experiments/{id}/cancel
+        + POST /experiments/import
+        + GET /runs/export
+        + GET /queue
+        + POST /queue/pause
+        + POST /queue/resume
+    }
+
+    class db <<module>> {
+        + create_tables()
+        + insert_experiment(spec)
+        + list_experiments(status, limit, offset)
+        + dequeue_next() -> experiment | None
+        + set_running / set_completed / set_failed / set_cancelled
+        + update_progress(id, progress_json)
+        + get_queue_state()
+    }
+
+    class logging_config <<module>> {
+        + configure_logging(verbose, log_level, log_format, log_file) -> dict
+        + build_dict_config(level, fmt, log_file) -> dict
+        + resolve_level / resolve_format / default_log_dir
+        + JsonFormatter
+        .. env: DEAP_LOG_LEVEL / DEAP_LOG_FORMAT / DEAP_LOG_DIR ..
+        ' WARNING (default) -> INFO (--verbose) -> DEBUG (-vv)
+        ' captureWarnings(True): warnings.warn -> py.warnings logger
+    }
+
+    class export_import <<module>> {
+        + build_export_manifest() -> dict
+        + create_run_export_zip(run_dir, flags) -> bytes
+        + create_experiment_export_zip_generator(...) -> Generator
+        + validate_import_zip(zip, root) -> ImportValidationResult
+        + extract_import_zip(zip, root) -> list
+        + restore_experiment_to_db(json, dirs, db) -> str
+    }
+}
+
+package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
+    class ApiClient {
+        - _client: httpx.Client
+        - _base_url: str
+        --
+        + get_catalog() -> dict
+        + get_algorithms() -> list
+        + get_environment(name) -> dict
+        + get_compatibility(env, algos) -> dict
+        + validate(spec) -> ValidationReportModel
+        + submit(spec) -> SubmitResponse
+        + list_experiments() -> list[ExperimentRecord]
+        + get_experiment(id) -> ExperimentRecord
+        + get_progress(id) -> ProgressSnapshot
+        + get_stdout(id, offset, limit) -> dict
+        + get_experiment_spec(id) -> dict
+        + build_experiment_export_url(id, flags) -> str
+        + build_run_export_url(dirs, flags) -> str
+        + import_experiments(zip, overwrite) -> dict
+        + get_queue() -> QueueState
+        + pause_queue() / resume_queue()
+        + cancel_experiment(id) / delete_experiment(id)
+        + get_health() -> dict  ' advanced_enabled
+        + start_install(manager, action, args) / get_install(job_id)
+        + validate_script(src) / submit_script(src, label)
+    }
+
+    class param_widgets <<module>> {
+        + coerce_param(value, spec) -> Any
+        + render_param(spec, key) -> value  (thin Streamlit wrapper)
+    }
+
+    class forms <<module>> {
+        + build_env_form(catalog) -> (values, touched)
+        + build_algo_form(catalog, env) -> (values, touched)
+        + build_fitness_form(env_spec) -> (values, touched)
+    }
+
+    class validation_view <<module>> {
+        + group_issues_by_tab(report) -> dict
+        + render_validation_report(report)
+    }
+
+    class spec_utils <<module>> {
+        + spec_to_form_defaults(spec) -> dict
+        + extract_loaded_spec(setup_config) -> dict | None
+    }
+}
+
+' Cross-package relationships (v0.2+)
+Catalog --> AlgorithmSpec : contains
+Catalog --> EnvironmentSpec : contains
+ExperimentSpecModel ..> ExperimentSpec : to_dataclass()
+FastAPIApp --> Catalog : serves as JSON
+FastAPIApp --> Dispatcher : lifespan manages
+FastAPIApp --> db : async I/O
+Dispatcher --> Runner : Popen subprocess
+Runner --> "baselines.Trainer" : train(progress_callback)
+FastAPIApp ..> logging_config : configure_logging() + GET /logs tails service.log
+Runner ..> logging_config : configure_logging() (console only)
+FastAPIApp ..> advanced : _require_advanced() gate (403)
+FastAPIApp ..> install_jobs : POST /env/install -> start_install
+FastAPIApp ..> script_validate : POST /experiments/script[/validate]
+Dispatcher ..> ScriptSubmitModel : runs kind=="script" spec as python user_script.py
+ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
+"Setup Page" ..> ApiClient : uses
+"Queue Page" ..> ApiClient : uses
+"Browse Page" ..> ApiClient : uses (export/import/re-run)
+"Setup Page" ..> spec_utils : uses (re-run pre-populate)
+AlgorithmSpec --> ParamSpec : hyperparameters
+EnvironmentSpec --> TeamSpec : teams
 
 policies ..> RunRecord : "reads .manifest"
 policies ..> PolicyCheckpointEntry : parses

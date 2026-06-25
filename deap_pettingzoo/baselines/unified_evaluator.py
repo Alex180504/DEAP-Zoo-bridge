@@ -5,8 +5,9 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Mapping, Tuple
 import json
+import logging
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -16,6 +17,8 @@ from deap_pettingzoo.baselines.base import (
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.utils.logging.replay import FrameRecorder
+
+logger = logging.getLogger(__name__)
 
 
 class UnifiedEvaluator(BaselineEvaluator):
@@ -53,17 +56,22 @@ class UnifiedEvaluator(BaselineEvaluator):
     
     def evaluate(
         self,
-        policy: PolicyProtocol,
+        policy: Optional[PolicyProtocol],
         env_name: str,
         num_episodes: int,
         seed: Optional[int] = None,
         render: bool = False,
         env_config: Optional[Dict[str, Any]] = None,
+        iteration: Optional[int] = None,
+        env_steps: Optional[int] = None,
+        record_extra: Optional[Mapping[str, Any]] = None,
+        policy_map: Optional[Mapping[str, PolicyProtocol]] = None,
     ) -> EvalResult:
         """Evaluate a policy on the given environment.
-        
+
         Args:
-            policy: Trained policy satisfying PolicyProtocol.
+            policy: Trained policy satisfying PolicyProtocol, broadcast to
+                every agent. May be ``None`` when ``policy_map`` is supplied.
             env_name: PettingZoo environment name.
             num_episodes: Number of episodes to evaluate.
             seed: Random seed for reproducibility.
@@ -71,12 +79,26 @@ class UnifiedEvaluator(BaselineEvaluator):
             env_config: Optional environment configuration dict. Must match
                 the config used during training so observation/action shapes
                 are consistent.
-            
+            iteration: Optional training iteration/generation that produced
+                ``policy``. When recording, it is written to the recorder's
+                ``frames/recordings.json`` sidecar so the UI can associate
+                the artefact with its metrics row.
+            env_steps: Optional cumulative env-step count at this iteration
+                (the meaningful axis for RL runs). Also written to the sidecar.
+            record_extra: Optional extra metadata dict for the sidecar entry.
+            policy_map: Optional per-agent ``{agent_id: policy}`` mapping for
+                heterogeneous rollouts (e.g. co-evolution, where each side owns
+                different agents). When given it takes precedence over
+                ``policy``; agents missing from the map act randomly. The
+                aggregate reward then spans a mixed-policy episode, so the
+                returned statistics are only meaningful for recording, not for
+                single-policy fitness comparison.
+
         Returns:
             EvalResult with reward statistics.
-        
+
         Notes:
-            ``human`` mode pops a window but returns None. 
+            ``human`` mode pops a window but returns None.
             ``rgb_array`` takes precedence over ``human`` when both are requested.
         """
 
@@ -115,11 +137,18 @@ class UnifiedEvaluator(BaselineEvaluator):
                 ep_seed = None
 
             if recording:
-                recorder.start_episode(self.record_episode_offset + ep_idx)
+                recorder.start_episode(
+                    self.record_episode_offset + ep_idx,
+                    iteration=iteration,
+                    env_steps=env_steps,
+                    extra=record_extra,
+                )
 
             # Run episode
             total_reward, length = self._run_episode(
-                policy, env, ep_seed, render, recorder=recorder if recording else None
+                policy, env, ep_seed, render,
+                recorder=recorder if recording else None,
+                policy_map=policy_map,
             )
             episode_rewards.append(total_reward)
             episode_lengths.append(length)
@@ -145,28 +174,36 @@ class UnifiedEvaluator(BaselineEvaluator):
     
     def _run_episode(
         self,
-        policy: PolicyProtocol,
+        policy: Optional[PolicyProtocol],
         env: PettingZooWrapper,
         seed: Optional[int],
         render: bool,
         *,
         recorder: Optional[FrameRecorder] = None,
+        policy_map: Optional[Mapping[str, PolicyProtocol]] = None,
     ) -> tuple:
         """Run a single episode.
-        
+
         Args:
-            policy: Policy to evaluate.
+            policy: Policy to evaluate (broadcast to all agents). May be
+                ``None`` when ``policy_map`` is supplied.
             env: Environment instance.
             seed: Random seed for this episode.
             render: Whether to render.
             recorder: Optional active :class:`FrameRecorder` collecting
                 ``rgb_array`` frames per step.
-            
+            policy_map: Optional per-agent ``{agent_id: policy}`` mapping;
+                agents not present act randomly via ``action_space.sample()``.
+
         Returns:
             Tuple of (total_reward, episode_length).
         """
-        # Reset policy and environment
-        policy.reset()
+        # Reset every distinct policy (recurrent state).
+        if policy_map is not None:
+            for pol in set(policy_map.values()):
+                pol.reset()
+        if policy is not None:
+            policy.reset()
         observations = env.reset(seed=seed)
 
         # Capture initial frame so the artefact starts on the reset state.
@@ -174,7 +211,7 @@ class UnifiedEvaluator(BaselineEvaluator):
             try:
                 recorder.add_frame(env.render())
             except Exception:
-                pass
+                logger.debug("frame capture failed", exc_info=True)
 
         # Track rewards per agent
         agent_rewards = dict.fromkeys(env.possible_agents, 0.0)
@@ -193,12 +230,17 @@ class UnifiedEvaluator(BaselineEvaluator):
             actions = {}
             for agent in observations:
                 mask = infos.get(agent, {}).get("action_mask")
+                pol = policy_map.get(agent) if policy_map is not None else policy
+                if pol is None:
+                    # Heterogeneous rollout with no policy for this agent.
+                    actions[agent] = env.action_space(agent).sample()
+                    continue
                 try:
-                    actions[agent] = policy.get_action(
+                    actions[agent] = pol.get_action(
                         observations[agent], action_mask=mask
                     )
                 except TypeError:
-                    actions[agent] = policy.get_action(observations[agent])
+                    actions[agent] = pol.get_action(observations[agent])
             
             # Step environment
             observations, rewards, terminations, truncations, _ = env.step(actions)

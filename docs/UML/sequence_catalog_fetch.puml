@@ -1,0 +1,61 @@
+@startuml sequence_catalog_fetch
+!theme plain
+title Catalog Fetch – UI Dynamic Form Construction
+
+participant "Setup Page\n(Streamlit)" as Setup
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "Catalog\n(deap_pettingzoo.catalog)" as Cat
+
+== First render: fetch full catalog ==
+
+Setup -> Client: GET /catalog
+Client -> API: HTTP GET
+API -> Cat: catalog.to_json()
+Cat --> API: {catalog_version, algorithms[],\n environments[], coevolution,\n budget_modes[], availability}
+API --> Client: 200 JSON
+Client --> Setup: catalog dict
+Setup -> Setup: cache in st.session_state
+
+Setup -> Setup: render Environment tab\n(selectbox: env names from catalog)
+note right of Setup: show availability badges\n(missing extras greyed out)
+
+== Env selection → compatibility check ==
+
+Setup -> Setup: user selects environment
+
+Setup -> Client: GET /catalog/compatibility?\n  env=simple_tag_v3&algorithms=ea,cma-es,maddpg,...
+Client -> API: HTTP GET
+API -> Cat: compatible_algorithms(env, all_algos)
+Cat --> API: {matrix, compatible[], incompatible[]}
+API --> Client: 200 JSON
+Client --> Setup: compatibility matrix
+Setup -> Setup: render Algorithm tab\n(compatible highlighted, incompatible disabled)
+
+== Algo selection → param rendering ==
+
+Setup -> Setup: user selects algorithms
+
+loop for each selected algorithm
+    Setup -> Client: GET /catalog/algorithms/{name}
+    Client -> API: HTTP GET
+    API -> Cat: get_algorithm(name)
+    Cat --> API: AlgorithmSpec {hyperparameters: ParamSpec[]}
+    API --> Client: 200 JSON
+    Client --> Setup: algorithm spec
+    Setup -> Setup: render hyperparameter widgets\n(number_input, selectbox, toggle, ...)\nper ParamSpec {type, min, max, choices, group, advanced}
+end
+
+== Coevolution options ==
+
+alt coevolution tab active
+    Setup -> Client: GET /catalog/coevolution
+    Client -> API: HTTP GET
+    API -> Cat: coevolution options
+    Cat --> API: {modes[], schedules[], samplers[], eligible_optimizers[]}
+    API --> Client: 200 JSON
+    Client --> Setup: coevolution options
+    Setup -> Setup: render coevolution form\n(sides, mode, schedule, k_opponents,...)
+end
+
+@enduml

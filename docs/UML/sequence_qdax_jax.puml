@@ -24,7 +24,7 @@ deactivate JaxMARLMod
 
 == Training ==
 
-User -> Trainer : train(TrainingConfig(\n  env_name="jaxmarl_simple_tag",\n  algorithm_params={"descriptor": "pursuit_evasion_2d",\n                    "grid_shape": (20,20), ...}))
+User -> Trainer : train(TrainingConfig(\n  env_name="jaxmarl_simple_tag",\n  algorithm_params={"descriptor_fn": <caller-supplied callable>,\n                    "grid_shape": (20,20), ...}))
 activate Trainer
 
 Trainer -> Registry : get_env_spec(env_name)

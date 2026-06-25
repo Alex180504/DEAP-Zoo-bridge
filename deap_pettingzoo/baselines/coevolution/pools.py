@@ -814,9 +814,11 @@ class RLPolicyPool(_BasePool):
         RL side's ``learn()`` step. Returning ``self`` would leak the
         post-learn policy back into the same generation's evaluations
         that should have used the pre-learn policy. We therefore
-        return a fresh ``RLPolicyPool`` wrapping a deep copy of the
-        wrapper (which transitively deep-copies the underlying torch
-        modules).
+        return a fresh ``RLPolicyPool`` wrapping an isolated, pre-learn
+        view of the policy: a frozen CPU snapshot for an
+        :class:`AgileRLPolicyWrapper` (which also works for on-policy
+        ``StochasticActor`` learners that ``copy.deepcopy`` rejects), or
+        a deep copy for any other policy type.
 
         This method runs once per generation whenever the synchronous
         schedule snapshots pools — regardless of which side is the next
@@ -824,11 +826,29 @@ class RLPolicyPool(_BasePool):
         wrapper directly via the driver context and does not go
         through this snapshot path.
         """
-        import copy
         import warnings
 
+        from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+
+        policy = self._policy
+        if isinstance(policy, AgileRLPolicyWrapper):
+            try:
+                return RLPolicyPool(policy.make_frozen_cpu_snapshot())
+            except Exception as exc:  # pragma: no cover
+                warnings.warn(
+                    f"RLPolicyPool.snapshot_sync: make_frozen_cpu_snapshot "
+                    f"failed ({exc!r}); falling back to the live policy "
+                    "reference. The synchronous-schedule isolation contract "
+                    "(opponents see pre-learn weights) is best-effort.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return RLPolicyPool(policy)
+
+        import copy
+
         try:
-            frozen = copy.deepcopy(self._policy)
+            frozen = copy.deepcopy(policy)
         except Exception as exc:  # pragma: no cover
             warnings.warn(
                 f"RLPolicyPool.snapshot_sync: deep-copy of RL policy failed "
@@ -838,7 +858,7 @@ class RLPolicyPool(_BasePool):
                 RuntimeWarning,
                 stacklevel=2,
             )
-            frozen = self._policy
+            frozen = policy
         return RLPolicyPool(frozen)
 
     def __len__(self) -> int:

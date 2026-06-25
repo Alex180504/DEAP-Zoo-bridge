@@ -53,9 +53,9 @@ class TestRequiredOutputSize:
         # Flattens: shape (2, 3) -> 6 outputs.
         assert required_output_size(spaces.Box(low=-1.0, high=1.0, shape=(2, 3))) == 6
 
-    def test_multi_discrete_raises(self):
-        with pytest.raises(NotImplementedError, match="MultiDiscrete"):
-            required_output_size(spaces.MultiDiscrete([3, 4]))
+    def test_multi_discrete_sum_of_nvec(self):
+        # MultiDiscrete is now supported: sum(nvec) = 3 + 4 = 7 outputs.
+        assert required_output_size(spaces.MultiDiscrete([3, 4])) == 7
 
     def test_tuple_raises(self):
         with pytest.raises(NotImplementedError, match="Tuple"):

@@ -3,16 +3,19 @@
 An *action head* converts the raw output of a feedforward network into a
 value that is valid for a given :mod:`gymnasium.spaces` action space.
 
-Two heads are provided:
+Three heads are provided:
 
 - :class:`DiscreteHead` — argmax over ``n`` logits, returns a Python ``int``.
 - :class:`BoxHead` — tanh-squash raw output to ``[-1, 1]`` then rescale to
   ``[low, high]``, returns a ``np.float32`` array.
+- :class:`MultiDiscreteHead` — split ``sum(nvec)`` logits into one chunk per
+  sub-action and argmax each, returns a ``np.int64`` array of shape
+  ``(len(nvec),)``.
 
-:class:`MultiDiscrete`, :class:`Tuple`, and :class:`Dict` action spaces are
-explicitly **not supported** for EA-driven policies.  :func:`make_head`
-raises :class:`NotImplementedError` with a message pointing callers at the
-AgileRL trainers, which handle those spaces natively.
+:class:`Tuple` and :class:`Dict` action spaces remain **not supported** for
+EA-driven policies.  :func:`make_head` raises :class:`NotImplementedError`
+with a message pointing callers at the AgileRL trainers, which handle those
+spaces natively.
 """
 
 from __future__ import annotations
@@ -187,13 +190,66 @@ class BoxHead(ActionHead):
         return decoded.reshape(self._shape)
 
 
+class MultiDiscreteHead(ActionHead):
+    """Per-sub-action argmax over concatenated logits.
+
+    A :class:`gymnasium.spaces.MultiDiscrete` space with ``nvec = [n0, n1,
+    ...]`` is decoded from a flat output of size ``sum(nvec)``: the output is
+    split into one contiguous chunk per sub-action and :func:`numpy.argmax`
+    is taken within each chunk.  This matches :func:`gymnasium.spaces.flatdim`
+    and AgileRL's ``sample_multi_discrete`` layout, so a network can drive
+    either backend with the same number of outputs.
+
+    The per-chunk argmax is scale-invariant, so any output activation
+    (e.g. NEAT's sigmoid, a raw linear layer) yields valid sub-actions.
+
+    Args:
+        nvec: Per-sub-action choice counts (array-like of ints, all >= 1).
+
+    Returns a ``np.int64`` array of shape ``(len(nvec),)`` from :meth:`decode`,
+    with entry ``i`` in ``[0, nvec[i])``.
+    """
+
+    def __init__(self, nvec: Any) -> None:
+        self.nvec = np.asarray(nvec, dtype=np.int64).ravel()
+        if self.nvec.size == 0:
+            raise ValueError("MultiDiscreteHead requires a non-empty nvec.")
+        if np.any(self.nvec < 1):
+            raise ValueError(
+                f"MultiDiscreteHead requires every nvec entry >= 1, got {self.nvec.tolist()}"
+            )
+        # Chunk boundaries into the flat logit vector: offsets[i]:offsets[i+1].
+        self._offsets = np.concatenate(([0], np.cumsum(self.nvec))).astype(np.int64)
+
+    @property
+    def output_size(self) -> int:
+        """Number of network output units required: ``sum(nvec)``."""
+        return int(self.nvec.sum())
+
+    def decode(self, raw_output: np.ndarray) -> np.ndarray:
+        arr = np.asarray(raw_output).ravel()
+        if arr.size != self.output_size:
+            raise ValueError(
+                f"MultiDiscreteHead expected output of size {self.output_size}, "
+                f"got size {arr.size}"
+            )
+        return np.array(
+            [
+                int(np.argmax(arr[self._offsets[i] : self._offsets[i + 1]]))
+                for i in range(self.nvec.size)
+            ],
+            dtype=np.int64,
+        )
+
+
 def required_output_size(action_space: Any) -> int:
     """Return the number of network output units required for ``action_space``.
 
     Mirrors :func:`make_head`'s space support: :class:`Discrete` needs
-    ``n`` outputs, :class:`Box` needs ``prod(shape)`` outputs (1-D only
-    in practice).  Unsupported spaces raise :class:`NotImplementedError`
-    with the same message pattern used by :func:`make_head`.
+    ``n`` outputs, :class:`MultiDiscrete` needs ``sum(nvec)`` outputs, and
+    :class:`Box` needs ``prod(shape)`` outputs (1-D only in practice).
+    Unsupported spaces raise :class:`NotImplementedError` with the same
+    message pattern used by :func:`make_head`.
 
     Args:
         action_space: A :class:`gymnasium.spaces.Space` instance.
@@ -202,8 +258,8 @@ def required_output_size(action_space: Any) -> int:
         Required number of output units.
 
     Raises:
-        NotImplementedError: For :class:`MultiDiscrete`, :class:`Tuple`,
-            :class:`Dict`, and any other unsupported space type.
+        NotImplementedError: For :class:`Tuple`, :class:`Dict`, and any
+            other unsupported space type.
         TypeError: If ``action_space`` is ``None``.
     """
     if action_space is None:
@@ -212,12 +268,7 @@ def required_output_size(action_space: Any) -> int:
     if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
         return int(action_space.n)
     if hasattr(action_space, "nvec"):
-        raise NotImplementedError(
-            "MultiDiscrete action spaces are not supported by "
-            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
-            "(MADDPG / MATD3 / IPPO) for envs with communication "
-            "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
-        )
+        return int(np.sum(action_space.nvec))
     if hasattr(action_space, "shape") and hasattr(action_space, "low"):
         shape = action_space.shape
         if shape is None or len(shape) == 0:
@@ -247,17 +298,19 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
         masked: If ``True`` and ``action_space`` is :class:`Discrete`,
             return a :class:`MaskedDiscreteHead` instead of the default
             :class:`DiscreteHead` so the caller can supply an
-            ``action_mask`` to :meth:`ActionHead.decode`.
+            ``action_mask`` to :meth:`ActionHead.decode`.  Ignored for
+            non-Discrete spaces (MPE2 MultiDiscrete envs are not turn-based).
 
     Returns:
         :class:`DiscreteHead` (or :class:`MaskedDiscreteHead` when
-        ``masked=True``) for :class:`Discrete`, :class:`BoxHead` for
-        :class:`Box`.
+        ``masked=True``) for :class:`Discrete`,
+        :class:`MultiDiscreteHead` for :class:`MultiDiscrete`,
+        :class:`BoxHead` for :class:`Box`.
 
     Raises:
-        NotImplementedError: For :class:`MultiDiscrete`, :class:`Tuple`,
-            :class:`Dict`, and any other unsupported space type.  The
-            message points callers at the AgileRL trainers.
+        NotImplementedError: For :class:`Tuple`, :class:`Dict`, and any
+            other unsupported space type.  The message points callers at
+            the AgileRL trainers.
         TypeError: If ``action_space`` is ``None``.
     """
     if action_space is None:
@@ -268,12 +321,7 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
         cls = MaskedDiscreteHead if masked else DiscreteHead
         return cls(int(action_space.n))
     if hasattr(action_space, "nvec"):
-        raise NotImplementedError(
-            "MultiDiscrete action spaces are not supported by "
-            "FeedforwardNeuralPolicy. Use one of the AgileRL trainers "
-            "(MADDPG / MATD3 / IPPO) for envs with communication "
-            "channels (e.g. simple_reference_v3, simple_world_comm_v3)."
-        )
+        return MultiDiscreteHead(action_space.nvec)
     if hasattr(action_space, "low") and hasattr(action_space, "high") and hasattr(
         action_space, "shape"
     ):
@@ -294,6 +342,7 @@ __all__ = [
     "DiscreteHead",
     "MaskedDiscreteHead",
     "BoxHead",
+    "MultiDiscreteHead",
     "make_head",
     "required_output_size",
 ]

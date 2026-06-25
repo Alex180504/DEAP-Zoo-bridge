@@ -1,0 +1,65 @@
+@startuml sequence_import_rerun
+!theme plain
+title Experiment Import & Re-Run – Browse -> Backend -> Setup
+
+actor User
+participant "Browse Page\n(Streamlit)" as Browse
+participant "FastAPI\n/app.py" as API
+participant "export_import.py\n(validator + extractor)" as EI
+participant "db.py\n(SQLite WAL)" as DB
+participant "File System\n(results)" as FS
+participant "Setup Page\n(Streamlit)" as Setup
+
+== Import ZIP ==
+User -> Browse: upload .zip file\n(st.file_uploader)
+Browse -> API: POST /experiments/import\n(multipart: zip file)
+API -> EI: validate_import_zip(zip_path, results_root)
+
+group Validation
+    EI -> EI: check: valid zip?
+    EI -> EI: check: deap_export_manifest.json present?
+    EI -> EI: check: schema_version <= current?
+    EI -> EI: check: run_dirs have manifest.json?
+    EI -> EI: check: path traversal? (.., absolute paths)
+    EI -> EI: check: disk space? (shutil.disk_usage)
+end
+
+alt validation failed
+    EI --> API: ImportValidationResult(ok=False, errors=[...])
+    API --> Browse: 422 {errors: [{path, code, message}], warnings: [...]}
+    Browse --> User: render errors inline
+else validation ok
+    EI -> FS: extract_import_zip(zip_path, results_root)
+    note right of FS: preserve dir structure\nskip/overwrite duplicates
+    EI -> DB: restore_experiment_to_db(experiment.json, run_dirs)
+    DB -> DB: insert_experiment(origin='import', status='completed')
+    DB -> DB: set_completed(new_id, run_dirs)
+    EI --> API: {imported: [{original_id, new_id, label, run_count}]}
+    API --> Browse: 200 {ok: true, imported: [...]}
+    Browse -> Browse: st.cache_resource.clear() + st.rerun()
+    Browse --> User: success summary + imported runs visible
+end
+
+== Re-run (UI-origin experiments only) ==
+User -> Browse: select UI-origin runs → ⚙️ Manage → 🔄 Load spec into Setup
+Browse -> API: GET /experiments/{exp_id}/spec
+API -> DB: get_experiment(exp_id)
+DB --> API: {spec: ExperimentSpec}
+API --> Browse: {spec: {...}}
+Browse -> Browse: spec_to_form_defaults(spec)
+Browse -> Browse: state.setup_config = json.dumps({..._loaded_spec...})
+Browse -> Browse: state.persist()
+Browse --> User: success toast "Spec loaded — go to Setup"
+Browse -> Setup: st.page_link("pages/8_Setup.py")
+
+== Setup pre-populated ==
+Setup -> Setup: extract_loaded_spec(setup_config)
+Setup -> Setup: pre-populate all 8 tabs
+Setup --> User: banner "📋 Loaded spec from experiment '...'"
+User -> Setup: review params, modify budget/seeds, submit
+Setup -> API: POST /experiments (origin='ui')
+note right of API: new experiment ID\nnew queue entry\nnew run dirs
+API --> Setup: 201 {id, status="queued"}
+Setup --> User: success + navigate to Queue
+
+@enduml

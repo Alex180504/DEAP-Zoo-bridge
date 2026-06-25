@@ -1,7 +1,7 @@
 """Artificial Potential Field (APF) evader policy.
 
 Implements a deterministic reactive evader for use with
-:class:`~deap_pettingzoo.environments.PursuitEvasionEnv`.  The policy
+:class:`~examples.pursuit_evasion.simple_tag.env.PursuitEvasionEnv`.  The policy
 computes a resultant force vector from inverse-square repulsive
 contributions of every *visible* pursuer and landmark, plus a soft
 boundary push that activates near the operational edge, then quantises the
@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 
-from deap_pettingzoo.contrib.pursuit_evasion.env import ObsLayout
+from .env import ObsLayout
 
 
 # Direction vectors for the five MPE discrete actions.

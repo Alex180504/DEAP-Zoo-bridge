@@ -52,6 +52,8 @@ class EnvironmentInfo:
         agent_ids: Ordered list of agent identifiers.
         has_continuous_actions: True if any agent has a Box action space.
         has_discrete_actions: True if any agent has a Discrete action space.
+        has_multidiscrete_actions: True if any agent has a MultiDiscrete
+            action space.
         has_global_state: True if the environment exposes a ``state()`` method.
         obs_dim: Per-agent observation dimension (None if heterogeneous).
         act_dim: Per-agent action dimension (None if heterogeneous).
@@ -70,6 +72,8 @@ class EnvironmentInfo:
     act_dim: Optional[int]
     action_low: Optional[np.ndarray]
     action_high: Optional[np.ndarray]
+    #: Whether any agent has a :class:`gymnasium.spaces.MultiDiscrete` space.
+    has_multidiscrete_actions: bool = False
     #: Whether the env is a strictly turn-based AEC wrapped via:
     #: :class:`MaskedSimultaneousAdapter` or
     #: :class:`SequentialTurnAdapter`. Used to gate MADDPG/MATD3.
@@ -84,6 +88,7 @@ class EnvironmentInfo:
             'agent_ids': self.agent_ids,
             'has_continuous_actions': self.has_continuous_actions,
             'has_discrete_actions': self.has_discrete_actions,
+            'has_multidiscrete_actions': self.has_multidiscrete_actions,
             'has_global_state': self.has_global_state,
             'obs_dim': self.obs_dim,
             'act_dim': self.act_dim,
@@ -169,6 +174,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
 
     has_continuous = False
     has_discrete = False
+    has_multidiscrete = False
     obs_dims: set = set()
     act_dims: set = set()
     first_action_low: Optional[np.ndarray] = None
@@ -182,11 +188,17 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
         if hasattr(obs_space, 'shape') and obs_space.shape:
             obs_dims.add(int(np.prod(obs_space.shape)))
 
-        # Action space type
-        if hasattr(act_space, 'n'):
+        # Action space type.  Check ``nvec`` before ``shape`` because
+        # MultiDiscrete exposes ``shape`` (but no ``low``/``high``) and would
+        # otherwise be misclassified as Box and crash on ``.low``.
+        if hasattr(act_space, 'n') and not hasattr(act_space, 'nvec'):
             # gymnasium.spaces.Discrete
             has_discrete = True
             act_dims.add(int(act_space.n))
+        elif hasattr(act_space, 'nvec'):
+            # gymnasium.spaces.MultiDiscrete — sum(nvec) output units.
+            has_multidiscrete = True
+            act_dims.add(int(np.sum(act_space.nvec)))
         elif hasattr(act_space, 'shape') and act_space.shape:
             # gymnasium.spaces.Box
             has_continuous = True
@@ -218,6 +230,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
         agent_ids=agents,
         has_continuous_actions=has_continuous,
         has_discrete_actions=has_discrete,
+        has_multidiscrete_actions=has_multidiscrete,
         has_global_state=has_global_state,
         obs_dim=obs_dims.pop() if len(obs_dims) == 1 else None,
         act_dim=act_dims.pop() if len(act_dims) == 1 else None,
@@ -268,6 +281,16 @@ def check_compatibility(
         issues.append(
             "Environment has discrete action spaces, but the algorithm "
             "only supports continuous actions."
+        )
+
+    if env_info.has_multidiscrete_actions and not caps.get(
+        'multidiscrete_action', False
+    ):
+        issues.append(
+            "Environment has MultiDiscrete action spaces, but the algorithm "
+            "does not support them. Use EA / CMA-ES / PSO / NEAT / QDax or "
+            "IPPO (the deterministic-actor off-policy learners MADDPG / MATD3 "
+            "do not support MultiDiscrete)."
         )
 
     # Global state requirement
