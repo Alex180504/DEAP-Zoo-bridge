@@ -13,11 +13,12 @@ unless the snapshot is replayed.
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 import os
 import pickle
 import subprocess
 import sys
-
+import multiprocessing
 import numpy as np
 import pytest
 
@@ -178,11 +179,12 @@ class TestProcessSpecPropagation:
     """The snapshot on the spec carries the env even with no initializer."""
 
     def test_missing_snapshot_fails_in_worker(self, md_env):
-        # No initializer (mirrors SCOOP/Dask) AND no snapshot on the spec:
-        # fresh workers cannot resolve the runtime-registered env.
         inds = _make_inds(2)
         spec = _md_spec(None)
-        with make_executor(2, backend="process") as executor:
+        with ProcessPoolExecutor(
+            max_workers=2,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
             with pytest.raises(Exception):
                 evaluate_population_parallel(inds, executor=executor, spec=spec)
 
