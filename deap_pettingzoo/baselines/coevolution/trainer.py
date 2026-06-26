@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random as _random
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ from deap_pettingzoo.utils.parallel import (
     make_executor,
     resolve_num_workers,
 )
+from deap_pettingzoo.utils.rng import seed_everything
 
 from .evaluator import CoEvolutionEvaluator
 from .rl_side import RLSideState, _RLDriverContext
@@ -623,7 +625,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         Emits GPU-contention and RL-parallelism warnings.
         """
         if coev_cfg.seed is not None:
-            np.random.seed(int(coev_cfg.seed))
+            seed_everything(int(coev_cfg.seed))
         self._rng = np.random.default_rng(coev_cfg.seed)
 
         states: Dict[str, SideState] = {
@@ -633,13 +635,17 @@ class CoEvolutionTrainer(BaselineTrainer):
             side_rng = np.random.default_rng(
                 self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
             )
+            previous_py_state = _random.getstate()
             previous_np_state = np.random.get_state()
             try:
                 state.initialise(env, rng=side_rng)
             except Exception:
+                _random.setstate(previous_py_state)
                 np.random.set_state(previous_np_state)
                 raise
+            state._py_state = _random.getstate()
             state._np_state = np.random.get_state()
+            _random.setstate(previous_py_state)
             np.random.set_state(previous_np_state)
 
         rl_cuda_sides = [

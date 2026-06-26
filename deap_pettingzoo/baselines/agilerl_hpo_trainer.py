@@ -231,6 +231,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
         )
         tournament_size = config.algorithm_params.get("tournament_size", 2)
         seed = config.algorithm_params.get("seed", None)
+        if seed is not None:
+            self._seed_everything(int(seed))
 
         # Build NetConfig and HyperparameterConfig.
         net_config = config.algorithm_params.get("net_config", {})
