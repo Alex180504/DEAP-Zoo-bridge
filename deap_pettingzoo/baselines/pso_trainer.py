@@ -169,6 +169,11 @@ class PSOTrainer(BaselineTrainer):
         )
 
         seed = config.algorithm_params.get("seed", None)
+        # Seed global RNGs
+        if seed is not None:
+            from deap_pettingzoo.utils.rng import seed_everything
+            seed_everything(int(seed))
+
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
