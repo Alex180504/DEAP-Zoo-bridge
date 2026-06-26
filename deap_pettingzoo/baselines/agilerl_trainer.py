@@ -545,13 +545,8 @@ class AgileRLTrainer(BaselineTrainer):
 
     @staticmethod
     def _seed_everything(seed: int) -> None:
-        np.random.seed(seed)
-        try:
-            import torch
-
-            torch.manual_seed(seed)
-        except ImportError:  # pragma: no cover
-            pass
+        from deap_pettingzoo.utils.rng import seed_everything as _se
+        _se(seed)
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
         if config.budget_mode == BudgetMode.WALL_CLOCK:
