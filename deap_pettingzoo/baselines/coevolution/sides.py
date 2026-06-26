@@ -23,6 +23,7 @@ the :class:`CoEvolutionTrainer` consumes.
 
 from __future__ import annotations
 
+import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -187,6 +188,7 @@ class SideState:
         self.history: List[GenerationStats] = []
 
         self._np_state: Optional[Any] = None
+        self._py_state: Optional[Any] = None
 
     # Lifecycle hooks — subclasses override
 
@@ -450,25 +452,37 @@ class EASideState(SideState):
             del ind.fitness.values
 
         # Simple (mu, lambda)=(N, N) generational loop with full replacement - matches EATrainer's "simple" strategy.
-        global_state_before: Optional[Any] = None
-        if self._np_state is not None:
-            global_state_before = np.random.get_state()
-            np.random.set_state(self._np_state)
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
 
-        offspring = [self.toolbox.clone(ind) for ind in self.population]
-        for i in range(1, len(offspring), 2):
-            if self._rng.random() < self.crossover_rate:
-                self.toolbox.mate(offspring[i - 1], offspring[i])
-                del offspring[i - 1].fitness.values
-                del offspring[i].fitness.values
-        for ind in offspring:
-            if self._rng.random() < self.mutation_rate:
-                self.toolbox.mutate(ind)
-                del ind.fitness.values
+            offspring = [self.toolbox.clone(ind) for ind in self.population]
+            for i in range(1, len(offspring), 2):
+                if self._rng.random() < self.crossover_rate:
+                    self.toolbox.mate(offspring[i - 1], offspring[i])
+                    del offspring[i - 1].fitness.values
+                    del offspring[i].fitness.values
+            for ind in offspring:
+                if self._rng.random() < self.mutation_rate:
+                    self.toolbox.mutate(ind)
+                    del ind.fitness.values
 
-        if global_state_before is not None:
-            self._np_state = np.random.get_state()
-            np.random.set_state(global_state_before)
+            # (mu, lambda) selection: choose next generation from offspring only
+            self.population = self.toolbox.select(offspring, self.population_size)
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
 
         # Evaluate invalid individuals.
         invalid = [ind for ind in offspring if not ind.fitness.valid]
@@ -480,13 +494,6 @@ class EASideState(SideState):
             for ind in invalid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # (mu, lambda) selection: choose next generation from offspring ONLY.
-        # In competitive coevolution, (mu+lambda) elitism is harmful because
-        # parent fitness values were earned against *previous* opponents; stale
-        # high-scoring parents will dominate tournament selection over offspring
-        # that are correctly evaluated against today's (harder) opponents,
-        # causing the population to freeze at a local optimum forever.
-        self.population = self.toolbox.select(offspring, self.population_size)
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
@@ -700,17 +707,25 @@ class CMAESSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
-        global_state_before: Optional[Any] = None
-        if self._np_state is not None:
-            global_state_before = np.random.get_state()
-            np.random.set_state(self._np_state)
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently 
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
 
-        self.toolbox.update(self.population)
-        next_population = self.toolbox.generate()
-
-        if global_state_before is not None:
-            self._np_state = np.random.get_state()
-            np.random.set_state(global_state_before)
+            self.toolbox.update(self.population)
+            next_population = self.toolbox.generate()
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
 
         # Collect stats from the *evaluated* population before swapping.
         self.hof.update(self.population)
@@ -897,7 +912,26 @@ class PSOSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
-        self.toolbox.update(self.population)
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
+
+            self.toolbox.update(self.population)
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
+
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))

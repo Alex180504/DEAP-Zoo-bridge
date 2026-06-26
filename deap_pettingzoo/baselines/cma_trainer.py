@@ -220,10 +220,11 @@ class CMAESTrainer(BaselineTrainer):
             team_mapping=config.fitness.team_mapping,
         )
 
-        # Seed NumPy's global RNG — deap.cma.Strategy samples via numpy.random.standard_normal, so this is the only control knob.
+        # Seed global RNGs
         seed = config.algorithm_params.get("seed", None)
         if seed is not None:
-            np.random.seed(int(seed))
+            from deap_pettingzoo.utils.rng import seed_everything
+            seed_everything(int(seed))
 
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
