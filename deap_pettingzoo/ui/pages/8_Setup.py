@@ -1,4 +1,4 @@
-"""Setup — configure and submit an experiment.
+"""Setup: configure and submit an experiment.
 
 This page fetches the catalog JSON from the backend (service must be
 running — a yellow banner is shown if unreachable), builds a multi-tab
@@ -44,9 +44,7 @@ settings = load_settings(
     results_root=str(state.results_root) if state.results_root else None
 )
 
-# ---------------------------------------------------------------------------
 # API client
-# ---------------------------------------------------------------------------
 
 client = get_client()
 try:
@@ -54,8 +52,7 @@ try:
 except (ApiUnavailable, Exception):
     st.warning(
         "Cannot reach the experiment service backend. "
-        "Start it with `python -m deap_pettingzoo.service` "
-        "or set `FASTAPI_URL` to point at a running instance."
+        "Set `FASTAPI_URL` to point at a running backend service or container."
     )
     st.stop()
 
@@ -63,19 +60,16 @@ env_list = {e["name"]: e for e in catalog.get("environments", [])}
 algo_list = {a["name"]: a for a in catalog.get("algorithms", [])}
 all_algo_names = list(algo_list.keys())
 
-# Whether the backend exposes the advanced (install + custom-script) surface.
+# Select whether the backend exposes the advanced (install + custom-script) surface.
 try:
     advanced_enabled = bool(client.get_health().get("advanced_enabled", False))
 except Exception:
     advanced_enabled = False
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
-#: Budget-mode param specs (hand-authored — not from the catalog, since
-#: budget modes are a top-level concept).
+#: Budget-mode param specs (hand-authored — not from the catalog, since budget modes are a top-level concept).
 _BUDGET_PARAMS: List[Dict[str, Any]] = [
     {
         "name": "mode",
@@ -211,9 +205,7 @@ def _build_submit_spec(
     return spec, raw_error
 
 
-# ---------------------------------------------------------------------------
 # Restore from stored state (survives hot-reload / tab switch)
-# ---------------------------------------------------------------------------
 
 _stored = state.setup_config
 _prev_env = ""
@@ -249,7 +241,7 @@ if _stored:
 else:
     _loaded_spec = None
 
-# --- Banner for loaded spec ------------------------------------------------
+# Banner for loaded spec
 if _loaded_spec:
     loaded_label = _loaded_spec.get("label", "")
     cols = st.columns([8, 1])
@@ -269,7 +261,7 @@ if _loaded_spec:
 
 _GITHUB_HINT = (
     "Looks like a bare GitHub URL. pip can't install that directly — use the "
-    "`git+https://…` form, e.g. `git+https://github.com/Alex180504/marl-aquarium.git` "
+    "`git+https://…` form, "
     "(or a `.../archive/refs/heads/main.zip` link)."
 )
 
@@ -347,23 +339,18 @@ def _render_install_panel(client: ApiClient) -> None:
 def _render_script_editor(client: ApiClient, state: UIState) -> None:
     st.subheader("Custom experiment script")
     st.caption(
-        "Paste a full experiment script (e.g. an `examples/pursuit_evasion` "
-        "module). It is queued and run as `python user_script.py`; its relative "
+        "Paste a full Python experiment script. It is queued and run as `python user_script.py`; its relative "
         "`results/…` outputs are linked to the experiment and appear under "
         "Browse. Validation is **static only** — it checks syntax/structure, not "
         "that the script trains correctly."
     )
     label = st.text_input("Label (optional)", value="")
 
-    # st.text_area is the reliable default (always returns its current value).
-    # The rich editor is opt-in: streamlit-code-editor only emits its text on
-    # editor events, so a naive read can come back empty ("Script is empty").
+    # Optional rich editor (syntax-highlighted) if streamlit-code-editor is installed.
     use_rich = st.checkbox(
         "Rich code editor",
         value=False,
-        help="Syntax-highlighted editor (needs streamlit-code-editor). The plain "
-             "text area is used otherwise and is fully reliable.",
-    )
+        help="Syntax-highlighted editor (needs streamlit-code-editor).")
     src = state.advanced_script
     if use_rich:
         try:
@@ -374,8 +361,7 @@ def _render_script_editor(client: ApiClient, state: UIState) -> None:
                 lang="python",
                 height=[18, 30],
                 key="_adv_code_editor",
-                # Emit text on blur + debounced typing so a button click (which
-                # blurs the editor) captures the latest content.
+                # Emit text on blur + debounced typing so a button click (which blurs the editor) captures the latest content.
                 response_mode=["debounce", "blur"],
             )
             returned = (_ed or {}).get("text", "")
@@ -383,7 +369,7 @@ def _render_script_editor(client: ApiClient, state: UIState) -> None:
             src = returned if returned.strip() else state.advanced_script
             st.caption("Tip: click outside the editor before Validate/Submit.")
         except Exception as exc:  # noqa: BLE001 — fall back to a plain area
-            st.caption(f"Rich editor unavailable ({exc}); using plain text area.")
+            st.caption(f"Error: Rich editor unavailable ({exc}); using plain text area.")
             src = st.text_area(
                 "Python script", value=state.advanced_script, height=400,
                 label_visibility="collapsed",
@@ -406,7 +392,7 @@ def _render_script_editor(client: ApiClient, state: UIState) -> None:
                 st.error("Backend unreachable.")
     with c2:
         if st.button(
-            "Submit script to queue",
+            "Submit a script to queue",
             use_container_width=True,
             type="primary",
             key="_adv_submit",
@@ -448,14 +434,11 @@ def _render_advanced_section(client: ApiClient, state: UIState) -> None:
         _render_script_editor(client, state)
 
 
-# ===========================================================================
-# Tab 1 — Environment
-# ===========================================================================
+# Tab 1: Environment
 
 # Top-level mode: the spec form (8 tabs + Validate/Submit) OR the Advanced tools.
 # Rendering Advanced as a mutually-exclusive mode (not a 9th tab) keeps the
-# page-level Validate/Submit buttons from showing alongside the script editor's
-# own buttons (they live outside the tab group and would otherwise duplicate).
+# page-level Validate/Submit buttons from duplicating alongside the script editor's own buttons
 if advanced_enabled:
     page_mode = st.radio(
         "Page mode",
@@ -515,9 +498,7 @@ with tab_env:
     else:
         compatible_algos = all_algo_names
 
-# ===========================================================================
-# Tab 2 — Algorithm(s)
-# ===========================================================================
+# Tab 2: Algorithm(s)
 
 with tab_algos:
     st.markdown(f"**Environment:** `{env_sel}` — compatible algorithms highlighted below.")
@@ -566,18 +547,14 @@ with tab_algos:
                 extras = ", ".join(spec.get("required_extras", []) or ["unknown"])
                 st.caption(f"**{spec.get('label', name)}** — install `{extras}`")
 
-# ===========================================================================
-# Tab 3 — Budget
-# ===========================================================================
+# Tab 3: Budget
 
 with tab_budget:
     budget_ctx = WidgetContext(values=dict(_prev_budget))
     _render_param_group(_BUDGET_PARAMS, budget_ctx)
     budget_values, _ = coerce_touched(_BUDGET_PARAMS, budget_ctx.values)
 
-# ===========================================================================
-# Tab 4 — Fitness
-# ===========================================================================
+# Tab 4: Fitness
 
 with tab_fitness:
     multi_team = len(env_spec.get("teams", [])) >= 2
@@ -591,19 +568,16 @@ with tab_fitness:
     if "aggregation_method" in fitness_ctx.values:
         fitness_values["aggregation_method"] = fitness_ctx.values["aggregation_method"]
 
-# ===========================================================================
-# Tab 5 — Recording
-# ===========================================================================
+# Tab 5: Recording
 
 with tab_rec:
     rec_ctx = WidgetContext(values=dict(_prev_recording))
     _render_param_group(_RECORDING_PARAMS, rec_ctx)
     recording_values, _ = coerce_touched(_RECORDING_PARAMS, rec_ctx.values)
 
-    # --- Cadence mode (algorithm-agnostic) -------------------------------------
+    # Cadence mode (algorithm-agnostic)
     # One concept across EA generations and RL iterations: choose how often to
-    # capture the champion. The companion field (count / env-step interval) is
-    # shown conditionally.
+    # capture the champion rollout. The companion field (count / env-step interval) is shown conditionally.
     _MODE_LABELS = {
         "count": "N evenly spread over the run",
         "every": "Every generation / iteration",
@@ -642,11 +616,10 @@ with tab_rec:
             "spread' unless you need every step."
         )
 
-    # --- Resolution control (custom: the generic int widget can't emit None) ---
+    # Resolution control (custom: the generic int widget can't emit None)
     # ``max_dim`` downscales the longer side of each rendered frame. Default to
-    # 512 px; offer a full-resolution toggle (max_dim=None) for pixel-exact
-    # replays, gated behind a memory/perf warning since frames are buffered
-    # uncompressed in RAM.
+    # 512 px and offer a full-resolution toggle (max_dim=None) for pixel-exact
+    # replays, gated behind a memory/performance warning.
     _prev_max_dim = _prev_recording.get("max_dim", _DEFAULT_MAX_DIM)
     _prev_full_res = "max_dim" in _prev_recording and _prev_max_dim is None
     full_res = st.checkbox(
@@ -661,7 +634,7 @@ with tab_rec:
         st.warning(
             "Full-resolution recording buffers every frame uncompressed in "
             "RAM before encoding. In large / high-resolution environments "
-            "(e.g. aquarium at 6000×6000) this can consume a lot of memory "
+            "this can consume a lot of memory "
             "and slow training noticeably. Prefer a max-dimension cap unless "
             "you need pixel-exact replays."
         )
@@ -681,9 +654,7 @@ with tab_rec:
         )
         recording_values["max_dim"] = int(max_dim)
 
-# ===========================================================================
-# Tab 6 — Coevolution
-# ===========================================================================
+# Tab 6: Coevolution
 
 with tab_coev:
     st.checkbox(
@@ -719,8 +690,7 @@ with tab_coev:
             "Aggregation", options=list(coev_opts.get("aggregations", ["mean"])), key="_coev_agg"
         )
 
-        # Only offer algorithms that are installed and are not the
-        # "coevolution" pseudo-algorithm entry.
+        # Only offer algorithms that are installed and are not the "coevolution" pseudo-algorithm entry.
         coev_algo_options = [
             n for n, s in algo_list.items()
             if s.get("available", False) and n != "coevolution"
@@ -746,18 +716,14 @@ with tab_coev:
             })
         coevolution_values["sides"] = sides
 
-# ===========================================================================
-# Tab 7 — Parallelism
-# ===========================================================================
+# Tab 7: Parallelism
 
 with tab_par:
     par_ctx = WidgetContext(values=dict(_prev_parallelism))
     _render_param_group(_PARALLELISM_PARAMS, par_ctx)
     parallelism_values, _ = coerce_touched(_PARALLELISM_PARAMS, par_ctx.values)
 
-# ===========================================================================
-# Tab 8 — Raw config
-# ===========================================================================
+# Tab 8: Raw config
 
 with tab_raw:
     raw_text = st.text_area(
@@ -765,7 +731,7 @@ with tab_raw:
         value=_prev_raw_text,
         height=200,
         help=(
-            "Free-form config that is deep-merged on top of the form "
+            "Free-form config that is merged on top of the form "
             "defaults. Explicit form values still take precedence."
         ),
     )
@@ -780,9 +746,7 @@ with tab_raw:
         except Exception as exc:
             st.error(f"Parse error: {exc}")
 
-# ---------------------------------------------------------------------------
 # Validate + Submit
-# ---------------------------------------------------------------------------
 
 col1, col2 = st.columns(2)
 
@@ -827,11 +791,9 @@ with col2:
                     render_validation_report(exc.report)
                     st.error("Fix the issues above before submitting.")
                 except ApiUnavailable:
-                    st.error("Backend unreachable.")
+                    st.error("Error: Backend connection failed.")
 
-# ---------------------------------------------------------------------------
 # Persist form state for hot-reload / tab-switch survival
-# ---------------------------------------------------------------------------
 
 _persist = {
     "env": env_sel,

@@ -1,8 +1,8 @@
-"""Inspect — diff runs and sweep hyperparameters.
+"""Inspect: diff runs and sweep hyperparameters.
 
 Merges the former *Diff* and *Hyperparams* pages into one page with two tabs:
 
-* **Diff** — side-by-side manifest / hyperparam / summary comparison of
+* **Diff** — side-by-side manifest / hyperparameter / summary comparison of
   two selected runs. Only differing fields are shown.
 * **Sweep** — group selected runs by a varying hyperparameter value and
   show effect-size box plots with bootstrap CIs.
@@ -44,10 +44,7 @@ if not selected_ids:
 selected_runs = [all_runs[rid] for rid in selected_ids]
 experiment = load_experiment_cached([s.run_dir for s in selected_runs])
 
-# ---------------------------------------------------------------------------
-# Helpers (ported from 3_Diff.py)
-# ---------------------------------------------------------------------------
-
+# Helpers
 
 def _flatten(d: dict, prefix: str = "") -> dict:
     out: dict = {}
@@ -82,16 +79,11 @@ def _to_str(v) -> str:
             return str(v)
     return str(v)
 
-
-# ===========================================================================
 # Tabs
-# ===========================================================================
 
 tab_diff, tab_sweep = st.tabs(["Diff", "Sweep"])
 
-# ---------------------------------------------------------------------------
 # Diff tab
-# ---------------------------------------------------------------------------
 
 with tab_diff:
     if len(selected_ids) < 2:
@@ -145,9 +137,7 @@ with tab_diff:
                 else:
                     st.dataframe(rows, use_container_width=True, hide_index=True)
 
-# ---------------------------------------------------------------------------
-# Sweep tab
-# ---------------------------------------------------------------------------
+# Hyperparameter sweep tab
 
 with tab_sweep:
     # Collect hyperparam keys across all runs, with their distinct value counts.

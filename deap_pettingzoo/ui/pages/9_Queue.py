@@ -1,4 +1,4 @@
-"""Queue — monitor the experiment queue and running experiments.
+"""Queue: monitor the experiment queue and running experiments.
 
 Polls the backend (FastAPI service) every ~2 seconds to show:
 - A queue-status bar (paused state, running experiment id).
@@ -40,22 +40,15 @@ settings = load_settings(
 
 client = get_client()
 
-# ---------------------------------------------------------------------------
 # Polling helpers
-# ---------------------------------------------------------------------------
 
 POLL_INTERVAL = 2  # seconds for the auto-refresh fragment
 
-
-# ---------------------------------------------------------------------------
 # Auto-refreshing fragment — the body of the page re-runs every 2 s.
-# ---------------------------------------------------------------------------
 
 @st.fragment(run_every=POLL_INTERVAL)
 def _queue_body() -> None:
-    # -------------------------------------------------------------------
     # Fetch data
-    # -------------------------------------------------------------------
 
     experiments: List[Dict[str, Any]] = []
     queue_state: Dict[str, Any] = {
@@ -75,9 +68,7 @@ def _queue_body() -> None:
     except Exception:
         pass  # use the defaults above
 
-    # -------------------------------------------------------------------
     # Queue control bar
-    # -------------------------------------------------------------------
 
     col_pause, col_resume, col_spacer = st.columns([1, 1, 6])
 
@@ -108,9 +99,7 @@ def _queue_body() -> None:
     elif queued_ids:
         st.caption(f"Queued: {len(queued_ids)} experiments waiting.")
 
-    # -------------------------------------------------------------------
     # Active experiment (progress + stdout)
-    # -------------------------------------------------------------------
 
     running_exp: Optional[Dict[str, Any]] = None
     for exp in experiments:
@@ -192,9 +181,7 @@ def _queue_body() -> None:
 
         st.divider()
 
-    # -------------------------------------------------------------------
     # All experiments list
-    # -------------------------------------------------------------------
 
     st.subheader("All experiments", divider="gray")
 
@@ -252,7 +239,7 @@ def _queue_body() -> None:
                                 st.toast("Cancel failed.")
                             st.rerun()
                     elif row["_status"] == "completed":
-                        st.caption("✅ Done")
+                        st.caption("✅ Completed")
                     else:
                         st.caption(row["Status"])
 
@@ -262,14 +249,11 @@ def _queue_body() -> None:
                 _render_table("Past", terminal_rows)
 
         st.caption(
-            "Completed experiments appear in the **Browse** page automatically — "
-            "their run directories are under your results root."
+            "Completed experiments are saved to your results directory and appear in the **Browse** page automatically"
         )
 
 
-# ---------------------------------------------------------------------------
 # Run the auto-refreshing body + persist state
-# ---------------------------------------------------------------------------
 
 _queue_body()
 state.persist()

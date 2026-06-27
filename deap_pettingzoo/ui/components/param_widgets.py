@@ -1,5 +1,5 @@
 """Map a :class:`~deap_pettingzoo.catalog.schema.ParamSpec` JSON dict to a
-Streamlit widget, with pure-Python coercion helpers for unit testing.
+Streamlit widget, with pure Python coercion helpers for unit testing.
 
 The ``render_param`` function is the **only** function that imports
 ``streamlit``. ``coerce_param`` and ``coerce_touched`` are streamlit-free
@@ -11,11 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-# ---------------------------------------------------------------------------
-# Streamlit-free coercion helpers (unit-testable)
-# ---------------------------------------------------------------------------
+# Streamlit-free Python coercion helpers (unit-testable)
 
-#: Parameter type names expected in the JSON from the catalog.
+# Parameter type names expected in the JSON from the catalog
 _PARAM_TYPE_COERCERS: Dict[str, Callable[[Any], Any]] = {
     "int": int,
     "float": float,
@@ -52,7 +50,7 @@ def coerce_param(param_spec: Dict[str, Any], value: Any) -> Any:
         choices = param_spec.get("choices", [])
         if value in choices:
             return value
-        # Try string match.
+        # Try string match
         str_val = str(value)
         for c in choices:
             if str(c) == str_val:
@@ -101,7 +99,7 @@ def coerce_touched(
 
     * ``coerced_dict`` contains only non-default, not-None, well-typed
       entries.  This is exactly the payload the Setup page sends to the
-      backend — no default values are transmitted (the catalog fills them).
+      backend - no default values are transmitted (the catalog fills them).
     * ``touched_keys`` is the set of param names the user explicitly changed
       away from the default.  Used for the 3-layer merge: explicit form
       beats raw config.
@@ -123,9 +121,7 @@ def coerce_touched(
     return coerced, touched
 
 
-# ---------------------------------------------------------------------------
 # WidgetContext
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -134,7 +130,7 @@ class WidgetContext:
 
     Attributes:
         disabled_reason: When non-empty, every widget is disabled and this
-            string is shown as a tooltip / caption explaining why.
+            string is shown as a tooltip / caption.
         touched: Accumulated set of explicitly-changed param names.
         values: Accumulated coerced values (propagated per-tab).
     """
@@ -149,9 +145,7 @@ class WidgetContext:
         return f"_w_{self._counter}_{name}"
 
 
-# ---------------------------------------------------------------------------
 # render_param (Streamlit-dependent)
-# ---------------------------------------------------------------------------
 
 
 def render_param(
@@ -183,17 +177,17 @@ def render_param(
     disabled = bool(ctx.disabled_reason)
     key = ctx._key(name)
 
-    # Resolve the initial value: stored > current_value > default.
+    # Resolve the initial value: stored > current_value > default
     stored = ctx.values.get(name)
     if stored is not None:
         current_value = stored
     if current_value is None and not param_spec.get("nullable"):
         current_value = param_spec.get("default")
-    # Coerce for display (handle None gracefully).
+    # Coerce for display (handle None gracefully)
     try:
-        display_val = coerce_param(param_spec, current_value)
+        display_value = coerce_param(param_spec, current_value)
     except (ValueError, TypeError):
-        display_val = current_value
+        display_value = current_value
 
     if ptype == "int":
         minimum = param_spec.get("minimum")
@@ -201,7 +195,7 @@ def render_param(
         step = param_spec.get("step", 1)
         v = st.number_input(
             label,
-            value=int(display_val) if display_val is not None else int(minimum or 0),
+            value=int(display_value) if display_value is not None else int(minimum or 0),
             min_value=minimum,
             max_value=maximum,
             step=step,
@@ -215,7 +209,7 @@ def render_param(
         step = param_spec.get("step")
         v = st.number_input(
             label,
-            value=float(display_val) if display_val is not None else 0.0,
+            value=float(display_value) if display_value is not None else 0.0,
             min_value=minimum,
             max_value=maximum,
             step=step if step is not None else 0.1,
@@ -226,7 +220,7 @@ def render_param(
     elif ptype == "bool":
         v = st.checkbox(
             label,
-            value=bool(display_val) if display_val is not None else False,
+            value=bool(display_value) if display_value is not None else False,
             help=help_text,
             disabled=disabled,
             key=key,
@@ -234,7 +228,7 @@ def render_param(
     elif ptype == "enum":
         choices = param_spec.get("choices", [])
         choice_labels = [str(c) for c in choices]
-        default_str = str(display_val) if display_val is not None else None
+        default_str = str(display_value) if display_value is not None else None
         default_idx = 0
         if default_str is not None:
             try:
@@ -253,7 +247,7 @@ def render_param(
     elif ptype == "str":
         v = st.text_input(
             label,
-            value=str(display_val) if display_val is not None else "",
+            value=str(display_value) if display_value is not None else "",
             help=help_text,
             disabled=disabled,
             key=key,
@@ -262,15 +256,15 @@ def render_param(
         v = st.multiselect(
             label,
             options=[],
-            default=list(display_val) if isinstance(display_val, list) else [],
+            default=list(display_value) if isinstance(display_value, list) else [],
             help=help_text,
             disabled=disabled,
             key=key,
         )
     else:
-        v = display_val
+        v = display_value
 
-    # Coerce and store.
+    # Coerce and store
     try:
         cv = coerce_param(param_spec, v)
     except (ValueError, TypeError):

@@ -2,8 +2,9 @@
 
 Run with::
 
-    python -m deap_pettingzoo.ui            # convenience launcher
-    streamlit run deap_pettingzoo/ui/app.py # equivalent
+    python -m deap_pettingzoo.ui         
+    or:   
+    streamlit run deap_pettingzoo/ui/app.py 
 
 Uses :func:`streamlit.navigation` to organise pages into three groups:
 
@@ -39,9 +40,7 @@ settings = load_settings(
 )
 state.results_root = settings.results_root
 
-# ---------------------------------------------------------------------------
 # Page definitions (st.navigation groups)
-# ---------------------------------------------------------------------------
 
 _PAGES_DIR = "pages"
 
@@ -63,9 +62,7 @@ pages = {
 
 pg = st.navigation(pages, position="sidebar")
 
-# ---------------------------------------------------------------------------
-# Sidebar — results-root picker (below navigation)
-# ---------------------------------------------------------------------------
+# Sidebar — results-root picker (below navigation).
 
 with st.sidebar:
     st.divider()
@@ -81,9 +78,7 @@ with st.sidebar:
         settings = load_settings(results_root=new_root)
         state.persist()  # write immediately so the current render sees the new root
 
-# ---------------------------------------------------------------------------
-# Home / landing body (shown when no page is selected, i.e. base URL)
-# ---------------------------------------------------------------------------
+# Home / landing page (shown when no page is selected, i.e. base URL).
 
 st.title("DEAP-bridge")
 st.caption(
@@ -118,9 +113,7 @@ else:
             "Use the **Browse** page in the sidebar to filter and select runs."
         )
 
-# ---------------------------------------------------------------------------
-# Run the selected page (if any — home body stays visible when none selected)
-# ---------------------------------------------------------------------------
+# Run the selected page (if any — home body stays visible when none selected).
 
 if pg is not None:
     pg.run()
