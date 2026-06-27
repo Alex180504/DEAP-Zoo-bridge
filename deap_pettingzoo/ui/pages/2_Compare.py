@@ -1,4 +1,4 @@
-"""Compare — aggregate curves and pairwise tests across selected runs."""
+"""Compare page: aggregate curves and pairwise tests across the selected runs."""
 
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ def _grouped_summary_table(experiment, group_mode: str):
     return pd.DataFrame(rows)
 
 
-# Resolve selected run_ids → run_dirs by re-discovering (cheap, cached above).
+# Resolve selected run_ids -> run_dirs by re-discovering (cheap, cached above).
 from deap_pettingzoo.ui.services.data import discover_runs
 
 all_runs = discover_runs(settings.results_root)
@@ -192,9 +192,8 @@ experiment = _cached_experiment(tuple(str(p) for p in selected_run_dirs))
 
 # Controls
 
-# Discover columns actually present across the selected runs' metrics.csv so
-# the user can't pick a non-existent y/x column (which would surface as
-# "No runs contained both '<x>' and '<y>'").
+# Discover columns actually present across the selected run's metrics.csv so that
+# the user can't pick a non-existent y/x column (which would surface as "No runs contained both '<x>' and '<y>'").
 _y_candidates: list[str] = []
 _x_candidates: list[str] = []
 _seen_y: set[str] = set()
@@ -203,8 +202,7 @@ for _r in experiment:
     if _r.metrics is None:
         continue
     for _c in _r.metrics.columns:
-        # numeric-only for y; everything for x (env_steps/iteration/wall_time
-        # are all numeric in practice anyway).
+        # Numeric-only for y; everything for x (env_steps/iteration/wall_time are all numeric in practice anyway).
         if _c in _seen_y:
             continue
         try:
@@ -217,7 +215,7 @@ for _r in experiment:
             _x_candidates.append(_c)
             _seen_x.add(_c)
 
-# Sensible defaults: prefer best_fitness/best/mean/max for y; env_steps for x.
+# Defaults: prefer best_fitness/best/mean/max for y; env_steps for x.
 _preferred_y = ["best_fitness", "best", "mean", "max", "reward"]
 _default_y = next(
     (c for c in _preferred_y if c in _seen_y),

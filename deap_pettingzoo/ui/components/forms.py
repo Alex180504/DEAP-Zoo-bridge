@@ -1,4 +1,4 @@
-"""Tabbed dynamic-form builders.
+"""Tabbed dynamic form builders.
 
 Each builder consumes the catalog JSON (as fetched from the FastAPI
 ``GET /catalog/*`` endpoints) and renders a tab's worth of widgets,
@@ -19,11 +19,7 @@ from deap_pettingzoo.ui.components.param_widgets import (
     render_param,
 )
 
-
-# ---------------------------------------------------------------------------
 # Environment tab
-# ---------------------------------------------------------------------------
-
 
 def build_env_form(
     env_spec: Dict[str, Any],
@@ -32,8 +28,7 @@ def build_env_form(
     """Render environment configuration widgets.
 
     Args:
-        env_spec: Environment catalog entry (the dict from
-            ``GET /catalog/environments/{name}``).
+        env_spec: Environment catalog entry (the dict from ``GET /catalog/environments/{name}``).
         ctx: Shared :class:`WidgetContext`.
 
     Returns:
@@ -58,15 +53,11 @@ def build_env_form(
         st.info("This environment has no configurable parameters.")
         return {}, set()
 
-    # Group params.
+    # Group params
     _render_param_group(params, ctx, group_label=None)
     return coerce_touched(params, ctx.values)
 
-
-# ---------------------------------------------------------------------------
 # Algorithm tab(s)
-# ---------------------------------------------------------------------------
-
 
 def build_algo_form(
     algo_spec: Dict[str, Any],
@@ -74,7 +65,7 @@ def build_algo_form(
 ) -> Tuple[Dict[str, Any], Set[str]]:
     """Render the hyperparameter form for one algorithm.
 
-    Only non-advanced parameters are shown upfront; advanced ones are hidden
+    Only basic parameters are shown upfront; advanced ones are hidden
     inside a ``st.expander("Advanced")``.  The return values follow the same
     ``(dict, set)`` contract as :func:`build_env_form`.
     """
@@ -102,9 +93,7 @@ def build_algo_form(
     return coerce_touched(params, ctx.values)
 
 
-# ---------------------------------------------------------------------------
 # Fitness tab
-# ---------------------------------------------------------------------------
 
 
 def build_fitness_form(
@@ -122,15 +111,12 @@ def build_fitness_form(
         help="How to collapse per-agent rewards into a single fitness value.",
         disabled=bool(ctx.disabled_reason),
     )
-    # Team mapping is not surfaced in the simple form — it's raw-config territory
-    # (auto-inferred from the env's declared teams).
+    # Team mapping is not surfaced in the simple form
     ctx.values["aggregation_method"] = method
     return {"aggregation_method": method}, {"aggregation_method"}
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _render_param_group(

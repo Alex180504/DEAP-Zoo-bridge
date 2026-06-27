@@ -1,4 +1,4 @@
-"""Report — render the analysis package's HTML report inline."""
+"""Report: render the analysis package's HTML report inline."""
 
 from __future__ import annotations
 
@@ -8,6 +8,16 @@ import streamlit as st
 
 from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.data import discover_runs, load_experiment_cached
+
+try:
+    from deap_pettingzoo.analysis.report import build_report
+except ImportError as exc:
+    st.error(
+        "The report builder needs the `analysis` extra. Install with "
+        "`pip install deap-pettingzoo[analysis]`. "
+        f"(Underlying error: {exc})"
+    )
+    st.stop()
 
 st.set_page_config(page_title="Report", layout="wide")
 st.title("Render report")
@@ -29,9 +39,8 @@ if not selected:
 
 experiment = load_experiment_cached([s.run_dir for s in selected])
 
-# ---- Per-generation metrics download (CSV) ----------------------------
-# experiment.runs are already coevolution-expanded (one RunRecord per side),
-# so each download is a single, flat per-iteration metrics table.
+# Per-generation metrics download (CSV) experiment.runs are coevolution-expanded (one RunRecord per side),
+# so that each download is a single, flat per-iteration metrics table.
 st.subheader("Per-generation metrics (CSV)")
 runs_with_metrics = [
     r for r in experiment.runs if r.metrics is not None and len(r.metrics) > 0
@@ -70,16 +79,6 @@ else:
 
 st.divider()
 
-try:
-    from deap_pettingzoo.analysis.report import build_report
-except ImportError as exc:
-    st.error(
-        "The report builder needs the `analysis` extra. Install with "
-        "`pip install deap-pettingzoo[analysis]`. "
-        f"(Underlying error: {exc})"
-    )
-    st.stop()
-
 out_dir = Path(st.text_input("Output directory", value=".report-out"))
 fmt = st.selectbox("Format", ["html", "md"], index=0)
 metric = st.text_input("Metric", value="final_fitness")
@@ -99,8 +98,7 @@ if st.button("Render"):
         except OSError:
             st.caption("Open the file directly to inspect the report.")
         else:
-            # Inline relative image references as base64 data URIs so the
-            # iframe (which has no filesystem access) can render the figures.
+            # Inline relative image references as base64 data URIs so the iframe (which has no filesystem access) can render the figures.
             import base64
             import mimetypes
             import re

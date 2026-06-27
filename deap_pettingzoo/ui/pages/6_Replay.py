@@ -1,4 +1,4 @@
-"""Replay — play recorded video frames for a selected run.
+"""Replay: play recorded video frames for a selected run.
 
 Recordings written by :class:`FrameRecorder` since the iteration-metadata
 feature carry a ``frames/recordings.json`` sidecar mapping each artefact to
@@ -23,14 +23,12 @@ import streamlit as st
 from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.data import discover_runs
 
-# Matches FrameRecorder filenames `{prefix}episode_NNNN.{ext}`. The
-# prefix is captured non-greedily and may be empty (e.g. legacy
-# `episode_0001.mp4`). Trainers currently emit `train_`; live-rollout
-# capture uses `live_`.
+# Matches FrameRecorder filenames `{prefix}episode_NNNN.{ext}`.
+# The prefix is captured non-greedily and may be empty 
+# Trainers currently emit `train_`; live-rollout capture uses `live_`.
 _EPISODE_RE = re.compile(r"^(?P<prefix>.*?)episode_\d+\.(?:mp4|gif)$")
 
-# Columns tried (in order) for the one-line headline value shown next to a
-# recording in the selector.
+# Columns tried (in order) for the one-line headline value shown next to a recording in the selector.
 _HEADLINE_COLS = ("best_fitness", "max", "mean", "qd_score")
 
 
@@ -142,7 +140,7 @@ if not state.selected_run_ids:
 all_runs = {r.run_id: r for r in discover_runs(settings.results_root)}
 options = [rid for rid in state.selected_run_ids if rid in all_runs]
 if not options:
-    st.warning("Selected runs no longer exist on disk.")
+    st.warning("Selected runs cannot be found on disk.")
     st.stop()
 
 picked = st.selectbox("Run", options)
@@ -172,8 +170,7 @@ manifest_mtime = manifest_path.stat().st_mtime if manifest_path.is_file() else 0
 metrics = _load_metrics(str(run_dir), manifest_mtime)
 
 # Group artefacts by their FrameRecorder prefix so training captures
-# (`train_`) and future live-rollout captures (`live_`) cluster in the
-# UI without tripping over each other.
+# (`train_`) and future live-rollout captures (`live_`) cluster in the UI properly.
 prefixes = sorted({_prefix_of(p) for p in video_files})
 if len(prefixes) > 1:
     selected_prefix = st.radio(
@@ -203,11 +200,7 @@ video_width = st.slider(
     step=20,
     help="Cap and resize the replay window width.",
 )
-# Mid-gray border so the window edges are visible against MPE's white
-# background in both light and dark themes. st.video takes no style arg,
-# so style the video element via CSS. A bare `video` selector is used
-# (rather than a version-specific data-testid) since this page renders a
-# single replay video.
+# Gray border so the window edges are visible against MPE's white background.
 _REPLAY_BORDER = "2px solid #888"
 st.markdown(
     f"<style>video{{border:{_REPLAY_BORDER};border-radius:4px;"
@@ -231,7 +224,7 @@ else:
         unsafe_allow_html=True,
     )
 
-# ---- Iteration metrics detail panel -----------------------------------
+# Iteration metrics detail panel
 st.divider()
 st.subheader("Iteration metrics")
 

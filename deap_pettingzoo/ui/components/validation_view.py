@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
-# Known path prefixes → tab label mapping.
+# Known path prefixes -> tab label mapping
 _TAB_MAP = {
     "environment": "Environment",
     "algorithms": "Algorithm(s)",
@@ -46,7 +46,7 @@ def render_validation_report(report: Dict[str, Any]) -> None:
     """Display a validation report (the dict from ``GET /experiments/validate``
     or the error body of a 422 response) as colour-coded blocks.
 
-    ``report["ok"]`` returns ``True`` → green success banner.
+    ``report["ok"]`` returns ``True`` -> green success banner.
     Otherwise, red errors per tab and orange warnings."""
     import streamlit as st  # noqa: WPS433
 

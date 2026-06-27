@@ -1,7 +1,7 @@
 """Streamlit UI for deap-bridge experiment results.
 
-This subpackage is a *pure consumer* of the on-disk artefacts produced
-by :mod:`deap_pettingzoo.utils.logging` and rehydrated by
+This subpackage is a *pure consumer* of the on-disk artifacts produced
+by :mod:`deap_pettingzoo.utils.logging` and processed by
 :mod:`deap_pettingzoo.analysis`. Nothing in :mod:`deap_pettingzoo.baselines`
 or :mod:`deap_pettingzoo.utils.logging` imports from here, so the
 backend stays fully usable without the UI installed.
@@ -9,13 +9,17 @@ backend stays fully usable without the UI installed.
 Entry points
 ------------
 
-The simplest way to launch the UI is::
+The simplest way to launch the UI is via docker-compose::
 
-    python -m deap_pettingzoo.ui
 
-which is equivalent to::
+Alternatively, the UI service can be started directly via the command line::
 
     streamlit run deap_pettingzoo/ui/app.py
+    
+    or:
+    
+    python -m deap_pettingzoo.ui
+
 
 Optional dependencies (install with ``pip install deap-pettingzoo[ui]``):
 

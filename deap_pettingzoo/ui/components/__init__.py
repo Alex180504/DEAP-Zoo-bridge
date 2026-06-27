@@ -1,4 +1,4 @@
-"""Reusable UI components for the experiment-setup and queue pages.
+"""Reusable UI components for the experiment setup and queue pages.
 
 Modules:
 * :mod:`.param_widgets` — map a :class:`~deap_pettingzoo.catalog.schema.ParamSpec`

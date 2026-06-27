@@ -1,7 +1,7 @@
 """Subprocess launcher for the Streamlit UI.
 
 Kept in a private module so ``deap_pettingzoo.ui.__init__`` stays free
-of the heavy import side effects of pulling in ``streamlit`` itself —
+of the heavy import side effects of pulling in ``streamlit`` itself, so that
 the import only executes when :func:`run` is actually called.
 
 Supports two modes:

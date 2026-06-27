@@ -147,7 +147,7 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Group by experiment ----------------------------------------------
+    # Group by experiment
     group_by_exp = st.checkbox("Group by experiment", key="browse_group_by_exp")
 
     st.divider()
@@ -175,7 +175,7 @@ with st.sidebar:
                 st.warning("Enter a folder name first.")
 
         st.markdown("**Move selected runs to folder**")
-        # List first-level subdirs that are NOT run dirs (no manifest.json)
+        # List first-level subdirs that are not run dirs (no manifest.json)
         try:
             subdirs = sorted(
                 p.name for p in root.iterdir()
@@ -263,7 +263,7 @@ rows = [
     for r in filtered
 ]
 
-# Pre-select rows whose run_id is already in state.selected_run_ids.
+# Pre-select rows whose run_id is already in state.selected_run_ids
 preselected_indices = [
     i for i, row in enumerate(rows) if row["run_id"] in state.selected_run_ids
 ]
@@ -288,7 +288,7 @@ def _on_table_select():
     selected_ids = [
         rows_data[i]["run_id"] for i in sel_rows if 0 <= i < len(rows_data)
     ]
-    # Update session state directly (
+    # Update session state directly
     st.session_state.setdefault("_deap_ui_state_v1", {})[
         "selected_run_ids"
     ] = selected_ids
@@ -310,8 +310,7 @@ event = st.dataframe(
     key=_table_key,
 )
 
-# Read selection directly from widget state (NOT from event.selection,
-# which can be stale during the on_select-triggered rerun).
+# Read selection directly from widget state (NOT from event.selection, which can be stale during the on_select-triggered rerun).
 _table_state = st.session_state.get(_table_key, {})
 selected_indices = list(
     _table_state.get("selection", {}).get("rows", [])
@@ -324,9 +323,9 @@ selected_run_dirs = {
 }
 
 # Re-sync from session state (callback may have updated it before this rerun)
-# and use the widget-state read as the primary source.  If the widget state
-# is empty but the callback already persisted a non-empty selection, keep
-# the callback's value — this guards against stale widget-state reads.
+# and use the widget-state read as the primary source.
+# If the widget stateis empty but the callback already persisted a non-empty selection, keep
+# the callback's value to guard against stale widget-state reads.
 stored = st.session_state.get("_deap_ui_state_v1", {})
 callback_ids = list(stored.get("selected_run_ids") or [])
 if selected_run_ids:
@@ -343,7 +342,7 @@ state.persist()
 if st.session_state.get("_browse_confirm_delete"):
     n = len(state.selected_run_ids)
     st.warning(
-        f"**Permanently delete {n} run(s)?** This removes all files on disk and cannot be undone."
+        f"**Permanently delete {n} run(s)?** This will remove all files on disk and cannot be undone."
     )
     c1, c2, _ = st.columns([1, 1, 6])
     if c1.button("✅ Confirm delete", key="_confirm_del_yes"):
@@ -385,7 +384,7 @@ if st.session_state.get("_browse_confirm_delete"):
 # Manage selected runs
 if selected_run_ids:
     with st.expander(f"⚙️ Manage {len(selected_run_ids)} selected run(s)", expanded=False):
-        st.markdown("**Rename** — sets a human-readable display name (stored in manifest).")
+        st.markdown("**Rename** — set a human-readable display name.")
         col_name, col_btn = st.columns([3, 1])
         new_name = col_name.text_input(
             "New display name",
@@ -415,7 +414,7 @@ if selected_run_ids:
                 st.error(err)
 
         st.divider()
-        st.markdown("**Delete** — permanently removes the run directory from disk.")
+        st.markdown("**Delete** — permanently remove the run directory from disk.")
         if st.button(f"🗑 Delete {len(selected_run_ids)} selected run(s)", key="browse_delete_btn", type="secondary"):
             st.session_state["_browse_confirm_delete"] = True
             st.rerun()
@@ -481,7 +480,7 @@ with st.expander("📦 Export selected runs", expanded=bool(state.selected_run_i
 
 # --- Import (main content, below export) --------------------------------
 with st.expander("📦 Import experiments"):
-    st.markdown("**Import a previously exported experiment**")
+    st.markdown("**Import an experiment**")
     _import_widget("browse_import_main_uploader", "browse_import_main_btn")
 
 st.divider()
