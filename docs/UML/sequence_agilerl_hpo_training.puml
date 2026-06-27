@@ -34,7 +34,9 @@ loop ep_cycle (until env-step budget)
             note right: Shared agilerl_onpolicy.train_agent_on_policy:\ncollect rollouts -> agent.learn() (GAE)
         else off-policy (MADDPG / MATD3)
             Trainer -> Env: _train_one_agent(...)
-            note right: Replay-buffer rollout;\nagent.learn() every learn_step
+            note right
+                Replay-buffer rollout:\n1. MultiAgentReplayBuffer built per agent\n   (memory_size, agent_ids, device)\n2. save_to_memory(obs, raw_actions, reward,\n   next_obs, done) once per transition\n   using agent-keyed dicts\n3. agent.learn(memory.sample(batch_size))\n   gated on len(buffer)>=batch_size\n   and learning_delay/learn_step cadence
+            end note
         end
     end
 
