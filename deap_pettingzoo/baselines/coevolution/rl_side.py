@@ -380,9 +380,8 @@ class RLSideState(SideState):
         self._memory: Any = None
         self._wrapper: Optional[PolicyProtocol] = None
         self._pool: Optional[RLPolicyPool] = None
-        #: Effective torch device after :meth:`initialise`. 
-        #: Read by :func:`deap_pettingzoo.utils.device_check.warn_on_gpu_contention`.
-        self.resolved_device: str = "cpu"
+        self.is_rl_side: bool = True
+        # resolved_device default ("cpu") is set by SideState.__init__; overwritten in initialise().
         self._last_returns: List[float] = []
         self._bootstrap_ctx: Optional[_RLDriverContext] = None
         self._total_transitions: int = 0
