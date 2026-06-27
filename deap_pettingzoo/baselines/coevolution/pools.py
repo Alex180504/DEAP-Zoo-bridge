@@ -725,6 +725,12 @@ class RLPolicyPool(_BasePool):
     def __init__(self, policy: PolicyProtocol) -> None:
         if policy is None:
             raise ValueError("RLPolicyPool: policy must not be None.")
+        if isinstance(policy, (list, tuple)):
+            raise TypeError(
+                f"RLPolicyPool: expected a PolicyProtocol instance, got "
+                f"{type(policy).__name__!r}. Pass the policy directly, not "
+                "wrapped in a list or tuple."
+            )
         self._policy = policy
 
     def update(self, population_like: Any) -> None:
@@ -737,6 +743,12 @@ class RLPolicyPool(_BasePool):
         """
         if population_like is None:
             raise ValueError("RLPolicyPool.update: policy must not be None.")
+        if isinstance(population_like, (list, tuple)):
+            raise TypeError(
+                f"RLPolicyPool.update: expected a PolicyProtocol instance, got "
+                f"{type(population_like).__name__!r}. Pass the policy directly, "
+                "not wrapped in a list or tuple."
+            )
         self._policy = population_like
 
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:

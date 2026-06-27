@@ -22,7 +22,7 @@ from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 
-from .pools import OpponentPool, RLPolicyPool
+from .pools import FrozenPolicyPool, OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
@@ -84,6 +84,9 @@ class RLEvolveHPOSideState(SideState):
         self.hp_config_spec = cfg.get("hp_config", {})
         self.mutation_probs = cfg.get("mutation_probs", {})
 
+        self.is_rl_side: bool = True
+        # Mirror the public name RLSideState uses so the trainer's on-policy detector fires.
+        self.is_on_policy: bool = self._on_policy
         self._population: List[Any] = []
         self._champion_wrapper: Optional[AgileRLPolicyWrapper] = None
         self._action_space: Any = None
@@ -96,6 +99,7 @@ class RLEvolveHPOSideState(SideState):
     def initialise(
         self, env: PettingZooWrapper, rng: Optional[np.random.Generator] = None,
     ) -> None:
+        self.resolved_device = self.device
         if rng is not None:
             self._rng = rng
         elif self.seed is not None:
@@ -245,9 +249,8 @@ class RLEvolveHPOSideState(SideState):
     def current_pool(self) -> OpponentPool:
         """Expose the current champion as a picklable opponent pool."""
         if self._champion_wrapper is None:
-            return RLPolicyPool([])
-        pool = RLPolicyPool([self._champion_wrapper])
-        return pool
+            return FrozenPolicyPool([])
+        return RLPolicyPool(self._champion_wrapper)
 
     def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:
         assert self._champion_wrapper is not None
