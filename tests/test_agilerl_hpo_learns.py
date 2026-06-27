@@ -8,6 +8,7 @@ pytest.importorskip(
     reason="AgileRL not installed; run `pip install 'deap-pettingzoo[rl-baselines]'`.",
 )
 pytest.importorskip("torch", reason="PyTorch not installed.")
+pytest.importorskip("mpe2", reason="mpe2 not installed.")
 pytestmark = pytest.mark.slow
 
 from deap_pettingzoo.baselines.agilerl_hpo_trainer import MADDPGHPOTrainer
@@ -142,3 +143,114 @@ class TestHPOStoresAndLearns:
                 f"Gen {i + 1} max fitness mismatch: "
                 f"{ga['max']:.6f} vs {gb['max']:.6f}"
             )
+
+
+def _coev_hpo_side(seed: int = 0):
+    """Build and initialise an off-policy rl_hpo co-evolution side on a raw env.
+
+    Returns ``(state, env, learner_ids)``. The env is a *raw* mpe2 parallel
+    env — the format ``RLEvolveHPOSideState._train_agent`` consumes (its
+    ``reset()`` returns ``(obs, info)`` and ``step()`` a 5-tuple), matching the
+    ``evaluator._env`` the trainer hands it.
+    """
+    import mpe2
+    import numpy as np
+
+    from deap_pettingzoo.baselines.coevolution import Side, make_side_state
+
+    env = mpe2.simple_spread_v3.parallel_env(N=3, max_cycles=25)
+    env.reset(seed=seed)
+    side = Side(
+        "learners", ("agent",), "rl_hpo",
+        {"algorithm": "maddpg_hpo", "population_size": 2,
+         "evo_every_n_steps": 60, "device": "cpu", "seed": seed},
+    )
+    state = make_side_state(side)
+    state.initialise(env, rng=np.random.default_rng(seed))
+    return state, env, state._learner_ids
+
+
+class TestCoevolutionHPOSideLearns:
+    """The rl_hpo co-evolution side must store transitions and call learn()..
+    """
+
+    def test_coev_hpo_side_stores_and_learns(self):
+        """save_to_memory and learn() are both invoked during off-policy training."""
+        from agilerl.algorithms.maddpg import MADDPG
+        from agilerl.components.multi_agent_replay_buffer import (
+            MultiAgentReplayBuffer,
+        )
+        from deap_pettingzoo.baselines.coevolution.rl_hpo_side import (
+            RLEvolveHPOSideState,
+        )
+
+        state, env, learner_ids = _coev_hpo_side(seed=0)
+        agent = state._population[0]
+        # Force learning to fire quickly within a small step budget.
+        agent.batch_size = 4
+        agent.learn_step = 1
+        agent.learning_delay = 0
+
+        store_calls: list = []
+        learn_calls: list = []
+        _orig_store = MultiAgentReplayBuffer.save_to_memory
+        _orig_learn = MADDPG.learn
+
+        def _store_spy(self, *args, **kwargs):
+            store_calls.append(True)
+            return _orig_store(self, *args, **kwargs)
+
+        def _learn_spy(self, *args, **kwargs):
+            learn_calls.append(True)
+            return _orig_learn(self, *args, **kwargs)
+
+        try:
+            with patch.object(MultiAgentReplayBuffer, "save_to_memory", _store_spy), \
+                    patch.object(MADDPG, "learn", _learn_spy):
+                RLEvolveHPOSideState._train_agent(
+                    agent, env, learner_ids, target_steps=60,
+                )
+        finally:
+            env.close()
+
+        assert len(store_calls) > 0, (
+            "save_to_memory was never called — the co-evolution HPO side built "
+            "no replay buffer."
+        )
+        assert len(learn_calls) > 0, (
+            "agent.learn() was never invoked — the co-evolution HPO side does "
+            "no learning."
+        )
+
+    def test_coev_hpo_side_learn_updates_params(self):
+        """Actor parameters change after _train_agent — end-to-end proof of learning."""
+        import torch
+
+        from deap_pettingzoo.baselines.coevolution.rl_hpo_side import (
+            RLEvolveHPOSideState,
+        )
+
+        state, env, learner_ids = _coev_hpo_side(seed=1)
+        agent = state._population[0]
+        agent.batch_size = 4
+        agent.learn_step = 1
+        agent.learning_delay = 0
+
+        actor = list(agent.actors.values())[0]
+        before = torch.cat(
+            [p.detach().flatten() for p in actor.parameters()]
+        ).clone()
+
+        try:
+            RLEvolveHPOSideState._train_agent(
+                agent, env, learner_ids, target_steps=80,
+            )
+        finally:
+            env.close()
+
+        after = torch.cat(
+            [p.detach().flatten() for p in actor.parameters()]
+        ).clone()
+        assert not torch.allclose(before, after), (
+            "Actor parameters did not change — no gradient updates occurred."
+        )

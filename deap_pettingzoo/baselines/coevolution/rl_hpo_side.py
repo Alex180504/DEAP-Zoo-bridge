@@ -330,50 +330,121 @@ class RLEvolveHPOSideState(SideState):
         learner_ids: List[str],
         target_steps: int,
     ) -> None:
+        """Off-policy rollout-and-learn for one population member.
+
+        AgileRL agents do not expose ``agent.memory``, so this builds a
+        dedicated :class:`~agilerl.components.multi_agent_replay_buffer.MultiAgentReplayBuffer`
+        per call, stores one agent-keyed transition per env step, and gates
+        ``agent.learn`` on the real buffer. The co-evolution env
+        is a single, non-vectorised parallel env, so ``is_vectorised=False``.
+        """
+        from agilerl.components.multi_agent_replay_buffer import (
+            MultiAgentReplayBuffer,
+        )
+        from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
+
         steps = 0
-        learn_step = getattr(agent, "learn_step", 100)
-        batch_size = getattr(agent, "batch_size", 64)
-        memory = getattr(agent, "memory", None)
-        learning_delay = getattr(agent, "learning_delay", 500)
-        total_transitions = getattr(agent, "_total_transitions", 0)
+        learn_step = max(1, int(getattr(agent, "learn_step", 100)))
+        batch_size = int(getattr(agent, "batch_size", 64))
+        # Default to 0: co-evolution generations are short and total_transitions
+        # persists across generations (written back below), so warm-up accrues.
+        learning_delay = int(getattr(agent, "learning_delay", 0))
+        total_transitions = int(getattr(agent, "_total_transitions", 0))
+        discrete = bool(getattr(agent, "discrete_actions", False))
+
+        memory = MultiAgentReplayBuffer(
+            memory_size=int(getattr(agent, "memory_size", 100_000)),
+            field_names=["obs", "action", "reward", "next_obs", "done"],
+            agent_ids=list(learner_ids),
+            device=getattr(agent, "device", "cpu"),
+        )
+
+        # Precompute NaN placeholders once (dict.get defaults are eager).
+        obs_placeholders = {
+            a: AgileRLTrainer._nan_placeholder_for_space(env.observation_space(a))
+            for a in learner_ids
+        }
+        act_placeholders = {
+            a: AgileRLTrainer._nan_placeholder_for_space(env.action_space(a))
+            for a in learner_ids
+        }
 
         while steps < target_steps:
-            obs, info = env.reset()
+            obs, _ = env.reset()
             while steps < target_steps:
                 try:
-                    actions = agent.get_action(obs, training=True)
+                    action_result = agent.get_action(obs, training=True)
                 except TypeError:
-                    actions = agent.get_action(obs)
-                result = actions[0] if isinstance(actions, tuple) else actions
-                next_obs, rewards, terms, truncs, _ = env.step(result)
+                    action_result = agent.get_action(obs)
+                if isinstance(action_result, tuple):
+                    actions, raw_actions = action_result[0], action_result[1]
+                else:
+                    actions = raw_actions = action_result
 
-                if memory is not None:
-                    for a in learner_ids:
-                        r = float(rewards.get(a, 0.0))
-                        o = obs.get(a)
-                        no = next_obs.get(a)
-                        if o is not None and no is not None:
-                            memory.save_to_memory(o, result.get(a), r, no,
-                                terms.get(a, False) or truncs.get(a, False))
+                # Unwrap the leading (1,) batch dim so the single env receives
+                # scalar discrete / unbatched continuous actions.
+                env_actions: Dict[str, Any] = {}
+                for a, act in actions.items():
+                    arr = np.asarray(act)
+                    if arr.ndim > 0 and arr.shape[0] == 1:
+                        arr = arr[0]
+                        if discrete and arr.shape == ():
+                            arr = arr.item()
+                    env_actions[a] = arr
+                next_obs, rewards, terms, truncs, _ = env.step(env_actions)
+
+                # Build agent-keyed transition dicts; one save per transition.
+                full_obs = {a: obs.get(a, obs_placeholders[a]) for a in learner_ids}
+                full_raw_actions: Dict[str, Any] = {}
+                for a in learner_ids:
+                    if a in raw_actions:
+                        arr = np.asarray(raw_actions[a])
+                        if arr.ndim > 0 and arr.shape[0] == 1:
+                            arr = arr[0]
+                        full_raw_actions[a] = arr
+                    else:
+                        full_raw_actions[a] = act_placeholders[a]
+                full_reward = {
+                    a: float(rewards[a]) if a in rewards else np.nan
+                    for a in learner_ids
+                }
+                full_next_obs = {
+                    a: next_obs.get(a, obs_placeholders[a]) for a in learner_ids
+                }
+                done_dict = AgileRLTrainer._build_done_dict(
+                    terms, truncs, list(learner_ids), is_vec=False, num_envs=1,
+                )
+
+                memory.save_to_memory(
+                    full_obs, full_raw_actions, full_reward, full_next_obs,
+                    done_dict, is_vectorised=False,
+                )
+
                 total_transitions += 1
                 steps += 1
                 obs = next_obs
 
-                if total_transitions >= learning_delay and steps % learn_step == 0:
-                    if memory is not None and len(memory) >= batch_size:
-                        try:
-                            experiences = memory.sample(batch_size)
-                            agent.learn(experiences)
-                        except Exception:  # pragma: no cover - version drift
-                            logging.getLogger(__name__).warning(
-                                "RLEvolveHPOSideState._train_agent: agent.learn() failed",
-                                exc_info=True,
-                            )
+                if (
+                    total_transitions >= learning_delay
+                    and (total_transitions - learning_delay) % learn_step == 0
+                    and len(memory) >= batch_size
+                ):
+                    try:
+                        experiences = memory.sample(batch_size)
+                        agent.learn(experiences)
+                    except Exception:  # pragma: no cover - version drift
+                        logging.getLogger(__name__).warning(
+                            "RLEvolveHPOSideState._train_agent: agent.learn() failed",
+                            exc_info=True,
+                        )
 
                 if all(terms.get(a, False) for a in learner_ids) or all(
                     truncs.get(a, False) for a in learner_ids
                 ):
                     break
+
+        if hasattr(agent, "_total_transitions"):
+            object.__setattr__(agent, "_total_transitions", total_transitions)
 
     def _maybe_apply_grouping_patch(self) -> None:
         """Install AgileRL's grouped-IPPO advantage/state flattening fix.
