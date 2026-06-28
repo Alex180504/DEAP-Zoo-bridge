@@ -11,8 +11,8 @@ NEAT's generation count is the natural budget unit.  The trainer maps
 :attr:`~deap_pettingzoo.baselines.base.BudgetMode.ENV_STEPS` to
 generations using the population size and evaluation episodes.
 
-Only :class:`~deap_pettingzoo.baselines.base.BudgetMode.WALL_CLOCK` is
-not supported (NEAT does not expose a suspend/resume hook).
+The native-generation :class:`~deap_pettingzoo.baselines.base.BudgetMode.GENERATIONS`
+mode is not yet wired through the NEAT back-derivation.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -422,14 +423,24 @@ class NEATTrainer(BaselineTrainer):
     def _budget_to_generations(
         self, config: TrainingConfig, pop_size: int
     ) -> int:
-        """Translate ``config.budget_mode`` / ``.budget_value`` to generations."""
+        """Translate ``config.budget_mode`` / ``.budget_value`` to generations.
+
+        Uses the shared :func:`~deap_pettingzoo.baselines.base.derive_generations`
+        helper so NEAT shares the round-to-nearest + warn-on-collapse behaviour
+        of the other population backends.
+        """
+        eval_eps = int(
+            config.algorithm_params.get("eval_episodes_per_genome", 1)
+        )
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
             # Each generation evaluates pop_size genomes × eval_eps episodes.
-            eval_eps = int(
-                config.algorithm_params.get("eval_episodes_per_genome", 1)
+            return derive_generations(
+                config.budget_value,
+                pop_size * eval_eps,
+                1,
+                label="NEAT",
+                unit="eval episodes",
             )
-            eps_per_gen = pop_size * eval_eps
-            return max(1, config.budget_value // max(1, eps_per_gen))
 
         if config.budget_mode == BudgetMode.ENV_STEPS:
             # Resolve episode length from env config: MPE uses "max_cycles",
@@ -440,21 +451,12 @@ class NEATTrainer(BaselineTrainer):
                     config.env_config.get("max_time_steps", 25),
                 )
             )
-            eval_eps = int(
-                config.algorithm_params.get("eval_episodes_per_genome", 1)
+            return derive_generations(
+                config.budget_value,
+                pop_size * eval_eps,
+                avg_steps_per_episode,
+                label="NEAT",
             )
-            steps_per_gen = pop_size * eval_eps * avg_steps_per_episode
-            n_gens = config.budget_value // max(1, steps_per_gen)
-            if n_gens == 0:
-                import warnings
-                warnings.warn(
-                    f"NEAT budget ({config.budget_value:,} steps) is smaller "
-                    f"than one generation ({steps_per_gen:,} steps). "
-                    "Running 1 generation only.",
-                    stacklevel=2,
-                )
-                return 1
-            return n_gens
 
         # Fallback — should not happen (supports_budget_mode gate).
         return 10

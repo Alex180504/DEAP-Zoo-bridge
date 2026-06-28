@@ -27,6 +27,7 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
 )
 from deap_pettingzoo.baselines.ea_trainer import (
     GenomePolicyWrapper,
@@ -416,8 +417,12 @@ class CMAESTrainer(BaselineTrainer):
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        """CMA-ES supports env-step and eval-episode budgets."""
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+        """CMA-ES supports env-step, eval-episode, and generation budgets."""
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
 
     def get_capabilities(self) -> Dict[str, Any]:
         """Report CMA-ES capability flags (matches EA's)."""
@@ -439,22 +444,30 @@ class CMAESTrainer(BaselineTrainer):
 
         Raises:
             ValueError: If ``config.budget_mode`` is not
-                ``BudgetMode.ENV_STEPS`` or ``BudgetMode.EVAL_EPISODES``.
+                ``BudgetMode.ENV_STEPS``, ``BudgetMode.EVAL_EPISODES``, or
+                ``BudgetMode.GENERATIONS``.
         """
         max_steps_per_episode = config.algorithm_params.get(
             "max_steps_per_episode", 200
         )
 
-        if config.budget_mode == BudgetMode.ENV_STEPS:
-            total_env_steps = config.budget_value
-            num_generations = total_env_steps // (
-                self.population_size * max_steps_per_episode
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            num_generations = max(1, int(config.budget_value))
+        elif config.budget_mode == BudgetMode.ENV_STEPS:
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                max_steps_per_episode,
+                label="CMA-ES",
             )
-            num_generations = max(1, num_generations)
         elif config.budget_mode == BudgetMode.EVAL_EPISODES:
-            total_episodes = config.budget_value
-            num_generations = total_episodes // self.population_size
-            num_generations = max(1, num_generations)
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                1,
+                label="CMA-ES",
+                unit="eval episodes",
+            )
         else:
             raise ValueError(
                 f"CMAESTrainer does not support budget mode {config.budget_mode}"

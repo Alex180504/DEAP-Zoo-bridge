@@ -42,8 +42,8 @@ class TestNEATTrainer:
     def test_supports_budget_mode(self, trainer):
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
         assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is True
-        # WALL_CLOCK not supported.
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
+        # GENERATIONS is not yet wired through the NEAT back-derivation.
+        assert trainer.supports_budget_mode(BudgetMode.GENERATIONS) is False
 
     def test_train_smoke(self, trainer, minimal_config):
         """End-to-end smoke test on simple_spread_v3."""

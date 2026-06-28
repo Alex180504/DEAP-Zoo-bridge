@@ -100,7 +100,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
             env_name: Registered PettingZoo env name.
             seed: Master seed (recorded in the manifest).
             env_config: Env config dict.
-            budget_mode: ``"env_steps" | "eval_episodes" | "wall_clock"``.
+            budget_mode: ``"env_steps" | "eval_episodes" | "generations"``.
             budget_value: Budget amount in matching units.
             hyperparams: Trainer-specific hyperparameters.
             notes: Free-form notes.

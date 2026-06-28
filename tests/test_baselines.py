@@ -123,8 +123,8 @@ class TestEATrainer:
         
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
         assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is True
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
-    
+        assert trainer.supports_budget_mode(BudgetMode.GENERATIONS) is True
+
     def test_ea_trainer_budget_translation(self):
         """Test budget translation to EA parameters."""
         trainer = EATrainer(population_size=20)

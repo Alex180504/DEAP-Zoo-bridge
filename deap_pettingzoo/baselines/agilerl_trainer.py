@@ -549,9 +549,6 @@ class AgileRLTrainer(BaselineTrainer):
         _se(seed)
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
-        if config.budget_mode == BudgetMode.WALL_CLOCK:
-            # Soft cap: rely on a large step budget and let the caller's timer stop us; we return a very large number here.
-            return 10**9
         return translate_budget_to_env_steps(config)
 
     def _build_agent(

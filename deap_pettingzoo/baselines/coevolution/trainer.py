@@ -51,6 +51,7 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
 )
 from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
@@ -991,7 +992,11 @@ class CoEvolutionTrainer(BaselineTrainer):
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -1036,6 +1041,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             does not apply, the RL side samples one opponent per rollout
             episode internally).
         """
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            # Generations are the native unit — honor the request directly,
+            # independent of per-side episode bookkeeping.
+            return max(1, int(config.budget_value))
         evolving = [s for s in coev_cfg.sides if s.optimizer != "frozen"]
         if not evolving:
             # Pathological — nothing is actually evolving — do at least
@@ -1059,10 +1068,20 @@ class CoEvolutionTrainer(BaselineTrainer):
                 )
         ep_per_gen = max(1, ep_per_gen)
         if config.budget_mode == BudgetMode.ENV_STEPS:
-            steps_per_gen = ep_per_gen * coev_cfg.max_steps_per_episode
-            return max(1, config.budget_value // max(1, steps_per_gen))
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                coev_cfg.max_steps_per_episode,
+                label="co-evolution",
+            )
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
-            return max(1, config.budget_value // ep_per_gen)
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                1,
+                label="co-evolution",
+                unit="eval episodes",
+            )
         raise ValueError(
             f"CoEvolutionTrainer does not support budget mode {config.budget_mode}."
         )
