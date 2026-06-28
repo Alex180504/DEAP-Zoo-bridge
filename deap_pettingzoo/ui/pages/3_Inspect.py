@@ -178,6 +178,8 @@ with tab_sweep:
                 (
                     m
                     for m in (
+                        # Held-out eval reward first.
+                        "eval_mean_reward",
                         "final_fitness",
                         "best_fitness",
                         "mean_episode_reward",

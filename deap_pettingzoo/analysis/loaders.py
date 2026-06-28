@@ -9,9 +9,12 @@ availability. Only :file:`manifest.json` is required.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 def _lazy_pd():
@@ -208,12 +211,19 @@ class RunRecord:
         """Where :attr:`comparison_score` was sourced from.
 
         One of ``"held_out"`` (the held-out :attr:`eval_mean_reward`),
-        ``"training_fitness"`` (the optimiser's own :attr:`final_fitness`),
-        ``"training_reward"`` (only a self-reported ``mean_episode_reward``),
-        or ``"none"``. Scores of differing provenance are not comparable;
-        consumers surface this tag so a mixed comparison is blocked rather
-        than rendered as a wrong verdict.
+        ``"eval_failed"`` (re-evaluation was attempted but raised — the run
+        has no comparable score and is excluded), ``"training_fitness"`` (the
+        optimiser's own :attr:`final_fitness`), ``"training_reward"`` (only a
+        self-reported ``mean_episode_reward``), or ``"none"``. Scores of
+        differing provenance are not comparable; consumers surface this tag so
+        a mixed comparison is blocked rather than rendered as a wrong verdict.
+
+        An explicit ``eval_failed`` marker is honoured **before** any training
+        fallback so a run whose held-out eval crashed is not silently
+        re-admitted on its (incomparable) self-reported metric.
         """
+        if self.summary.get("eval_metric_provenance") == "eval_failed":
+            return "eval_failed"
         if self.eval_mean_reward is not None:
             return "held_out"
         if self.final_fitness is not None:
@@ -231,7 +241,13 @@ class RunRecord:
         ``mean_episode_reward`` (legacy runs with no re-eval). The chosen
         source is reported by :attr:`score_provenance`, so unlike the old
         ``final_fitness`` chain the fallback is never silent.
+
+        Returns ``None`` when the run is tagged ``eval_failed``: a run whose
+        canonical held-out eval crashed has no comparable score, so it is
+        dropped from comparisons rather than re-admitted on a training metric.
         """
+        if self.summary.get("eval_metric_provenance") == "eval_failed":
+            return None
         if self.eval_mean_reward is not None:
             return self.eval_mean_reward
         genuine = self.final_fitness
@@ -455,11 +471,19 @@ class Experiment:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _provenance_for(r: RunRecord, metric: str) -> str:
+        """Provenance tag for ``r`` under ``metric`` (see :meth:`score_provenances`)."""
+        if metric in ("final_fitness", "comparison_score", "eval_mean_reward"):
+            return r.score_provenance
+        return "explicit_metric"
+
     def final_scores(
         self,
         metric: str = "final_fitness",
         *,
         algorithm: Optional[str] = None,
+        provenance: Optional[str] = None,
     ) -> Dict[str, List[float]]:
         """Group final scalar scores by algorithm.
 
@@ -469,15 +493,43 @@ class Experiment:
         :attr:`RunRecord.comparison_score`, i.e. it prefers the held-out
         ``eval_mean_reward`` and never silently substitutes a training reward
         without it being reflected in :meth:`score_provenances`.
+
+        Args:
+            provenance: When given (e.g. ``"held_out"``), restrict the returned
+                scores to runs of exactly that provenance. Leave ``None`` to
+                pool every available score; in that case, if the pooled scores
+                span more than one (non-``"none"``) provenance a **warning is
+                logged** — pooling held-out and self-reported metrics yields a
+                non-comparable result, so direct programmatic callers should
+                either pass ``provenance="held_out"`` or gate on
+                :meth:`score_provenances`.
         """
         groups: Dict[str, List[float]] = {}
+        group_provs: Dict[str, set] = {}
         for r in self.runs:
             if algorithm is not None and r.algorithm != algorithm:
+                continue
+            prov = self._provenance_for(r, metric)
+            if provenance is not None and prov != provenance:
                 continue
             value = self._metric_value(r, metric)
             if value is None:
                 continue
             groups.setdefault(r.algorithm, []).append(float(value))
+            group_provs.setdefault(r.algorithm, set()).add(prov)
+
+        if provenance is None:
+            pooled = {p for provs in group_provs.values() for p in provs} - {"none"}
+            if len(pooled) > 1:
+                logger.warning(
+                    "final_scores(metric=%r) pools scores of mixed provenance %s; "
+                    "these are not directly comparable. Pass provenance='held_out' "
+                    "to restrict, or gate on Experiment.score_provenances(). "
+                    "Per-group provenance: %s",
+                    metric,
+                    sorted(pooled),
+                    {a: sorted(p) for a, p in group_provs.items()},
+                )
         return groups
 
     def score_provenances(
@@ -500,12 +552,7 @@ class Experiment:
                 continue
             if self._metric_value(r, metric) is None:
                 continue
-            prov = (
-                r.score_provenance
-                if metric in ("final_fitness", "comparison_score", "eval_mean_reward")
-                else "explicit_metric"
-            )
-            out.setdefault(r.algorithm, set()).add(prov)
+            out.setdefault(r.algorithm, set()).add(self._provenance_for(r, metric))
         return out
 
 

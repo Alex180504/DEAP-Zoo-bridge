@@ -211,14 +211,22 @@ def compare_baselines(
             print(f"Training completed in {training_result.training_time:.2f}s")
 
             print(f"Evaluating on {config.eval_episodes} episodes...")
-            eval_result = evaluator.evaluate(
-                policy=training_result.policy,
+            # Multi-agent RL wrappers expose ``policy_map()`` for an
+            # order-independent per-agent dispatch (robust to a shrinking
+            # active-agent set); single-policy backends use the broadcast path.
+            _policy = training_result.policy
+            _policy_map = _policy.policy_map() if hasattr(_policy, "policy_map") else None
+            _eval_kwargs = dict(
                 env_name=sub.config.env_name,
                 num_episodes=config.eval_episodes,
                 seed=_EVAL_SEED_BASE + int(sub.seed),  # paired by repeat index
                 env_config=sub.config.env_config,
                 render=False,
             )
+            if _policy_map:
+                eval_result = evaluator.evaluate(None, policy_map=_policy_map, **_eval_kwargs)
+            else:
+                eval_result = evaluator.evaluate(_policy, **_eval_kwargs)
             print(f"Evaluation: mean={eval_result.mean_reward:.2f}, "
                   f"std={eval_result.std_reward:.2f}")
 

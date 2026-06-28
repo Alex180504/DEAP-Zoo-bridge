@@ -167,6 +167,27 @@ def _persist_eval_metrics(
         logger.warning("Could not merge eval metrics into %s", summary_path)
 
 
+def _evaluate_policy(evaluator: Any, policy: Any, sub: Any, eval_seed: int) -> Any:
+    """Run the held-out evaluation for one trained ``policy``.
+
+    Multi-agent RL policies (those exposing ``policy_map()``, i.e.
+    :class:`AgileRLPolicyWrapper`) are evaluated through the evaluator's
+    per-agent ``policy_map`` path, which dispatches by agent id and so stays
+    correct even when the active-agent set shrinks mid-episode. Single-policy
+    backends (EA / CMA-ES / PSO) keep the simple broadcast path.
+    """
+    common = dict(
+        env_name=sub.config.env_name,
+        num_episodes=_EVAL_EPISODES,
+        seed=eval_seed,
+        env_config=sub.config.env_config,
+    )
+    policy_map = policy.policy_map() if hasattr(policy, "policy_map") else None
+    if policy_map:
+        return evaluator.evaluate(None, policy_map=policy_map, **common)
+    return evaluator.evaluate(policy, **common)
+
+
 def _record_held_out_eval(
     evaluator: Any,
     sub: Any,
@@ -188,17 +209,17 @@ def _record_held_out_eval(
     """
     try:
         eval_seed = _EVAL_SEED_BASE + int(sub.seed)
-        eval_result = evaluator.evaluate(
-            result.policy,
-            env_name=sub.config.env_name,
-            num_episodes=_EVAL_EPISODES,
-            seed=eval_seed,
-            env_config=sub.config.env_config,
-        )
+        eval_result = _evaluate_policy(evaluator, result.policy, sub, eval_seed)
     except Exception as exc:  # noqa: BLE001 - re-eval must not abort the run
         logger.warning("Held-out re-eval failed for %s: %s", label, exc)
         metrics_row["eval_mean_reward"] = None
         metrics_row["eval_metric_provenance"] = "eval_failed"
+        # Persist the failure marker (no eval_mean_reward) so the analysis layer
+        # treats this run as "could not be scored on the held-out metric" and
+        # excludes it from comparisons, rather than silently re-admitting it on
+        # its incomparable self-reported metric on reload.
+        if run_dir:
+            _persist_eval_metrics(Path(run_dir), {"eval_metric_provenance": "eval_failed"})
         return
 
     eval_metrics = {
