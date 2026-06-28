@@ -189,6 +189,10 @@ class SideState:
 
         self._np_state: Optional[Any] = None
         self._py_state: Optional[Any] = None
+        # True for RL sides; read by trainer GPU-contention and worker-fallback detectors.
+        self.is_rl_side: bool = False
+        # Torch device string; overwritten in initialise() by RL subclasses.
+        self.resolved_device: str = "cpu"
 
     # Lifecycle hooks — subclasses override
 
