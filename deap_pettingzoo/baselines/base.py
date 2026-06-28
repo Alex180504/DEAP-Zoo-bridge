@@ -8,6 +8,7 @@ and evaluating their resulting policies under a common interface.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import (
     Any,
@@ -23,12 +24,76 @@ import warnings
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 
 class BudgetMode(Enum):
-    """Budget constraint mode for training."""
+    """Budget constraint mode for training.
+
+    * ``ENV_STEPS`` — total environment steps (the cross-algorithm axis that
+      lets EA and RL be compared on a matched budget).
+    * ``EVAL_EPISODES`` — total evaluation episodes.
+    * ``GENERATIONS`` — number of generations / iterations, the native unit of
+      the population backends (EA / CMA-ES / PSO / co-evolution / QDax). The
+      step-based AgileRL trainers reject this mode (see
+      :meth:`BaselineTrainer.supports_budget_mode`).
+    """
     ENV_STEPS = "env_steps"
     EVAL_EPISODES = "eval_episodes"
-    WALL_CLOCK = "wall_clock"
+    GENERATIONS = "generations"
+
+
+def derive_generations(
+    budget_steps: int,
+    pop: int,
+    max_steps: int,
+    *,
+    label: str = "population trainer",
+    unit: str = "env steps",
+) -> int:
+    """Back-derive a generation count from a budget, rounding to nearest.
+
+    Population trainers express their budget as a total number of environment
+    steps (or evaluation episodes, by passing ``max_steps=1``), but their
+    native unit is *generations*. This converts one to the other with
+    round-to-nearest — not floor, which silently discards up to a whole
+    generation and warns (both to :mod:`warnings` and the module logger)
+    whenever the request is too small to fund more than a single generation.
+    Without that signal an "equal budget" EA-vs-RL comparison can silently
+    collapse the EA to its random initial population and report a misleading
+    "EA lost"..
+
+    Args:
+        budget_steps: Total budget, in the same unit as ``pop * max_steps``.
+        pop: Population size evaluated per generation.
+        max_steps: Nominal env steps per evaluation episode. Pass ``1`` when
+            the budget is expressed in evaluation episodes.
+        label: Trainer name used in the warning message.
+        unit: Human-readable budget unit for the warning message.
+
+    Returns:
+        Generation count, always ``>= 1``.
+    """
+    pop = max(1, int(pop))
+    max_steps = max(1, int(max_steps))
+    per_generation = pop * max_steps
+    raw = budget_steps / per_generation
+    generations = max(1, round(raw))
+    # Warn when the budget cannot fund even a single full generation, so the
+    # population never really evolves past its random initial state — the
+    # silent-collapse case the matched-budget comparison must not hide.
+    if raw < 1.0:
+        msg = (
+            f"{label}: a budget of {int(budget_steps):,} {unit} only funds "
+            f"{raw:.2f} generation(s) at population={pop} x "
+            f"max_steps={max_steps} ({per_generation:,} {unit}/generation); "
+            f"clamped to {generations} generation(s). The matched-budget "
+            f"comparison may be unfair - raise the budget, lower the "
+            f"population, or use BudgetMode.GENERATIONS."
+        )
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        logger.warning(msg)
+    return generations
 
 
 class RecordingMode(str, Enum):

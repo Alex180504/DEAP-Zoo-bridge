@@ -24,6 +24,7 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
 )
 from deap_pettingzoo.baselines.ea_trainer import (
     GenomePolicyWrapper,
@@ -354,7 +355,11 @@ class PSOTrainer(BaselineTrainer):
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -368,10 +373,20 @@ class PSOTrainer(BaselineTrainer):
 
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:
         max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
-        if config.budget_mode == BudgetMode.ENV_STEPS:
-            gens = config.budget_value // (self.population_size * max_steps)
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            gens = max(1, int(config.budget_value))
+        elif config.budget_mode == BudgetMode.ENV_STEPS:
+            gens = derive_generations(
+                config.budget_value, self.population_size, max_steps, label="PSO"
+            )
         elif config.budget_mode == BudgetMode.EVAL_EPISODES:
-            gens = config.budget_value // self.population_size
+            gens = derive_generations(
+                config.budget_value,
+                self.population_size,
+                1,
+                label="PSO",
+                unit="eval episodes",
+            )
         else:
             raise ValueError(f"PSOTrainer does not support {config.budget_mode}")
         return {

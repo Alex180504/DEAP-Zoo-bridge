@@ -82,7 +82,7 @@ class RunManifest:
         env_name: Registered PettingZoo env name.
         env_config: Env config dict actually used.
         seed: Master seed for the run, or ``None`` if not seeded.
-        budget_mode: ``"env_steps" | "eval_episodes" | "wall_clock"``.
+        budget_mode: ``"env_steps" | "eval_episodes" | "generations"``.
         budget_value: Amount in units specified by ``budget_mode``.
         hyperparams: Trainer-specific algorithm parameters.
         notes: Free-form notes (e.g. experiment label).

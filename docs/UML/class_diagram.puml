@@ -272,6 +272,7 @@ package "deap_pettingzoo.evaluators" {
     class SingleEpisodeEvaluator {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
+        + env_steps_consumed: int
     BaseEvaluator <|-- SelfPlayEvaluator
     MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
     SingleEpisodeEvaluator --> PettingZooWrapper : uses
@@ -389,7 +390,8 @@ package "deap_pettingzoo.baselines" {
     enum BudgetMode {
         ENV_STEPS
         EVAL_EPISODES
-        WALL_CLOCK
+        GENERATIONS
+        -- GENERATIONS: population trainers only;\n   AgileRL rejects it.
     }
 
     interface PolicyProtocol <<Protocol>> {
@@ -479,6 +481,7 @@ package "deap_pettingzoo.baselines" {
         + {abstract} train(config: TrainingConfig) -> TrainingResult
         + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
         + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
     }
 
     abstract class BaselineEvaluator {

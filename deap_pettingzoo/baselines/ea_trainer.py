@@ -24,6 +24,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     PolicyProtocol,
+    derive_generations,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -531,7 +532,10 @@ class EATrainer(BaselineTrainer):
                 unit="generation",
                 current=gen,
                 total=num_generations,
-                env_steps=gen * env_steps_per_iteration,
+                # Charge gen-0: the initial population is a full evaluation,
+                # so cumulative env steps at generation g is (g+1) iterations.
+                # Mirrors CMA-ES / PSO progress accounting.
+                env_steps=(gen + 1) * env_steps_per_iteration,
                 best_fitness=entry.get("max"),
                 mean_fitness=entry.get("mean"),
                 wall_time_s=time.time() - start_time,
@@ -641,7 +645,7 @@ class EATrainer(BaselineTrainer):
                 # per-gen hook didn't land exactly on fraction 1.0 (dedups).
                 self._recorder.finalize(
                     _ea_champion, iteration=num_generations,
-                    env_steps=num_generations * env_steps_per_iteration,
+                    env_steps=(num_generations + 1) * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
@@ -667,7 +671,7 @@ class EATrainer(BaselineTrainer):
                 # the final champion; record once at the end.
                 self._recorder.finalize(
                     _ea_champion, iteration=num_generations,
-                    env_steps=num_generations * env_steps_per_iteration,
+                    env_steps=(num_generations + 1) * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
@@ -691,7 +695,7 @@ class EATrainer(BaselineTrainer):
                     _emit_gen_progress(gen)
                 self._recorder.finalize(
                     _ea_champion, iteration=num_generations,
-                    env_steps=num_generations * env_steps_per_iteration,
+                    env_steps=(num_generations + 1) * env_steps_per_iteration,
                 )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
@@ -722,6 +726,9 @@ class EATrainer(BaselineTrainer):
                     log,
                     fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    # Generation 0 is the random initial population (a full
+                    # evaluation); charge it on the env-step axis.
+                    charge_initial_population=True,
                 )
                 from deap_pettingzoo.utils.logging import save_ea_genome, KIND_EA_GENOME
                 save_ea_genome(
@@ -748,6 +755,11 @@ class EATrainer(BaselineTrainer):
             # Defensive: never fail training because of logging cleanup.
             pass
 
+        nominal_env_steps = (num_generations + 1) * env_steps_per_iteration
+        real_env_steps = (
+            int(evaluator.env_steps_consumed) if effective_workers <= 1 else None
+        )
+
         # Create result
         return TrainingResult(
             algorithm='ea',
@@ -757,6 +769,8 @@ class EATrainer(BaselineTrainer):
                 'final_fitness': best_individual.fitness.values[0],
                 'num_generations': num_generations,
                 'population_size': self.population_size,
+                'env_steps_nominal': nominal_env_steps,
+                'env_steps_consumed': real_env_steps,
             },
             metadata={
                 'genome_config': genome_config,
@@ -793,8 +807,12 @@ class EATrainer(BaselineTrainer):
         Returns:
             True if supported.
         """
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
-    
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
+
     def get_capabilities(self) -> Dict[str, Any]:
         """Get EA capabilities.
         
@@ -821,27 +839,35 @@ class EATrainer(BaselineTrainer):
 
         Raises:
             ValueError: If ``config.budget_mode`` is not
-                ``BudgetMode.ENV_STEPS`` or ``BudgetMode.EVAL_EPISODES``.
+                ``BudgetMode.ENV_STEPS``, ``BudgetMode.EVAL_EPISODES``, or
+                ``BudgetMode.GENERATIONS``.
         """
         max_steps_per_episode = config.algorithm_params.get('max_steps_per_episode', 200)
-        
-        if config.budget_mode == BudgetMode.ENV_STEPS:
-            # Calculate generations from environment steps
+
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            # Generations are the EA's native unit, so honor the request exactly.
+            num_generations = max(1, int(config.budget_value))
+        elif config.budget_mode == BudgetMode.ENV_STEPS:
             # env_steps = population_size * num_generations * max_steps_per_episode
-            total_env_steps = config.budget_value
-            num_generations = total_env_steps // (self.population_size * max_steps_per_episode)
-            num_generations = max(1, num_generations)  # At least 1 generation
-            
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                max_steps_per_episode,
+                label="EA",
+            )
         elif config.budget_mode == BudgetMode.EVAL_EPISODES:
-            # Each episode evaluates one individual
-            # Total episodes = population_size * num_generations
-            total_episodes = config.budget_value
-            num_generations = total_episodes // self.population_size
-            num_generations = max(1, num_generations)
-            
+            # Each episode evaluates one individual:
+            # total_episodes = population_size * num_generations.
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                1,
+                label="EA",
+                unit="eval episodes",
+            )
         else:
             raise ValueError(f"EA does not support budget mode: {config.budget_mode}")
-        
+
         return {
             'num_generations': num_generations,
             'max_steps_per_episode': max_steps_per_episode,

@@ -38,6 +38,7 @@ def dump_fitness_history(
     env_steps_per_iteration: int,
     iteration_key: str = "generation",
     extra_columns_per_row: Optional[Mapping[str, Any]] = None,
+    charge_initial_population: bool = False,
 ) -> None:
     """Write a generation-keyed history list to the ``metrics`` table.
 
@@ -46,16 +47,29 @@ def dump_fitness_history(
     ``(iteration, env_steps, wall_time, ...)``. Existing entry keys
     other than ``iteration_key`` flow through unchanged.
 
+    The ``env_steps`` column reports the cumulative env steps consumed up to
+    and including each row: ``populations_evaluated * env_steps_per_iteration``.
+    Trainers whose history is **1-indexed** (CMA-ES / PSO — generation ``k``
+    is the ``k``-th evaluated population, no separate initial eval) leave
+    ``charge_initial_population=False`` so ``env_steps = gen * per_iter``.
+    Trainers whose history is **0-indexed with a free initial population**
+    (the EA: generation 0 is the random initial population) pass
+    ``charge_initial_population=True`` so generation 0 is charged a full
+    ``per_iter`` rather than reporting zero env steps; otherwise
+    the cross-algorithm performance-vs-env-steps axis is biased low by one
+    population.
+
     No-op when ``logger`` is a :class:`NoOpLogger`.
     """
     if isinstance(logger, NoOpLogger):
         return
     extras = dict(extra_columns_per_row or {})
+    offset = 1 if charge_initial_population else 0
     for entry in fitness_history:
         gen = int(entry.get(iteration_key, 0))
         row = {
             "iteration": gen,
-            "env_steps": gen * int(env_steps_per_iteration),
+            "env_steps": (gen + offset) * int(env_steps_per_iteration),
             "wall_time": float(entry.get("wall_time", 0.0)),
         }
         for k, v in entry.items():

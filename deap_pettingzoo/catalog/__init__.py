@@ -184,5 +184,8 @@ def to_json(*, only_available: bool = False) -> Dict[str, Any]:
         "budget_modes": [
             {"name": "env_steps", "label": "Environment steps"},
             {"name": "eval_episodes", "label": "Evaluation episodes"},
+            # Population trainers only; per-algorithm support is gated by each
+            # AlgorithmSpec.supported_budget_modes.
+            {"name": "generations", "label": "Generations"},
         ],
     }
