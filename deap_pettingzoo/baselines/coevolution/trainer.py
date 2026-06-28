@@ -650,7 +650,7 @@ class CoEvolutionTrainer(BaselineTrainer):
 
         rl_cuda_sides = [
             name for name, s in states.items()
-            if isinstance(s, RLSideState)
+            if getattr(s, "is_rl_side", False)
             and torch_uses_cuda(s.resolved_device)
         ]
         qdax_sides = [
@@ -659,10 +659,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         ]
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
 
-        has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
+        has_rl_side = any(getattr(s, "is_rl_side", False) for s in states.values())
         if has_rl_side and resolved_workers > 1:
             has_onpolicy_rl = any(
-                isinstance(s, RLSideState) and getattr(s, "is_on_policy", False)
+                getattr(s, "is_rl_side", False) and getattr(s, "is_on_policy", False)
                 for s in states.values()
             )
             rl_detail = (

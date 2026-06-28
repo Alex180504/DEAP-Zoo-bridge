@@ -247,8 +247,12 @@ class EvolveHPOTrainer(AgileRLTrainer):
         ctor_kwargs["device"] = config.algorithm_params.get(
             "device", self.device
         )
+        # memory_size and learning_delay are buffer/rollout params consumed by
+        # _train_one_agent; convert them to valid MADDPG/MATD3 constructor args.
+        self._hpo_memory_size = int(config.algorithm_params.get("memory_size", 100_000))
+        self._hpo_learning_delay = int(config.algorithm_params.get("learning_delay", 0))
         for key in (
-            "batch_size", "memory_size", "learning_delay", "learn_step",
+            "batch_size", "learn_step",
             "lr_actor", "lr_critic", "lr", "gamma", "tau", "policy_freq",
             "expl_noise", "O_U_noise", "ent_coef",
         ):
@@ -579,47 +583,112 @@ class EvolveHPOTrainer(AgileRLTrainer):
         rng: np.random.Generator,
     ) -> int:
         """Run off-policy rollout-and-learn for one agent, returning steps consumed."""
+        from agilerl.components.multi_agent_replay_buffer import (  # noqa: WPS433
+            MultiAgentReplayBuffer,
+        )
+
         steps = 0
-        learn_step = getattr(agent, "learn_step", 100)
-        batch_size = getattr(agent, "batch_size", 64)
-        memory = getattr(agent, "memory", None)
-        learning_delay = getattr(agent, "learning_delay", 500)
-        total_transitions = getattr(agent, "_total_transitions", 0)
+        learn_step = max(1, int(getattr(agent, "learn_step", 100)))
+        batch_size = int(getattr(agent, "batch_size", 64))
+        learning_delay = int(getattr(self, "_hpo_learning_delay", getattr(agent, "learning_delay", 500)))
+        total_transitions = int(getattr(agent, "_total_transitions", 0))
         discrete = bool(getattr(agent, "discrete_actions", False))
+        num_envs = int(getattr(env, "num_envs", 1))
+
+        memory = MultiAgentReplayBuffer(
+            memory_size=int(getattr(self, "_hpo_memory_size", getattr(agent, "memory_size", 100_000))),
+            field_names=["obs", "action", "reward", "next_obs", "done"],
+            agent_ids=agent_ids,
+            device=self.device,
+        )
 
         while steps < target_steps:
             ep_seed = int(rng.integers(0, 2**31)) if seed is not None else None
-            obs, info = env.reset(seed=ep_seed)
+            obs, _ = env.reset(seed=ep_seed)
             ep_steps = 0
 
             while ep_steps < max_steps and steps < target_steps:
                 try:
-                    actions = agent.get_action(obs, training=True)
+                    action_result = agent.get_action(obs, training=True)
                 except TypeError:
-                    actions = agent.get_action(obs)
-                result = actions[0] if isinstance(actions, tuple) else actions
-                # Unwrap batched actions for raw PettingZoo envs.
-                unwrapped: Dict[str, Any] = {}
-                for a, act in result.items():
-                    arr = np.asarray(act)
-                    if arr.ndim > 0 and arr.shape[0] == 1:
-                        arr = arr[0]
-                        if discrete and arr.shape == ():
-                            arr = arr.item()
-                    unwrapped[a] = arr
-                next_obs, rewards, terms, truncs, infos = env.step(unwrapped)
+                    action_result = agent.get_action(obs)
+
+                if isinstance(action_result, tuple):
+                    actions, raw_actions = action_result[0], action_result[1]
+                else:
+                    actions = action_result
+                    raw_actions = action_result
+
+                # Unwrap batched actions for env.step in the non-vec path.
+                if is_vec:
+                    env_actions = actions
+                else:
+                    env_actions: Dict[str, Any] = {}
+                    for a, act in actions.items():
+                        arr = np.asarray(act)
+                        if arr.ndim > 0 and arr.shape[0] == 1:
+                            arr = arr[0]
+                            if discrete and arr.shape == ():
+                                arr = arr.item()
+                        env_actions[a] = arr
+
+                next_obs, rewards, terms, truncs, _ = env.step(env_actions)
+
+                # Build agent-keyed transition dicts with one save_to_memory call per transition.
+                full_obs = {
+                    a: obs.get(
+                        a, self._nan_placeholder_for_space(env.observation_space(a))
+                    )
+                    for a in agent_ids
+                }
+                full_raw_actions: Dict[str, Any] = {}
+                for a in agent_ids:
+                    if a in raw_actions:
+                        arr = np.asarray(raw_actions[a])
+                        if not is_vec and arr.ndim > 0 and arr.shape[0] == 1:
+                            arr = arr[0]
+                        full_raw_actions[a] = arr
+                    else:
+                        full_raw_actions[a] = self._nan_placeholder_for_space(
+                            env.action_space(a)
+                        )
+                if is_vec:
+                    full_reward = {
+                        a: np.asarray(
+                            rewards.get(
+                                a, np.full(num_envs, np.nan, dtype=np.float32)
+                            ),
+                            dtype=np.float32,
+                        ).reshape(num_envs)
+                        for a in agent_ids
+                    }
+                else:
+                    full_reward = {
+                        a: float(rewards[a]) if a in rewards else np.nan
+                        for a in agent_ids
+                    }
+                full_next_obs = {
+                    a: next_obs.get(
+                        a, self._nan_placeholder_for_space(env.observation_space(a))
+                    )
+                    for a in agent_ids
+                }
+                done_dict = self._build_done_dict(
+                    terms, truncs, agent_ids, is_vec=is_vec, num_envs=num_envs,
+                )
+
+                memory.save_to_memory(
+                    full_obs,
+                    full_raw_actions,
+                    full_reward,
+                    full_next_obs,
+                    done_dict,
+                    is_vectorised=is_vec,
+                )
+
                 done = all(terms.get(a, False) for a in agent_ids) or all(
                     truncs.get(a, False) for a in agent_ids
                 )
-
-                # Store transition.
-                if memory is not None:
-                    for a in agent_ids:
-                        memory.save_to_memory(
-                            obs.get(a), result.get(a),
-                            float(rewards.get(a, 0.0)),
-                            next_obs.get(a), done,
-                        )
                 total_transitions += 1
                 steps += 1
                 ep_steps += 1
@@ -627,8 +696,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
                 if (
                     total_transitions >= learning_delay
-                    and steps % learn_step == 0
-                    and memory is not None
+                    and (total_transitions - learning_delay) % learn_step == 0
                     and len(memory) >= batch_size
                 ):
                     try:
@@ -745,10 +813,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         obs_spaces, act_spaces, agent_ids = extract_space_metadata(env)
         return env, obs_spaces, act_spaces, agent_ids
 
-    # ------------------------------------------------------------------
     # Concrete subclasses per algorithm
-    # ------------------------------------------------------------------
-
 
 class MADDPGHPOTrainer(EvolveHPOTrainer):
     ALGORITHM_NAME = "maddpg"
