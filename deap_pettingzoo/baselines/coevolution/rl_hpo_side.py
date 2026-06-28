@@ -51,8 +51,13 @@ class RLEvolveHPOSideState(SideState):
     * ``population_size`` (default 6)
     * ``evo_every_n_steps`` (default 20_000 — coevolution generations
       are typically shorter than standalone HPO)
-    * ``agent_ctor_kwargs`` — forwarded to the underlying AgileRL
-      algorithm constructor (lr_actor, batch_size, ...).
+    * ``agent_ctor_kwargs`` — forwarded **verbatim** to the underlying
+      AgileRL algorithm constructor. Valid keys are algorithm-specific:
+      off-policy MADDPG/MATD3 take ``lr_actor`` / ``lr_critic`` /
+      ``batch_size`` / ``learn_step`` / ``gamma`` / ``tau`` / ...; on-policy
+      IPPO takes ``lr`` (not ``lr_actor``) and has no ``tau``. Non-constructor
+      knobs (e.g. ``memory_size`` / ``learning_delay``) are not accepted here
+      and raise ``TypeError`` from the constructor.
     * ``net_config`` — ``{encoder_config, head_config}`` dict.
     * ``hp_config`` — ``{name: [min, max]}`` dict for
       :class:`~agilerl.algorithms.core.registry.HyperparameterConfig`.
@@ -137,6 +142,11 @@ class RLEvolveHPOSideState(SideState):
         act_spaces = [env.action_space(a) for a in self._learner_ids]
 
         hp_config = self._build_hp_config(hp_config_spec=self.hp_config_spec)
+        # Forward the user's per-agent ctor knobs (lr_actor, batch_size, ...)
+        # verbatim, defaulting device to the side's resolved device so the
+        # population lives on the same device as Mutations (mirrors RLSideState).
+        ctor_kwargs = dict(self.agent_ctor_kwargs)
+        ctor_kwargs.setdefault("device", self.resolved_device)
         pop = self._build_population(
             alg_cls=alg_cls,
             size=self.population_size,
@@ -145,6 +155,7 @@ class RLEvolveHPOSideState(SideState):
             agent_ids=self._learner_ids,
             net_config=self.net_config,
             hp_config=hp_config,
+            ctor_kwargs=ctor_kwargs,
         )
         self._population = pop
         if self._on_policy:
@@ -295,8 +306,15 @@ class RLEvolveHPOSideState(SideState):
         agent_ids: List[str],
         net_config: Dict[str, Any],
         hp_config: Any,
+        ctor_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
-        kwargs: Dict[str, Any] = {}
+        """Create the AgileRL population.
+
+        ``ctor_kwargs`` (e.g. ``lr_actor``, ``batch_size``, ``learn_step``,
+        ``gamma``, ``tau``, ``device``) is forwarded verbatim to the
+        algorithm constructor alongside ``net_config`` / ``hp_config``.
+        """
+        kwargs: Dict[str, Any] = dict(ctor_kwargs or {})
         if net_config:
             kwargs["net_config"] = net_config
         if hp_config:

@@ -254,3 +254,47 @@ class TestCoevolutionHPOSideLearns:
         assert not torch.allclose(before, after), (
             "Actor parameters did not change — no gradient updates occurred."
         )
+
+
+class TestCoevolutionHPOSideForwardsCtorKwargs:
+    """Regression test: ``agent_ctor_kwargs`` must reach the agents.
+    """
+
+    def test_ctor_kwargs_reach_constructed_agents(self):
+        """Non-default ctor kwargs land on every population member."""
+        import mpe2
+        import numpy as np
+
+        from deap_pettingzoo.baselines.coevolution import Side, make_side_state
+
+        # Non-default values, distinct from MADDPG's defaults
+        # (batch_size=64, lr_actor=1e-3, learn_step=5, gamma=0.95, tau=0.01).
+        ctor_kwargs = {
+            "batch_size": 7,
+            "lr_actor": 3e-4,
+            "learn_step": 11,
+            "gamma": 0.9,
+            "tau": 0.02,
+        }
+
+        env = mpe2.simple_spread_v3.parallel_env(N=3, max_cycles=25)
+        env.reset(seed=0)
+        try:
+            side = Side(
+                "learners", ("agent",), "rl_hpo",
+                {"algorithm": "maddpg_hpo", "population_size": 2,
+                 "evo_every_n_steps": 60, "device": "cpu", "seed": 0,
+                 "agent_ctor_kwargs": ctor_kwargs},
+            )
+            state = make_side_state(side)
+            state.initialise(env, rng=np.random.default_rng(0))
+
+            assert len(state._population) == 2
+            for agent in state._population:
+                assert agent.batch_size == 7
+                assert agent.lr_actor == pytest.approx(3e-4)
+                assert agent.learn_step == 11
+                assert agent.gamma == pytest.approx(0.9)
+                assert agent.tau == pytest.approx(0.02)
+        finally:
+            env.close()
