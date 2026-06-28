@@ -152,7 +152,16 @@ class RunRecord:
 
     @property
     def final_fitness(self) -> Optional[float]:
-        for key in ("final_fitness", "best_fitness", "mean_episode_reward"):
+        """Genuine optimisation fitness for this run.
+
+        Resolves ``final_fitness`` -> ``best_fitness`` -> (co-evolution
+        ``final_best``). Deliberately **excludes** ``mean_episode_reward``:
+        a self-reported RL training reward is not a fitness, and silently
+        coalescing it here mixed incomparable metrics into one column. 
+        Use :attr:`comparison_score` for the provenance-tagged
+        cross-backend comparison metric.
+        """
+        for key in ("final_fitness", "best_fitness"):
             if key in self.summary:
                 try:
                     return float(self.summary[key])
@@ -177,6 +186,62 @@ class RunRecord:
             except (TypeError, ValueError):
                 pass
         return None
+
+    @property
+    def eval_mean_reward(self) -> Optional[float]:
+        """Held-out re-evaluation reward, the canonical comparison metric.
+
+        Written by the subprocess runner / :func:`compare_baselines` after
+        training: a fixed-seed :class:`UnifiedEvaluator` rollout of the
+        trained policy, recorded for **every** backend (EA, CMA-ES, PSO and
+        the RL learners). This is the only metric on which EA and RL are
+        directly comparable; ``None`` for legacy runs predating re-eval.
+        """
+        v = self.summary.get("eval_mean_reward")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def score_provenance(self) -> str:
+        """Where :attr:`comparison_score` was sourced from.
+
+        One of ``"held_out"`` (the held-out :attr:`eval_mean_reward`),
+        ``"training_fitness"`` (the optimiser's own :attr:`final_fitness`),
+        ``"training_reward"`` (only a self-reported ``mean_episode_reward``),
+        or ``"none"``. Scores of differing provenance are not comparable;
+        consumers surface this tag so a mixed comparison is blocked rather
+        than rendered as a wrong verdict.
+        """
+        if self.eval_mean_reward is not None:
+            return "held_out"
+        if self.final_fitness is not None:
+            return "training_fitness"
+        if self.summary.get("mean_episode_reward") is not None:
+            return "training_reward"
+        return "none"
+
+    @property
+    def comparison_score(self) -> Optional[float]:
+        """Provenance-aware scalar used for cross-backend comparison.
+
+        Prefers the held-out :attr:`eval_mean_reward`; falls back to the
+        genuine :attr:`final_fitness`, then to a self-reported
+        ``mean_episode_reward`` (legacy runs with no re-eval). The chosen
+        source is reported by :attr:`score_provenance`, so unlike the old
+        ``final_fitness`` chain the fallback is never silent.
+        """
+        if self.eval_mean_reward is not None:
+            return self.eval_mean_reward
+        genuine = self.final_fitness
+        if genuine is not None:
+            return genuine
+        v = self.summary.get("mean_episode_reward")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
 
 def expand_coevolution_run(record: RunRecord) -> List[RunRecord]:
@@ -358,6 +423,8 @@ class Experiment:
                 "seed": r.seed,
                 "wall_time_s": r.wall_time_s,
                 "final_fitness": r.final_fitness,
+                "eval_mean_reward": r.eval_mean_reward,
+                "score_provenance": r.score_provenance,
             }
             for k, v in r.summary.items():
                 if k in row:
@@ -366,6 +433,27 @@ class Experiment:
                     row[k] = v
             rows.append(row)
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _metric_value(r: RunRecord, metric: str) -> Optional[float]:
+        """Resolve one scalar score for ``r`` under ``metric``.
+
+        ``"final_fitness"`` and ``"comparison_score"`` both resolve to the
+        held-out-preferred :attr:`RunRecord.comparison_score` (so every
+        consumer that asks for the default metric automatically gets the
+        honest cross-backend value); ``"eval_mean_reward"`` resolves to the
+        held-out reward only; any other key is read verbatim from the run
+        summary.
+        """
+        if metric in ("final_fitness", "comparison_score"):
+            return r.comparison_score
+        if metric == "eval_mean_reward":
+            return r.eval_mean_reward
+        value = r.summary.get(metric)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def final_scores(
         self,
@@ -376,25 +464,49 @@ class Experiment:
         """Group final scalar scores by algorithm.
 
         Returns a mapping ``{algorithm: [score_seed_0, score_seed_1, ...]}``
-        suitable for feeding into :mod:`compare` / :mod:`rliable_bridge`.
+        suitable for feeding into :mod:`compare` / :mod:`rliable_bridge`. The
+        default ``metric="final_fitness"`` resolves through
+        :attr:`RunRecord.comparison_score`, i.e. it prefers the held-out
+        ``eval_mean_reward`` and never silently substitutes a training reward
+        without it being reflected in :meth:`score_provenances`.
         """
         groups: Dict[str, List[float]] = {}
         for r in self.runs:
             if algorithm is not None and r.algorithm != algorithm:
                 continue
-            value: Any
-            if metric == "final_fitness":
-                value = r.final_fitness
-            else:
-                value = r.summary.get(metric)
+            value = self._metric_value(r, metric)
             if value is None:
                 continue
-            try:
-                fv = float(value)
-            except (TypeError, ValueError):
-                continue
-            groups.setdefault(r.algorithm, []).append(fv)
+            groups.setdefault(r.algorithm, []).append(float(value))
         return groups
+
+    def score_provenances(
+        self,
+        metric: str = "final_fitness",
+        *,
+        algorithm: Optional[str] = None,
+    ) -> Dict[str, set]:
+        """Group score provenances by algorithm, aligned with :meth:`final_scores`.
+
+        Returns ``{algorithm: {provenance, ...}}`` over the same runs
+        :meth:`final_scores` would include. A group whose set is not a single
+        ``{"held_out"}`` (or, across groups, a non-singleton union) signals a
+        comparison that mixes held-out and self-reported metrics and must not
+        be reported as a significance verdict.
+        """
+        out: Dict[str, set] = {}
+        for r in self.runs:
+            if algorithm is not None and r.algorithm != algorithm:
+                continue
+            if self._metric_value(r, metric) is None:
+                continue
+            prov = (
+                r.score_provenance
+                if metric in ("final_fitness", "comparison_score", "eval_mean_reward")
+                else "explicit_metric"
+            )
+            out.setdefault(r.algorithm, set()).add(prov)
+        return out
 
 
 def load_experiment(
