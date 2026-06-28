@@ -24,10 +24,11 @@ R -> EX: filter(algorithm=...)
 EX --> R: filtered Experiment
 
 R -> EX: summary_table()
-EX --> R: pd.DataFrame[algorithm, env, seed, run_id, wall_time_s, final_fitness]
+EX --> R: pd.DataFrame[algorithm, env, seed, run_id, wall_time_s,\n  final_fitness, eval_mean_reward, score_provenance]
 
 R -> EX: final_scores(metric="final_fitness")
-EX --> R: dict[algo -> ndarray]
+note right of EX: "final_fitness" resolves through RunRecord.comparison_score —\nprefers held-out eval_mean_reward, never silently substitutes a\ntraining reward (provenance via score_provenances(metric))
+EX --> R: dict[algo -> ndarray]  (held-out-preferred)
 
 R -> AG: aggregate_summary(score_groups)
 AG --> R: DataFrame[mean+CI, iqm+CI, median]

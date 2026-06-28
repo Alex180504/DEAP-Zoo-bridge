@@ -1339,7 +1339,18 @@ package "deap_pettingzoo.analysis" {
     +run_id: str
     +wall_time_s: Optional[float]
     +final_fitness: Optional[float]
+    +eval_mean_reward: Optional[float]
+    +comparison_score: Optional[float]
+    +score_provenance: str
   }
+  note bottom of RunRecord
+    final_fitness = genuine optimiser objective
+    (final_fitness/best_fitness/coevolution),
+    no longer coalesces mean_episode_reward.
+    comparison_score prefers held-out
+    eval_mean_reward; score_provenance tags it
+    held_out | training_fitness | training_reward.
+  end note
 
   class Experiment {
     +root: Path
@@ -1349,7 +1360,14 @@ package "deap_pettingzoo.analysis" {
     +by_env(): dict[str, list[RunRecord]]
     +summary_table(): pd.DataFrame
     +final_scores(metric): dict[str, ndarray]
+    +score_provenances(metric): dict[str, set]
   }
+  note bottom of Experiment
+    final_scores(metric="final_fitness") resolves
+    via comparison_score (held-out preferred);
+    score_provenances() exposes per-group
+    provenance so a mixed comparison is blocked.
+  end note
 
   class loaders <<module>> {
     +load_run(run_dir): RunRecord
