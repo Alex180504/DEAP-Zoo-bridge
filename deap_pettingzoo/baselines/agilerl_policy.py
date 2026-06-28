@@ -228,11 +228,26 @@ class AgileRLPolicyWrapper:
         """Return a deterministic action for the next agent in rotation.
 
         Accepts and ignores extra keyword arguments (e.g. ``deterministic``)
-        so it can be dropped into evaluators that pass such flags.
+        so it can be dropped into evaluators that pass such flags. This
+        broadcast path assumes the caller queries agents once each per step in
+        a fixed full-roster order; for an order-independent dispatch that stays
+        correct when the active-agent set shrinks mid-episode use
+        :meth:`action_for` / :meth:`policy_map`.
         """
         agent_id = self._agent_ids[self._call_index % len(self._agent_ids)]
         self._call_index += 1
+        return self.action_for(agent_id, observation)
 
+    def action_for(self, agent_id: str, observation: np.ndarray) -> Any:
+        """Return this policy's action for an explicitly-named ``agent_id``.
+
+        Order-independent counterpart to :meth:`get_action`: because the caller
+        names the agent, the dispatch stays correct when the active-agent set
+        changes mid-episode (e.g. an environment where an agent terminates
+        early), which the round-robin rotation in :meth:`get_action` does not.
+        Decentralized actors read only the queried agent's own observation, so
+        zero-filled placeholders for not-yet-seen agents are harmless.
+        """
         self._obs_cache[agent_id] = np.asarray(observation)
         obs_dict = self._build_full_obs_dict()
 
@@ -251,6 +266,17 @@ class AgileRLPolicyWrapper:
         if action.shape == ():
             return action.item()
         return action
+
+    def policy_map(self) -> Dict[str, "_AgentPolicyView"]:
+        """Return a per-agent ``{agent_id: view}`` map for held-out evaluation.
+
+        Each view dispatches to this wrapper via :meth:`action_for` for its own
+        agent id, so :class:`UnifiedEvaluator`'s ``policy_map`` path scores the
+        policy correctly even when the active-agent set shrinks mid-episode —
+        the broadcast/rotation path (:meth:`get_action`) assumes a fixed full
+        roster. The views share this wrapper's observation cache and reset.
+        """
+        return {aid: _AgentPolicyView(self, aid) for aid in self._agent_ids}
 
     def reset(self) -> None:
         """Reset the agent rotation counter and obs cache for a new episode."""
@@ -443,6 +469,26 @@ class AgileRLPolicyWrapper:
             multidiscrete_nvecs=multidiscrete_nvecs,
             agent_actor_idx=agent_actor_idx,
         )
+
+
+class _AgentPolicyView:
+    """Per-agent :class:`PolicyProtocol` view over an :class:`AgileRLPolicyWrapper`.
+
+    Produced by :meth:`AgileRLPolicyWrapper.policy_map`. Binds a fixed agent id
+    and delegates to the parent wrapper's :meth:`~AgileRLPolicyWrapper.action_for`,
+    giving the order-independent dispatch that ``UnifiedEvaluator``'s per-agent
+    ``policy_map`` path needs (robust to a shrinking active-agent set).
+    """
+
+    def __init__(self, wrapper: "AgileRLPolicyWrapper", agent_id: str) -> None:
+        self._wrapper = wrapper
+        self._agent_id = agent_id
+
+    def get_action(self, observation: np.ndarray, **_: Any) -> Any:
+        return self._wrapper.action_for(self._agent_id, observation)
+
+    def reset(self) -> None:
+        self._wrapper.reset()
 
 
 class FrozenRLPolicyWrapper:

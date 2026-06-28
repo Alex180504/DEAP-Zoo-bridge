@@ -33,9 +33,19 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
+# Held-out re-evaluation defaults. Every standard sub-run is re-scored with a
+# shared :class:`UnifiedEvaluator` after training so EA and RL backends carry a
+# directly comparable metric.
+_EVAL_EPISODES = 20
+_EVAL_MAX_STEPS = 500
+#: Base offset for the held-out eval RNG. The episode seeds are derived from
+#: ``_EVAL_SEED_BASE + sub.seed`` so the *i*-th repeat of every algorithm is
+#: scored on the *same* paired set of evaluation episodes.
+_EVAL_SEED_BASE = 90_000_000
+_EVAL_PROVENANCE = "held_out_unified"
+
+
 # ProgressWriter
-# ---------------------------------------------------------------------------
 
 
 class ProgressWriter:
@@ -107,9 +117,128 @@ def _write_result(
         pass
 
 
-# ---------------------------------------------------------------------------
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Write ``payload`` as JSON to ``path`` via a temp-file + replace.
+
+    ``sort_keys=True`` mirrors :meth:`RunManifest.to_json` so a re-evaluated
+    ``manifest.json`` keeps the same key ordering as a freshly-written one.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    os.replace(str(tmp), str(path))
+
+
+def _persist_eval_metrics(
+    run_dir: Path,
+    eval_metrics: Dict[str, Any],
+) -> None:
+    """Merge held-out eval metrics into a run's on-disk summary.
+
+    :attr:`RunRecord.summary` prefers ``manifest.json``'s ``final_summary``
+    (written by the trainer before the runner regains control) and only falls
+    back to ``summary.json``, so the eval keys are merged into **both** to keep
+    the analysis/UI layers consistent regardless of which a loader reads.
+
+    Best-effort: a persistence failure is logged but never raised, so it cannot
+    fail an otherwise-complete run.
+    """
+    manifest_path = run_dir / "manifest.json"
+    try:
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            final_summary = dict(manifest.get("final_summary") or {})
+            final_summary.update(eval_metrics)
+            manifest["final_summary"] = final_summary
+            _atomic_write_json(manifest_path, manifest)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Could not merge eval metrics into %s", manifest_path)
+
+    summary_path = run_dir / "summary.json"
+    try:
+        summary: Dict[str, Any] = {}
+        if summary_path.is_file():
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary.update(eval_metrics)
+        _atomic_write_json(summary_path, summary)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Could not merge eval metrics into %s", summary_path)
+
+
+def _evaluate_policy(evaluator: Any, policy: Any, sub: Any, eval_seed: int) -> Any:
+    """Run the held-out evaluation for one trained ``policy``.
+
+    Multi-agent RL policies (those exposing ``policy_map()``, i.e.
+    :class:`AgileRLPolicyWrapper`) are evaluated through the evaluator's
+    per-agent ``policy_map`` path, which dispatches by agent id and so stays
+    correct even when the active-agent set shrinks mid-episode. Single-policy
+    backends (EA / CMA-ES / PSO) keep the simple broadcast path.
+    """
+    common = dict(
+        env_name=sub.config.env_name,
+        num_episodes=_EVAL_EPISODES,
+        seed=eval_seed,
+        env_config=sub.config.env_config,
+    )
+    policy_map = policy.policy_map() if hasattr(policy, "policy_map") else None
+    if policy_map:
+        return evaluator.evaluate(None, policy_map=policy_map, **common)
+    return evaluator.evaluate(policy, **common)
+
+
+def _record_held_out_eval(
+    evaluator: Any,
+    sub: Any,
+    result: Any,
+    metrics_row: Dict[str, Any],
+    run_dir: Optional[str],
+    label: str,
+) -> None:
+    """Re-evaluate ``result.policy`` on the held-out metric and record it.
+
+    Mutates ``metrics_row`` in place (the per-sub-run entry of
+    ``final_metrics``) with ``eval_mean_reward`` / ``eval_std_reward`` /
+    ``eval_episodes`` / ``eval_metric_provenance``, and merges the same keys
+    into the run's on-disk summary via :func:`_persist_eval_metrics`. The eval
+    seed is derived from ``sub.seed`` so the i-th repeat of every algorithm is
+    scored on the same paired episodes. Best-effort: any failure is logged and
+    recorded as ``eval_metric_provenance="eval_failed"`` rather than raised, so
+    re-eval can never abort an otherwise-complete run.
+    """
+    try:
+        eval_seed = _EVAL_SEED_BASE + int(sub.seed)
+        eval_result = _evaluate_policy(evaluator, result.policy, sub, eval_seed)
+    except Exception as exc:  # noqa: BLE001 - re-eval must not abort the run
+        logger.warning("Held-out re-eval failed for %s: %s", label, exc)
+        metrics_row["eval_mean_reward"] = None
+        metrics_row["eval_metric_provenance"] = "eval_failed"
+        # Persist the failure marker (no eval_mean_reward) so the analysis layer
+        # treats this run as "could not be scored on the held-out metric" and
+        # excludes it from comparisons, rather than silently re-admitting it on
+        # its incomparable self-reported metric on reload.
+        if run_dir:
+            _persist_eval_metrics(Path(run_dir), {"eval_metric_provenance": "eval_failed"})
+        return
+
+    eval_metrics = {
+        "eval_mean_reward": float(eval_result.mean_reward),
+        "eval_std_reward": float(eval_result.std_reward),
+        "eval_episodes": _EVAL_EPISODES,
+        "eval_metric_provenance": _EVAL_PROVENANCE,
+    }
+    metrics_row.update(eval_metrics)
+    if run_dir:
+        _persist_eval_metrics(Path(run_dir), eval_metrics)
+    print(
+        f"    held-out eval: mean={eval_result.mean_reward:.3f} "
+        f"(±{eval_result.std_reward:.3f}, n={_EVAL_EPISODES})",
+        flush=True,
+    )
+
+
 # Main entry
-# ---------------------------------------------------------------------------
 
 
 def run_experiment(
@@ -169,15 +298,26 @@ def run_experiment(
 
     # 4. Execute sub-runs
     from deap_pettingzoo.baselines.comparison import get_trainer
+    from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 
     progress_writer = ProgressWriter(experiment_dir)
     run_dirs: List[str] = []
     final_metrics: Dict[str, Any] = {}
     total_runs = len(plan.sub_runs)
 
+    # One shared held-out evaluator for the whole standard comparison so EA and
+    # RL backends are scored on the same metrics. Co-evolution sub-runs
+    # produce a per-side policy map rather than a single comparable policy, so
+    # they keep their own reported metric and are not re-evaluated here.
+    evaluator: Optional[UnifiedEvaluator] = (
+        UnifiedEvaluator(max_steps=_EVAL_MAX_STEPS)
+        if plan.mode == "standard"
+        else None
+    )
+
     for sub in plan.sub_runs:
         label = f"[{sub.run_index + 1}/{total_runs}] {sub.algorithm} seed={sub.seed}"
-        # Keep the human-facing progress print on the terminal (always captured
+        # Keep the user-facing progress print on the terminal (always captured
         # in _stdout.log) and mirror it through logging for the structured feed.
         print(f"--> Starting {label}", flush=True)
         logger.info("Starting sub-run %s", label)
@@ -220,6 +360,16 @@ def run_experiment(
             "num_generations": result.metrics.get("num_generations"),
             "training_time_s": result.training_time,
         }
+
+        # Held-out re-eval: score the trained policy with the shared evaluator
+        # so every backend carries a comparable ``eval_mean_reward``.
+        if evaluator is not None and result.policy is not None:
+            _record_held_out_eval(
+                evaluator, sub, result, final_metrics[algo_key], run_dir, label
+            )
+
+    if evaluator is not None:
+        evaluator.close()
 
     # 5. Success
     print(f"OK  All {total_runs} sub-runs completed.", flush=True)

@@ -58,14 +58,34 @@ def build_report(
     summary = experiment.summary_table()
     score_groups = experiment.final_scores(metric=metric)
     aggregate = aggregate_summary(score_groups)
-    pairwise = pairwise_table(experiment, metric=metric, test="mann_whitney")
+
+    # Provenance gate: cross-algorithm comparisons (pairwise significance,
+    # cross-task normalisation) are only valid when every compared group shares
+    # one score provenance. When held-out and self-reported metrics are mixed,
+    # suppress those sections rather than publish a wrong comparison.
+    provenances = experiment.score_provenances(metric=metric)
+    comparable = (
+        set().union(*provenances.values()) - {"none"} if provenances else set()
+    )
+    provenance_mixed = len(comparable) > 1
+    metric_provenance = (
+        "mixed: " + ", ".join(sorted(comparable))
+        if provenance_mixed
+        else (next(iter(comparable)) if comparable else "none")
+    )
+
+    pairwise = (
+        None
+        if provenance_mixed
+        else pairwise_table(experiment, metric=metric, test="mann_whitney")
+    )
 
     figures: list = []
     if include_figures and score_groups:
         figures.extend(_render_figures(experiment, score_groups, output_dir))
 
     multitask: Optional[dict] = None
-    if len(experiment.by_env()) >= 2:
+    if not provenance_mixed and len(experiment.by_env()) >= 2:
         multitask = _build_multitask_section(
             experiment,
             output_dir,
@@ -84,6 +104,8 @@ def build_report(
             figures=figures,
             metric=metric,
             multitask=multitask,
+            metric_provenance=metric_provenance,
+            provenance_mixed=provenance_mixed,
         )
     return _write_html(
         output_dir,
@@ -95,6 +117,8 @@ def build_report(
         figures=figures,
         metric=metric,
         multitask=multitask,
+        metric_provenance=metric_provenance,
+        provenance_mixed=provenance_mixed,
     )
 
 
@@ -215,11 +239,24 @@ def _write_markdown(
     figures,
     metric: str,
     multitask: Optional[dict] = None,
+    metric_provenance: str = "none",
+    provenance_mixed: bool = False,
 ) -> Path:
     lines: list = [f"# {title}", ""]
     lines.append(f"- **Runs analysed:** {n_runs}")
     lines.append(f"- **Score metric:** `{metric}`")
+    lines.append(f"- **Score provenance:** {metric_provenance}")
     lines.append("")
+    if provenance_mixed:
+        lines.append(
+            "> ⚠️ **Mixed metric provenance — cross-algorithm comparison "
+            "suppressed.** The selected runs mix held-out evaluation rewards "
+            "with self-reported training metrics, which are not comparable. "
+            "Re-run the missing backends so every group carries a held-out "
+            "`eval_mean_reward` before reading pairwise significance or "
+            "cross-task aggregates."
+        )
+        lines.append("")
 
     lines.append("## Per-run summary")
     lines.append("")
@@ -233,7 +270,13 @@ def _write_markdown(
 
     lines.append("## Pairwise comparison (Mann-Whitney U + Cliff's delta)")
     lines.append("")
-    lines.append(_df_to_md(pairwise))
+    if provenance_mixed:
+        lines.append(
+            "_Suppressed — metric provenance is mixed across groups "
+            "(see warning above)._"
+        )
+    else:
+        lines.append(_df_to_md(pairwise))
     lines.append("")
 
     if multitask is not None:
@@ -282,12 +325,28 @@ def _write_html(
     figures,
     metric: str,
     multitask: Optional[dict] = None,
+    metric_provenance: str = "none",
+    provenance_mixed: bool = False,
 ) -> Path:
     summary_html = _df_to_html(summary)
     aggregate_html = _df_to_html(
         aggregate.reset_index() if len(aggregate) else aggregate
     )
-    pairwise_html = _df_to_html(pairwise)
+    if provenance_mixed:
+        pairwise_html = (
+            "<p><strong>⚠️ Suppressed</strong> — metric provenance is mixed "
+            "across groups; cross-algorithm comparison is not valid.</p>"
+        )
+        provenance_html = (
+            '<p style="color:#b00;"><strong>⚠️ Mixed metric provenance — '
+            "cross-algorithm comparison suppressed.</strong> Held-out eval "
+            "rewards are mixed with self-reported training metrics; re-run the "
+            "missing backends before reading significance or cross-task "
+            "aggregates.</p>"
+        )
+    else:
+        pairwise_html = _df_to_html(pairwise)
+        provenance_html = ""
     fig_html_parts: list = []
     for label, fname in figures:
         fig_html_parts.append(
@@ -363,7 +422,9 @@ figcaption {{ color: var(--muted); font-size: 0.9rem; margin-top: 0.3rem; }}
 </style></head><body>
 <h1>{title}</h1>
 <p><strong>Runs analysed:</strong> {n_runs} &middot;
-<strong>Score metric:</strong> <code>{metric}</code></p>
+<strong>Score metric:</strong> <code>{metric}</code> &middot;
+<strong>Provenance:</strong> <code>{metric_provenance}</code></p>
+{provenance_html}
 <h2>Per-run summary</h2>
 {summary_html}
 <h2>Aggregate (mean / median / IQM with 95% bootstrap CI)</h2>
