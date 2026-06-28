@@ -16,16 +16,28 @@ activate Runner
 note right of Runner
   config specifies:
   - algorithms: ['ea', 'maddpg', 'ippo', ...]
+  - env_config: {...}  (threaded into train + eval)
   - budget_mode: ENV_STEPS
   - budget_value: 100000
   - num_seeds: 3
   - eval_episodes: 100
 end note
 
+== Planning Phase ==
+
+Runner -> Runner: build_configs(ExperimentSpec(env, algos, env_config, budget))
+note right of Runner
+  Same builder as the subprocess runner (F-3.3-04):
+  env_config threading + SuperSuit auto-pad,
+  catalog param routing, and a per-(algorithm, repeat)
+  training seed paired by repeat index (F-3.3-03).
+end note
+Runner -> Runner: group sub_runs by (canonical) algorithm
+
 == Training Phase ==
 
-loop for each algorithm in config.algorithms
-    Runner -> Runner: get_trainer(algorithm)
+loop for each algorithm (grouped sub_runs)
+    Runner -> Runner: get_trainer(algorithm, **sub.trainer_params)
 
     alt algorithm == 'ea'
         Runner -> EA: train(training_config)
@@ -81,9 +93,10 @@ end
 == Evaluation Phase ==
 
 loop for each algorithm
-    loop for each trained policy (seed)
-        Runner -> Evaluator: evaluate(policy, env_name, eval_episodes)
+    loop for each trained policy (repeat i)
+        Runner -> Evaluator: evaluate(policy, sub.config.env_name,\n  env_config=sub.config.env_config,\n  seed=_EVAL_SEED_BASE + i, num_episodes=eval_episodes)
         activate Evaluator
+        note right of Evaluator: paired by repeat index — the i-th repeat of every\nalgorithm is scored on the same eval episodes (F-3.3-03)
 
         loop for eval_episodes times
             Evaluator -> Evaluator: _run_episode(policy, seed)

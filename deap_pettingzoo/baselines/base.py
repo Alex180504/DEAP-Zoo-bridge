@@ -428,7 +428,16 @@ class ComparisonConfig:
         budget_value: Budget amount in units specified by budget_mode.
         num_seeds: Number of independent runs per algorithm.
         eval_episodes: Number of episodes for final evaluation.
-        algorithm_configs: Algorithm-specific configurations (nested dicts).
+        env_config: Environment configuration dict threaded into **both**
+            training and the held-out evaluation so every backend trains and is
+            scored on the identical environment (F-3.3-02). Catalog defaults
+            fill in the rest via :func:`build_configs`.
+        max_steps_per_episode: Per-episode step cap for the held-out evaluator.
+            A first-class field (previously mis-read from the per-algorithm
+            ``algorithm_configs`` namespace).
+        algorithm_configs: Algorithm-specific configurations. Each entry may
+            carry ``trainer_params`` / ``algorithm_params`` sub-dicts; both are
+            flattened and re-routed by catalog target during config building.
         output_dir: Directory for saving results.
     """
     algorithms: List[str]
@@ -437,6 +446,8 @@ class ComparisonConfig:
     budget_value: int
     num_seeds: int = 3
     eval_episodes: int = 100
+    env_config: Dict[str, Any] = field(default_factory=dict)
+    max_steps_per_episode: int = 500
     algorithm_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     output_dir: Optional[Path] = None
     

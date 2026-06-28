@@ -14,9 +14,6 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     ComparisonConfig,
-    TrainingConfig,
-    TrainingResult,
-    EvalResult,
 )
 from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 
@@ -59,23 +56,51 @@ def get_trainer(name: str, **kwargs) -> BaselineTrainer:
     return _TRAINER_REGISTRY[name](**kwargs)
 
 
+#: Base offset for the held-out eval RNG. Episode seeds are derived from
+#: ``_EVAL_SEED_BASE + repeat_index`` so the *i*-th repeat of every algorithm is
+#: scored on the same paired set of evaluation episodes.
+_EVAL_SEED_BASE = 90_000_000
+
+
+def _flatten_algo_hyperparams(algo_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a legacy ``algorithm_configs`` entry into one hyperparameter dict.
+
+    The legacy nested shape (``{"trainer_params": {...}, "algorithm_params":
+    {...}}``) is collapsed into a single flat mapping; :func:`build_configs`
+    then re-routes each key to ``trainer_params`` / ``algorithm_params`` by its
+    catalog ``ParamTarget``, so the caller no longer has to know the split.
+    """
+    flat: Dict[str, Any] = {}
+    for namespace in ("trainer_params", "algorithm_params"):
+        block = algo_config.get(namespace)
+        if isinstance(block, dict):
+            flat.update(block)
+    return flat
+
+
 def compare_baselines(
     config: ComparisonConfig,
     validate: bool = True,
 ) -> Dict[str, Any]:
     """Compare multiple baseline algorithms.
-    
+
     High-level function that:
-    1. Trains each algorithm with matched budget across multiple seeds
-    2. Evaluates all trained policies using unified evaluator
-    3. Aggregates results and computes statistics
-    4. Saves results to disk (if output_dir specified)
-    
+
+    1. Builds a unified :class:`BuiltPlan` via :func:`build_configs` so this
+       legacy entry point inherits the same ``env_config`` threading, SuperSuit
+       auto-padding, fitness/recording/parallelism handling, and per-repeat
+       seeds the subprocess runner uses.
+    2. Trains each algorithm with the matched budget across ``num_seeds``.
+    3. Evaluates every trained policy with one shared :class:`UnifiedEvaluator`
+       on the **same** ``env_config`` used for training, with eval episodes
+       paired by repeat index.
+    4. Aggregates per-algorithm statistics and saves results (if ``output_dir``).
+
     Args:
         config: Comparison configuration.
         validate: If True (default), run compatibility checks before training
             and skip algorithms that are incompatible with the environment.
-        
+
     Returns:
         Dictionary with comparison results:
         {
@@ -97,35 +122,57 @@ def compare_baselines(
             'config': {...},
         }
     """
-    # Create evaluator
-    evaluator = UnifiedEvaluator(
-        max_steps=config.algorithm_configs.get('max_steps_per_episode', 500)
+    from collections import OrderedDict
+
+    from deap_pettingzoo.baselines.experiment_spec import (
+        BudgetSpec,
+        ExperimentSpec,
+        build_configs,
     )
-    
-    # Results storage
-    results = {
+
+    # Shared evaluator
+    evaluator = UnifiedEvaluator(max_steps=config.max_steps_per_episode)
+
+    results: Dict[str, Any] = {
         'config': {
             'env_name': config.env_name,
+            'env_config': dict(config.env_config),
             'budget_mode': config.budget_mode.value,
             'budget_value': config.budget_value,
             'num_seeds': config.num_seeds,
             'eval_episodes': config.eval_episodes,
         }
     }
-    
-    # Train and evaluate each algorithm
-    for algorithm in config.algorithms:
+
+    # Build the unified plan once; group the resulting sub-runs by (canonical) algorithm, preserving the requested order.
+    spec = ExperimentSpec(
+        environment=config.env_name,
+        algorithms=list(config.algorithms),
+        env_config=dict(config.env_config),
+        hyperparameters={
+            algo: _flatten_algo_hyperparams(config.algorithm_configs.get(algo, {}))
+            for algo in config.algorithms
+        },
+        budget=BudgetSpec(
+            mode=config.budget_mode.value,
+            value=config.budget_value,
+            num_seeds=config.num_seeds,
+        ),
+    )
+    plan = build_configs(spec, output_root=config.output_dir)
+
+    subs_by_algo: "OrderedDict[str, list]" = OrderedDict()
+    for sub in plan.sub_runs:
+        subs_by_algo.setdefault(sub.algorithm, []).append(sub)
+
+    for algorithm, subs in subs_by_algo.items():
         print(f"\n{'='*70}")
         print(f"Algorithm: {algorithm.upper()}")
         print(f"{'='*70}")
-        
-        # Get algorithm-specific config
-        algo_config = config.algorithm_configs.get(algorithm, {})
-        
-        # Create trainer
-        trainer = get_trainer(algorithm, **algo_config.get('trainer_params', {}))
-        
-        # Check budget mode support
+
+        # One trainer instance for the per-algorithm capability/compat checks.
+        trainer = get_trainer(algorithm, **subs[0].trainer_params)
+
         if not trainer.supports_budget_mode(config.budget_mode):
             print(f"Warning: {algorithm} does not support {config.budget_mode.value}")
             logger.warning(
@@ -133,8 +180,7 @@ def compare_baselines(
                 algorithm, config.budget_mode.value,
             )
             continue
-        
-        # Validate environment compatibility
+
         if validate:
             from deap_pettingzoo.baselines.compatibility import validate_compatibility
             compat = validate_compatibility(trainer, config.env_name, algorithm)
@@ -152,55 +198,50 @@ def compare_baselines(
                 for w in compat.warnings:
                     print(f"[{algorithm}] Warning: {w}")
                     logger.warning("[%s] %s", algorithm, w)
-        
-        # Train across seeds
+
+        # Train + evaluate each repeat. ``sub.config`` already carries the
+        # threaded env_config, paired training seed, and output_dir.
         seed_results = []
-        for seed_idx in range(config.num_seeds):
-            print(f"\n--- Seed {seed_idx + 1}/{config.num_seeds} ---")
-            
-            # Create training config
-            training_config = TrainingConfig(
-                env_name=config.env_name,
-                budget_mode=config.budget_mode,
-                budget_value=config.budget_value,
-                num_seeds=1,  # Single seed per training run
-                algorithm_params={
-                    **algo_config.get('algorithm_params', {}),
-                    'seed': seed_idx,
-                },
-                output_dir=config.output_dir / algorithm / f"seed_{seed_idx}" if config.output_dir else None,
-            )
-            
-            # Train
+        for sub in subs:
+            print(f"\n--- Seed {sub.seed + 1}/{config.num_seeds} ---")
+
+            run_trainer = get_trainer(algorithm, **sub.trainer_params)
             print(f"Training {algorithm}...")
-            training_result = trainer.train(training_config)
+            training_result = run_trainer.train(sub.config)
             print(f"Training completed in {training_result.training_time:.2f}s")
-            
-            # Evaluate
+
             print(f"Evaluating on {config.eval_episodes} episodes...")
-            eval_result = evaluator.evaluate(
-                policy=training_result.policy,
-                env_name=config.env_name,
+            # Multi-agent RL wrappers expose ``policy_map()`` for an
+            # order-independent per-agent dispatch (robust to a shrinking
+            # active-agent set); single-policy backends use the broadcast path.
+            _policy = training_result.policy
+            _policy_map = _policy.policy_map() if hasattr(_policy, "policy_map") else None
+            _eval_kwargs = dict(
+                env_name=sub.config.env_name,
                 num_episodes=config.eval_episodes,
-                seed=seed_idx * 1000,  # Deterministic evaluation seeds
-                render=False
+                seed=_EVAL_SEED_BASE + int(sub.seed),  # paired by repeat index
+                env_config=sub.config.env_config,
+                render=False,
             )
+            if _policy_map:
+                eval_result = evaluator.evaluate(None, policy_map=_policy_map, **_eval_kwargs)
+            else:
+                eval_result = evaluator.evaluate(_policy, **_eval_kwargs)
             print(f"Evaluation: mean={eval_result.mean_reward:.2f}, "
                   f"std={eval_result.std_reward:.2f}")
-            
-            # Store results
+
             seed_results.append({
-                'seed': seed_idx,
+                'seed': sub.seed,
                 'training_time': training_result.training_time,
                 'training_metrics': training_result.metrics,
                 'eval_result': eval_result.to_dict(),
             })
-        
+
         # Aggregate across seeds
         if seed_results:
             mean_rewards = [sr['eval_result']['mean_reward'] for sr in seed_results]
             best_seed_idx = int(np.argmax(mean_rewards))
-            
+
             results[algorithm] = {
                 'seeds': seed_results,
                 'mean_reward': float(np.mean(mean_rewards)),
@@ -208,28 +249,29 @@ def compare_baselines(
                 'min_reward': float(np.min(mean_rewards)),
                 'max_reward': float(np.max(mean_rewards)),
                 'best_seed': best_seed_idx,
+                'eval_metric_provenance': 'held_out_unified',
                 'capabilities': trainer.get_capabilities(),
             }
-            
+
             print(f"\n{algorithm.upper()} Summary:")
             print(f"  Mean reward: {results[algorithm]['mean_reward']:.2f} "
                   f"± {results[algorithm]['std_reward']:.2f}")
             print(f"  Best seed: {best_seed_idx} "
                   f"(reward: {mean_rewards[best_seed_idx]:.2f})")
-    
+
     # Save results
     if config.output_dir:
         config.output_dir.mkdir(parents=True, exist_ok=True)
         results_path = config.output_dir / 'comparison_results.json'
-        
+
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
-        
+
         print(f"\nResults saved to: {results_path}")
-    
+
     # Cleanup
     evaluator.close()
-    
+
     return results
 
 
@@ -237,11 +279,10 @@ def compare_baselines(
 def _register_builtins():
     """Register built-in trainers, sourcing the mapping from the catalog.
 
-    The algorithm → trainer-class bindings come from
+    The algorithm -> trainer-class bindings come from
     :func:`deap_pettingzoo.catalog.algorithms.iter_trainer_bindings`, so the
     trainer registry and the unified catalog can never drift apart (this is how
-    ``pso`` — historically missing from the registry — is now registered as a
-    first-class standalone algorithm).
+    ``pso`` is registered as a standalone algorithm in the UI catalog).
 
     Importing a trainer module does NOT require its optional extra (the heavy
     ``import agilerl`` / ``import torch`` calls are deferred until ``train()``),

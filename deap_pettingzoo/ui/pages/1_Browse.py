@@ -256,6 +256,10 @@ rows = [
         "final_fitness": r.final_summary.get("final_fitness")
         or r.final_summary.get("best_fitness")
         or r.final_summary.get("mean_episode_reward"),
+        # Held-out re-eval reward — the cross-backend-comparable metric (the
+        # `final_fitness` column above still coalesces a self-reported training
+        # reward for legacy/RL runs, so surface the honest metric alongside it).
+        "eval_mean_reward": r.final_summary.get("eval_mean_reward"),
         "run_dir": str(r.run_dir),
         "origin": f"UI ({r.experiment_id})" if r.experiment_id else "",
         "exp_id": r.experiment_id or "",
