@@ -542,6 +542,10 @@ class RLSideState(SideState):
             )
         self.generation += 1
         _gen_t0 = time.time()
+        # Snapshot the cumulative transition counter so we can report the
+        # per-generation delta (GenerationStats.env_steps is per-generation,
+        # consistent with the EA/CMA/PSO sides and the trainer's top-level sum).
+        _transitions_before = self._total_transitions
 
         episode_returns: List[float] = []
 
@@ -625,7 +629,7 @@ class RLSideState(SideState):
             min=float(arr.min()),
             max=best,
             best_fitness=best,
-            env_steps=self._total_transitions,
+            env_steps=int(self._total_transitions - _transitions_before),
             wall_time_s=time.time() - _gen_t0,
         )
         self.history.append(stats)

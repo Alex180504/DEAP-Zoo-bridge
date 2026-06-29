@@ -744,8 +744,13 @@ def _worker_evaluate(
             not expose an init hook.
 
     Returns:
-        Fitness tuple from the evaluator, ready for
-        ``individual.fitness.values``.
+        ``(fitness, steps_delta)`` where ``fitness`` is the evaluator's
+        fitness tuple (ready for ``individual.fitness.values``) and
+        ``steps_delta`` is the real number of env ticks this single
+        evaluation consumed. The delta is measured around the evaluate
+        call so it is robust to the per-process cached evaluator (and to
+        SCOOP / Dask in-process fallbacks) to prevent double counting regardless
+        of backend.
     """
     payload, spec = payload_and_spec
     evaluator = _ensure_worker_evaluator(spec)
@@ -759,7 +764,9 @@ def _worker_evaluate(
     )
     genome.set_weights(np.asarray(payload.weights, dtype=float))
     ind = _LightweightIndividual(genome)
-    return evaluator.evaluate(ind, seed=payload.seed)
+    before = evaluator.env_steps_consumed
+    fitness = evaluator.evaluate(ind, seed=payload.seed)
+    return fitness, int(evaluator.env_steps_consumed - before)
 
 
 def _individual_to_payload(
@@ -789,6 +796,8 @@ def _individual_to_payload(
 def make_parallel_evaluate_map(
     executor: Any,
     spec: _EvalWorkerSpec,
+    *,
+    step_sink: Optional[List[int]] = None,
 ) -> Any:
     """Build a ``map``-shaped callable for parallel fitness evaluation.
 
@@ -805,13 +814,24 @@ def make_parallel_evaluate_map(
     For the in-house ``_run_simple`` loop the same object is usable
     as a one-arg helper via
     :func:`evaluate_population_parallel`.
+
+    Args:
+        step_sink: Optional 1-element mutable list. When provided, the
+            real per-task env-step deltas returned by each worker are
+            summed into ``step_sink[0]`` (mirroring the ``_eval_counter``
+            idiom), letting the driver aggregate a worker-side counter
+            that otherwise never crosses back from the subprocess.
     """
     def _pmap(_evaluate_ignored, individuals: Iterable[Any]):
         inds = list(individuals)
         payloads = [
             (_individual_to_payload(ind), spec) for ind in inds
         ]
-        return list(executor.map(_worker_evaluate, payloads))
+        results = list(executor.map(_worker_evaluate, payloads))
+        if step_sink is not None:
+            step_sink[0] += sum(int(steps) for _, steps in results)
+        # Preserve the fitness-only ``toolbox.map`` contract.
+        return [fitness for fitness, _ in results]
 
     return _pmap
 
@@ -822,6 +842,7 @@ def evaluate_population_parallel(
     executor: Any,
     spec: _EvalWorkerSpec,
     eval_seeds: Optional[Iterable[Optional[int]]] = None,
+    step_sink: Optional[List[int]] = None,
 ) -> List[tuple]:
     """Evaluate a population via ``executor`` using worker rebuilds.
 
@@ -834,6 +855,14 @@ def evaluate_population_parallel(
             as the evaluator's ``seed=`` kwarg. Used by tests and the
             ``algorithm_params["deterministic_eval"]`` opt-in to make
             serial and parallel runs produce identical fitness values.
+        step_sink: Optional 1-element mutable list. When provided, the
+            real per-task env-step deltas returned by each worker are
+            summed into ``step_sink[0]`` so the driver can aggregate a
+            worker-side counter that never crosses back otherwise.
+
+    Returns:
+        The fitness-only list (one tuple per individual), preserving the
+        contract callers relied on before ``step_sink`` was added.
     """
     inds = list(individuals)
     if eval_seeds is None:
@@ -848,7 +877,10 @@ def evaluate_population_parallel(
         (_individual_to_payload(ind, seed=s), spec)
         for ind, s in zip(inds, seeds)
     ]
-    return list(executor.map(_worker_evaluate, payloads))
+    results = list(executor.map(_worker_evaluate, payloads))
+    if step_sink is not None:
+        step_sink[0] += sum(int(steps) for _, steps in results)
+    return [fitness for fitness, _ in results]
 
 
 # --------------------------------------------------------------------------

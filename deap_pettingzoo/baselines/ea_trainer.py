@@ -414,7 +414,22 @@ class EATrainer(BaselineTrainer):
         ea_params = self._translate_budget(config)
         num_generations = ea_params['num_generations']
         max_steps_per_episode = ea_params['max_steps_per_episode']
-        
+
+        # Opt-in consumed-step budgeting: run until the real env-step budget
+        # is exhausted instead of a precomputed generation count. Only the
+        # ``simple`` loop can honor it — the DEAP built-ins
+        # (mu_plus_lambda / mu_comma_lambda) run a fixed ``ngen``.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            if self.strategy != "simple":
+                raise ValueError(
+                    "budget_on_consumed=True is only supported by the EA "
+                    f"'simple' strategy; strategy={self.strategy!r} runs a "
+                    "DEAP built-in with a fixed generation count. Use "
+                    "budget_on_consumed=False or BudgetMode.GENERATIONS."
+                )
+            consumed_budget = int(config.budget_value)
+
         # Setup environment and evaluator
         env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
         sample_obs = env.reset(seed=0)
@@ -528,6 +543,21 @@ class EATrainer(BaselineTrainer):
             if not fitness_history:
                 return None
             entry = fitness_history[-1]
+            if consumed_budget is not None:
+                # Consumed-step budgeting: the generation count is not known up
+                # front, so report progress against the real env-step budget.
+                consumed = (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                )
+                return ProgressEvent(
+                    unit="env_step",
+                    current=consumed,
+                    total=consumed_budget,
+                    env_steps=consumed,
+                    best_fitness=entry.get("max"),
+                    mean_fitness=entry.get("mean"),
+                    wall_time_s=time.time() - start_time,
+                )
             return ProgressEvent(
                 unit="generation",
                 current=gen,
@@ -584,13 +614,21 @@ class EATrainer(BaselineTrainer):
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
         ) as executor:
+            # Aggregates real env-step deltas from parallel workers (whose
+            # per-process evaluator counters never cross back). Stays at 0
+            # on the serial path, where the main-process evaluator counter
+            # is authoritative instead.
+            _parallel_steps = [0]
+
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
             if effective_workers > 1:
                 toolbox.register(
                     "map",
-                    make_parallel_evaluate_map(executor, worker_spec),
+                    make_parallel_evaluate_map(
+                        executor, worker_spec, step_sink=_parallel_steps
+                    ),
                 )
-                
+
             base_eval_seed = config.algorithm_params.get("seed")
             _eval_counter = [0]
 
@@ -611,6 +649,7 @@ class EATrainer(BaselineTrainer):
                         executor=executor,
                         spec=worker_spec,
                         eval_seeds=seeds,
+                        step_sink=_parallel_steps,
                     )
                 return [
                     evaluator.evaluate(ind, seed=s)
@@ -633,19 +672,49 @@ class EATrainer(BaselineTrainer):
             })
             _emit_gen_progress(0)
 
-            # Evolution loop — strategy-dependent.
+            # Evolution loop — strategy-dependent. Defaults to the nominal
+            # generation count; the consumed-budgeting ``simple`` path below
+            # overrides it with the realized count once the loop stops.
+            realized_generations = num_generations
             if self.strategy == "simple":
-                self._run_simple(
-                    population, toolbox, stats, hof, fitness_history,
-                    num_generations, rng,
-                    eval_population=_eval_population,
-                    on_generation=_on_generation,
-                )
+                if consumed_budget is not None:
+                    # Drive to a generous safety cap and stop once the real
+                    # consumed budget is exhausted. The cap is a rigorous upper
+                    # bound: each generation consumes >= 1 tick per (re)evaluated
+                    # individual, and episodes run at most ``max_steps`` ticks,
+                    # so no more than ``nominal_gens * max_steps`` generations
+                    # are ever needed to exhaust the budget.
+                    safety_cap = (
+                        num_generations * max(1, max_steps_per_episode) + 10
+                    )
+
+                    def _consumed_reached() -> bool:
+                        consumed = (
+                            int(evaluator.env_steps_consumed)
+                            + int(_parallel_steps[0])
+                        )
+                        return consumed >= consumed_budget
+
+                    realized_generations = self._run_simple(
+                        population, toolbox, stats, hof, fitness_history,
+                        safety_cap, rng,
+                        eval_population=_eval_population,
+                        on_generation=_on_generation,
+                        stop_predicate=_consumed_reached,
+                    )
+                else:
+                    self._run_simple(
+                        population, toolbox, stats, hof, fitness_history,
+                        num_generations, rng,
+                        eval_population=_eval_population,
+                        on_generation=_on_generation,
+                    )
+                    realized_generations = num_generations
                 # Safety net: guarantee a final capture even if the last
                 # per-gen hook didn't land exactly on fraction 1.0 (dedups).
                 self._recorder.finalize(
-                    _ea_champion, iteration=num_generations,
-                    env_steps=(num_generations + 1) * env_steps_per_iteration,
+                    _ea_champion, iteration=realized_generations,
+                    env_steps=(realized_generations + 1) * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
@@ -745,7 +814,7 @@ class EATrainer(BaselineTrainer):
                     {
                         "algorithm": "ea",
                         "final_fitness": float(best_individual.fitness.values[0]),
-                        "num_generations": num_generations,
+                        "num_generations": realized_generations,
                         "population_size": self.population_size,
                         "strategy": self.strategy,
                     },
@@ -755,9 +824,16 @@ class EATrainer(BaselineTrainer):
             # Defensive: never fail training because of logging cleanup.
             pass
 
-        nominal_env_steps = (num_generations + 1) * env_steps_per_iteration
+        # Nominal ceiling tracks the realized generation count (equal to the
+        # requested count on the nominal path; the consumed-budgeting path runs
+        # a variable number of generations until the real budget is exhausted).
+        nominal_env_steps = (realized_generations + 1) * env_steps_per_iteration
+        # Correct on both paths: serial leaves ``_parallel_steps[0] == 0`` and
+        # the main-process evaluator counter is authoritative; parallel leaves
+        # the main-process evaluator counter at 0 and aggregates the workers'
+        # real per-task deltas into ``_parallel_steps[0]``.
         real_env_steps = (
-            int(evaluator.env_steps_consumed) if effective_workers <= 1 else None
+            int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
         )
 
         # Create result
@@ -767,7 +843,7 @@ class EATrainer(BaselineTrainer):
             metrics={
                 'fitness_history': fitness_history,
                 'final_fitness': best_individual.fitness.values[0],
-                'num_generations': num_generations,
+                'num_generations': realized_generations,
                 'population_size': self.population_size,
                 'env_steps_nominal': nominal_env_steps,
                 'env_steps_consumed': real_env_steps,
@@ -885,7 +961,8 @@ class EATrainer(BaselineTrainer):
         *,
         eval_population,
         on_generation=None,
-    ) -> None:
+        stop_predicate=None,
+    ) -> int:
         """In-house ``eaSimple``-style generational loop.
 
         Preserves the historical behaviour of :class:`EATrainer`:
@@ -902,7 +979,17 @@ class EATrainer(BaselineTrainer):
                 hall-of-fame and statistics are updated). Used by the
                 opt-in frame-recording machinery to fire one extra
                 champion-rollout episode.
+            stop_predicate: Optional zero-arg callable checked at the end of
+                each generation. When it returns ``True`` the loop breaks
+                early — used by the opt-in consumed-step budgeting to stop
+                once the real env-step budget is exhausted. ``num_generations``
+                then acts as a safety cap rather than an exact count.
+
+        Returns:
+            The realized generation count (equals ``num_generations`` on the
+            nominal path; may be fewer when ``stop_predicate`` breaks early).
         """
+        gen = 0
         for gen in range(1, num_generations + 1):
             offspring = toolbox.select(population, len(population))
             offspring = list(map(toolbox.clone, offspring))
@@ -937,3 +1024,8 @@ class EATrainer(BaselineTrainer):
 
             if on_generation is not None:
                 on_generation(gen)
+
+            if stop_predicate is not None and stop_predicate():
+                break
+
+        return gen

@@ -162,7 +162,11 @@ class GenerationStats:
     archive_best_fitness: Optional[float] = None
     filled_niches: Optional[int] = None
     total_niches: Optional[int] = None
-    #: Cumulative env interactions this side has performed up to this generation.
+    #: Real env interactions this side performed *during* this generation
+    #: (per-generation, not cumulative). Populated by evolving sides from
+    #: their evaluator's ``env_steps_consumed`` counter; left at 0 for sides
+    #: that cannot report real ticks. The trainer sums these across sides and
+    #: generations for the top-level ``env_steps_consumed`` metric.
     env_steps: int = 0
     #: Wall-clock seconds this ``step_generation`` call took.
     wall_time_s: float = 0.0
@@ -514,6 +518,10 @@ class EASideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,  # current-gen best, not stale HoF value
+            # Real env ticks this side consumed this generation. The trainer
+            # builds a fresh evaluator per side per generation, so the
+            # evaluator's cumulative counter equals this generation's total.
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats
@@ -752,6 +760,8 @@ class CMAESSideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,  # current-gen best, not stale HoF value
+            # Real env ticks consumed this generation (fresh evaluator/gen).
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats
@@ -949,6 +959,8 @@ class PSOSideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,
+            # Real env ticks consumed this generation (fresh evaluator/gen).
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats

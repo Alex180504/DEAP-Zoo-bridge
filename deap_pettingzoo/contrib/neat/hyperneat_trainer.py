@@ -30,6 +30,7 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -81,6 +82,8 @@ class HyperNEATTrainer(NEATTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
+        reject_consumed_budgeting(config, "HyperNEATTrainer")
+        self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
 
         pop_size = int(params.get("pop_size", 50))
@@ -88,7 +91,7 @@ class HyperNEATTrainer(NEATTrainer):
         if n_generations is None:
             n_generations = self._budget_to_generations(config, pop_size)
 
-        # --- Build env ---------------------------------------------------
+        # Build env
         env = PettingZooWrapper(
             config.env_name,
             env_config=config.env_config,
@@ -192,15 +195,19 @@ class HyperNEATTrainer(NEATTrainer):
                 registry_snapshot=snapshot,
             )
 
+            _parallel_steps = [0]
             with make_executor(
                 self._num_workers,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
             ) as executor:
-                _eval_genomes = make_neat_parallel_evaluate(executor, worker_spec)
+                _eval_genomes = make_neat_parallel_evaluate(
+                    executor, worker_spec, step_sink=_parallel_steps
+                )
                 _run_neat(pop, _eval_genomes, n_generations)
                 if not self._fitness_history:
                     self._fitness_history.append(0.0)
+            self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
 
@@ -241,6 +248,7 @@ class HyperNEATTrainer(NEATTrainer):
                                     truncateds.values()
                                 )
                                 _steps += 1
+                                self._env_steps_consumed += 1
                             rewards.append(ep_rew)
                         genome.fitness = float(np.mean(rewards))
                     except Exception:
@@ -289,6 +297,10 @@ class HyperNEATTrainer(NEATTrainer):
                 "fitness_history": list(self._fitness_history),
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
+                "env_steps_nominal": int(
+                    n_generations * pop_size * eval_eps * 500
+                ),
+                "env_steps_consumed": int(self._env_steps_consumed),
             },
             metadata={"genome": best_genome, "config": neat_config},
             seed=seed,
@@ -306,6 +318,8 @@ class ESHyperNEATTrainer(NEATTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
+        reject_consumed_budgeting(config, "ESHyperNEATTrainer")
+        self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
 
         pop_size = int(params.get("pop_size", 50))
@@ -413,15 +427,19 @@ class ESHyperNEATTrainer(NEATTrainer):
                 registry_snapshot=snapshot,
             )
 
+            _parallel_steps = [0]
             with make_executor(
                 self._num_workers,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
             ) as executor:
-                _eval_genomes = make_neat_parallel_evaluate(executor, worker_spec)
+                _eval_genomes = make_neat_parallel_evaluate(
+                    executor, worker_spec, step_sink=_parallel_steps
+                )
                 _run_neat(pop, _eval_genomes, n_generations)
                 if not self._fitness_history:
                     self._fitness_history.append(0.0)
+            self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
 
@@ -461,6 +479,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                                     truncateds.values()
                                 )
                                 _steps += 1
+                                self._env_steps_consumed += 1
                             rewards.append(ep_rew)
                         genome.fitness = float(np.mean(rewards))
                     except Exception:
@@ -508,6 +527,10 @@ class ESHyperNEATTrainer(NEATTrainer):
                 "fitness_history": list(self._fitness_history),
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
+                "env_steps_nominal": int(
+                    n_generations * pop_size * eval_eps * 500
+                ),
+                "env_steps_consumed": int(self._env_steps_consumed),
             },
             metadata={"genome": best_genome, "config": neat_config},
             seed=seed,

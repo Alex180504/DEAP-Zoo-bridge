@@ -363,7 +363,10 @@ package "deap_pettingzoo.integration" {
         + mutate_gaussian(individual, mu, sigma, indpb) -> tuple
         + clone_individual(individual) -> Individual
         + make_parallel_evaluate_map(executor,
-            worker_spec) -> Callable
+            worker_spec, *, step_sink=None) -> Callable
+        + evaluate_population_parallel(individuals, *,
+            executor, spec, eval_seeds=None,
+            step_sink=None) -> list
         + make_mixed_parallel_evaluate_map(executor,
             evaluator, *, eval_episodes=1) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
@@ -372,6 +375,10 @@ package "deap_pettingzoo.integration" {
            snapshot via replay_registry_snapshot_once
            so SCOOP/Dask (no initializer hook) get
            custom envs too --
+        -- _worker_evaluate now returns
+           (fitness, steps_delta); make_parallel_evaluate_map /
+           evaluate_population_parallel sum the deltas into the
+           optional step_sink accumulator and return fitness-only --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -409,8 +416,10 @@ package "deap_pettingzoo.baselines" {
         + render: bool
         + num_workers: int = 1
         + parallel_backend: str = "process"
+        + budget_on_consumed: bool = False
         + recording: RecordingConfig
         -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO);\n   rejected by mu±lambda / QDax / coev / NEAT --
     }
 
     class RecordingConfig <<dataclass>> {
@@ -761,6 +770,20 @@ note bottom of CMAESTrainer
   numpy.array(pop) inside strategy.update
   works while preserving evaluator
   contract.
+end note
+
+note bottom of EATrainer
+  Uniform env-step metric contract — every
+  population trainer (EA, CMA-ES, PSO,
+  co-evolution, NEAT/HyperNEAT) emits
+  TrainingResult.metrics["env_steps_nominal"]
+  and ["env_steps_consumed"]. Consumed is the
+  real tick count (aggregated across workers on
+  the parallel path); below nominal when episodes
+  truncate early. QDax reports it on the numpy
+  scoring path, None on the JAX-native path.
+  budget_on_consumed=True makes EA simple / CMA-ES /
+  PSO run until the real ENV_STEPS budget is spent.
 end note
 
 note bottom of GenomePolicyWrapper

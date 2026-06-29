@@ -96,6 +96,33 @@ def derive_generations(
     return generations
 
 
+def reject_consumed_budgeting(config: "TrainingConfig", trainer_label: str) -> None:
+    """Raise when opt-in consumed-step budgeting is requested but unsupported.
+
+    The ``budget_on_consumed`` flag is only honoured by the manual-loop
+    trainers (EA ``simple``, CMA-ES, PSO). The DEAP built-in EA strategies,
+    QDax, co-evolution, and NEAT/HyperNEAT run fixed iteration counts (or
+    JAX-native loops), so they reject the flag with a clear message rather
+    than silently ignoring it.
+
+    Args:
+        config: The training configuration to inspect.
+        trainer_label: Human-readable trainer name for the error message.
+
+    Raises:
+        ValueError: If ``config.budget_on_consumed`` is set while
+            ``config.budget_mode == BudgetMode.ENV_STEPS`` (the only mode the
+            flag would affect).
+    """
+    if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+        raise ValueError(
+            f"{trainer_label} does not support budget_on_consumed=True "
+            "(consumed-step budgeting). It is supported only by the EA "
+            "'simple' strategy, CMA-ES, and PSO. Use budget_on_consumed=False "
+            "or BudgetMode.GENERATIONS."
+        )
+
+
 class RecordingMode(str, Enum):
     """Champion-rollout recording cadence policy (algorithm-agnostic).
 
@@ -339,6 +366,17 @@ class TrainingConfig:
         parallel_backend: Executor backend for parallel evaluation — one of
             ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
             value is used only when this is left at the default ``"process"``.
+        budget_on_consumed: Opt-in. When ``True`` *and*
+            ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers
+            (EA ``simple``, CMA-ES, PSO) run until the *real* consumed env-step
+            budget is exhausted instead of a precomputed generation count. This
+            trades the exact/deterministic generation count of nominal
+            budgeting for a real-tick budget (the realized generation count
+            then depends on how early episodes truncate). Default ``False``
+            (nominal/deterministic budgeting). Has no effect under
+            other budget modes, and is rejected (``ValueError``) by trainers /
+            strategies that cannot honor it: EA ``mu_plus_lambda`` /
+            ``mu_comma_lambda``, QDax, co-evolution, and NEAT.
     """
     env_name: str
     budget_mode: BudgetMode
@@ -351,6 +389,7 @@ class TrainingConfig:
     render: bool = False
     num_workers: int = 1
     parallel_backend: str = "process"
+    budget_on_consumed: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
