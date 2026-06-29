@@ -199,7 +199,10 @@ def _rollout_once(
     *,
     ctx: Optional[dict] = None,
 ):
-    """Run one rollout episode and return ``(fitness, descriptor)``.
+    """Run one rollout episode and return ``(fitness, descriptor, steps)``.
+
+    ``steps`` is the real number of env ticks this episode consumed (it
+    truncates below ``episode_length`` whenever the env terminates early).
 
     ``ctx`` is the lazily-built worker context returned by
     :func:`_ensure_worker_context`; passing it lets a caller average multiple
@@ -275,7 +278,7 @@ def _rollout_once(
         "velocities": jnp.asarray(np.stack(vel_hist[: episode_length + 1])),
     }
     descriptor = np.asarray(descriptor_fn(trajectory))
-    return float(total_reward), descriptor
+    return float(total_reward), descriptor, int(steps)
 
 
 def _numpy_rollout(args):
@@ -287,8 +290,9 @@ def _numpy_rollout(args):
             weight vector; ``seed`` is an int.
 
     Returns:
-        ``(fitness: float, descriptor: np.ndarray)`` averaged over
-        ``spec.eval_episodes`` rollouts.
+        ``(fitness: float, descriptor: np.ndarray, steps: int)`` —
+        fitness/descriptor averaged over ``spec.eval_episodes`` rollouts and
+        the total real env ticks summed across those rollouts.
     """
     import numpy as np
 
@@ -297,10 +301,11 @@ def _numpy_rollout(args):
     eval_episodes = max(1, int(spec.eval_episodes))
     fitnesses = []
     descriptors = []
+    total_steps = 0
     base_seed = int(seed)
 
     for episode_idx in range(eval_episodes):
-        fitness, descriptor = _rollout_once(
+        fitness, descriptor, steps = _rollout_once(
             spec,
             flat_params,
             base_seed + episode_idx,
@@ -308,10 +313,12 @@ def _numpy_rollout(args):
         )
         fitnesses.append(float(fitness))
         descriptors.append(np.asarray(descriptor, dtype=np.float32))
+        total_steps += int(steps)
 
     return (
         float(np.mean(np.asarray(fitnesses, dtype=np.float64))),
         np.mean(np.stack(descriptors, axis=0), axis=0),
+        total_steps,
     )
 
 
@@ -467,6 +474,11 @@ def make_numpy_scoring_function(
         scoring_function._last_batch_fitness = np.asarray(  # type: ignore[attr-defined]
             fitnesses, dtype=np.float64
         )
+        # Accumulate real env ticks across iterations. The trainer reads this
+        # back as the run's consumed-steps total on the numpy/PettingZoo path.
+        scoring_function._env_steps_consumed += int(  # type: ignore[attr-defined]
+            sum(int(r[2]) for r in results)
+        )
         return (
             jnp.asarray(fitnesses, dtype=jnp.float32),
             jnp.asarray(np.stack(descriptors), dtype=jnp.float32),
@@ -487,6 +499,10 @@ def make_numpy_scoring_function(
     scoring_function.close = _close  # type: ignore[attr-defined]
     scoring_function._executor = None  # type: ignore[attr-defined]
     scoring_function._last_batch_fitness = None  # type: ignore[attr-defined]
+    # Cumulative real env ticks across all scoring calls (numpy path only).
+    # The JAX-native scoring function does not define this attribute, so the
+    # trainer reports env_steps_consumed=None there (a documented structural limit).
+    scoring_function._env_steps_consumed = 0  # type: ignore[attr-defined]
     scoring_function._num_workers = effective_workers  # type: ignore[attr-defined]
     scoring_function._num_eval_episodes = rollout_spec.eval_episodes  # type: ignore[attr-defined]
     scoring_function._parallel_backend = parallel_backend  # type: ignore[attr-defined]

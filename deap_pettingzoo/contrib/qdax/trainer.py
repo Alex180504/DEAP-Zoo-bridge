@@ -30,6 +30,8 @@ from deap_pettingzoo.baselines.base import (
     BudgetMode,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import (
@@ -230,17 +232,40 @@ def _build_initial_genotypes(
 
 
 def _budget_to_iterations(config: TrainingConfig, params: Dict[str, Any]) -> int:
-    """Translate ``config.budget_value`` into a QDax iteration count."""
+    """Translate ``config.budget_value`` into a QDax iteration count.
+
+    The initial repertoire (``init_batch_size`` genotypes, defaulting to the
+    per-iteration ``batch_size`` for CMA-ME) is a realevaluation, so its
+    env-step / episode cost is deducted from the budget *before* deriving
+    iterations — otherwise an ENV_STEPS-matched QDax run overspends the budget
+    by the (often larger) init population.
+    """
     batch = int(params["batch_size"])
     ep_len = int(params["episode_length"])
     eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+    init_batch = int(params.get("init_batch_size", batch))
+    if config.budget_mode == BudgetMode.GENERATIONS:
+        return max(1, int(config.budget_value))
     if config.budget_mode == BudgetMode.ENV_STEPS:
-        return max(1, config.budget_value // (batch * ep_len * eval_episodes))
+        init_cost = init_batch * ep_len * eval_episodes
+        return derive_generations(
+            config.budget_value - init_cost,
+            batch * eval_episodes,
+            ep_len,
+            label="QDax",
+        )
     if config.budget_mode == BudgetMode.EVAL_EPISODES:
-        return max(1, config.budget_value // (batch * eval_episodes))
+        init_cost = init_batch * eval_episodes
+        return derive_generations(
+            config.budget_value - init_cost,
+            batch * eval_episodes,
+            1,
+            label="QDax",
+            unit="eval episodes",
+        )
     raise ValueError(
-        f"QDax trainers support BudgetMode.ENV_STEPS and "
-        f"BudgetMode.EVAL_EPISODES; got {config.budget_mode}."
+        f"QDax trainers support BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES, "
+        f"and BudgetMode.GENERATIONS; got {config.budget_mode}."
     )
 
 
@@ -482,14 +507,16 @@ def _extract_champion(repertoire, module, *, action_space=None):
 class MAPElitesTrainer(BaselineTrainer):
     """MAP-Elites trainer over a Flax MLP policy.
 
-    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``.
-    ``WALL_CLOCK`` is intentionally not supported: the QDax loop is
-    unpredictable in wall time because the first iteration incurs the
-    ``jit`` compile cost.
+    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``,
+    ``GENERATIONS`` (iterations are the native unit).
     """
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
+        return mode in (
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        )
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -504,6 +531,7 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
         from qdax.core.map_elites import MAPElites
@@ -640,12 +668,25 @@ class MAPElitesTrainer(BaselineTrainer):
 
         # Summary metrics: take the last entry of each QDax metric
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        _env_steps_per_iter = int(params["batch_size"]) * _ep_len * _eval_episodes
+        _init_env_steps = int(params["init_batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": champion_fitness,
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            "env_steps_nominal": int(
+                _init_env_steps + num_iters * _env_steps_per_iter
+            ),
+            # Real int on the numpy/PettingZoo scoring path; None on the
+            # JAX-native path, where scoring runs inside jax.jit/vmap with no
+            # Python-side per-tick counter (a documented structural limit).
+            "env_steps_consumed": getattr(
+                scoring_fn, "_env_steps_consumed", None
+            ),
         }
 
         _persist_qdax_results(
@@ -656,10 +697,12 @@ class MAPElitesTrainer(BaselineTrainer):
             training_time=elapsed,
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
-            recording_max_steps=int(params["episode_length"]),
+            recording_max_steps=_ep_len,
             repertoire_path=Path(metadata["repertoire_path"])
             if "repertoire_path" in metadata
             else None,
+            env_steps_per_iteration=_env_steps_per_iter,
+            init_env_steps=_init_env_steps,
         )
 
         return TrainingResult(
@@ -682,7 +725,11 @@ class CMAMETrainer(BaselineTrainer):
     """
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
+        return mode in (
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        )
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -697,6 +744,7 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "CMAMETrainer")
 
         import jax
         import jax.numpy as jnp
@@ -842,12 +890,24 @@ class CMAMETrainer(BaselineTrainer):
             metadata["repertoire_path"] = str(path)
 
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        # CMA-ME builds its initial repertoire from a single batch, so the
+        # init charge equals one iteration's env steps.
+        _iter_env_steps = int(params["batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": float(fitnesses[best_idx]),
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            # init batch + one batch per iteration.
+            "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
+            # Real int on the numpy/PettingZoo path; None on the JAX-native
+            # path (no Python-side per-tick counter, documented).
+            "env_steps_consumed": getattr(
+                scoring_fn, "_env_steps_consumed", None
+            ),
         }
 
         _persist_qdax_results(
@@ -858,10 +918,12 @@ class CMAMETrainer(BaselineTrainer):
             training_time=elapsed,
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
-            recording_max_steps=int(params["episode_length"]),
+            recording_max_steps=_ep_len,
             repertoire_path=Path(metadata["repertoire_path"])
             if "repertoire_path" in metadata
             else None,
+            env_steps_per_iteration=_iter_env_steps,
+            init_env_steps=_iter_env_steps,
         )
 
         return TrainingResult(
@@ -929,6 +991,8 @@ def _persist_qdax_results(
     champion_policy=None,
     recording_max_steps: Optional[int] = None,
     repertoire_path: Optional[Path] = None,
+    env_steps_per_iteration: int = 0,
+    init_env_steps: int = 0,
 ) -> None:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
 
@@ -936,6 +1000,12 @@ def _persist_qdax_results(
     ``qd_score``, ``coverage``, ``max_fitness``, ``min_fitness``,
     ``mean_fitness``). Numeric scalars are coerced to float; non-numeric
     fields are skipped. No-op when ``config.output_dir`` is ``None``.
+
+    The cumulative ``env_steps`` axis charges the initial repertoire build
+    (``history[0]``) at ``init_env_steps`` and every subsequent iteration at
+    ``env_steps_per_iteration`, so the QDax env-step axis includes the
+    uncharged initial population. Both default to ``0`` for callers
+    that do not supply them.
 
     If ``repertoire_path`` points to an existing file, it is registered
     in ``manifest.artifacts['policy']`` so the analysis loader can
@@ -952,9 +1022,11 @@ def _persist_qdax_results(
 
     with build_logger(config, algorithm=algorithm) as log:
         for i, entry in enumerate(history):
+            # history[0] is the initial repertoire (init_env_steps); each
+            # later iteration adds env_steps_per_iteration.
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": 0,
+                "env_steps": int(init_env_steps) + i * int(env_steps_per_iteration),
                 "wall_time": 0.0,
             }
             try:

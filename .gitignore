@@ -187,3 +187,5 @@ test_results.txt
 _baseline_mypy.txt
 _baseline_pylint.txt
 _baseline_pytest.txt
+
+*.jar

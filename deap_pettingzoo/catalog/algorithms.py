@@ -39,6 +39,9 @@ from deap_pettingzoo.catalog.schema import AlgorithmSpec, ParamSpec
 _POP_AGGREGATIONS: Tuple[str, ...] = ("sum", "mean", "min", "max", "team")
 _MARL_AGGREGATIONS: Tuple[str, ...] = ()  # MARL uses env reward directly.
 _BUDGET_MODES: Tuple[str, ...] = ("env_steps", "eval_episodes")
+# Population trainers (EA / CMA-ES / PSO) additionally accept a native
+# generation budget; the step-based AgileRL trainers do not.
+_POP_BUDGET_MODES: Tuple[str, ...] = ("env_steps", "eval_episodes", "generations")
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ _ALGORITHM_DEFINITIONS: Tuple[_AlgorithmDefinition, ...] = (
         aliases=("genetic", "ga"),
         coevolution_optimizer="ea",
         required_modules=("deap",),
+        supported_budget_modes=_POP_BUDGET_MODES,
         description="DEAP genetic algorithm over flat MLP weight vectors.",
     ),
     _AlgorithmDefinition(
@@ -111,6 +115,7 @@ _ALGORITHM_DEFINITIONS: Tuple[_AlgorithmDefinition, ...] = (
         aliases=("cma", "cmaes"),
         coevolution_optimizer="cma",
         required_modules=("deap",),
+        supported_budget_modes=_POP_BUDGET_MODES,
         description="Covariance Matrix Adaptation Evolution Strategy.",
     ),
     _AlgorithmDefinition(
@@ -122,6 +127,7 @@ _ALGORITHM_DEFINITIONS: Tuple[_AlgorithmDefinition, ...] = (
         capabilities=_caps(True, True, False, False, True, multidiscrete=True),
         coevolution_optimizer="pso",
         required_modules=("deap",),
+        supported_budget_modes=_POP_BUDGET_MODES,
         description="Particle swarm over flat MLP weight vectors.",
     ),
     _AlgorithmDefinition(

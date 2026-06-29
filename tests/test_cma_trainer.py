@@ -29,7 +29,7 @@ class TestCMAESTrainerBasics:
         trainer = CMAESTrainer()
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
         assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is True
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
+        assert trainer.supports_budget_mode(BudgetMode.GENERATIONS) is True
 
     def test_budget_translation_env_steps(self):
         trainer = CMAESTrainer(population_size=20)

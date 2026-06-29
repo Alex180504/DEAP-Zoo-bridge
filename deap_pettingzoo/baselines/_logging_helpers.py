@@ -38,6 +38,7 @@ def dump_fitness_history(
     env_steps_per_iteration: int,
     iteration_key: str = "generation",
     extra_columns_per_row: Optional[Mapping[str, Any]] = None,
+    gen_offset: int = 0,
 ) -> None:
     """Write a generation-keyed history list to the ``metrics`` table.
 
@@ -45,6 +46,16 @@ def dump_fitness_history(
     ``<run_dir>/metrics.csv`` with the canonical schema
     ``(iteration, env_steps, wall_time, ...)``. Existing entry keys
     other than ``iteration_key`` flow through unchanged.
+
+    ``env_steps`` is computed as ``(gen + gen_offset) * env_steps_per_iteration``
+    so that every population trainer's first data point lands at ``env_steps=0``
+    regardless of how the trainer indexes its generations:
+
+    * EA is 0-indexed (gen 0 = initial population) — use ``gen_offset=0``
+      (default) so gen 0 → env_steps 0.
+    * CMA-ES / PSO are 1-indexed (gen 1 = first update) — use
+      ``gen_offset=-1`` so gen 1 → env_steps 0. This aligns the x-axis
+      origin with RL algorithms that start reporting from step 0.
 
     No-op when ``logger`` is a :class:`NoOpLogger`.
     """
@@ -55,7 +66,7 @@ def dump_fitness_history(
         gen = int(entry.get(iteration_key, 0))
         row = {
             "iteration": gen,
-            "env_steps": gen * int(env_steps_per_iteration),
+            "env_steps": max(0, (gen + gen_offset)) * int(env_steps_per_iteration),
             "wall_time": float(entry.get("wall_time", 0.0)),
         }
         for k, v in entry.items():

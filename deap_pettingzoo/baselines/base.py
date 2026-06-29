@@ -8,6 +8,7 @@ and evaluating their resulting policies under a common interface.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import (
     Any,
@@ -23,12 +24,103 @@ import warnings
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 
 class BudgetMode(Enum):
-    """Budget constraint mode for training."""
+    """Budget constraint mode for training.
+
+    * ``ENV_STEPS`` — total environment steps (the cross-algorithm axis that
+      lets EA and RL be compared on a matched budget).
+    * ``EVAL_EPISODES`` — total evaluation episodes.
+    * ``GENERATIONS`` — number of generations / iterations, the native unit of
+      the population backends (EA / CMA-ES / PSO / co-evolution / QDax). The
+      step-based AgileRL trainers reject this mode (see
+      :meth:`BaselineTrainer.supports_budget_mode`).
+    """
     ENV_STEPS = "env_steps"
     EVAL_EPISODES = "eval_episodes"
-    WALL_CLOCK = "wall_clock"
+    GENERATIONS = "generations"
+
+
+def derive_generations(
+    budget_steps: int,
+    pop: int,
+    max_steps: int,
+    *,
+    label: str = "population trainer",
+    unit: str = "env steps",
+) -> int:
+    """Back-derive a generation count from a budget, rounding to nearest.
+
+    Population trainers express their budget as a total number of environment
+    steps (or evaluation episodes, by passing ``max_steps=1``), but their
+    native unit is *generations*. This converts one to the other with
+    round-to-nearest — not floor, which silently discards up to a whole
+    generation and warns (both to :mod:`warnings` and the module logger)
+    whenever the request is too small to fund more than a single generation.
+    Without that signal an "equal budget" EA-vs-RL comparison can silently
+    collapse the EA to its random initial population and report a misleading
+    "EA lost"..
+
+    Args:
+        budget_steps: Total budget, in the same unit as ``pop * max_steps``.
+        pop: Population size evaluated per generation.
+        max_steps: Nominal env steps per evaluation episode. Pass ``1`` when
+            the budget is expressed in evaluation episodes.
+        label: Trainer name used in the warning message.
+        unit: Human-readable budget unit for the warning message.
+
+    Returns:
+        Generation count, always ``>= 1``.
+    """
+    pop = max(1, int(pop))
+    max_steps = max(1, int(max_steps))
+    per_generation = pop * max_steps
+    raw = budget_steps / per_generation
+    generations = max(1, round(raw))
+    # Warn when the budget cannot fund even a single full generation, so the
+    # population never really evolves past its random initial state — the
+    # silent-collapse case the matched-budget comparison must not hide.
+    if raw < 1.0:
+        msg = (
+            f"{label}: a budget of {int(budget_steps):,} {unit} only funds "
+            f"{raw:.2f} generation(s) at population={pop} x "
+            f"max_steps={max_steps} ({per_generation:,} {unit}/generation); "
+            f"clamped to {generations} generation(s). The matched-budget "
+            f"comparison may be unfair - raise the budget, lower the "
+            f"population, or use BudgetMode.GENERATIONS."
+        )
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        logger.warning(msg)
+    return generations
+
+
+def reject_consumed_budgeting(config: "TrainingConfig", trainer_label: str) -> None:
+    """Raise when opt-in consumed-step budgeting is requested but unsupported.
+
+    The ``budget_on_consumed`` flag is only honoured by the manual-loop
+    trainers (EA ``simple``, CMA-ES, PSO). The DEAP built-in EA strategies,
+    QDax, co-evolution, and NEAT/HyperNEAT run fixed iteration counts (or
+    JAX-native loops), so they reject the flag with a clear message rather
+    than silently ignoring it.
+
+    Args:
+        config: The training configuration to inspect.
+        trainer_label: Human-readable trainer name for the error message.
+
+    Raises:
+        ValueError: If ``config.budget_on_consumed`` is set while
+            ``config.budget_mode == BudgetMode.ENV_STEPS`` (the only mode the
+            flag would affect).
+    """
+    if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+        raise ValueError(
+            f"{trainer_label} does not support budget_on_consumed=True "
+            "(consumed-step budgeting). It is supported only by the EA "
+            "'simple' strategy, CMA-ES, and PSO. Use budget_on_consumed=False "
+            "or BudgetMode.GENERATIONS."
+        )
 
 
 class RecordingMode(str, Enum):
@@ -274,6 +366,17 @@ class TrainingConfig:
         parallel_backend: Executor backend for parallel evaluation — one of
             ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
             value is used only when this is left at the default ``"process"``.
+        budget_on_consumed: Opt-in. When ``True`` *and*
+            ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers
+            (EA ``simple``, CMA-ES, PSO) run until the *real* consumed env-step
+            budget is exhausted instead of a precomputed generation count. This
+            trades the exact/deterministic generation count of nominal
+            budgeting for a real-tick budget (the realized generation count
+            then depends on how early episodes truncate). Default ``False``
+            (nominal/deterministic budgeting). Has no effect under
+            other budget modes, and is rejected (``ValueError``) by trainers /
+            strategies that cannot honor it: EA ``mu_plus_lambda`` /
+            ``mu_comma_lambda``, QDax, co-evolution, and NEAT.
     """
     env_name: str
     budget_mode: BudgetMode
@@ -286,6 +389,7 @@ class TrainingConfig:
     render: bool = False
     num_workers: int = 1
     parallel_backend: str = "process"
+    budget_on_consumed: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
