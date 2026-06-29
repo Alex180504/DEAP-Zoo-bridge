@@ -1,7 +1,7 @@
 from typing import Any, Optional
 import numpy as np
 from ..genomes import FixedTopologyGenome
-from .action_heads import ActionHead, make_head
+from .action_heads import ActionHead, BoxHead, make_head
 
 
 class FeedforwardNeuralPolicy:
@@ -116,7 +116,7 @@ class FeedforwardNeuralPolicy:
             return np.maximum(0, x)
         elif activation == 'sigmoid':
             return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))  # Clip to prevent overflow
-        elif activation == 'linear':
+        elif activation in ('linear', 'identity'):
             return x
         else:
             raise ValueError(f"Unsupported activation: {activation}")

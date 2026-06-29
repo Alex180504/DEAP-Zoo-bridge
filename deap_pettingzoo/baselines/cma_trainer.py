@@ -234,9 +234,11 @@ class CMAESTrainer(BaselineTrainer):
             from deap_pettingzoo.utils.rng import seed_everything
             seed_everything(int(seed))
 
+        is_box = hasattr(action_space, 'low') and hasattr(action_space, 'high')
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if is_box else self.activation,
             "weight_range": self.weight_range,
         }
 

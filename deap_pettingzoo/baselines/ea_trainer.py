@@ -459,10 +459,13 @@ class EATrainer(BaselineTrainer):
             from deap_pettingzoo.utils.rng import seed_everything
             seed_everything(int(seed))
 
-        # Create genome configuration
+        # Create genome configuration.
+        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
+        is_box = hasattr(action_space, 'low') and hasattr(action_space, 'high')
         genome_config = {
             'layer_sizes': [input_size, self.hidden_size, output_size],
             'activation': 'tanh',
+            'output_activation': 'linear' if is_box else 'tanh',
             'weight_range': (-1.0, 1.0),
             'random_seed': seed,
         }
