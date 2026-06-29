@@ -385,6 +385,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 log.row("metrics", {
                     "iteration": generation,
                     "env_steps": steps_done,
+                    "nominal_env_steps": steps_done,
                     "wall_time_s": elapsed,
                     "mean": mean_fit,
                     "std": std_fit,

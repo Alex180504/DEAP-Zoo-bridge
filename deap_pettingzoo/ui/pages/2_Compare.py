@@ -250,9 +250,9 @@ _env_steps_degenerate = (
     )
 )
 _preferred_x = (
-    ["iteration", "env_steps", "wall_time"]
+    ["iteration", "env_steps", "nominal_env_steps", "wall_time"]
     if _env_steps_degenerate
-    else ["env_steps", "iteration", "wall_time"]
+    else ["env_steps", "nominal_env_steps", "iteration", "wall_time"]
 )
 _x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or [
     "env_steps"

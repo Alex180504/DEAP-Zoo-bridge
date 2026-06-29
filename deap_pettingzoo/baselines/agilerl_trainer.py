@@ -973,6 +973,7 @@ class AgileRLTrainer(BaselineTrainer):
                 metrics_history.append({
                     "iteration": len(metrics_history),
                     "env_steps": int(progress_steps),
+                    "nominal_env_steps": int(progress_steps),
                     "wall_time_s": elapsed,
                     "mean": _emit_mean,
                     "std": float(np.std(_window)) if _window else None,
@@ -1281,6 +1282,7 @@ class AgileRLTrainer(BaselineTrainer):
             metrics_history.append({
                 "iteration": len(metrics_history),
                 "env_steps": int(progress_steps),
+                "nominal_env_steps": int(progress_steps),
                 "wall_time_s": elapsed_op,
                 "mean": _emit_mean,
                 "std": float(np.std(_window)) if _window else None,

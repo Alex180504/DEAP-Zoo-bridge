@@ -903,6 +903,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             config, algorithm="coevolution"
         )
 
+        _nominal_total = self._nominal_env_steps(coev_cfg, num_generations)
+        _nominal_per_gen = _nominal_total / max(1, num_generations)
         with log:
             for name, hist in per_side_history.items():
                 for s in hist:
@@ -911,6 +913,9 @@ class CoEvolutionTrainer(BaselineTrainer):
                         {
                             "iteration": int(s.generation),
                             "env_steps": int(s.env_steps),
+                            "nominal_env_steps": int(
+                                s.generation * _nominal_per_gen
+                            ),
                             "wall_time": float(s.wall_time_s),
                             "side": name,
                             "mean": s.mean,
