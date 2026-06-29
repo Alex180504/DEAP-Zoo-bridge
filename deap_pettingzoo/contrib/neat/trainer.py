@@ -129,6 +129,7 @@ class NEATTrainer(BaselineTrainer):
 
     def __init__(self, num_workers: int = 1) -> None:
         self._fitness_history: List[float] = []
+        self._env_steps_history: List[int] = []
         self._generation_num: int = 0
         # Cumulative real env ticks across the whole run. Incremented per-tick
         # on the serial path and aggregated from worker step-deltas on the
@@ -164,6 +165,7 @@ class NEATTrainer(BaselineTrainer):
         # Reset per-run state so reusing a trainer instance does not carry a
         # previous run's consumed-step count into this run's metrics.
         self._env_steps_consumed = 0
+        self._env_steps_history = []
         params = dict(config.algorithm_params)
 
         # --- Resolve budget to generations -----------------------------------
@@ -287,6 +289,7 @@ class NEATTrainer(BaselineTrainer):
                 """neat fitness-function contract: assign .fitness to each genome."""
                 self._generation_num += 1
                 gen_fitnesses: list[float] = []
+                _before = int(self._env_steps_consumed)
 
                 for _genome_id, genome in genomes_and_ids:
                     try:
@@ -329,6 +332,10 @@ class NEATTrainer(BaselineTrainer):
 
                 if gen_fitnesses:
                     self._fitness_history.append(float(np.max(gen_fitnesses)))
+                # Per-generation real env steps (serial path).
+                self._env_steps_history.append(
+                    int(self._env_steps_consumed) - _before
+                )
 
         # --- Add reporters ---------------------------------------------------
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
@@ -374,7 +381,10 @@ class NEATTrainer(BaselineTrainer):
             pass
         self._recorder.close()
 
-        self._log(config, best_genome, pop_size, elapsed, algorithm="NEAT")
+        self._log(
+            config, best_genome, pop_size, elapsed, algorithm="NEAT",
+            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+        )
         if config.recording.enabled:
             log.close()
 
@@ -412,6 +422,7 @@ class NEATTrainer(BaselineTrainer):
         elapsed: float,
         *,
         algorithm: str = "NEAT",
+        nominal_env_steps_per_iteration: int = 0,
     ) -> None:
         """Persist fitness history and summary to ``config.output_dir``."""
         output_dir = config.output_dir
@@ -421,13 +432,28 @@ class NEATTrainer(BaselineTrainer):
         if not output_dir.exists():
             output_dir.mkdir(parents=True, exist_ok=True)
         logger = build_logger(config, algorithm=algorithm)
+        # Build per-generation entries with real env_steps (cumulative).
+        _cumulative = 0
+        _entries: list = []
+        _step_hist = getattr(self, "_env_steps_history", [])
+        for i, f in enumerate(self._fitness_history):
+            if i < len(_step_hist):
+                _cumulative += _step_hist[i]
+            else:
+                # Parallel path or missing data: apportion evenly.
+                _cumulative = (
+                    int(self._env_steps_consumed) * (i + 1) // max(1, len(self._fitness_history))
+                ) if self._fitness_history else 0
+            _entries.append({
+                "generation": i,
+                "best_fitness": f,
+                "env_steps": _cumulative,
+            })
         dump_fitness_history(
             logger,
-            [
-                {"generation": i, "best_fitness": f}
-                for i, f in enumerate(self._fitness_history)
-            ],
-            env_steps_per_iteration=pop_size,
+            _entries,
+            env_steps_per_iteration=nominal_env_steps_per_iteration or pop_size,
+            nominal_env_steps_per_iteration=nominal_env_steps_per_iteration or pop_size,
         )
         write_summary(
             logger,

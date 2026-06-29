@@ -296,6 +296,9 @@ class PSOTrainer(BaselineTrainer):
                 # Extract gbest from toolbox context for champion tracking.
                 gbest_ctx = toolbox._pso_gbest_ctx
                 gbest_fit = gbest_ctx.get("fitness")
+                consumed = (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                )
                 fitness_history.append({
                     "generation": gen,
                     "mean": record["avg"],
@@ -303,10 +306,8 @@ class PSOTrainer(BaselineTrainer):
                     "min": record["min"],
                     "max": record["max"],
                     "gbest": gbest_fit,
+                    "env_steps": consumed,
                 })
-                consumed = (
-                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
-                )
                 if consumed_budget is not None:
                     self._on_progress(
                         progress_callback,
@@ -357,7 +358,8 @@ class PSOTrainer(BaselineTrainer):
             with log:
                 dump_fitness_history(log, fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps,
-                    gen_offset=-1)
+                    gen_offset=-1,
+                    nominal_env_steps_per_iteration=self.population_size * max_steps)
                 from deap_pettingzoo.utils.logging import save_ea_genome
                 save_ea_genome(log, best_genome, kind="pso_genome", extra={
                     "final_fitness": float(best_ind.fitness.values[0]),

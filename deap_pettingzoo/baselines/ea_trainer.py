@@ -580,6 +580,14 @@ class EATrainer(BaselineTrainer):
 
         def _on_generation(gen: int) -> None:
             """Per-generation hook: emit progress **and** maybe record."""
+            # Inject real consumed steps into the just-appended history row
+            # so dump_fitness_history writes the honest counter. Only used by
+            # _run_simple; μ±λ strategies lack a per-gen hook so they fall
+            # back to the nominal formula in dump_fitness_history.
+            if fitness_history:
+                fitness_history[-1]["env_steps"] = (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                )
             event = _make_event(gen)
             if event is not None:
                 self._on_progress(progress_callback, event, champion=_ea_champion)
@@ -669,6 +677,9 @@ class EATrainer(BaselineTrainer):
                 'std': record['std'],
                 'min': record['min'],
                 'max': record['max'],
+                'env_steps': (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                ),
             })
             _emit_gen_progress(0)
 
@@ -795,6 +806,7 @@ class EATrainer(BaselineTrainer):
                     log,
                     fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    nominal_env_steps_per_iteration=self.population_size * max_steps_per_episode,
                 )
                 from deap_pettingzoo.utils.logging import save_ea_genome, KIND_EA_GENOME
                 save_ea_genome(

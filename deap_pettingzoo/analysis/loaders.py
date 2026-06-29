@@ -84,6 +84,7 @@ def _synthesise_metrics_from_episodes(episodes, summary: Dict[str, Any]):
         {
             "iteration": iters,
             "env_steps": env_steps.values,
+            "nominal_env_steps": env_steps.values,
             "wall_time": [0.0] * n,
             "mean": rolling.mean().values,
             "min": rolling.min().values,

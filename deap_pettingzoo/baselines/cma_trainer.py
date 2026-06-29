@@ -343,6 +343,9 @@ class CMAESTrainer(BaselineTrainer):
                 gen += 1
 
                 record = stats.compile(population)
+                consumed = (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                )
                 fitness_history.append(
                     {
                         "generation": gen,
@@ -350,10 +353,8 @@ class CMAESTrainer(BaselineTrainer):
                         "std": record["std"],
                         "min": record["min"],
                         "max": record["max"],
+                        "env_steps": consumed,
                     }
-                )
-                consumed = (
-                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 )
                 if consumed_budget is not None:
                     self._on_progress(
@@ -408,6 +409,7 @@ class CMAESTrainer(BaselineTrainer):
                     fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps_per_episode,
                     gen_offset=-1,
+                    nominal_env_steps_per_iteration=self.population_size * max_steps_per_episode,
                 )
                 from deap_pettingzoo.utils.logging import save_ea_genome, KIND_CMA_GENOME
                 save_ea_genome(

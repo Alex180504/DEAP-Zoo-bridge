@@ -703,6 +703,7 @@ class MAPElitesTrainer(BaselineTrainer):
             else None,
             env_steps_per_iteration=_env_steps_per_iter,
             init_env_steps=_init_env_steps,
+            env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
         )
 
         return TrainingResult(
@@ -924,6 +925,7 @@ class CMAMETrainer(BaselineTrainer):
             else None,
             env_steps_per_iteration=_iter_env_steps,
             init_env_steps=_iter_env_steps,
+            env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
         )
 
         return TrainingResult(
@@ -993,6 +995,7 @@ def _persist_qdax_results(
     repertoire_path: Optional[Path] = None,
     env_steps_per_iteration: int = 0,
     init_env_steps: int = 0,
+    env_steps_consumed: Optional[int] = None,
 ) -> None:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
 
@@ -1006,6 +1009,11 @@ def _persist_qdax_results(
     ``env_steps_per_iteration`, so the QDax env-step axis includes the
     uncharged initial population. Both default to ``0`` for callers
     that do not supply them.
+
+    ``env_steps_consumed``, when not ``None``, is the real env-step counter
+    from the numpy/PettingZoo scoring path; on the JAX-native scoring path
+    (no Python-side per-tick counter) it is ``None`` and ``env_steps`` falls
+    back to the nominal computation.
 
     If ``repertoire_path`` points to an existing file, it is registered
     in ``manifest.artifacts['policy']`` so the analysis loader can
@@ -1024,9 +1032,11 @@ def _persist_qdax_results(
         for i, entry in enumerate(history):
             # history[0] is the initial repertoire (init_env_steps); each
             # later iteration adds env_steps_per_iteration.
+            _nominal = int(init_env_steps) + i * int(env_steps_per_iteration)
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": int(init_env_steps) + i * int(env_steps_per_iteration),
+                "env_steps": int(env_steps_consumed) if env_steps_consumed is not None else _nominal,
+                "nominal_env_steps": _nominal,
                 "wall_time": 0.0,
             }
             try:

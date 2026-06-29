@@ -286,7 +286,11 @@ class HyperNEATTrainer(NEATTrainer):
             pass
         self._recorder.close()
 
-        self._log(config, best_genome, pop_size, elapsed, algorithm="HyperNEAT")
+        self._log(
+            config, best_genome, pop_size, elapsed,
+            algorithm="HyperNEAT",
+            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+        )
         if config.recording.enabled:
             log.close()
 
@@ -516,7 +520,11 @@ class ESHyperNEATTrainer(NEATTrainer):
             pass
         self._recorder.close()
 
-        self._log(config, best_genome, pop_size, elapsed, algorithm="ES-HyperNEAT")
+        self._log(
+            config, best_genome, pop_size, elapsed,
+            algorithm="ES-HyperNEAT",
+            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+        )
         if config.recording.enabled:
             log.close()
 
