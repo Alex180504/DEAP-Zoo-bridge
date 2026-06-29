@@ -369,10 +369,15 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._partition_agents()
         #: Populated after each :meth:`run` call for trainer logging.
         self.last_details: Optional[CoEvolutionEvalResult] = None
+        #: Cumulative real env ticks across every :meth:`run` call made on
+        #: this evaluator instance. Both the serial and the evaluator-side
+        #: parallel paths funnel through :meth:`_finalise`, which advances
+        #: this counter. The trainer builds one fresh evaluator per side per
+        #: generation, so reading it after a population pass produces that
+        #: side's real per-generation env-step count.
+        self.env_steps_consumed: int = 0
 
-    # ------------------------------------------------------------------
     # Agent partitioning
-    # ------------------------------------------------------------------
 
     def _partition_agents(self) -> None:
         """Validate that every env agent belongs to exactly one side."""
@@ -579,6 +584,10 @@ class CoEvolutionEvaluator(BaseEvaluator):
             num_samples=self.k_opponents,
         )
         self.last_details = details
+        # Accumulate real env ticks so the trainer can surface a per-side,
+        # per-generation consumed-steps figure (serial + evaluator-parallel
+        # both reach here).
+        self.env_steps_consumed += int(total_steps)
         return details
 
     def _aggregate(self, rewards: List[float]) -> float:

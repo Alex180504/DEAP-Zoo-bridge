@@ -116,7 +116,7 @@ def _rebuild_substrate(spec: _NeatWorkerSpec) -> Any:
     return Substrate(inputs, outputs, hidden)
 
 
-def _neat_worker_evaluate(payload: tuple) -> float:
+def _neat_worker_evaluate(payload: tuple) -> tuple:
     """Worker-side genome evaluator for ``executor.map``.
 
     Parameters
@@ -126,9 +126,11 @@ def _neat_worker_evaluate(payload: tuple) -> float:
 
     Returns
     -------
-    float
-        Mean episode reward across ``spec.eval_episodes_per_genome``
-        episodes.
+    tuple
+        ``(mean_reward, steps)`` — the mean episode reward across
+        ``spec.eval_episodes_per_genome`` episodes and the total real env
+        ticks this genome consumed (summed across those episodes). The
+        driver discards order-free; ``executor.map`` preserves order.
     """
     from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
@@ -192,6 +194,7 @@ def _neat_worker_evaluate(payload: tuple) -> float:
     )
     try:
         rewards: list[float] = []
+        total_steps = 0
         for ep_i in range(spec.eval_episodes_per_genome):
             ep_seed = spec.seed * 10_000 + ep_i
             observations = env.reset(seed=ep_seed)
@@ -209,8 +212,9 @@ def _neat_worker_evaluate(payload: tuple) -> float:
                 done = all(dones.values()) or all(truncateds.values())
                 _steps += 1
             rewards.append(ep_rew)
+            total_steps += _steps
 
-        return float(np.mean(rewards))
+        return float(np.mean(rewards)), total_steps
     finally:
         try:
             env.close()
@@ -221,6 +225,8 @@ def _neat_worker_evaluate(payload: tuple) -> float:
 def make_neat_parallel_evaluate(
     executor: Any,
     worker_spec: _NeatWorkerSpec,
+    *,
+    step_sink: Optional[List[int]] = None,
 ) -> "Any":
     """Return a callable suitable as a neat fitness function.
 
@@ -236,6 +242,11 @@ def make_neat_parallel_evaluate(
         A context-managed executor from :func:`~deap_pettingzoo.utils.parallel.make_executor`.
     worker_spec:
         Shared spec describing the env, action space, and eval budget.
+    step_sink:
+        Optional 1-element mutable list. When provided, the real per-genome
+        env-step counts returned by the workers are summed into
+        ``step_sink[0]`` across every generation, so the driver can report a
+        real consumed-steps total for the parallel path.
 
     Returns
     -------
@@ -251,10 +262,12 @@ def make_neat_parallel_evaluate(
         payloads = [(genome, worker_spec) for _genome_id, genome in genomes_and_ids]
 
         # Evaluate in parallel.  executor.map preserves order.
-        fitnesses: list = list(executor.map(_neat_worker_evaluate, payloads))
+        results: list = list(executor.map(_neat_worker_evaluate, payloads))
 
-        # Assign fitnesses back to genomes.
-        for (_genome_id, genome), fitness in zip(genomes_and_ids, fitnesses):
+        # Assign fitnesses back to genomes; aggregate real steps if requested.
+        for (_genome_id, genome), (fitness, _steps) in zip(genomes_and_ids, results):
             genome.fitness = float(fitness)
+        if step_sink is not None:
+            step_sink[0] += sum(int(steps) for _fitness, steps in results)
 
     return _parallel_fitness

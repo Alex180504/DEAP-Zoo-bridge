@@ -52,12 +52,13 @@ alt num_workers > 1
             Pop -> Executor: map(_neat_worker_evaluate, [(genome, spec), ...])
             Executor -> Executor: each worker rebuilds:\n  neat.Config + PettingZooWrapper + NeatPolicy
             Executor -> Executor: evaluate genome across eval_eps episodes
-            Executor --> Pop: [(genome_id, fitness), ...]
+            Executor --> Pop: [(genome_id, (fitness, steps)), ...]\n  worker returns real env-tick count;\n  driver sums deltas into step_sink
         end
 
         Pop -> Pop: reproduce / speciate
     end
     Trainer -> Executor: executor.__exit__()
+    Trainer -> Trainer: self._env_steps_consumed += step_sink[0]
 else num_workers == 1 (sequential)
     loop n_generations
         Trainer -> Pop: run(eval_function, n=1)
@@ -77,6 +78,7 @@ else num_workers == 1 (sequential)
             loop episode steps
                 Trainer -> Env: step(actions_dict)
                 Env --> Trainer: observations, rewards, dones, truncateds, infos
+                Trainer -> Trainer: self._env_steps_consumed += 1
             end
             Trainer -> Trainer: genome.fitness = mean(rewards)
         end
@@ -105,6 +107,7 @@ end
 
 Trainer -> Policy: NeatPolicy(best_genome, config)
 Trainer -> Result: TrainingResult(algorithm="NEAT", policy=champion, metrics)
+note right: metrics include env_steps_nominal\n+ env_steps_consumed (real ticks, serial + parallel)
 
 Trainer -> UE: close()
 Trainer -> EL: close()

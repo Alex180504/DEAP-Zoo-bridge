@@ -239,6 +239,8 @@ class MixedPolicyEvaluator(BaseEvaluator):
         self.learner_factory = learner_factory
         self.max_steps = max_steps
         self.fitness_spec = fitness_spec
+        #: Cumulative real environment steps across every :meth:`evaluate` call.
+        self.env_steps_consumed = 0
         if fitness_spec is not None:
             fitness_spec.validate()
 
@@ -410,6 +412,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
                         reward_components[k] = reward_components.get(k, 0.0) + float(v)
 
             steps += 1
+            self.env_steps_consumed += 1
             if all(terms.values()) or all(truncs.values()):
                 break
 

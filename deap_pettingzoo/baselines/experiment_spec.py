@@ -696,11 +696,9 @@ def _build_coevolution_plan(
     return BuiltPlan(mode="coevolution", sub_runs=sub_runs)
 
 
-# ---------------------------------------------------------------------------
-# validate_spec
-# ---------------------------------------------------------------------------
+# Validate_spec
 
-_VALID_BUDGET_MODES = ("env_steps", "eval_episodes")
+_VALID_BUDGET_MODES = ("env_steps", "eval_episodes", "generations")
 _SUPPORTED_BACKENDS = ("process", "scoop", "dask")
 
 
@@ -714,7 +712,8 @@ def validate_spec(spec: ExperimentSpec) -> "ValidationReport":
 
     Checks (non-exhaustive): environment exists + installed; env-config types /
     ranges; each algorithm exists + installed; budget mode supported by every
-    selected algorithm (``wall_clock`` is rejected); aggregation supported;
+    selected algorithm (e.g. ``generations`` is rejected for the step-based
+    AgileRL trainers); aggregation supported;
     co-evolution sides cover every team with eligible optimizers; numeric
     guards on budget / seeds / recording / parallelism.
     """
@@ -781,7 +780,7 @@ def _validate_budget(spec, report):
             "budget.mode",
             "invalid_budget_mode",
             f"Budget mode {budget.mode!r} is not supported. Choose one of "
-            f"{list(_VALID_BUDGET_MODES)} (wall_clock is not implemented).",
+            f"{list(_VALID_BUDGET_MODES)}.",
         )
     if budget.value <= 0:
         report.add(

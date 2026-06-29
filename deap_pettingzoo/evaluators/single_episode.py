@@ -74,6 +74,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         self.aggregation_method = aggregation_method
         self.team_mapping = team_mapping or {}
         self.fitness_spec = fitness_spec
+        #: Cumulative count of *real* environment steps consumed across every
+        #: :meth:`evaluate` call on this instance.
+        self.env_steps_consumed = 0
         if fitness_spec is not None:
             fitness_spec.validate()
     
@@ -155,6 +158,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 # Check if episode is done
                 done = all(dones.values()) or all(truncated.values())
                 steps += 1
+                self.env_steps_consumed += 1
             
             # Aggregate fitness across agents
             aggregated = self._aggregate_fitness(cumulative_rewards)

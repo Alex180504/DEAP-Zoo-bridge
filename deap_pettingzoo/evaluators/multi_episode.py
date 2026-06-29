@@ -77,6 +77,17 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             fitness_spec=fitness_spec,
             **single_eval_kwargs,
         )
+
+    @property
+    def env_steps_consumed(self) -> int:
+        """Cumulative real env steps across every delegated episode.
+
+        Mirrors :attr:`SingleEpisodeEvaluator.env_steps_consumed`; the
+        underlying single-episode evaluator accumulates ticks across all
+        episodes this evaluator runs, so the count is below the nominal
+        ``num_episodes * max_steps`` whenever episodes terminate early
+        """
+        return self.single_evaluator.env_steps_consumed
     
     def evaluate(
         self,

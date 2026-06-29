@@ -55,7 +55,7 @@ alt off-policy (MADDPG/MATD3)
 end
 
 Trainer -> Trainer: _budget_to_steps(config)
-note right: ENV_STEPS → as-is\nEVAL_EPISODES × 25\nWALL_CLOCK → huge cap
+note right: ENV_STEPS → as-is\nEVAL_EPISODES × 25\nGENERATIONS → ValueError\n(population-trainer-only unit)
 
 == Rollout loop ==
 

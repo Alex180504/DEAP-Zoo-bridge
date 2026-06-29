@@ -100,6 +100,8 @@ class SelfPlayEvaluator(BaseEvaluator):
         self.masked = bool(masked)
         self.flatten_obs = bool(flatten_obs)
         self.fitness_spec = fitness_spec
+        #: Cumulative real environment steps across every :meth:`evaluate` call.
+        self.env_steps_consumed = 0
         if fitness_spec is not None:
             fitness_spec.validate()
 
@@ -166,6 +168,7 @@ class SelfPlayEvaluator(BaseEvaluator):
                 or (truncs and all(truncs.get(a, False) for a in truncs))
             )
             steps += 1
+            self.env_steps_consumed += 1
 
         aggregated = self._aggregate(cumulative)
 

@@ -549,9 +549,6 @@ class AgileRLTrainer(BaselineTrainer):
         _se(seed)
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
-        if config.budget_mode == BudgetMode.WALL_CLOCK:
-            # Soft cap: rely on a large step budget and let the caller's timer stop us; we return a very large number here.
-            return 10**9
         return translate_budget_to_env_steps(config)
 
     def _build_agent(
@@ -1378,6 +1375,11 @@ class IPPOTrainer(AgileRLTrainer):
     ALGORITHM_IMPORT = ("agilerl.algorithms.ippo", "IPPO")
     ON_POLICY = True
 
+    # Off-policy-only kwargs the shared describe_hyperparameters() surfaces but
+    # IPPO's constructor doesn't accept. lr_actor is remapped to lr; the rest
+    # are dropped silently.
+    _IPPO_UNSUPPORTED_KWARGS = frozenset({"lr_critic", "tau"})
+
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
@@ -1388,6 +1390,15 @@ class IPPOTrainer(AgileRLTrainer):
             "on_policy": True,
             "supports_turn_based": True,
         }
+
+    def _build_agent(self, alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs):
+        kwargs = dict(ctor_kwargs)
+        # IPPO uses `lr` (single rate for actor+critic); remap lr_actor if set.
+        if "lr_actor" in kwargs:
+            kwargs.setdefault("lr", kwargs.pop("lr_actor"))
+        for key in self._IPPO_UNSUPPORTED_KWARGS:
+            kwargs.pop(key, None)
+        return super()._build_agent(alg_cls, obs_spaces, act_spaces, agent_ids, kwargs)
 
 
 class GroupedIPPOTrainer(IPPOTrainer):

@@ -51,6 +51,8 @@ from deap_pettingzoo.baselines.base import (
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
@@ -72,9 +74,7 @@ from .sides import GenerationStats, Side, SideState, make_side_state
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Worker initializer
-# ---------------------------------------------------------------------------
 
 def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     """ProcessPoolExecutor worker initializer.
@@ -154,6 +154,10 @@ class _QDaxPolicyEvaluator:
         # Optional hook called at each episode step with (obs_dict, env_wrapper).
         # Set by QDaxSideState._evaluate_one_genotype to collect trajectory data.
         self.trajectory_hook = None  # type: ignore[assignment]
+        #: Cumulative real env ticks across all evaluate() calls on this
+        #: instance (mirrors CoEvolutionEvaluator.env_steps_consumed so the
+        #: QDax side can surface a real per-generation consumed-steps count).
+        self.env_steps_consumed: int = 0
 
         self._learner_agents = [
             a for a in env_wrapper.possible_agents
@@ -223,6 +227,7 @@ class _QDaxPolicyEvaluator:
                 break
             if truncs and all(truncs.values()):
                 break
+        self.env_steps_consumed += int(steps)
         return total
 from deap_pettingzoo.utils.device_check import (
     torch_uses_cuda,
@@ -449,6 +454,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 "config.algorithm_params['coevolution'] to be a "
                 "CoEvolutionConfig instance."
             )
+        reject_consumed_budgeting(config, "CoEvolutionTrainer")
 
         start = time.time()
         num_generations = self._translate_budget(config, coev_cfg)
@@ -542,11 +548,22 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._recorder.close()
         self._rec_env = None
         training_time = time.time() - start
+        # Real env ticks: sum each side's per-generation GenerationStats.env_steps.
+        env_steps_consumed = int(
+            sum(
+                int(s.env_steps)
+                for hist in per_side_history.values()
+                for s in hist
+            )
+        )
+        env_steps_nominal = self._nominal_env_steps(coev_cfg, num_generations)
         metrics = {
             "per_side_history": {
                 name: [self._stats_to_dict(s) for s in hist]
                 for name, hist in per_side_history.items()
             },
+            "env_steps_nominal": env_steps_nominal,
+            "env_steps_consumed": env_steps_consumed,
             "final_best": {
                 name: (
                     None
@@ -991,7 +1008,11 @@ class CoEvolutionTrainer(BaselineTrainer):
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
@@ -1019,6 +1040,49 @@ class CoEvolutionTrainer(BaselineTrainer):
             "best_fitness": s.best_fitness,
         }
 
+    @staticmethod
+    def _episodes_per_generation(coev_cfg: CoEvolutionConfig) -> int:
+        """Sum the nominal episodes per generation across evolving sides.
+
+        EA/CMA/PSO sides contribute ``population_size * k_opponents``; QDax
+        sides ``batch_size * k_opponents``; RL sides
+        ``rollout_episodes_per_gen``. Frozen sides contribute nothing.
+        Mirrors the per-side accounting in :meth:`_translate_budget`.
+        """
+        ep_per_gen = 0
+        for s in coev_cfg.sides:
+            if s.optimizer == "frozen":
+                continue
+            if s.optimizer == "rl":
+                ep_per_gen += int(
+                    s.optimizer_config.get("rollout_episodes_per_gen", 4)
+                )
+            elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("batch_size", 20))
+                    * coev_cfg.k_opponents
+                )
+            else:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("population_size", 20))
+                    * coev_cfg.k_opponents
+                )
+        return max(1, ep_per_gen)
+
+    def _nominal_env_steps(
+        self, coev_cfg: CoEvolutionConfig, num_generations: int
+    ) -> int:
+        """Nominal env-step ceiling: ``ep_per_gen * max_steps * generations``.
+
+        The honest counterpart to the real ``env_steps_consumed`` metric;
+        episodes that truncate early make consumed fall below this nominal.
+        """
+        return int(
+            self._episodes_per_generation(coev_cfg)
+            * int(coev_cfg.max_steps_per_episode)
+            * int(num_generations)
+        )
+
     def _translate_budget(
         self, config: TrainingConfig, coev_cfg: CoEvolutionConfig
     ) -> int:
@@ -1036,33 +1100,31 @@ class CoEvolutionTrainer(BaselineTrainer):
             does not apply, the RL side samples one opponent per rollout
             episode internally).
         """
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            # Generations are the native unit — honor the request directly,
+            # independent of per-side episode bookkeeping.
+            return max(1, int(config.budget_value))
         evolving = [s for s in coev_cfg.sides if s.optimizer != "frozen"]
         if not evolving:
             # Pathological — nothing is actually evolving — do at least
             # one pass to produce output.
             return 1
-        ep_per_gen = 0
-        for s in evolving:
-            if s.optimizer == "rl":
-                ep_per_gen += int(
-                    s.optimizer_config.get("rollout_episodes_per_gen", 4)
-                )
-            elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
-                ep_per_gen += (
-                    int(s.optimizer_config.get("batch_size", 20))
-                    * coev_cfg.k_opponents
-                )
-            else:
-                ep_per_gen += (
-                    int(s.optimizer_config.get("population_size", 20))
-                    * coev_cfg.k_opponents
-                )
-        ep_per_gen = max(1, ep_per_gen)
+        ep_per_gen = self._episodes_per_generation(coev_cfg)
         if config.budget_mode == BudgetMode.ENV_STEPS:
-            steps_per_gen = ep_per_gen * coev_cfg.max_steps_per_episode
-            return max(1, config.budget_value // max(1, steps_per_gen))
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                coev_cfg.max_steps_per_episode,
+                label="co-evolution",
+            )
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
-            return max(1, config.budget_value // ep_per_gen)
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                1,
+                label="co-evolution",
+                unit="eval episodes",
+            )
         raise ValueError(
             f"CoEvolutionTrainer does not support budget mode {config.budget_mode}."
         )
@@ -1173,6 +1235,10 @@ class CoEvolutionTrainer(BaselineTrainer):
                     )
             # Dispatch all N×k episodes in parallel.
             results = list(executor.map(_episode_rollout, payloads))
+            # Funnel the real per-episode ticks (otherwise discarded on this
+            # population-parallel path) into the same cumulative counter the
+            # serial path advances via CoEvolutionEvaluator._finalise.
+            evaluator.env_steps_consumed += sum(int(r.steps) for r in results)
             # Aggregate per individual.
             fitnesses: List[tuple] = []
             for i in range(n):
