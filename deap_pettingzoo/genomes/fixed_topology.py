@@ -20,8 +20,11 @@ class FixedTopologyGenome:
         hidden_layers: List of hidden layer sizes
     """
     
-    SUPPORTED_ACTIVATIONS = {'relu', 'tanh', 'sigmoid', 'linear'}
-    
+    SUPPORTED_ACTIVATIONS = {'relu', 'tanh', 'sigmoid', 'linear', 'identity'}
+
+    # Canonical name mapping; all dispatch uses the canonical form.
+    _ACTIVATION_ALIASES = {'identity': 'linear'}
+
     def __init__(
         self,
         layer_sizes: List[int],
@@ -32,19 +35,21 @@ class FixedTopologyGenome:
     ) -> None:
         """
         Initialize fixed-topology genome.
-        
+
         Args:
             layer_sizes: Network architecture [input, hidden1, hidden2, ..., output]
-            activation: Hidden-layer activation function
+            activation: Hidden-layer activation function. ``'identity'`` is
+                accepted as an alias for ``'linear'``.
             output_activation: Output-layer activation function. When omitted,
                 preserves the historical behavior by matching ``activation``.
+                ``'identity'`` is accepted as an alias for ``'linear'``.
             weight_range: (min, max) for weight initialization
             random_seed: Seed for reproducible initialization
-            
+
         Raises:
             ValueError: If layer_sizes has fewer than 2 layers
             ValueError: If activation not in supported set
-            
+
         Example:
             >>> genome = FixedTopologyGenome(
             ...     layer_sizes=[10, 64, 32, 4],
@@ -59,8 +64,9 @@ class FixedTopologyGenome:
                 f"Network must have at least 2 layers (input and output), "
                 f"got {len(layer_sizes)}"
             )
-        
-        # Validate activation
+
+        # Validate and canonicalize activations ('identity' → 'linear').
+        activation = self._ACTIVATION_ALIASES.get(activation, activation)
         if activation not in self.SUPPORTED_ACTIVATIONS:
             raise ValueError(
                 f"Unsupported activation function '{activation}'. "
@@ -68,6 +74,7 @@ class FixedTopologyGenome:
             )
         if output_activation is None:
             output_activation = activation
+        output_activation = self._ACTIVATION_ALIASES.get(output_activation, output_activation)
         if output_activation not in self.SUPPORTED_ACTIVATIONS:
             raise ValueError(
                 f"Unsupported output activation function '{output_activation}'. "

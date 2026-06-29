@@ -9,13 +9,16 @@ package "deap_pettingzoo.genomes" {
     class FixedTopologyGenome {
         + layer_sizes: List[int]
         + activation: str
-    + output_activation: str
+        + output_activation: str
         + input_size: int
         + output_size: int
         + hidden_layers: List[int]
         + weight_range: tuple[float, float]
+        .. supported activations ..
+        + SUPPORTED_ACTIVATIONS: {relu, tanh, sigmoid, linear, identity}
+        + _ACTIVATION_ALIASES: {identity -> linear}
         --
-    + __init__(layer_sizes, activation, output_activation, weight_range: tuple[float, float], random_seed)
+        + __init__(layer_sizes, activation, output_activation, weight_range, random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
         + get_weights() -> np.ndarray
@@ -72,7 +75,11 @@ package "deap_pettingzoo.policies" {
 
     class BoxHead {
         + low, high: np.ndarray
-        + decode(raw) -> np.ndarray  (tanh → rescale)
+        .. single-squash contract ..
+        + decode(raw) -> np.ndarray
+        .. decode: tanh(raw) → rescale to [low, high] ..
+        .. requires genome.output_activation="linear" so ..
+        .. tanh is applied exactly once (not twice) ..
     }
 
     class "make_head(space, masked=False)" as make_head <<factory>>

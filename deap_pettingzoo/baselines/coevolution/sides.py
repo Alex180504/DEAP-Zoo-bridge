@@ -373,9 +373,11 @@ class EASideState(SideState):
         output_size = required_output_size(self._action_space)
 
         setup_deap_creators()
+        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
             "random_seed": self.seed,
         }
@@ -633,9 +635,11 @@ class CMAESSideState(SideState):
         elif self.seed is not None:
             np.random.seed(int(self.seed))
 
+        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
         }
 
@@ -853,9 +857,11 @@ class PSOSideState(SideState):
         else:
             pso_seed = None
 
+        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
         }
         from deap_pettingzoo.integration.pso_integration import (
