@@ -77,9 +77,15 @@ class BudgetSpec:
     mode: str = "env_steps"
     value: int = 50_000
     num_seeds: int = 1
+    budget_on_consumed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"mode": self.mode, "value": self.value, "num_seeds": self.num_seeds}
+        return {
+            "mode": self.mode,
+            "value": self.value,
+            "num_seeds": self.num_seeds,
+            "budget_on_consumed": self.budget_on_consumed,
+        }
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "BudgetSpec":
@@ -88,6 +94,7 @@ class BudgetSpec:
             mode=str(data.get("mode", "env_steps")),
             value=int(data.get("value", 50_000)),
             num_seeds=int(data.get("num_seeds", 1)),
+            budget_on_consumed=bool(data.get("budget_on_consumed", False)),
         )
 
 
@@ -605,6 +612,7 @@ def build_configs(
                 parallel_backend=cfg_parallel_backend,
                 recording=recording_config,
                 fitness=fitness_config,
+                budget_on_consumed=spec.budget.budget_on_consumed,
             )
             sub_runs.append(
                 SubRun(
@@ -682,6 +690,7 @@ def _build_coevolution_plan(
             env_config=dict(env_config),
             output_dir=out_dir,
             recording=recording_config,
+            budget_on_consumed=spec.budget.budget_on_consumed,
         )
         sub_runs.append(
             SubRun(
@@ -790,6 +799,30 @@ def _validate_budget(spec, report):
         report.add(
             "budget.num_seeds", "out_of_range", "Number of seeds must be >= 1."
         )
+    if budget.budget_on_consumed and budget.mode == "env_steps":
+        if spec.coevolution.enabled:
+            report.add(
+                "budget.budget_on_consumed",
+                "unsupported_trainer",
+                "budget_on_consumed=True is not supported by co-evolution. "
+                "Use budget_on_consumed=False or BudgetMode.GENERATIONS.",
+            )
+        for algo in spec.algorithms:
+            canonical = algo.lower().strip()
+            if canonical in ("ea", "genetic", "ga"):
+                strategy = (
+                    (spec.hyperparameters.get(algo) or {})
+                    .get("strategy", "simple")
+                )
+                if strategy not in ("simple", None, ""):
+                    report.add(
+                        "budget.budget_on_consumed",
+                        "unsupported_trainer",
+                        f"budget_on_consumed=True is only supported by the EA "
+                        f"'simple' strategy; strategy={strategy!r} runs a DEAP "
+                        f"built-in with a fixed generation count. Use "
+                        f"budget_on_consumed=False or BudgetMode.GENERATIONS.",
+                    )
 
 
 def _validate_recording(spec, report):

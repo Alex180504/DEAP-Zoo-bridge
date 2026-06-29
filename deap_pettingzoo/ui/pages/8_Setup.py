@@ -555,6 +555,53 @@ with tab_budget:
     _render_param_group(_BUDGET_PARAMS, budget_ctx)
     budget_values, _ = coerce_touched(_BUDGET_PARAMS, budget_ctx.values)
 
+    # budget_on_consumed — only meaningful under env_steps mode.
+    _boc_mode = budget_values.get("mode", "env_steps")
+    _boc_default = bool(_prev_budget.get("budget_on_consumed", False))
+    if _boc_mode == "env_steps":
+        _budget_on_consumed = st.checkbox(
+            "Budget on consumed steps",
+            value=_boc_default,
+            key="_budget_on_consumed",
+            help=(
+                "Run until the **real** consumed env-step count reaches the "
+                "budget value instead of stopping after a precomputed number of "
+                "generations. Supported by EA (strategy='simple'), CMA-ES, and "
+                "PSO only; rejected with a clear error for EA mu±lambda, NEAT, "
+                "QDax, and co-evolution."
+            ),
+        )
+        if _budget_on_consumed:
+            _coev_on = st.session_state.get(
+                "_coev_enabled", _prev_coev.get("enabled", False)
+            )
+            if _coev_on:
+                st.warning(
+                    "`Budget on consumed steps` is not supported by co-evolution "
+                    "and will be rejected at runtime. Disable co-evolution or "
+                    "uncheck this option."
+                )
+            elif selected_algos:
+                _evo_selected = [
+                    a for a in selected_algos
+                    if algo_list.get(a, {}).get("family") == "evolutionary"
+                ]
+                if not _evo_selected:
+                    st.warning(
+                        "`Budget on consumed steps` has no effect on the selected "
+                        "algorithm(s) — it only applies to EA (strategy='simple'), "
+                        "CMA-ES, and PSO."
+                    )
+                elif any(a in ("ea", "genetic", "ga") for a in selected_algos):
+                    st.info(
+                        "For EA, `Budget on consumed steps` requires "
+                        "strategy='simple'. The mu±lambda strategies run a "
+                        "fixed generation count and will be rejected at runtime."
+                    )
+        budget_values["budget_on_consumed"] = _budget_on_consumed
+    else:
+        budget_values["budget_on_consumed"] = False
+
 # Tab 4: Fitness
 
 with tab_fitness:
