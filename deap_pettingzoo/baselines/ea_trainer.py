@@ -711,7 +711,7 @@ class EATrainer(BaselineTrainer):
                 # per-gen hook didn't land exactly on fraction 1.0 (dedups).
                 self._recorder.finalize(
                     _ea_champion, iteration=realized_generations,
-                    env_steps=(realized_generations + 1) * env_steps_per_iteration,
+                    env_steps=realized_generations * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
@@ -737,7 +737,7 @@ class EATrainer(BaselineTrainer):
                 # the final champion; record once at the end.
                 self._recorder.finalize(
                     _ea_champion, iteration=num_generations,
-                    env_steps=(num_generations + 1) * env_steps_per_iteration,
+                    env_steps=num_generations * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
@@ -761,7 +761,7 @@ class EATrainer(BaselineTrainer):
                     _emit_gen_progress(gen)
                 self._recorder.finalize(
                     _ea_champion, iteration=num_generations,
-                    env_steps=(num_generations + 1) * env_steps_per_iteration,
+                    env_steps=num_generations * env_steps_per_iteration,
                 )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
