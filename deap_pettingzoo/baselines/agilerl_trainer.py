@@ -1375,6 +1375,11 @@ class IPPOTrainer(AgileRLTrainer):
     ALGORITHM_IMPORT = ("agilerl.algorithms.ippo", "IPPO")
     ON_POLICY = True
 
+    # Off-policy-only kwargs the shared describe_hyperparameters() surfaces but
+    # IPPO's constructor doesn't accept. lr_actor is remapped to lr; the rest
+    # are dropped silently.
+    _IPPO_UNSUPPORTED_KWARGS = frozenset({"lr_critic", "tau"})
+
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
@@ -1385,6 +1390,15 @@ class IPPOTrainer(AgileRLTrainer):
             "on_policy": True,
             "supports_turn_based": True,
         }
+
+    def _build_agent(self, alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs):
+        kwargs = dict(ctor_kwargs)
+        # IPPO uses `lr` (single rate for actor+critic); remap lr_actor if set.
+        if "lr_actor" in kwargs:
+            kwargs.setdefault("lr", kwargs.pop("lr_actor"))
+        for key in self._IPPO_UNSUPPORTED_KWARGS:
+            kwargs.pop(key, None)
+        return super()._build_agent(alg_cls, obs_spaces, act_spaces, agent_ids, kwargs)
 
 
 class GroupedIPPOTrainer(IPPOTrainer):

@@ -133,16 +133,22 @@ class WidgetContext:
             string is shown as a tooltip / caption.
         touched: Accumulated set of explicitly-changed param names.
         values: Accumulated coerced values (propagated per-tab).
+        prefix: Namespace prefix included in every widget key so that two
+            contexts rendered on the same page (e.g. EA and CMA-ES forms side
+            by side) never produce duplicate Streamlit element IDs even when
+            they share parameter names like ``population_size``.
     """
 
     disabled_reason: str = ""
     touched: Set[str] = field(default_factory=set)
     values: Dict[str, Any] = field(default_factory=dict)
+    prefix: str = ""
     _counter: int = 0
 
     def _key(self, name: str) -> str:
         self._counter += 1
-        return f"_w_{self._counter}_{name}"
+        ns = f"{self.prefix}_" if self.prefix else ""
+        return f"_w_{ns}{self._counter}_{name}"
 
 
 # render_param (Streamlit-dependent)

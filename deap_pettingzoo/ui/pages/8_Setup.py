@@ -530,7 +530,8 @@ with tab_algos:
                 "The experiment may fail at runtime.",
             )
         algo_ctx = WidgetContext(
-            values=dict(_prev_algo_vals.get(algo_name, {}))
+            values=dict(_prev_algo_vals.get(algo_name, {})),
+            prefix=algo_name,
         )
         vals, touched = build_algo_form(a_spec, algo_ctx)
         algo_forms[algo_name] = vals
