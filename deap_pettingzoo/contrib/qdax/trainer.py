@@ -31,6 +31,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import (
@@ -530,6 +531,7 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
         from qdax.core.map_elites import MAPElites
@@ -666,16 +668,27 @@ class MAPElitesTrainer(BaselineTrainer):
 
         # Summary metrics: take the last entry of each QDax metric
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        _env_steps_per_iter = int(params["batch_size"]) * _ep_len * _eval_episodes
+        _init_env_steps = int(params["init_batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": champion_fitness,
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            "env_steps_nominal": int(
+                _init_env_steps + num_iters * _env_steps_per_iter
+            ),
+            # Real int on the numpy/PettingZoo scoring path; None on the
+            # JAX-native path, where scoring runs inside jax.jit/vmap with no
+            # Python-side per-tick counter (a documented structural limit).
+            "env_steps_consumed": getattr(
+                scoring_fn, "_env_steps_consumed", None
+            ),
         }
 
-        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
-        _ep_len = int(params["episode_length"])
         _persist_qdax_results(
             config,
             algorithm="map_elites",
@@ -688,8 +701,8 @@ class MAPElitesTrainer(BaselineTrainer):
             repertoire_path=Path(metadata["repertoire_path"])
             if "repertoire_path" in metadata
             else None,
-            env_steps_per_iteration=int(params["batch_size"]) * _ep_len * _eval_episodes,
-            init_env_steps=int(params["init_batch_size"]) * _ep_len * _eval_episodes,
+            env_steps_per_iteration=_env_steps_per_iter,
+            init_env_steps=_init_env_steps,
         )
 
         return TrainingResult(
@@ -731,6 +744,7 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "CMAMETrainer")
 
         import jax
         import jax.numpy as jnp
@@ -876,19 +890,26 @@ class CMAMETrainer(BaselineTrainer):
             metadata["repertoire_path"] = str(path)
 
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        # CMA-ME builds its initial repertoire from a single batch, so the
+        # init charge equals one iteration's env steps.
+        _iter_env_steps = int(params["batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": float(fitnesses[best_idx]),
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            # init batch + one batch per iteration.
+            "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
+            # Real int on the numpy/PettingZoo path; None on the JAX-native
+            # path (no Python-side per-tick counter, documented).
+            "env_steps_consumed": getattr(
+                scoring_fn, "_env_steps_consumed", None
+            ),
         }
 
-        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
-        _ep_len = int(params["episode_length"])
-        # CMA-ME builds its initial repertoire from a single batch, so the
-        # init charge equals one iteration's env steps.
-        _iter_env_steps = int(params["batch_size"]) * _ep_len * _eval_episodes
         _persist_qdax_results(
             config,
             algorithm="cma_me",

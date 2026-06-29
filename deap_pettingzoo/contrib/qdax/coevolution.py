@@ -155,6 +155,7 @@ class _QDaxGenotypeResult:
 
     fitness: float
     descriptor: np.ndarray   # shape (behavior_dim,) float32
+    steps: int = 0           # real env ticks summed across the k episodes
 
 
 def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeResult":
@@ -192,6 +193,7 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
 
     rewards: List[float] = []
     all_positions: List[np.ndarray] = []
+    total_steps = 0
 
     for ep_idx, ep_snaps in enumerate(payload.per_episode_snapshots):
         opp_policies: Dict[str, Any] = {}
@@ -205,7 +207,7 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
                     opp_policies[a] = opp_pol
 
         ep_positions: List[np.ndarray] = []
-        total = _run_qdax_worker_episode(
+        total, ep_steps = _run_qdax_worker_episode(
             env=env,
             policy=policy,
             opp_policies=opp_policies,
@@ -217,6 +219,7 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
         )
         rewards.append(total)
         all_positions.extend(ep_positions)
+        total_steps += int(ep_steps)
 
     arr = np.asarray(rewards, dtype=np.float64)
     if payload.aggregation == "mean":
@@ -229,7 +232,9 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
         fitness = float(arr.mean())
 
     descriptor = _compute_qdax_descriptor(all_positions, payload.descriptor_fn)
-    return _QDaxGenotypeResult(fitness=fitness, descriptor=descriptor)
+    return _QDaxGenotypeResult(
+        fitness=fitness, descriptor=descriptor, steps=total_steps
+    )
 
 
 def _run_qdax_worker_episode(
@@ -242,8 +247,12 @@ def _run_qdax_worker_episode(
     position_extractor: Optional[Any],
     positions_out: List[np.ndarray],
     seed: Optional[int],
-) -> float:
-    """Run one episode in a worker; append position arrays to *positions_out*."""
+) -> Tuple[float, int]:
+    """Run one episode in a worker; append position arrays to *positions_out*.
+
+    Returns ``(total_reward, steps)`` where ``steps`` is the real env-tick
+    count for this episode (truncates below ``max_steps`` on early termination).
+    """
     from deap_pettingzoo.baselines.coevolution.evaluator import _invoke_get_action
 
     observations = env.reset(seed=seed)
@@ -283,7 +292,7 @@ def _run_qdax_worker_episode(
             break
         if truncs and all(truncs.values()):
             break
-    return total
+    return total, steps
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +912,11 @@ class QDaxSideState(SideState):
             )
 
         results = list(executor.map(_qdax_genotype_rollout, payloads))
+        # Funnel the real per-episode ticks (otherwise discarded on this
+        # population-parallel path) into the same counter the serial scoring
+        # path advances via _QDaxPolicyEvaluator.evaluate, so the side's
+        # GenerationStats.env_steps reflects parallel runs too.
+        evaluator.env_steps_consumed += sum(int(r.steps) for r in results)
         return [r.fitness for r in results], [r.descriptor for r in results]
 
     # ------------------------------------------------------------------
@@ -951,6 +965,12 @@ class QDaxSideState(SideState):
             archive_best_fitness=archive_best,
             filled_niches=filled_niches,
             total_niches=total_niches,
+            # Real env ticks this generation when scoring ran against a live
+            # env via the _QDaxPolicyEvaluator (serial coev path). The
+            # JAX-native scoring path has no Python-side per-tick counter, so it is not used here.
+            env_steps=int(
+                getattr(self._current_evaluator, "env_steps_consumed", 0)
+            ),
         )
         self.best_fitness = max(self.best_fitness, archive_best)
         self.history.append(stats)

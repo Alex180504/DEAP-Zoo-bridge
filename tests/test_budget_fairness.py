@@ -280,6 +280,207 @@ class TestRealCounterReporting:
         assert 0 < real < nominal
 
 
+def _early_trunc_config(factory_kwargs=None, **overrides):
+    """Build a TrainingConfig on an early-truncating env (25-cycle cap, 200
+    nominal max_steps) so real consumed steps fall well below nominal."""
+    base = dict(
+        env_name="simple_spread_v3",
+        budget_mode=BudgetMode.GENERATIONS,
+        budget_value=2,
+        env_config={"max_cycles": 25},
+        algorithm_params={"max_steps_per_episode": 200, "seed": 0},
+    )
+    base.update(overrides)
+    return TrainingConfig(**base)
+
+
+class TestParallelCounterAggregation:
+    """Real ``env_steps_consumed`` is aggregated across ``num_workers > 1``."""
+
+    @pytest.mark.parametrize("factory", [EATrainer, CMAESTrainer, PSOTrainer])
+    def test_parallel_reports_real_int_below_nominal(self, factory):
+        trainer = factory(population_size=4)
+        config = _early_trunc_config(num_workers=2)
+        result = trainer.train(config)
+        nominal = result.metrics["env_steps_nominal"]
+        consumed = result.metrics["env_steps_consumed"].
+        assert isinstance(consumed, int)
+        assert 0 < consumed < nominal
+
+
+class TestCMAPSOReporting:
+    """CMA-ES / PSO surface both env-step keys on the serial path."""
+
+    @pytest.mark.parametrize("factory", [CMAESTrainer, PSOTrainer])
+    def test_serial_reports_both_keys_below_nominal(self, factory):
+        trainer = factory(population_size=4)
+        config = _early_trunc_config(num_workers=1)
+        result = trainer.train(config)
+        assert "env_steps_nominal" in result.metrics
+        assert "env_steps_consumed" in result.metrics
+        nominal = result.metrics["env_steps_nominal"]
+        consumed = result.metrics["env_steps_consumed"]
+        assert isinstance(consumed, int)
+        assert 0 < consumed < nominal
+
+
+class TestConsumedStepBudgeting:
+    """Opt-in ``budget_on_consumed`` stops on the real env-step budget."""
+
+    @pytest.mark.parametrize("factory", [EATrainer, CMAESTrainer, PSOTrainer])
+    def test_stops_at_consumed_budget(self, factory):
+        pop = 4
+        budget = 3000
+        max_steps = 200
+        trainer = factory(population_size=pop, **(
+            {"strategy": "simple"} if factory is EATrainer else {}
+        ))
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            algorithm_params={"max_steps_per_episode": max_steps, "seed": 0},
+            budget_on_consumed=True,
+        )
+        result = trainer.train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        # The run stops once the real budget is exhausted and overshoots by at most one generation's budget.
+        assert consumed >= budget
+        assert consumed < budget + pop * max_steps
+        # The realized generation count differs from the nominal derivation,
+        # because episodes truncate at 25 cycles (real per-gen << nominal).
+        nominal_gens = derive_generations(budget, pop, max_steps)
+        assert result.metrics["num_generations"] != nominal_gens
+
+    def test_no_effect_under_generations_mode(self):
+        """The flag is inert (no error, nominal behaviour) under GENERATIONS."""
+        trainer = EATrainer(population_size=4, strategy="simple")
+        config = _early_trunc_config(budget_on_consumed=True)
+        result = trainer.train(config)
+        # GENERATIONS=2 honored exactly; the flag did nothing.
+        assert result.metrics["num_generations"] == 2
+
+
+class TestConsumedStepBudgetingRejection:
+    """Trainers / strategies that can't honor ``budget_on_consumed`` reject it."""
+
+    def _env_steps_config(self):
+        return TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=3000,
+            env_config={"max_cycles": 25},
+            algorithm_params={"max_steps_per_episode": 200, "seed": 0},
+            budget_on_consumed=True,
+        )
+
+    def test_ea_mu_plus_lambda_rejects(self):
+        trainer = EATrainer(population_size=4, strategy="mu_plus_lambda")
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            trainer.train(self._env_steps_config())
+
+    def test_coevolution_rejects(self):
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=200,
+        )
+        config = self._env_steps_config()
+        config.algorithm_params["coevolution"] = coev_cfg
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            CoEvolutionTrainer().train(config)
+
+    def test_neat_rejects(self):
+        pytest.importorskip("neat")
+        from deap_pettingzoo.contrib.neat.trainer import NEATTrainer
+
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            NEATTrainer().train(self._env_steps_config())
+
+    def test_qdax_rejects(self):
+        pytest.importorskip("qdax")
+        from deap_pettingzoo.contrib.qdax.trainer import MAPElitesTrainer
+
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            MAPElitesTrainer().train(self._env_steps_config())
+
+
+class TestCoevolutionRealSteps:
+    """Co-evolution surfaces real consumed steps below the nominal ceiling."""
+
+    def test_ea_vs_ea_reports_consumed_below_nominal(self):
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=200,
+            seed=0,
+        )
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.GENERATIONS,
+            budget_value=2,
+            env_config={"max_cycles": 25},
+            algorithm_params={"coevolution": coev_cfg},
+        )
+        result = CoEvolutionTrainer().train(config)
+        nominal = result.metrics["env_steps_nominal"]
+        consumed = result.metrics["env_steps_consumed"]
+        assert isinstance(consumed, int)
+        assert 0 < consumed < nominal
+
+
+class TestNeatRealSteps:
+    """NEAT surfaces real consumed steps below the nominal ceiling."""
+
+    @pytest.mark.parametrize("num_workers", [1, 2])
+    def test_neat_reports_consumed_below_nominal(self, num_workers):
+        pytest.importorskip("neat")
+        from deap_pettingzoo.contrib.neat.trainer import NEATTrainer
+
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=20_000,
+            env_config={"max_cycles": 25},
+            algorithm_params={
+                "pop_size": 6,
+                "n_generations": 2,
+                "eval_episodes_per_genome": 1,
+                "seed": 0,
+            },
+        )
+        result = NEATTrainer(num_workers=num_workers).train(config)
+        nominal = result.metrics["env_steps_nominal"]
+        consumed = result.metrics["env_steps_consumed"]
+        assert isinstance(consumed, int)
+        assert 0 < consumed < nominal
+
+
 class TestSpecFrontDoor:
     """GENERATIONS is reachable through the spec/catalog front door
     for population algorithms and rejected for the step-based ones."""

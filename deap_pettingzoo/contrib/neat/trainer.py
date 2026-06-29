@@ -38,6 +38,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -129,6 +130,10 @@ class NEATTrainer(BaselineTrainer):
     def __init__(self, num_workers: int = 1) -> None:
         self._fitness_history: List[float] = []
         self._generation_num: int = 0
+        # Cumulative real env ticks across the whole run. Incremented per-tick
+        # on the serial path and aggregated from worker step-deltas on the
+        # parallel path (NEAT runs its own rollout loop, not SingleEpisodeEvaluator).
+        self._env_steps_consumed: int = 0
         if num_workers < 1:
             raise ValueError(f"num_workers must be >= 1, got {num_workers}")
         self._num_workers = int(num_workers)
@@ -155,6 +160,10 @@ class NEATTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
+        reject_consumed_budgeting(config, "NEATTrainer")
+        # Reset per-run state so reusing a trainer instance does not carry a
+        # previous run's consumed-step count into this run's metrics.
+        self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
 
         # --- Resolve budget to generations -----------------------------------
@@ -260,7 +269,11 @@ class NEATTrainer(BaselineTrainer):
                 initargs=(snapshot,),
             )
             _executor_ctx = _executor
-            _eval_genomes = make_neat_parallel_evaluate(_executor, worker_spec)
+            # 1-element sink so worker step-deltas aggregate across generations.
+            _parallel_steps = [0]
+            _eval_genomes = make_neat_parallel_evaluate(
+                _executor, worker_spec, step_sink=_parallel_steps
+            )
             _is_parallel = True
         else:
             _executor_ctx = None
@@ -299,6 +312,7 @@ class NEATTrainer(BaselineTrainer):
                                 episode_reward += float(sum(step_rewards.values()))
                                 done = all(dones.values()) or all(truncateds.values())
                                 _steps += 1
+                                self._env_steps_consumed += 1
                             rewards.append(episode_reward)
 
                         if aggregator == "sum":
@@ -324,6 +338,8 @@ class NEATTrainer(BaselineTrainer):
             if _is_parallel and _executor_ctx is not None:
                 with _executor_ctx:
                     best_genome = pop.run(_eval_genomes, n=n_generations)
+                # Fold the aggregated worker step-deltas into the run total.
+                self._env_steps_consumed += int(_parallel_steps[0])
                 if not self._fitness_history:
                     self._fitness_history.append(
                         float(best_genome.fitness if best_genome else 0.0)
@@ -369,6 +385,12 @@ class NEATTrainer(BaselineTrainer):
                 "fitness_history": list(self._fitness_history),
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
+                # Nominal ceiling: every genome evaluated for ``eval_eps``
+                # episodes of up to 500 ticks, across ``n_generations``.
+                "env_steps_nominal": int(
+                    n_generations * pop_size * eval_eps * 500
+                ),
+                "env_steps_consumed": int(self._env_steps_consumed),
             },
             metadata={
                 "genome": best_genome,

@@ -63,6 +63,12 @@ end
 
 T -> SA : best_policy() or frozen=None
 SA -->> T : FeedforwardNeuralPolicy
+note over T
+  Each side threads the evaluator's real per-generation
+  env ticks into GenerationStats.env_steps; train() sums
+  them into metrics["env_steps_consumed"] alongside
+  metrics["env_steps_nominal"].
+end note
 T -->> User : TrainingResult(policy, metrics)
 
 @enduml

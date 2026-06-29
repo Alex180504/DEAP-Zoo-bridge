@@ -155,6 +155,13 @@ class PSOTrainer(BaselineTrainer):
         num_generations = params["num_generations"]
         max_steps = params["max_steps_per_episode"]
 
+        # Opt-in consumed-step budgeting: run until the real env-step budget is
+        # exhausted instead of a precomputed generation count (manual-loop
+        # trainer — PSO supports it natively).
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
+
         env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
         sample_obs = env.reset(seed=0)
         agent_id = env.possible_agents[0]
@@ -243,6 +250,9 @@ class PSOTrainer(BaselineTrainer):
         ) as executor:
             base_eval_seed = config.algorithm_params.get("seed")
             _eval_counter = [0]
+            # Aggregates real env-step deltas from parallel workers; stays at
+            # 0 on the serial path where the evaluator counter is authoritative.
+            _parallel_steps = [0]
 
             def _next_seeds(n):
                 if base_eval_seed is None:
@@ -251,13 +261,22 @@ class PSOTrainer(BaselineTrainer):
                 _eval_counter[0] += n
                 return list(range(lo, lo + n))
 
+            # Nominal budgeting runs exactly ``num_generations``; consumed
+            # budgeting runs until the real budget is exhausted, bounded by a safety cap.
+            if consumed_budget is not None:
+                max_iters = num_generations * max(1, max_steps) + 10
+            else:
+                max_iters = num_generations
+
             population = toolbox.generate()
-            for gen in range(num_generations):
+            gen = 0
+            while gen < max_iters:
                 seeds = _next_seeds(len(population))
                 if effective_workers > 1:
                     fitnesses = evaluate_population_parallel(
                         population, executor=executor, spec=worker_spec,
                         eval_seeds=seeds,
+                        step_sink=_parallel_steps,
                     )
                 else:
                     fitnesses = [
@@ -269,33 +288,56 @@ class PSOTrainer(BaselineTrainer):
 
                 toolbox.update(population)
                 hof.update(population)
+                gen += 1
                 record = stats.compile(population)
 
                 # Extract gbest from toolbox context for champion tracking.
                 gbest_ctx = toolbox._pso_gbest_ctx
                 gbest_fit = gbest_ctx.get("fitness")
                 fitness_history.append({
-                    "generation": gen + 1,
+                    "generation": gen,
                     "mean": record["avg"],
                     "std": record["std"],
                     "min": record["min"],
                     "max": record["max"],
                     "gbest": gbest_fit,
                 })
-                self._on_progress(
-                    progress_callback,
-                    ProgressEvent(
-                        unit="generation",
-                        current=gen + 1,
-                        total=num_generations,
-                        env_steps=(gen + 1) * env_steps_per_iteration,
-                        best_fitness=record["max"],
-                        mean_fitness=record["avg"],
-                        wall_time_s=time.time() - start_time,
-                    ),
-                    champion=_pso_champion,
+                consumed = (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 )
+                if consumed_budget is not None:
+                    self._on_progress(
+                        progress_callback,
+                        ProgressEvent(
+                            unit="env_step",
+                            current=consumed,
+                            total=consumed_budget,
+                            env_steps=consumed,
+                            best_fitness=record["max"],
+                            mean_fitness=record["avg"],
+                            wall_time_s=time.time() - start_time,
+                        ),
+                        champion=_pso_champion,
+                    )
+                    if consumed >= consumed_budget:
+                        break
+                else:
+                    self._on_progress(
+                        progress_callback,
+                        ProgressEvent(
+                            unit="generation",
+                            current=gen,
+                            total=num_generations,
+                            env_steps=gen * env_steps_per_iteration,
+                            best_fitness=record["max"],
+                            mean_fitness=record["avg"],
+                            wall_time_s=time.time() - start_time,
+                        ),
+                        champion=_pso_champion,
+                    )
 
+        # Realized generation count (== num_generations on the nominal path).
+        num_generations = gen
         env.close()
         self._recorder.finalize(
             _pso_champion, iteration=num_generations,
@@ -337,6 +379,12 @@ class PSOTrainer(BaselineTrainer):
                 "num_generations": num_generations,
                 "population_size": self.population_size,
                 "dimension": dimension,
+                # PSO evaluates ``num_generations`` populations with no separate
+                # gen-0 eval, so nominal is num_generations * per-iter.
+                "env_steps_nominal": num_generations * env_steps_per_iteration,
+                "env_steps_consumed": (
+                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                ),
             },
             metadata={
                 "genome_config": genome_config,
