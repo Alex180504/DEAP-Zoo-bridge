@@ -562,10 +562,7 @@ class EATrainer(BaselineTrainer):
                 unit="generation",
                 current=gen,
                 total=num_generations,
-                # Charge gen-0: the initial population is a full evaluation,
-                # so cumulative env steps at generation g is (g+1) iterations.
-                # Mirrors CMA-ES / PSO progress accounting.
-                env_steps=(gen + 1) * env_steps_per_iteration,
+                env_steps=gen * env_steps_per_iteration,
                 best_fitness=entry.get("max"),
                 mean_fitness=entry.get("mean"),
                 wall_time_s=time.time() - start_time,
@@ -795,9 +792,6 @@ class EATrainer(BaselineTrainer):
                     log,
                     fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps_per_episode,
-                    # Generation 0 is the random initial population (a full
-                    # evaluation); charge it on the env-step axis.
-                    charge_initial_population=True,
                 )
                 from deap_pettingzoo.utils.logging import save_ea_genome, KIND_EA_GENOME
                 save_ea_genome(

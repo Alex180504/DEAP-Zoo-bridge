@@ -103,8 +103,9 @@ class TestGenerationDerivation:
 
 
 class TestGenZeroCharge:
-    def test_gen0_progress_event_charges_population(self):
-        """The first progress event reports env_steps == population * max_steps."""
+    def test_gen0_progress_event_reports_zero_env_steps(self):
+        """The gen-0 progress event reports env_steps == 0 so the comparison
+        chart x-axis aligns with RL algorithms that start from step 0."""
         pop = 4
         max_steps = 25
         trainer = EATrainer(population_size=pop, strategy="simple")
@@ -124,7 +125,7 @@ class TestGenZeroCharge:
         assert events, "expected at least one progress event"
         gen0 = events[0]
         assert gen0.current == 0
-        assert gen0.env_steps == pop * max_steps
+        assert gen0.env_steps == 0
 
 
 
@@ -303,7 +304,7 @@ class TestParallelCounterAggregation:
         config = _early_trunc_config(num_workers=2)
         result = trainer.train(config)
         nominal = result.metrics["env_steps_nominal"]
-        consumed = result.metrics["env_steps_consumed"].
+        consumed = result.metrics["env_steps_consumed"]
         assert isinstance(consumed, int)
         assert 0 < consumed < nominal
 

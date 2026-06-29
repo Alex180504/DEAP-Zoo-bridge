@@ -405,6 +405,7 @@ class CMAESTrainer(BaselineTrainer):
                     log,
                     fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    gen_offset=-1,
                 )
                 from deap_pettingzoo.utils.logging import save_ea_genome, KIND_CMA_GENOME
                 save_ea_genome(

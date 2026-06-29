@@ -354,7 +354,8 @@ class PSOTrainer(BaselineTrainer):
         try:
             with log:
                 dump_fitness_history(log, fitness_history,
-                    env_steps_per_iteration=self.population_size * max_steps)
+                    env_steps_per_iteration=self.population_size * max_steps,
+                    gen_offset=-1)
                 from deap_pettingzoo.utils.logging import save_ea_genome
                 save_ea_genome(log, best_genome, kind="pso_genome", extra={
                     "final_fitness": float(best_ind.fitness.values[0]),
