@@ -56,6 +56,7 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
             "budget_mode": budget.get("mode", "env_steps"),
             "budget_value": budget.get("value", 50000),
             "num_seeds": budget.get("num_seeds", 1),
+            "budget_on_consumed": budget.get("budget_on_consumed", False),
         }
 
     # fitness

@@ -907,12 +907,18 @@ class CoEvolutionTrainer(BaselineTrainer):
         _nominal_per_gen = _nominal_total / max(1, num_generations)
         with log:
             for name, hist in per_side_history.items():
+                # Accumulate per-generation real env steps so the
+                # `env_steps` column is cumulative (matching EA/CMA-ES/PSO/
+                # AgileRL semantics); GenerationStats.env_steps holds the
+                # single-generation delta from a fresh per-gen evaluator.
+                _cumulative_env_steps = 0
                 for s in hist:
+                    _cumulative_env_steps += int(s.env_steps)
                     log.row(
                         "metrics",
                         {
                             "iteration": int(s.generation),
-                            "env_steps": int(s.env_steps),
+                            "env_steps": _cumulative_env_steps,
                             "nominal_env_steps": int(
                                 s.generation * _nominal_per_gen
                             ),
