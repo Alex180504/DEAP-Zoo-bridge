@@ -841,6 +841,22 @@ class IPPOHPOTrainer(EvolveHPOTrainer):
     ALGORITHM_IMPORT = ("agilerl.algorithms.ippo", "IPPO")
     ON_POLICY = True
 
+    # IPPO's constructor only accepts a single `lr`; `lr_critic` and `tau`
+    # are off-policy-only and must be stripped before population creation.
+    _IPPO_UNSUPPORTED_KWARGS = frozenset({"lr_critic", "tau"})
+
+    def _build_population(self, alg_cls, size, obs_spaces, act_spaces, agent_ids,
+                          net_config, hp_config, ctor_kwargs):
+        kwargs = dict(ctor_kwargs)
+        if "lr_actor" in kwargs:
+            kwargs.setdefault("lr", kwargs.pop("lr_actor"))
+        for key in self._IPPO_UNSUPPORTED_KWARGS:
+            kwargs.pop(key, None)
+        return super()._build_population(
+            alg_cls, size, obs_spaces, act_spaces, agent_ids,
+            net_config, hp_config, kwargs,
+        )
+
 
 class GroupedIPPOHPOTrainer(IPPOHPOTrainer):
     """Prefix-grouped IPPO with evolutionary HPO.
