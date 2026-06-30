@@ -36,6 +36,82 @@ from .coevolution import NeatSideState, _NeatPopulationPool, _save_random_state,
 from ._pureples.es_hyperneat import ES_HYPERNEAT_PARAMS_DEFAULTS
 
 
+class _HyperNeatPopulationPool(_NeatPopulationPool):
+    """Population pool for HyperNEAT genomes.
+
+    Overrides :meth:`snapshot_opponents` to emit ``kind='hyperneat'``
+    snapshots carrying ``env_obs_size`` / ``env_act_size`` so workers
+    call :func:`~deap_pettingzoo.baselines.coevolution.pools.rebuild_opponent_policy`
+    with the correct substrate dimensions rather than treating them as
+    plain NEAT policies (which would cause an obs-size mismatch on
+    networks with CPPN geometry).
+    """
+
+    def __init__(self, genomes_by_id, policy_factory, neat_config,
+                 env_obs_size: int, env_act_size: int, activation: str = "sigmoid") -> None:
+        super().__init__(genomes_by_id, policy_factory, neat_config)
+        self._env_obs_size = env_obs_size
+        self._env_act_size = env_act_size
+        self._activation = activation
+
+    def snapshot_opponents(self, rng, k):
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}")
+        snapshots = []
+        for _ in range(k):
+            idx = rng.integers(0, len(self._genomes))
+            genome = self._genomes[idx]
+            snapshots.append(
+                OpponentSnapshot(
+                    kind="hyperneat",
+                    payload={
+                        "genome": genome,
+                        "env_obs_size": self._env_obs_size,
+                        "env_act_size": self._env_act_size,
+                        "activation": self._activation,
+                    },
+                )
+            )
+        return snapshots
+
+
+class _ESHyperNeatPopulationPool(_NeatPopulationPool):
+    """Population pool for ES-HyperNEAT genomes.
+
+    Same rationale as :class:`_HyperNeatPopulationPool` but emits
+    ``kind='es_hyperneat'`` snapshots that also carry the ES-HyperNEAT
+    parameter dict.
+    """
+
+    def __init__(self, genomes_by_id, policy_factory, neat_config,
+                 env_obs_size: int, env_act_size: int,
+                 es_params: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(genomes_by_id, policy_factory, neat_config)
+        self._env_obs_size = env_obs_size
+        self._env_act_size = env_act_size
+        self._es_params = dict(es_params) if es_params else {}
+
+    def snapshot_opponents(self, rng, k):
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}")
+        snapshots = []
+        for _ in range(k):
+            idx = rng.integers(0, len(self._genomes))
+            genome = self._genomes[idx]
+            snapshots.append(
+                OpponentSnapshot(
+                    kind="es_hyperneat",
+                    payload={
+                        "genome": genome,
+                        "env_obs_size": self._env_obs_size,
+                        "env_act_size": self._env_act_size,
+                        "es_params": self._es_params,
+                    },
+                )
+            )
+        return snapshots
+
+
 class HyperNeatSideState(NeatSideState):
     """HyperNEAT co-evolution side.
 
@@ -82,6 +158,10 @@ class HyperNeatSideState(NeatSideState):
         input_size = int(obs_shape[0]) if obs_shape else 1
         output_size = required_output_size(self._action_space)
 
+        # Stored so current_pool() can embed them in snapshots shipped to workers.
+        self._env_obs_size = input_size
+        self._env_act_size = output_size
+
         # Build substrate.
         self._substrate = substrate_for_env(
             input_size,
@@ -125,6 +205,8 @@ class HyperNeatSideState(NeatSideState):
         evaluator = evaluator_factory(self)
         env: PettingZooWrapper = getattr(evaluator, "_env", self._env)
 
+        self._gen_env_steps = 0
+
         def _fitness_func(
             genomes_and_ids: list, neat_cfg: neat.Config
         ) -> None:
@@ -156,6 +238,7 @@ class HyperNeatSideState(NeatSideState):
                             truncateds.values()
                         )
                         _steps += 1
+                    self._gen_env_steps += _steps
                     rewards.append(ep_rew)
                 genome.fitness = float(np.mean(rewards))
 
@@ -191,6 +274,7 @@ class HyperNeatSideState(NeatSideState):
             min=float(np.min(fitnesses)),
             max=float(np.max(fitnesses)),
             best_fitness=best_fit,
+            env_steps=int(self._gen_env_steps),
         )
 
     def current_pool(self) -> OpponentPool:
@@ -208,10 +292,16 @@ class HyperNeatSideState(NeatSideState):
                 activation=self._phenotype_activation,
             )
 
-        return _NeatPopulationPool(
+        # Use _HyperNeatPopulationPool so snapshot_opponents emits
+        # kind='hyperneat' (not 'neat'), giving parallel workers the
+        # correct substrate dimensions to rebuild the policy.
+        return _HyperNeatPopulationPool(
             genomes_by_id=dict(self._genomes_by_id),
             policy_factory=_factory,
             neat_config=self._neat_config,  # type: ignore[arg-type]
+            env_obs_size=self._env_obs_size,
+            env_act_size=self._env_act_size,
+            activation=self._phenotype_activation,
         )
 
     def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:
@@ -270,6 +360,10 @@ class ESHyperNeatSideState(NeatSideState):
         input_size = int(obs_shape[0]) if obs_shape else 1
         output_size = required_output_size(self._action_space)
 
+        # Stored so current_pool() can embed them in snapshots shipped to workers.
+        self._env_obs_size = input_size
+        self._env_act_size = output_size
+
         # ES-HyperNEAT substrate: no hidden nodes.
         self._substrate = substrate_for_env(
             input_size, output_size, layout="uniform"
@@ -309,6 +403,8 @@ class ESHyperNeatSideState(NeatSideState):
         evaluator = evaluator_factory(self)
         env: PettingZooWrapper = getattr(evaluator, "_env", self._env)
 
+        self._gen_env_steps = 0
+
         def _fitness_func(
             genomes_and_ids: list, neat_cfg: neat.Config
         ) -> None:
@@ -340,6 +436,7 @@ class ESHyperNeatSideState(NeatSideState):
                             truncateds.values()
                         )
                         _steps += 1
+                    self._gen_env_steps += _steps
                     rewards.append(ep_rew)
                 genome.fitness = float(np.mean(rewards))
 
@@ -375,6 +472,7 @@ class ESHyperNeatSideState(NeatSideState):
             min=float(np.min(fitnesses)),
             max=float(np.max(fitnesses)),
             best_fitness=best_fit,
+            env_steps=int(self._gen_env_steps),
         )
 
     def current_pool(self) -> OpponentPool:
@@ -392,10 +490,15 @@ class ESHyperNeatSideState(NeatSideState):
                 es_params=self._es_params,
             )
 
-        return _NeatPopulationPool(
+        # Use _ESHyperNeatPopulationPool so snapshot_opponents emits
+        # kind='es_hyperneat' with correct substrate dimensions and es_params.
+        return _ESHyperNeatPopulationPool(
             genomes_by_id=dict(self._genomes_by_id),
             policy_factory=_factory,
             neat_config=self._neat_config,  # type: ignore[arg-type]
+            env_obs_size=self._env_obs_size,
+            env_act_size=self._env_act_size,
+            es_params=self._es_params,
         )
 
     def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:

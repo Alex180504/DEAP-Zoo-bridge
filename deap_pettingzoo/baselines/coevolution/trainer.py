@@ -454,10 +454,20 @@ class CoEvolutionTrainer(BaselineTrainer):
                 "config.algorithm_params['coevolution'] to be a "
                 "CoEvolutionConfig instance."
             )
-        reject_consumed_budgeting(config, "CoEvolutionTrainer")
-
         start = time.time()
         num_generations = self._translate_budget(config, coev_cfg)
+
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
+        self._consumed_budget = consumed_budget
+        # Safety cap: when budget_on_consumed the real stop is the consumed check;
+        # max_iters prevents an infinite loop if every episode terminates in 1 step.
+        max_iters = (
+            num_generations * max(1, coev_cfg.max_steps_per_episode) + 10
+            if consumed_budget is not None
+            else num_generations
+        )
 
         env = PettingZooWrapper(
             config.env_name, env_config=config.env_config or None
@@ -521,21 +531,40 @@ class CoEvolutionTrainer(BaselineTrainer):
             self._progress_start = start
 
             if coev_cfg.schedule == "synchronous":
-                self._run_synchronous_loop(
+                realized = self._run_synchronous_loop(
                     env, states, coev_cfg, config,
-                    num_generations, per_side_history,
+                    max_iters, per_side_history,
+                    consumed_budget=consumed_budget,
                 )
             else:  # alternating
-                self._run_alternating_loop(
+                realized = self._run_alternating_loop(
                     env, states, coev_cfg, config,
-                    num_generations, per_side_history,
+                    max_iters, per_side_history,
+                    consumed_budget=consumed_budget,
                 )
+
+            # Warn when the safety cap fired without the consumed-budget check
+            # triggering — this usually means every episode terminates in 0
+            # steps so the consumed total never grows.
+            if consumed_budget is not None:
+                consumed_so_far = self._aggregate_consumed(per_side_history)
+                if realized >= max_iters and consumed_so_far < consumed_budget:
+                    warnings.warn(
+                        f"CoEvolutionTrainer: safety cap ({max_iters} iterations) "
+                        f"reached before consuming target env steps "
+                        f"({consumed_so_far} < {consumed_budget}). "
+                        "Episodes may terminate immediately (0 steps). "
+                        "Check max_steps_per_episode or use "
+                        "budget_on_consumed=False.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
             # Guarantee a final capture (dedups against the last per-gen one).
             self._recorder.finalize(
                 lambda: self._coev_policy_map(states),
-                iteration=num_generations,
-                env_steps=num_generations * self._recording_max_steps,
+                iteration=realized,
+                env_steps=realized * self._recording_max_steps,
             )
 
             # Build reporting-side policy *inside* the executor scope
@@ -549,14 +578,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._rec_env = None
         training_time = time.time() - start
         # Real env ticks: sum each side's per-generation GenerationStats.env_steps.
-        env_steps_consumed = int(
-            sum(
-                int(s.env_steps)
-                for hist in per_side_history.values()
-                for s in hist
-            )
-        )
-        env_steps_nominal = self._nominal_env_steps(coev_cfg, num_generations)
+        env_steps_consumed = self._aggregate_consumed(per_side_history)
+        # Use realized (actual generations run) so nominal is consistent with
+        # the "num_generations": realized entry in the same metrics dict.
+        env_steps_nominal = self._nominal_env_steps(coev_cfg, realized)
         metrics = {
             "per_side_history": {
                 name: [self._stats_to_dict(s) for s in hist]
@@ -576,7 +601,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 name: (len(state.side.hof) if state.side.hof is not None else 0)
                 for name, state in states.items()
             },
-            "num_generations": num_generations,
+            "num_generations": realized,
         }
         metadata = {
             "mode": coev_cfg.mode,
@@ -611,7 +636,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             per_side_history,
             states,
             training_time,
-            num_generations,
+            realized,
         )
 
         return TrainingResult(
@@ -759,12 +784,16 @@ class CoEvolutionTrainer(BaselineTrainer):
         coev_cfg: CoEvolutionConfig,
         gen: int,
         states: Dict[str, SideState],
+        *,
+        consumed: Optional[int] = None,
     ) -> None:
         """Call the user generation callback and emit a progress event.
 
         Both are error-isolated so neither can interrupt training. The
         progress event is logger-independent (built from in-loop state) and
         is wired into **both** the synchronous and alternating schedules.
+        When ``budget_on_consumed`` is active, emits an ``env_step`` unit
+        event so callers see consumed/total instead of generation/total.
         """
         if coev_cfg.generation_callback is not None:
             try:
@@ -790,23 +819,45 @@ class CoEvolutionTrainer(BaselineTrainer):
             best = bf if best is None else max(best, bf)
         start = getattr(self, "_progress_start", None)
         max_steps = int(getattr(self, "_recording_max_steps", 0) or 0)
-        # Single hook: emit progress and let the recording controller decide
-        # (per RecordingMode) whether to capture a heterogeneous rollout built
-        # from each side's current best policy.
-        self._on_progress(
-            getattr(self, "_progress_callback", None),
-            ProgressEvent(
-                unit="generation",
-                current=gen,
-                total=int(getattr(self, "_progress_total", 0)),
-                env_steps=gen * max_steps,
-                best_fitness=best,
-                mean_fitness=None,
-                wall_time_s=(time.time() - start) if start is not None else 0.0,
-                extra={"side_best": side_best},
-            ),
-            champion=lambda: self._coev_policy_map(states),
-        )
+        wall = (time.time() - start) if start is not None else 0.0
+        cb = getattr(self, "_progress_callback", None)
+        champion = lambda: self._coev_policy_map(states)
+
+        # When consumed-step budgeting is active, emit env_step-unit progress
+        # so the UI/callback sees consumed/budget rather than gen/total.
+        if getattr(self, "_consumed_budget", None) is not None and consumed is not None:
+            self._on_progress(
+                cb,
+                ProgressEvent(
+                    unit="env_step",
+                    current=consumed,
+                    total=int(self._consumed_budget),
+                    env_steps=consumed,
+                    best_fitness=best,
+                    mean_fitness=None,
+                    wall_time_s=wall,
+                    extra={"side_best": side_best},
+                ),
+                champion=champion,
+            )
+        else:
+            # Single hook: emit progress and let the recording controller decide
+            # (per RecordingMode) whether to capture a heterogeneous rollout built
+            # from each side's current best policy.
+            self._on_progress(
+                cb,
+                ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=int(getattr(self, "_progress_total", 0)),
+                    env_steps=gen * max_steps,
+                    best_fitness=best,
+                    mean_fitness=None,
+                    wall_time_s=wall,
+                    extra={"side_best": side_best},
+                ),
+                champion=champion,
+            )
 
     def _run_synchronous_loop(
         self,
@@ -814,26 +865,38 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         config: TrainingConfig,
-        num_generations: int,
+        max_iters: int,
         history: Dict[str, List[GenerationStats]],
-    ) -> None:
-        """Drive the synchronous schedule: every side advances each gen."""
-        for _g in range(num_generations):
+        *,
+        consumed_budget: Optional[int] = None,
+    ) -> int:
+        """Drive the synchronous schedule: every side advances each gen.
+
+        Returns the number of generations actually completed (may be less than
+        ``max_iters`` when ``consumed_budget`` is reached).
+        """
+        realized = 0
+        for _g in range(max_iters):
             _gt = time.time()
             self._run_synchronous_generation(env, states, coev_cfg, history)
+            realized = _g + 1
+            consumed = self._aggregate_consumed(history)
             # Progress + champion recording happen together in the callback.
-            self._invoke_generation_callback(coev_cfg, _g + 1, states)
+            self._invoke_generation_callback(coev_cfg, realized, states, consumed=consumed)
             _side_info = "  ".join(
                 _format_progress_entry(h[-1])
                 for n, h in history.items()
                 if h
             )
             print(
-                f"[CoEv] gen {_g + 1}/{num_generations}  "
+                f"[CoEv] gen {realized}/{max_iters}  "
                 f"{_side_info}  "
                 f"({time.time()-_gt:.1f}s)",
                 flush=True,
             )
+            if consumed_budget is not None and consumed >= consumed_budget:
+                break
+        return realized
 
     def _run_alternating_loop(
         self,
@@ -841,35 +904,49 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         config: TrainingConfig,
-        num_generations: int,
+        max_iters: int,
         history: Dict[str, List[GenerationStats]],
-    ) -> None:
-        """Drive the alternating schedule: one side advances at a time."""
+        *,
+        consumed_budget: Optional[int] = None,
+    ) -> int:
+        """Drive the alternating schedule: one side advances at a time.
+
+        Returns the number of side-steps actually completed (may be less than
+        ``max_iters`` when ``consumed_budget`` is reached).
+        """
         total = 0
         rotation = list(states)
-        while total < num_generations:
+        stop = False
+        while total < max_iters and not stop:
             for name in rotation:
+                if stop:
+                    break
                 for _inner in range(coev_cfg.alternating_generations):
-                    if total >= num_generations:
+                    if total >= max_iters or stop:
                         break
                     _gt = time.time()
                     self._run_alternating_step(
                         env, states, coev_cfg, history, name
                     )
                     total += 1
+                    consumed = self._aggregate_consumed(history)
                     # Progress + champion recording happen in the callback.
-                    self._invoke_generation_callback(coev_cfg, total, states)
+                    self._invoke_generation_callback(coev_cfg, total, states, consumed=consumed)
                     _side_info = "  ".join(
                         _format_progress_entry(h[-1])
                         for n, h in history.items()
                         if h
                     )
                     print(
-                        f"[CoEv] step {total}/{num_generations} ({name})  "
+                        f"[CoEv] step {total}/{max_iters} ({name})  "
                         f"{_side_info}  "
                         f"({time.time()-_gt:.1f}s)",
                         flush=True,
                     )
+                    if consumed_budget is not None and consumed >= consumed_budget:
+                        stop = True
+                        break
+        return total
 
     # Logging helpers
 
@@ -1038,6 +1115,11 @@ class CoEvolutionTrainer(BaselineTrainer):
         }
 
     # Internals
+
+    @staticmethod
+    def _aggregate_consumed(history: Dict[str, List[GenerationStats]]) -> int:
+        """Sum real per-generation env ticks across all sides and all entries."""
+        return int(sum(int(s.env_steps) for hist in history.values() for s in hist))
 
     @staticmethod
     def _stats_to_dict(s: GenerationStats) -> Dict[str, Any]:
