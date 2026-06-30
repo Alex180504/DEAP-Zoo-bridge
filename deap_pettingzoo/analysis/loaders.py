@@ -533,6 +533,102 @@ class Experiment:
                 )
         return groups
 
+    def per_agent_table(self):
+        """Per-agent reward decomposition for each run.
+
+        Returns a :class:`pandas.DataFrame` with one row per
+        ``(run, agent)`` carrying ``total_reward``,
+        ``mean_episode_reward``, ``n_steps`` and a ``source`` column.
+        Prefers per-step ``trajectories.parquet``; falls back to the
+        held-out ``eval_agent_rewards`` summary when no trajectories
+        frame is loaded (see :func:`per_agent_table` for precedence).
+
+        This is the only view that escapes the single-team-scalar
+        collapse: ``episodes.csv`` and the aggregate metric both sum
+        rewards across agents (degenerate on zero-sum competitive envs),
+        whereas this carries per-agent rewards.
+        """
+        return per_agent_table(self.runs)
+
+    def to_frame(
+        self,
+        metric: str = "final_fitness",
+        *,
+        include_config: bool = False,
+    ):
+        """Tidy per-(algorithm, env, seed) frame of scores for export.
+
+        One row per run with ``run_id``, ``algorithm``, ``env_name``,
+        ``seed``, ``score`` (resolved through the same provenance-aware
+        path as :meth:`final_scores`), ``score_provenance`` and
+        ``wall_time_s``.
+
+        Parameters
+        ----------
+        include_config:
+            When ``True``, also emit ``budget_mode``, ``budget_value``,
+            ``git_sha`` and each scalar hyperparameter (prefixed
+            ``hp.``) pulled from the run's ``manifest.json``, so a
+            plotted result can be tied back to the seed, budget, code
+            version and configuration that produced it.
+        """
+        pd = _lazy_pd()
+        rows: List[Dict[str, Any]] = []
+        for r in self.runs:
+            row: Dict[str, Any] = {
+                "run_id": r.run_id,
+                "algorithm": r.algorithm,
+                "env_name": r.env_name,
+                "seed": r.seed,
+                "score": self._metric_value(r, metric),
+                "score_provenance": self._provenance_for(r, metric),
+                "wall_time_s": r.wall_time_s,
+            }
+            if include_config:
+                row["budget_mode"] = r.manifest.get("budget_mode")
+                row["budget_value"] = r.manifest.get("budget_value")
+                env_meta = r.manifest.get("environment") or {}
+                row["git_sha"] = env_meta.get("git_sha")
+                hyperparams = r.manifest.get("hyperparams") or {}
+                for k, v in hyperparams.items():
+                    if v is None or isinstance(v, (str, int, float, bool)):
+                        row[f"hp.{k}"] = v
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def export(
+        self,
+        path: str | Path,
+        *,
+        fmt: Optional[str] = None,
+        metric: str = "final_fitness",
+        include_config: bool = True,
+    ) -> Path:
+        """Write :meth:`to_frame` to ``path`` for reproducible re-plotting.
+
+        ``fmt`` is one of ``"csv"`` / ``"json"`` / ``"parquet"``; when
+        ``None`` it is inferred from ``path``'s suffix (defaulting to
+        ``csv``). ``include_config`` defaults to ``True`` here so an
+        exported campaign carries the seed/budget/git_sha/hyperparams
+        needed to reproduce it. Returns ``path``.
+        """
+        path = Path(path)
+        if fmt is None:
+            fmt = path.suffix.lstrip(".").lower() or "csv"
+        fmt = fmt.lower()
+        df = self.to_frame(metric=metric, include_config=include_config)
+        if fmt == "csv":
+            df.to_csv(path, index=False)
+        elif fmt == "json":
+            df.to_json(path, orient="records", indent=2)
+        elif fmt == "parquet":
+            df.to_parquet(path, index=False)
+        else:
+            raise ValueError(
+                f"fmt must be 'csv', 'json' or 'parquet', got {fmt!r}"
+            )
+        return path
+
     def score_provenances(
         self,
         metric: str = "final_fitness",
@@ -580,6 +676,70 @@ def load_experiment(
 
 
 # Mapping helpers used by other analysis modules
+
+
+def per_agent_table(runs: Sequence[RunRecord]):
+    """Per-agent reward decomposition over ``runs``.
+
+    Prefers per-step ``trajectories.parquet`` (full ``total_reward`` /
+    ``mean_episode_reward`` / ``n_steps`` with ``source="trajectories"``).
+    When a run has no trajectories frame it falls back to the held-out
+    re-evaluation's per-agent means persisted in
+    ``summary['eval_agent_rewards']`` (``source="held_out_eval"``,
+    ``mean_episode_reward`` only; ``total_reward``/``n_steps`` are
+    ``NaN``) so the comparable every-backend decomposition is still
+    visible without the opt-in parquet sink.
+
+    See :meth:`Experiment.per_agent_table`. Accepts any iterable of
+    :class:`RunRecord` so UI code can decompose an arbitrary run subset
+    without constructing an :class:`Experiment`.
+    """
+    pd = _lazy_pd()
+    rows: List[Dict[str, Any]] = []
+    for r in runs:
+        traj = r.trajectories
+        if traj is not None and {"agent", "reward"} <= set(traj.columns):
+            if "episode_idx" in traj.columns:
+                n_eps = max(1, int(traj["episode_idx"].nunique()))
+            else:
+                n_eps = 1
+            for agent, series in traj.groupby("agent")["reward"]:
+                total = float(series.sum())
+                rows.append(
+                    {
+                        "run_id": r.run_id,
+                        "algorithm": r.algorithm,
+                        "env_name": r.env_name,
+                        "seed": r.seed,
+                        "agent": str(agent),
+                        "total_reward": total,
+                        "mean_episode_reward": total / n_eps,
+                        "n_steps": int(series.size),
+                        "source": "trajectories",
+                    }
+                )
+            continue
+        held_out = r.summary.get("eval_agent_rewards")
+        if isinstance(held_out, dict):
+            for agent, reward in held_out.items():
+                try:
+                    mean_reward = float(reward)
+                except (TypeError, ValueError):
+                    continue
+                rows.append(
+                    {
+                        "run_id": r.run_id,
+                        "algorithm": r.algorithm,
+                        "env_name": r.env_name,
+                        "seed": r.seed,
+                        "agent": str(agent),
+                        "total_reward": float("nan"),
+                        "mean_episode_reward": mean_reward,
+                        "n_steps": float("nan"),
+                        "source": "held_out_eval",
+                    }
+                )
+    return pd.DataFrame(rows)
 
 
 def metrics_aligned_to_x(

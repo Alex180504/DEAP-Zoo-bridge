@@ -80,6 +80,10 @@ def test_runner_mixed_spec_reports_comparable_metric(tmp_path):
         assert row.get("eval_mean_reward") is not None, (key, row)
         assert row.get("eval_metric_provenance"), (key, row)
         provenances.add(row["eval_metric_provenance"])
+        # Held-out per-agent decomposition is persisted so the
+        # analysis per-agent view can surface it without trajectories.parquet.
+        agent_rewards = row.get("eval_agent_rewards")
+        assert isinstance(agent_rewards, dict) and agent_rewards, (key, row)
 
     # Both backends must be comparable on the *same* held-out provenance.
     assert provenances == {"held_out_unified"}, provenances

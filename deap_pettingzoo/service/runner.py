@@ -228,6 +228,14 @@ def _record_held_out_eval(
         "eval_episodes": _EVAL_EPISODES,
         "eval_metric_provenance": _EVAL_PROVENANCE,
     }
+    # Persist the held-out per-agent decomposition so the analysis layer's
+    # per-agent view (Experiment.per_agent_table) can surface the comparable,
+    # every-backend metric even when no opt-in trajectories.parquet exists.
+    if eval_result.agent_rewards:
+        eval_metrics["eval_agent_rewards"] = {
+            str(agent): float(reward)
+            for agent, reward in eval_result.agent_rewards.items()
+        }
     metrics_row.update(eval_metrics)
     if run_dir:
         _persist_eval_metrics(Path(run_dir), eval_metrics)

@@ -485,6 +485,7 @@ package "deap_pettingzoo.baselines" {
         + num_episodes: int
         + episode_rewards: List[float]
         + episode_lengths: List[int]
+        + agent_rewards: Dict[str, float]
         + to_dict() -> dict
     }
 
@@ -713,12 +714,23 @@ package "deap_pettingzoo.baselines" {
     class UnifiedEvaluator {
         - max_steps: int
         - env_cache: dict
+        - aggregation: str
+        - score_agents: Optional[set[str]]
         --
-        + __init__(max_steps)
+        + __init__(max_steps, *, aggregation="sum", score_agents=None)
         + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
-        - _run_episode(policy, env, seed) -> tuple
+        - _aggregate_reward(agent_rewards) -> float
+        - _run_episode(policy, env, seed) -> (agent_rewards, length)
         + close()
     }
+    note bottom of UnifiedEvaluator
+      aggregation ("sum"|"mean") + score_agents are
+      an OPT-IN team/per-side scalar for zero-sum
+      competitive envs; the default
+      comparison path still scores team-sum, callers
+      opt in. Per-agent rewards are always surfaced
+      on EvalResult.agent_rewards.
+    end note
 
     class "comparison (module)" as comparison_mod <<module>> {
         - _TRAINER_REGISTRY: dict[str, type]
@@ -1403,17 +1415,24 @@ package "deap_pettingzoo.analysis" {
     +summary_table(): pd.DataFrame
     +final_scores(metric): dict[str, ndarray]
     +score_provenances(metric): dict[str, set]
+    +per_agent_table(): pd.DataFrame
+    +to_frame(metric, *, include_config): pd.DataFrame
+    +export(path, *, fmt, metric, include_config): Path
   }
   note bottom of Experiment
     final_scores(metric="final_fitness") resolves
     via comparison_score (held-out preferred);
     score_provenances() exposes per-group
     provenance so a mixed comparison is blocked.
+    per_agent_table() decomposes trajectories;
+    to_frame/export emit per-(algo,env,seed) rows
+    with score+seed+budget+git_sha+hyperparams.
   end note
 
   class loaders <<module>> {
     +load_run(run_dir): RunRecord
     +load_experiment(root, pattern): Experiment
+    +per_agent_table(runs): pd.DataFrame
   }
 
   class aggregate <<module>> {
@@ -1421,8 +1440,9 @@ package "deap_pettingzoo.analysis" {
     +bootstrap_ci(scores, *, statistic, n_resamples, ci, seed)
     +mean_with_ci(scores, **kw)
     +iqm_with_ci(scores, **kw)
-    +learning_curve_with_ci(runs, *, x_col, y_col, statistic)
-    +aggregate_summary(score_groups): pd.DataFrame
+    +resolve_y_col(runs, *, x_col, candidates): Optional[str]
+    +learning_curve_with_ci(runs, *, x_col, y_col=auto, statistic)
+    +aggregate_summary(score_groups, *, require_equal_n): pd.DataFrame
   }
 
   class compare <<module>> {
@@ -1434,10 +1454,10 @@ package "deap_pettingzoo.analysis" {
   }
 
   class rliable_bridge <<module>> {
-    +aggregate_metrics_table(score_groups, *, reps)
+    +aggregate_metrics_table(score_groups, *, reps, include_optimality_gap=auto)
     +performance_profile(score_groups, *, taus, reps)
     +probability_of_improvement(score_groups, *, reps)
-    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col, x_grid, reps)
+    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col=auto, x_grid, reps)
   }
 
   class plots <<module>> {
@@ -1468,8 +1488,11 @@ RunRecord ..> RunManifest : "loads manifest.json"
 note bottom of rliable_bridge
   Lazy-imports rliable; raises
   ImportError("install with .[analysis]")
-  if missing. iqm() in aggregate matches
-  rliable.metrics.aggregate_iqm to 1e-9.
+  if missing. iqm() count-trims 25% per end
+  (scipy.stats.trim_mean), matching
+  rliable.metrics.aggregate_iqm even on ties.
+  optimality_gap dropped from the raw
+  single-task table (meaningless un-normalised).
 end note
 
 note bottom of report
