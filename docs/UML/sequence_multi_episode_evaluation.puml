@@ -31,8 +31,14 @@ deactivate MultiEval
 
 == Multi-Episode Evaluation ==
 
-DEAP -> MultiEval : evaluate(individual)
+DEAP -> MultiEval : evaluate(individual, seed=None)
 activate MultiEval
+
+note right of MultiEval
+  seed overrides base_seed for this call only;
+  allows parallel workers to inject a run-specific
+  seed without mutating shared evaluator state.
+end note
 
 MultiEval -> MultiEval : episode_fitnesses = []
 MultiEval -> MultiEval : episode_stats = []
@@ -52,7 +58,8 @@ loop for each episode in range(num_episodes)
     
     MultiEval -> MultiEval : seed = evaluation_seeds[episode]
     
-    MultiEval -> SingleEval : evaluate(individual, seed)
+    MultiEval -> MultiEval : episode_seed = effective_base + episode_idx
+    MultiEval -> SingleEval : evaluate(individual, seed=episode_seed)
     activate SingleEval
     
     SingleEval -> Env : reset(seed)

@@ -174,10 +174,14 @@ package "deap_pettingzoo.environments" {
 
     class MaskedSimultaneousAdapter {
         parallel-shaped facade over AEC;\nevery active agent appears each step;\nonly current player's action executes;\ninfos[agent]["action_mask"] threaded.
+        .. termination contract ..
+        terminated agents absent from obs_dict/infos;\nstill present in rewards/terminations.
     }
 
     class SequentialTurnAdapter {
         single-agent-per-step dicts;\npreserves true turn semantics.
+        .. termination contract ..
+        drains terminated agent_selection\nwith step(None) before returning\nnext live agent obs (mirrors aec_to_parallel).
     }
 
     TurnBasedAdapter <|-- MaskedSimultaneousAdapter
@@ -193,6 +197,8 @@ package "deap_pettingzoo.environments" {
 
     class JaxEnvToPettingZooAdapter {
         per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
+        .. termination contract ..
+        dones["__truncated__"] → truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
     }
 
     JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
@@ -316,7 +322,7 @@ package "deap_pettingzoo.evaluators" {
         - base_seed: int
         --
         + __init__(env_wrapper, genome_config, num_episodes, aggregation, base_seed, ...)
-        + evaluate(individual) -> tuple
+        + evaluate(individual, seed=None) -> tuple
         + evaluate_with_stats(individual) -> tuple[mean, std, min, max]
     }
 

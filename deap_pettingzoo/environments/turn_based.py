@@ -194,12 +194,9 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
             if agent in post_obs_dict:
                 obs_dict[agent] = post_obs_dict[agent]
                 infos[agent] = post_infos.get(agent, {})
-            else:
-                # Keep agents that just terminated/truncated in the return
-                # payload one last time even if the AEC env has already
-                # dropped them from ``.agents``.
-                obs_dict[agent] = np.asarray([])
-                infos[agent] = {}
+            # Just-terminated agents are absent from obs_dict/infos so policies
+            # are never handed an empty or stale observation.  Rewards and
+            # terminations still carry their bookkeeping values above.
         return obs_dict, rewards, terminations, truncations, infos
 
     def _snapshot(self):
@@ -286,6 +283,23 @@ class SequentialTurnAdapter(_TurnBasedAdapterBase):
             )
         action = self._coerce_action(action)
         self.aec_env.step(action)
+
+        # Drain any terminated/truncated agents that the AEC env leaves in
+        # ``agents`` (mirroring PettingZoo's ``aec_to_parallel`` behaviour).
+        # Without this loop a terminated agent could be returned as the next
+        # actor, causing callers to request an action for a dead agent.
+        while True:
+            remaining = list(self.aec_env.agents)
+            if not remaining:
+                break
+            candidate = self.aec_env.agent_selection
+            if candidate is None:
+                break
+            if (self.aec_env.terminations.get(candidate, False)
+                    or self.aec_env.truncations.get(candidate, False)):
+                self.aec_env.step(None)
+            else:
+                break
 
         # Episode ended?
         remaining = list(self.aec_env.agents)
