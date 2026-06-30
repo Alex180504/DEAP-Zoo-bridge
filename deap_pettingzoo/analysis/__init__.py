@@ -33,12 +33,14 @@ from deap_pettingzoo.analysis.loaders import (
     RunRecord,
     load_experiment,
     load_run,
+    per_agent_table,
 )
 from deap_pettingzoo.analysis.aggregate import (
     bootstrap_ci,
     iqm,
     learning_curve_with_ci,
     mean_with_ci,
+    resolve_y_col,
 )
 from deap_pettingzoo.analysis.compare import (
     cliffs_delta,
@@ -85,5 +87,7 @@ __all__ = [
     "mean_with_ci",
     "normalize_score_matrices",
     "pairwise_table",
+    "per_agent_table",
+    "resolve_y_col",
     "welch_t",
 ]

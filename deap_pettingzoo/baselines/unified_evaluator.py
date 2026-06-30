@@ -5,7 +5,7 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, Mapping, Tuple
+from typing import Optional, Dict, Any, Mapping, Sequence, Tuple
 import json
 import logging
 import numpy as np
@@ -34,9 +34,11 @@ class UnifiedEvaluator(BaselineEvaluator):
         *,
         frame_recorder: Optional[FrameRecorder] = None,
         record_episode_offset: int = 0,
+        aggregation: str = "sum",
+        score_agents: Optional[Sequence[str]] = None,
     ):
         """Initialize unified evaluator.
-        
+
         Args:
             max_steps: Maximum steps per episode.
             frame_recorder: Optional :class:`FrameRecorder`. When supplied
@@ -48,11 +50,29 @@ class UnifiedEvaluator(BaselineEvaluator):
             record_episode_offset: Starting episode index for the recorder
                 (so successive generations don't overwrite each other's
                 ``episode_NNNN`` artefacts).
+            aggregation: How per-agent rewards collapse into the scalar
+                episode reward — ``"sum"`` (default, team return) or
+                ``"mean"`` (per-agent average). On a zero-sum competitive
+                env the global ``"sum"`` is ~0 for everyone; pair
+                ``aggregation`` with ``score_agents`` to score one side.
+            score_agents: Optional subset of agent ids whose rewards form
+                the scalar episode reward. ``None`` (default) scores every
+                agent. Use it to grade a backend on *its* team's return
+                (resolving the "trained for X, graded on Y" degeneracy on
+                competitive envs). Per-agent rewards in
+                :attr:`EvalResult.agent_rewards` always span every agent
+                regardless of this filter.
         """
+        if aggregation not in ("sum", "mean"):
+            raise ValueError(
+                f"aggregation must be 'sum' or 'mean', got {aggregation!r}"
+            )
         self.max_steps = max_steps
         self._env_cache: Dict[Tuple, PettingZooWrapper] = {}
         self.frame_recorder = frame_recorder
         self.record_episode_offset = int(record_episode_offset)
+        self.aggregation = aggregation
+        self.score_agents = set(score_agents) if score_agents is not None else None
     
     def evaluate(
         self,
@@ -119,13 +139,27 @@ class UnifiedEvaluator(BaselineEvaluator):
                 render_mode=render_mode,
             )
         env = self._env_cache[cache_key]
-        
+
+        # Guard against a score_agents selection that names no real agent
+        # (typo / wrong env): otherwise every episode silently scores 0.0.
+        if self.score_agents is not None:
+            possible = set(getattr(env, "possible_agents", []) or [])
+            if possible and self.score_agents.isdisjoint(possible):
+                logger.warning(
+                    "score_agents %s match no agent in %s (agents: %s); "
+                    "the scalar reward will be 0.0",
+                    sorted(self.score_agents),
+                    env_name,
+                    sorted(possible),
+                )
+
         # Setup RNG for episode seeds
         rng = np.random.default_rng(seed)
         
         # Run episodes
         episode_rewards = []
         episode_lengths = []
+        per_agent_totals: Dict[str, float] = {}
         recorder = self.frame_recorder
         recording = recorder is not None and recorder.enabled
 
@@ -145,13 +179,15 @@ class UnifiedEvaluator(BaselineEvaluator):
                 )
 
             # Run episode
-            total_reward, length = self._run_episode(
+            agent_rewards, length = self._run_episode(
                 policy, env, ep_seed, render,
                 recorder=recorder if recording else None,
                 policy_map=policy_map,
             )
-            episode_rewards.append(total_reward)
+            episode_rewards.append(self._aggregate_reward(agent_rewards))
             episode_lengths.append(length)
+            for agent, reward in agent_rewards.items():
+                per_agent_totals[agent] = per_agent_totals.get(agent, 0.0) + reward
 
             if recording:
                 recorder.end_episode()
@@ -160,7 +196,13 @@ class UnifiedEvaluator(BaselineEvaluator):
             # Advance offset so successive evaluate() calls (e.g. one per
             # generation) keep producing distinct episode_NNNN artefacts.
             self.record_episode_offset += num_episodes
-        
+
+        # Mean-over-episodes reward per agent (decomposition that the
+        # team-scalar mean_reward collapses).
+        mean_agent_rewards = {
+            agent: total / num_episodes for agent, total in per_agent_totals.items()
+        }
+
         # Compute statistics
         return EvalResult(
             mean_reward=float(np.mean(episode_rewards)),
@@ -170,7 +212,27 @@ class UnifiedEvaluator(BaselineEvaluator):
             num_episodes=num_episodes,
             episode_rewards=episode_rewards,
             episode_lengths=episode_lengths,
+            agent_rewards=mean_agent_rewards,
         )
+
+    def _aggregate_reward(self, agent_rewards: Mapping[str, float]) -> float:
+        """Collapse per-agent rewards into one scalar per the configured policy.
+
+        Restricts to :attr:`score_agents` when set, then applies
+        ``"sum"`` or ``"mean"`` aggregation. An empty selection yields
+        ``0.0`` (no scoring agent acted).
+        """
+        if self.score_agents is not None:
+            selected = [
+                r for a, r in agent_rewards.items() if a in self.score_agents
+            ]
+        else:
+            selected = list(agent_rewards.values())
+        if not selected:
+            return 0.0
+        if self.aggregation == "mean":
+            return float(np.mean(selected))
+        return float(np.sum(selected))
     
     def _run_episode(
         self,
@@ -196,7 +258,10 @@ class UnifiedEvaluator(BaselineEvaluator):
                 agents not present act randomly via ``action_space.sample()``.
 
         Returns:
-            Tuple of (total_reward, episode_length).
+            Tuple of (agent_rewards, episode_length), where
+            ``agent_rewards`` maps each possible agent to its summed
+            reward over the episode. The caller collapses it to a scalar
+            via :meth:`_aggregate_reward`.
         """
         # Reset every distinct policy (recurrent state).
         if policy_map is not None:
@@ -266,10 +331,7 @@ class UnifiedEvaluator(BaselineEvaluator):
             if render:
                 env.render()
         
-        # Aggregate total reward (sum across all agents)
-        total_reward = sum(agent_rewards.values())
-        
-        return total_reward, steps
+        return agent_rewards, steps
     
     def close(self):
         """Close all cached environments."""

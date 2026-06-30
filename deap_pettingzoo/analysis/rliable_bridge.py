@@ -98,15 +98,28 @@ def aggregate_metrics_table(
     score_matrices: Optional[Mapping[str, np.ndarray]] = None,
     reps: int = 2000,
     confidence_interval_size: float = 0.95,
+    include_optimality_gap: Optional[bool] = None,
 ) -> Any:
     """rliable aggregate scores (mean, median, IQM, optimality gap).
 
     Either pass ``score_groups`` (``{algo: [seed_scores...]}``,
     single-task) **or** ``score_matrices`` (``{algo: ndarray[n_runs,
     n_tasks]}``, multi-task). Returns a :class:`pandas.DataFrame` with
-    one row per algorithm and columns ``mean``, ``median``, ``iqm``,
-    ``optimality_gap``, each accompanied by ``_lo`` / ``_hi`` for the
-    bootstrap CI.
+    one row per algorithm and columns ``mean``, ``median``, ``iqm`` (and
+    ``optimality_gap`` when included), each accompanied by ``_lo`` /
+    ``_hi`` for the bootstrap CI.
+
+    Parameters
+    ----------
+    include_optimality_gap:
+        Whether to compute ``optimality_gap``. rliable's optimality gap
+        ``gamma - mean(min(scores, gamma))`` is only meaningful on
+        scores normalised so ``1.0`` is optimal; on raw scores ``>= 1``
+        it collapses to a silent ``0.0``. When ``None`` (default) it is
+        **omitted for the single-task** ``score_groups`` path (raw,
+        un-normalised) and **included for the multi-task**
+        ``score_matrices`` path (which is normalised before this call).
+        Pass an explicit bool to override.
     """
     library, metrics = _require_rliable()
     import pandas as pd  # noqa: WPS433
@@ -115,15 +128,23 @@ def aggregate_metrics_table(
     if not matrices:
         return pd.DataFrame()
 
+    if include_optimality_gap is None:
+        # Single-task scores are raw, so the optimality gap is meaningless
+        # there; the multi-task path normalises upstream, so keep it.
+        include_optimality_gap = score_matrices is not None
+
+    funcs = [
+        metrics.aggregate_mean,
+        metrics.aggregate_median,
+        metrics.aggregate_iqm,
+    ]
+    cols = ["mean", "median", "iqm"]
+    if include_optimality_gap:
+        funcs.append(metrics.aggregate_optimality_gap)
+        cols.append("optimality_gap")
+
     def aggregate_func(scores: np.ndarray) -> np.ndarray:
-        return np.array(
-            [
-                metrics.aggregate_mean(scores),
-                metrics.aggregate_median(scores),
-                metrics.aggregate_iqm(scores),
-                metrics.aggregate_optimality_gap(scores),
-            ]
-        )
+        return np.array([fn(scores) for fn in funcs])
 
     point, intervals = library.get_interval_estimates(
         matrices,
@@ -132,7 +153,6 @@ def aggregate_metrics_table(
         confidence_interval_size=confidence_interval_size,
     )
 
-    cols = ["mean", "median", "iqm", "optimality_gap"]
     rows = []
     for algo in matrices:
         row = {"algorithm": algo}
@@ -168,9 +188,10 @@ def aggregate_metrics_forest(
     if table.empty:
         return pd.DataFrame(columns=["algorithm", "metric", "point", "lo", "hi"])
 
+    metric_names = [c for c in table.columns if not c.endswith(("_lo", "_hi"))]
     rows = []
     for algo, row in table.iterrows():
-        for name in ("mean", "median", "iqm", "optimality_gap"):
+        for name in metric_names:
             rows.append(
                 {
                     "algorithm": algo,
@@ -277,7 +298,7 @@ def sample_efficiency_curve(
     runs_by_algo: Mapping[str, Sequence[Any]],
     *,
     x_col: str = "env_steps",
-    y_col: str = "best",
+    y_col: Optional[str] = None,
     n_points: int = 25,
     reps: int = 1000,
     confidence_interval_size: float = 0.95,
@@ -288,9 +309,23 @@ def sample_efficiency_curve(
     :class:`~deap_pettingzoo.analysis.loaders.RunRecord`. Returns a
     long-form :class:`pandas.DataFrame` with columns ``algorithm``,
     ``x``, ``iqm``, ``lo``, ``hi``.
+
+    When ``y_col`` is ``None`` (default) the value column is
+    auto-detected (``best`` → ``mean`` → ``max``) across all runs, so
+    product-path runs that log ``mean`` but never ``best`` yield a
+    non-empty curve. Mirrors
+    :func:`deap_pettingzoo.analysis.aggregate.learning_curve_with_ci`.
     """
     library, metrics = _require_rliable()
     import pandas as pd  # noqa: WPS433
+
+    from deap_pettingzoo.analysis.aggregate import resolve_y_col  # noqa: WPS433
+
+    if y_col is None:
+        all_runs = [r for runs in runs_by_algo.values() for r in runs]
+        y_col = resolve_y_col(all_runs, x_col=x_col)
+        if y_col is None:
+            return pd.DataFrame()
 
     # Determine a common x grid in env_steps spanning all runs.
     x_values: list = []

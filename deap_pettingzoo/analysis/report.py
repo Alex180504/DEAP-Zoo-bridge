@@ -11,12 +11,15 @@ can use :mod:`aggregate`, :mod:`compare`, and :mod:`plots` directly.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
 from deap_pettingzoo.analysis.aggregate import aggregate_summary
 from deap_pettingzoo.analysis.compare import pairwise_table
 from deap_pettingzoo.analysis.loaders import Experiment
+
+logger = logging.getLogger(__name__)
 
 
 def build_report(
@@ -150,7 +153,12 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
         for algo, runs in experiment.by_algorithm().items():
             try:
                 curves[algo] = learning_curve_with_ci(runs)
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as exc:
+                # Surface why a curve was skipped instead of silently
+                # dropping it (the figure used to vanish with no trace).
+                logger.warning(
+                    "Skipping learning curve for %r: %s", algo, exc
+                )
                 continue
         if curves:
             fig = plots.plot_learning_curves(
@@ -159,8 +167,13 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
             path = output_dir / "fig_learning_curves.png"
             fig.savefig(path, dpi=140)
             out.append(("Learning curves", path.name))
+        else:
+            logger.warning(
+                "No learning curves rendered: no run exposed a plottable "
+                "value column (best/mean/max) alongside env_steps."
+            )
     except Exception:  # pragma: no cover
-        pass
+        logger.warning("Learning-curve figure rendering failed", exc_info=True)
     return out
 
 

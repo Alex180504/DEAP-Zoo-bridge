@@ -499,6 +499,10 @@ class EvalResult:
         num_episodes: Number of episodes evaluated.
         episode_rewards: List of individual episode rewards.
         episode_lengths: List of episode lengths.
+        agent_rewards: Mean-over-episodes reward for each agent. Carries
+            the per-agent decomposition that ``mean_reward`` collapses to
+            a single team scalar (degenerate on zero-sum competitive
+            envs); empty for legacy callers that did not record it.
     """
     mean_reward: float
     std_reward: float
@@ -507,7 +511,8 @@ class EvalResult:
     num_episodes: int
     episode_rewards: List[float] = field(default_factory=list)
     episode_lengths: List[int] = field(default_factory=list)
-    
+    agent_rewards: Dict[str, float] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -518,6 +523,7 @@ class EvalResult:
             'num_episodes': self.num_episodes,
             'episode_rewards': [float(r) for r in self.episode_rewards],
             'episode_lengths': [int(l) for l in self.episode_lengths],
+            'agent_rewards': {str(k): float(v) for k, v in self.agent_rewards.items()},
         }
 
 

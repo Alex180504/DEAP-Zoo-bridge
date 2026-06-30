@@ -208,8 +208,57 @@ class TestUnifiedEvaluator:
         assert len(eval_result.episode_rewards) == 3
         assert len(eval_result.episode_lengths) == 3
         assert eval_result.mean_reward is not None
-        
+
         evaluator.close()
+
+    def test_rejects_unknown_aggregation(self):
+        with pytest.raises(ValueError, match="aggregation must be"):
+            UnifiedEvaluator(aggregation="median")
+
+    def test_agent_rewards_and_team_aggregation(self):
+        """Per-agent rewards are exposed; sum vs mean vs per-side selection."""
+
+        class _ConstPolicy:
+            def reset(self):
+                pass
+
+            def get_action(self, obs, action_mask=None):
+                return 0
+
+        kwargs = dict(
+            policy=_ConstPolicy(),
+            env_name="simple_spread_v3",
+            num_episodes=2,
+            seed=7,
+        )
+        sum_eval = UnifiedEvaluator(max_steps=10, aggregation="sum")
+        sum_res = sum_eval.evaluate(**kwargs)
+        sum_eval.close()
+
+        # Per-agent decomposition is surfaced, one entry per agent.
+        agents = sorted(sum_res.agent_rewards)
+        assert len(agents) >= 2
+        # The team scalar is the sum of the per-agent means.
+        assert sum_res.mean_reward == pytest.approx(
+            sum(sum_res.agent_rewards.values()), abs=1e-6
+        )
+
+        mean_eval = UnifiedEvaluator(max_steps=10, aggregation="mean")
+        mean_res = mean_eval.evaluate(**kwargs)
+        mean_eval.close()
+        assert mean_res.mean_reward == pytest.approx(
+            sum_res.mean_reward / len(agents), abs=1e-6
+        )
+
+        # Scoring a single side restricts the scalar to that agent.
+        side_eval = UnifiedEvaluator(
+            max_steps=10, aggregation="sum", score_agents=[agents[0]]
+        )
+        side_res = side_eval.evaluate(**kwargs)
+        side_eval.close()
+        assert side_res.mean_reward == pytest.approx(
+            side_res.agent_rewards[agents[0]], abs=1e-6
+        )
 
 
 class TestTrainerRegistry:
