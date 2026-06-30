@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
+from gymnasium import spaces
 
 from deap_pettingzoo.evaluators import (
     BaseEvaluator,
@@ -708,3 +709,108 @@ class TestMixedPolicyEvaluatorMultiObjective:
         result = evaluator.evaluate(individual, seed=42)
         assert isinstance(result, tuple)
         assert len(result) > 0
+
+
+class _PhantomRewardEnv:
+    """Minimal env-wrapper stand-in that emits a reward for 'phantom' not in reset obs.
+    """
+
+    possible_agents = ["agent_0"]
+
+    def __init__(self):
+        self._step_count = 0
+
+    def reset(self, seed: Optional[int] = None) -> Dict[str, np.ndarray]:
+        self._step_count = 0
+        return {"agent_0": np.zeros(2, dtype=np.float32)}
+
+    def step(self, actions) -> Tuple:
+        self._step_count += 1
+        obs: Dict[str, np.ndarray] = {}
+        rewards = {"agent_0": 1.0, "phantom": 5.0}  # 'phantom' was never in reset obs
+        dones = {"agent_0": True}
+        truncated = {"agent_0": False}
+        infos: Dict = {}
+        return obs, rewards, dones, truncated, infos
+
+    def action_space(self, agent: str):
+        return spaces.Discrete(2)
+
+    @property
+    def last_infos(self):
+        return {}
+
+    def close(self):
+        pass
+
+
+class TestSingleEpisodeEvaluatorTerminationHandling:
+    """F-2.3-01: evaluator survives a reward for an agent absent at reset."""
+
+    def _make_individual(self):
+        genome = FixedTopologyGenome(layer_sizes=[2, 4, 2], random_seed=0)
+
+        class _Ind:
+            pass
+
+        ind = _Ind()
+        ind.genome = genome
+        return ind
+
+    def test_survives_reward_for_agent_absent_at_reset(self):
+        """No KeyError when rewards contains 'phantom' not in cumulative_rewards."""
+        env = _PhantomRewardEnv()
+        evaluator = SingleEpisodeEvaluator(env_wrapper=env, max_steps=3)
+        ind = self._make_individual()
+        # Before the fix this raises KeyError: 'phantom'.
+        result = evaluator.evaluate(ind, seed=0)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+        assert isinstance(result[0], float)
+
+
+class TestMultiEpisodeEvaluatorSeedParam:
+    """F-2.3-02: MultiEpisodeEvaluator.evaluate must accept seed=None (parallel path)."""
+
+    @pytest.fixture
+    def wrapper(self):
+        return PettingZooWrapper(
+            env_name="simple_spread_v3",
+            env_config={"max_cycles": 5},
+        )
+
+    @pytest.fixture
+    def individual(self, wrapper):
+        obs = wrapper.reset(seed=0)
+        agent = next(iter(obs))
+        obs_dim = len(obs[agent])
+        action_dim = wrapper.action_space(agent).n
+        genome = FixedTopologyGenome(
+            layer_sizes=[obs_dim, 8, action_dim], random_seed=0
+        )
+
+        class _Ind:
+            pass
+
+        ind = _Ind()
+        ind.genome = genome
+        return ind
+
+    def test_evaluate_accepts_seed_kwarg(self, wrapper, individual):
+        """evaluate(ind, seed=42) must not raise TypeError."""
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=2, max_steps=5
+        )
+        # Before fix: TypeError — evaluate() got unexpected keyword argument 'seed'
+        result = evaluator.evaluate(individual, seed=42)
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+
+    def test_seed_threads_per_episode(self, wrapper, individual):
+        """Two calls with the same seed yield the same fitness (reproducibility)."""
+        evaluator = MultiEpisodeEvaluator(
+            env_wrapper=wrapper, num_episodes=2, max_steps=5
+        )
+        r1 = evaluator.evaluate(individual, seed=7)
+        r2 = evaluator.evaluate(individual, seed=7)
+        assert r1 == pytest.approx(r2, abs=1e-9)

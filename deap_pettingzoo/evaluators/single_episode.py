@@ -143,9 +143,9 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 # Step environment
                 observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)
 
-                # Accumulate rewards
+                # Accumulate rewards; .get avoids KeyError for agents absent at reset.
                 for agent, reward in rewards.items():
-                    cumulative_rewards[agent] += reward
+                    cumulative_rewards[agent] = cumulative_rewards.get(agent, 0.0) + reward
 
                 # Accumulate reward components (per the fitness spec hook).
                 if reward_components is not None and self.fitness_spec is not None:
