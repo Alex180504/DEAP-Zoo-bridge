@@ -288,8 +288,8 @@ class PSOTrainer(BaselineTrainer):
                 for ind, fit in zip(population, fitnesses):
                     ind.fitness.values = fit
 
-                toolbox.update(population)
                 hof.update(population)
+                toolbox.update(population)
                 gen += 1
                 record = stats.compile(population)
 

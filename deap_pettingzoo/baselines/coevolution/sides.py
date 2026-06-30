@@ -932,6 +932,8 @@ class PSOSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
+        self.hof.update(self.population)
+
         # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
         py_before: Optional[Any] = None
         np_before: Optional[Any] = None
@@ -952,7 +954,6 @@ class PSOSideState(SideState):
                 self._np_state = np.random.get_state()
                 np.random.set_state(np_before)
 
-        self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
         self.best_fitness = max(self.best_fitness, best)
