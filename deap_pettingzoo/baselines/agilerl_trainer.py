@@ -1544,9 +1544,9 @@ class GroupedIPPOTrainer(IPPOTrainer):
             validation_obs_spaces,
             validation_act_spaces,
         )
-        return alg_cls(
-            observation_spaces=obs_spaces,
-            action_spaces=act_spaces,
-            agent_ids=agent_ids,
-            **ctor_kwargs,
+        return super()._build_agent(
+            alg_cls, obs_spaces, 
+            act_spaces, 
+            agent_ids, 
+            ctor_kwargs
         )
