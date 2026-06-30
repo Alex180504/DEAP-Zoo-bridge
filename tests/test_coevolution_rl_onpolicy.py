@@ -203,7 +203,7 @@ class TestOnPolicyHPO:
         ).clone()
 
         class _Ev:
-            _env = env
+            env_wrapper = env
 
         state.step_generation(lambda s: _Ev())
 

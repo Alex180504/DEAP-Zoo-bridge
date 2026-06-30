@@ -99,11 +99,11 @@ def derive_generations(
 def reject_consumed_budgeting(config: "TrainingConfig", trainer_label: str) -> None:
     """Raise when opt-in consumed-step budgeting is requested but unsupported.
 
-    The ``budget_on_consumed`` flag is only honoured by the manual-loop
-    trainers (EA ``simple``, CMA-ES, PSO). The DEAP built-in EA strategies,
-    QDax, co-evolution, and NEAT/HyperNEAT run fixed iteration counts (or
-    JAX-native loops), so they reject the flag with a clear message rather
-    than silently ignoring it.
+    The ``budget_on_consumed`` flag is honoured by: EA ``simple``, CMA-ES,
+    PSO, and co-evolution (shared aggregate pool across all sides). The DEAP
+    built-in EA strategies (``mu_plus_lambda`` / ``mu_comma_lambda``), QDax,
+    and NEAT/HyperNEAT standalone trainers reject the flag with a clear
+    message rather than silently ignoring it.
 
     Args:
         config: The training configuration to inspect.

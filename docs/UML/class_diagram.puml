@@ -426,7 +426,7 @@ package "deap_pettingzoo.baselines" {
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
         -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
-        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO);\n   rejected by mu±lambda / QDax / coev / NEAT --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
     }
 
     class RecordingConfig <<dataclass>> {
@@ -1252,6 +1252,9 @@ note bottom of CoEvolutionTrainer
   -> _run_synchronous_loop | _run_alternating_loop
   -> persist. _step_one_side is the shared per-side
   body for both schedules (review S1).
+  Honors budget_on_consumed=True (ENV_STEPS): stops when
+  the summed per-side real env ticks reach budget_value
+  (shared aggregate pool; finish-generation-then-stop).
 end note
 
 ' ---------------- experiment logging ----------------

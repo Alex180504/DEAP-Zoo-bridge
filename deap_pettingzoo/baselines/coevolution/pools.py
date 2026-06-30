@@ -226,10 +226,12 @@ def rebuild_opponent_policy(
         genome = payload["genome"]
         env_obs_size = int(payload["env_obs_size"])
         env_act_size = int(payload["env_act_size"])
+        activation = str(payload.get("activation", "sigmoid"))
         cppn_cfg = build_cppn_config(input_size=5, output_size=1)
         substrate = substrate_for_env(env_obs_size, env_act_size)
         return HyperNeatPolicy(
             genome, cppn_cfg, substrate, action_space=action_space,
+            activation=activation,
         )
 
     if kind == "es_hyperneat":

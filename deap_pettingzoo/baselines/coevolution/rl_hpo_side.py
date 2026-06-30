@@ -176,33 +176,49 @@ class RLEvolveHPOSideState(SideState):
 
         # 1. Train each agent for evo_every steps against current opponents.
         evaluator = evaluator_factory(self)
-        env = evaluator._env  # type: ignore[attr-defined]
+        env = evaluator.env_wrapper
+
+        # Sample one policy per opponent side for non-learner agents.
+        # CoEvolutionEvaluator exposes .opponent_sides (list of
+        # (name, prefixes, pool) triples) and .side_agents (name → agent list).
+        learner_id_set = set(self._learner_ids)
+        opponent_policies: Dict[str, Any] = {}
+        for side_name, _prefixes, pool in getattr(evaluator, "opponent_sides", []):
+            opp_policy = pool.sample_opponent(self._rng)
+            for opp_agent in getattr(evaluator, "side_agents", {}).get(side_name, []):
+                if opp_agent not in learner_id_set:
+                    opponent_policies[opp_agent] = opp_policy
+
+        gen_steps = 0
         for agent in self._population:
             if self._on_policy:
-                self._train_agent_on_policy(
+                gen_steps += self._train_agent_on_policy(
                     agent=agent,
                     env=env,
                     learner_ids=self._learner_ids,
                     target_steps=self.evo_every,
                 )
             else:
-                self._train_agent(
+                gen_steps += self._train_agent(
                     agent=agent,
                     env=env,
                     learner_ids=self._learner_ids,
                     target_steps=self.evo_every,
+                    opponent_policies=opponent_policies,
                 )
 
         # 2. Evaluate fitnesses.
         fitnesses: List[float] = []
         for agent in self._population:
-            fit = self._eval_agent(
+            fit, eval_steps = self._eval_agent(
                 agent=agent,
                 env=env,
                 learner_ids=self._learner_ids,
                 num_episodes=3,
+                opponent_policies=opponent_policies,
             )
             fitnesses.append(fit)
+            gen_steps += eval_steps
 
         # 3. Mutation.
         try:
@@ -251,7 +267,7 @@ class RLEvolveHPOSideState(SideState):
             min=min(fitnesses),
             max=best,
             best_fitness=best,
-            env_steps=self.generation * self.evo_every,
+            env_steps=int(gen_steps),
             wall_time_s=time.time() - _gen_t0,
         )
         self.history.append(stats)
@@ -347,7 +363,8 @@ class RLEvolveHPOSideState(SideState):
         env: Any,
         learner_ids: List[str],
         target_steps: int,
-    ) -> None:
+        opponent_policies: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Off-policy rollout-and-learn for one population member.
 
         AgileRL agents do not expose ``agent.memory``, so this builds a
@@ -369,6 +386,7 @@ class RLEvolveHPOSideState(SideState):
         learning_delay = int(getattr(agent, "learning_delay", 0))
         total_transitions = int(getattr(agent, "_total_transitions", 0))
         discrete = bool(getattr(agent, "discrete_actions", False))
+        learner_id_set = set(learner_ids)
 
         memory = MultiAgentReplayBuffer(
             memory_size=int(getattr(agent, "memory_size", 100_000)),
@@ -388,12 +406,24 @@ class RLEvolveHPOSideState(SideState):
         }
 
         while steps < target_steps:
-            obs, _ = env.reset()
+            obs = env.reset()
+            # Normalise: raw mpe2/PettingZoo parallel envs return (obs, info);
+            # PettingZooWrapper returns the obs dict directly.
+            if isinstance(obs, tuple):
+                obs, _info = obs
             while steps < target_steps:
+                # Filter to only the agents this side controls; zero-fill any
+                # that have already terminated so AgileRL sees a full roster.
+                learner_obs = {a: ob for a, ob in obs.items() if a in learner_id_set}
+                if len(learner_obs) < len(learner_ids):
+                    _ref = next(iter(learner_obs.values())) if learner_obs else obs_placeholders[learner_ids[0]]
+                    for a in learner_ids:
+                        if a not in learner_obs:
+                            learner_obs[a] = np.zeros_like(_ref)
                 try:
-                    action_result = agent.get_action(obs, training=True)
+                    action_result = agent.get_action(learner_obs, training=True)
                 except TypeError:
-                    action_result = agent.get_action(obs)
+                    action_result = agent.get_action(learner_obs)
                 if isinstance(action_result, tuple):
                     actions, raw_actions = action_result[0], action_result[1]
                 else:
@@ -409,6 +439,26 @@ class RLEvolveHPOSideState(SideState):
                         if discrete and arr.shape == ():
                             arr = arr.item()
                     env_actions[a] = arr
+                # Use sampled opponent policies for non-learner active agents
+                # when available; fall back to random for any missing agent.
+                for a in env.agents:
+                    if a not in env_actions:
+                        if opponent_policies and a in opponent_policies and a in obs:
+                            try:
+                                opp_act = np.asarray(
+                                    opponent_policies[a].get_action(obs[a])
+                                )
+                                if opp_act.ndim > 0 and opp_act.shape[0] == 1:
+                                    opp_act = opp_act[0]
+                                env_actions[a] = (
+                                    opp_act.item()
+                                    if opp_act.shape == ()
+                                    else opp_act
+                                )
+                            except Exception:
+                                env_actions[a] = env.action_space(a).sample()
+                        else:
+                            env_actions[a] = env.action_space(a).sample()
                 next_obs, rewards, terms, truncs, _ = env.step(env_actions)
 
                 # Build agent-keyed transition dicts; one save per transition.
@@ -463,6 +513,7 @@ class RLEvolveHPOSideState(SideState):
 
         if hasattr(agent, "_total_transitions"):
             object.__setattr__(agent, "_total_transitions", total_transitions)
+        return steps
 
     def _maybe_apply_grouping_patch(self) -> None:
         """Install AgileRL's grouped-IPPO advantage/state flattening fix.
@@ -496,7 +547,7 @@ class RLEvolveHPOSideState(SideState):
         env: Any,
         learner_ids: List[str],
         target_steps: int,
-    ) -> None:
+    ) -> int:
         """On-policy (IPPO) training for one population member.
 
         Thin wrapper over the shared
@@ -509,7 +560,7 @@ class RLEvolveHPOSideState(SideState):
             train_agent_on_policy,
         )
 
-        train_agent_on_policy(
+        return train_agent_on_policy(
             agent, env, learner_ids, target_steps, logger=logger,
         )
 
@@ -519,16 +570,41 @@ class RLEvolveHPOSideState(SideState):
         env: Any,
         learner_ids: List[str],
         num_episodes: int = 3,
-    ) -> float:
+        opponent_policies: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[float, int]:
         rewards: List[float] = []
+        total_steps = 0
+        learner_id_set = set(learner_ids)
         for _ in range(num_episodes):
-            obs, _ = env.reset()
+            obs = env.reset()
+            # Normalise: raw mpe2/PettingZoo parallel envs return (obs, info);
+            # PettingZooWrapper returns the obs dict directly.
+            if isinstance(obs, tuple):
+                obs, _info = obs
             total = 0.0
+            ep_steps = 0
             for _ in range(200):
+                # Guard against an env that returns an empty obs dict on reset
+                # (all agents immediately done) to avoid StopIteration below.
+                if not obs:
+                    break
+                learner_obs = {a: ob for a, ob in obs.items() if a in learner_id_set}
+                if len(learner_obs) < len(learner_ids):
+                    _ref = (
+                        next(iter(learner_obs.values()))
+                        if learner_obs
+                        else np.zeros(
+                            env.observation_space(learner_ids[0]).shape,
+                            dtype=np.float32,
+                        )
+                    )
+                    for a in learner_ids:
+                        if a not in learner_obs:
+                            learner_obs[a] = np.zeros_like(_ref)
                 try:
-                    actions = agent.get_action(obs, training=False)
+                    actions = agent.get_action(learner_obs, training=False)
                 except TypeError:
-                    actions = agent.get_action(obs)
+                    actions = agent.get_action(learner_obs)
                 result = actions[0] if isinstance(actions, tuple) else actions
                 # Squeeze the leading (1,) batch dim so discrete envs receive
                 # scalar actions (on-policy get_action returns (1,)-shaped
@@ -539,12 +615,34 @@ class RLEvolveHPOSideState(SideState):
                     if arr.ndim > 0 and arr.shape[0] == 1:
                         arr = arr[0]
                     step_actions[a] = arr.item() if arr.shape == () else arr
+                # Use sampled opponent policies for non-learner active agents
+                # when available; fall back to random for any missing agent.
+                for a in env.agents:
+                    if a not in step_actions:
+                        if opponent_policies and a in opponent_policies and a in obs:
+                            try:
+                                opp_act = np.asarray(
+                                    opponent_policies[a].get_action(obs[a])
+                                )
+                                if opp_act.ndim > 0 and opp_act.shape[0] == 1:
+                                    opp_act = opp_act[0]
+                                step_actions[a] = (
+                                    opp_act.item()
+                                    if opp_act.shape == ()
+                                    else opp_act
+                                )
+                            except Exception:
+                                step_actions[a] = env.action_space(a).sample()
+                        else:
+                            step_actions[a] = env.action_space(a).sample()
                 next_obs, rews, terms, truncs, _ = env.step(step_actions)
                 total += sum(float(rews.get(a, 0.0)) for a in learner_ids)
                 obs = next_obs
+                ep_steps += 1
                 if all(terms.get(a, False) for a in learner_ids) or all(
                     truncs.get(a, False) for a in learner_ids
                 ):
                     break
             rewards.append(total)
-        return float(np.mean(rewards)) if rewards else 0.0
+            total_steps += ep_steps
+        return (float(np.mean(rewards)) if rewards else 0.0), total_steps

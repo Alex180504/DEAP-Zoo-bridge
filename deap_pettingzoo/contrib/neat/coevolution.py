@@ -153,6 +153,8 @@ class NeatSideState(SideState):
         evaluator = evaluator_factory(self)
         env: PettingZooWrapper = getattr(evaluator, "_env", self._env)
 
+        self._gen_env_steps = 0
+
         def _fitness_func(
             genomes_and_ids: list, neat_cfg: neat.Config
         ) -> None:
@@ -179,6 +181,7 @@ class NeatSideState(SideState):
                         ep_rew += float(sum(step_rewards.values()))
                         done = all(dones.values()) or all(truncateds.values())
                         _steps += 1
+                    self._gen_env_steps += _steps
                     rewards.append(ep_rew)
                 genome.fitness = float(np.mean(rewards))
                 gen_fitnesses.append(genome.fitness)
@@ -220,6 +223,7 @@ class NeatSideState(SideState):
             min=float(np.min(fitnesses)),
             max=float(np.max(fitnesses)),
             best_fitness=best_fit,
+            env_steps=int(self._gen_env_steps),
         )
 
     def current_pool(self) -> OpponentPool:

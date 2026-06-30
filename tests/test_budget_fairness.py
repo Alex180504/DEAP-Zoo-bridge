@@ -381,13 +381,15 @@ class TestConsumedStepBudgetingRejection:
         with pytest.raises(ValueError, match="budget_on_consumed"):
             trainer.train(self._env_steps_config())
 
-    def test_coevolution_rejects(self):
+    def test_coevolution_consumed_budget_synchronous(self):
+        """EA-vs-EA co-evolution with budget_on_consumed=True now succeeds."""
         from deap_pettingzoo.baselines.coevolution.sides import Side
         from deap_pettingzoo.baselines.coevolution.trainer import (
             CoEvolutionConfig,
             CoEvolutionTrainer,
         )
 
+        budget = 500
         coev_cfg = CoEvolutionConfig(
             mode="competitive_2pop",
             sides=[
@@ -397,12 +399,61 @@ class TestConsumedStepBudgetingRejection:
                      optimizer="ea", optimizer_config={"population_size": 4}),
             ],
             k_opponents=1,
-            max_steps_per_episode=200,
+            max_steps_per_episode=25,
+            seed=42,
         )
-        config = self._env_steps_config()
-        config.algorithm_params["coevolution"] = coev_cfg
-        with pytest.raises(ValueError, match="budget_on_consumed"):
-            CoEvolutionTrainer().train(config)
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            algorithm_params={"coevolution": coev_cfg},
+            budget_on_consumed=True,
+        )
+        result = CoEvolutionTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget, f"expected consumed >= {budget}, got {consumed}"
+        # Overshoot <= one generation's pooled cost (2 sides × pop=4 × k=1 × max_steps=25)
+        assert consumed <= budget + 200
+        assert isinstance(result.metrics["num_generations"], int)
+        assert result.metrics["num_generations"] >= 1
+
+    def test_coevolution_consumed_budget_alternating(self):
+        """Alternating schedule also honors budget_on_consumed."""
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        budget = 300
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            schedule="alternating",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=7,
+        )
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            algorithm_params={"coevolution": coev_cfg},
+            budget_on_consumed=True,
+        )
+        result = CoEvolutionTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        # Overshoot <= one side-step cost (pop=4 × k=1 × max_steps=25 = 100)
+        assert consumed <= budget + 100
+        assert result.metrics["num_generations"] >= 1
 
     def test_neat_rejects(self):
         pytest.importorskip("neat")
@@ -453,6 +504,101 @@ class TestCoevolutionRealSteps:
         consumed = result.metrics["env_steps_consumed"]
         assert isinstance(consumed, int)
         assert 0 < consumed < nominal
+
+
+class TestCoevolutionConsumedBudgetMixed:
+    """Co-evolution shared-pool consumed budget with heterogeneous side types."""
+
+    def test_ea_vs_cma_stops_at_budget(self):
+        """EA-vs-CMA co-evolution stops when the shared pool reaches budget."""
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        budget = 400
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="cma", optimizer_config={"population_size": 4}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=0,
+        )
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            algorithm_params={"coevolution": coev_cfg},
+            budget_on_consumed=True,
+        )
+        result = CoEvolutionTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        assert result.metrics["num_generations"] >= 1
+
+
+class TestRLHPOReporting:
+    """rl_hpo side reports real per-generation env steps (not triangular)."""
+
+    def test_env_steps_is_real_not_triangular(self):
+        pytest.importorskip("agilerl")
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        rl_hpo_env_steps: list = []
+
+        def _callback(gen, states):
+            st = states.get("b")
+            if st is not None and st.history:
+                rl_hpo_env_steps.append(int(st.history[-1].env_steps))
+
+        evo_every = 30
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="rl_hpo",
+                     optimizer_config={
+                         "algorithm": "maddpg_hpo",
+                         "population_size": 2,
+                         "evo_every_n_steps": evo_every,
+                     }),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=0,
+            generation_callback=_callback,
+        )
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.GENERATIONS,
+            budget_value=2,
+            env_config={"max_cycles": 25},
+            algorithm_params={"coevolution": coev_cfg},
+        )
+        CoEvolutionTrainer().train(config)
+
+        assert len(rl_hpo_env_steps) >= 2, "callback must capture at least 2 gens"
+        g1, g2 = rl_hpo_env_steps[0], rl_hpo_env_steps[1]
+        # Each generation should reflect real ticks (not triangular: gen2 ≠ 2*gen1).
+        assert g2 != 2 * g1, (
+            f"env_steps appears triangular: gen1={g1}, gen2={g2} — "
+            "bug fix may have regressed"
+        )
+        # Real steps must be greater than evo_every alone (includes eval steps).
+        assert g1 > evo_every, f"gen1 env_steps={g1} should exceed evo_every={evo_every}"
 
 
 class TestNeatRealSteps:

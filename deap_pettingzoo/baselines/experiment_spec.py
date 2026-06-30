@@ -800,13 +800,6 @@ def _validate_budget(spec, report):
             "budget.num_seeds", "out_of_range", "Number of seeds must be >= 1."
         )
     if budget.budget_on_consumed and budget.mode == "env_steps":
-        if spec.coevolution.enabled:
-            report.add(
-                "budget.budget_on_consumed",
-                "unsupported_trainer",
-                "budget_on_consumed=True is not supported by co-evolution. "
-                "Use budget_on_consumed=False or BudgetMode.GENERATIONS.",
-            )
         for algo in spec.algorithms:
             canonical = algo.lower().strip()
             if canonical in ("ea", "genetic", "ga"):
@@ -1118,3 +1111,28 @@ def _validate_coevolution(spec, report, env_spec, cat_algorithms):
             "unknown_reporting_side",
             f"Reporting side {coev.reporting_side!r} is not a declared side.",
         )
+
+    # QDax sides evaluate an entire JAX batch before returning per-generation
+    # env-step counts, so per-generation overshoot can be orders-of-magnitude
+    # larger than budget_value.  Block the combination rather than let it
+    # silently consume a multiple of the intended budget.
+    _QDAX_COEV_OPTIMIZERS = frozenset({"qdax_map_elites", "qdax_cma_me"})
+    if spec.budget.budget_on_consumed and spec.budget.mode == "env_steps":
+        qdax_sides = []
+        for side in coev.sides:
+            if side.algorithm == "frozen":
+                continue
+            optimizer = cat_algorithms.coevolution_optimizer_for(side.algorithm)
+            if optimizer in _QDAX_COEV_OPTIMIZERS:
+                qdax_sides.append(side.name)
+        if qdax_sides:
+            report.add(
+                "budget.budget_on_consumed",
+                "qdax_coarse_step",
+                f"budget_on_consumed=True with QDax co-evolution sides "
+                f"{qdax_sides!r}: QDax evaluates a full JAX batch "
+                f"(batch_size × eval_episodes × max_steps env ticks) before "
+                f"reporting per-generation counts, so per-generation overshoot "
+                f"can far exceed budget_value. "
+                f"Use budget_on_consumed=False or BudgetMode.GENERATIONS instead.",
+            )
