@@ -241,6 +241,11 @@ async def set_running(exp_id: str, pid: int, path: Optional[str] = None) -> None
     await _run_sync(_set)
 
 
+#: Once a row reaches any of these, `set_completed`/`set_failed`/`set_cancelled`
+#: below refuse to overwrite it to prevent race conditions.
+_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+
 async def set_completed(
     exp_id: str,
     run_dirs: List[str],
@@ -253,8 +258,8 @@ async def set_completed(
         try:
             conn.execute(
                 "UPDATE experiments SET status='completed', finished_at=?, "
-                "run_dirs_json=? WHERE id=?",
-                (now, json.dumps(run_dirs), exp_id),
+                "run_dirs_json=? WHERE id=? AND status NOT IN (?,?,?)",
+                (now, json.dumps(run_dirs), exp_id, *_TERMINAL_STATUSES),
             )
             conn.commit()
         finally:
@@ -277,8 +282,8 @@ async def set_failed(
         try:
             conn.execute(
                 "UPDATE experiments SET status='failed', finished_at=?, "
-                "error=?, run_dirs_json=? WHERE id=?",
-                (now, error, dirs_json, exp_id),
+                "error=?, run_dirs_json=? WHERE id=? AND status NOT IN (?,?,?)",
+                (now, error, dirs_json, exp_id, *_TERMINAL_STATUSES),
             )
             conn.commit()
         finally:
@@ -294,8 +299,9 @@ async def set_cancelled(exp_id: str, path: Optional[str] = None) -> None:
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:
             conn.execute(
-                "UPDATE experiments SET status='cancelled', finished_at=? WHERE id=?",
-                (now, exp_id),
+                "UPDATE experiments SET status='cancelled', finished_at=? "
+                "WHERE id=? AND status NOT IN (?,?,?)",
+                (now, exp_id, *_TERMINAL_STATUSES),
             )
             conn.commit()
         finally:
@@ -304,18 +310,47 @@ async def set_cancelled(exp_id: str, path: Optional[str] = None) -> None:
     await _run_sync(_set)
 
 
-async def set_interrupted_to_failed(path: Optional[str] = None) -> None:
-    """Crash recovery: any running experiment -> failed('interrupted')."""
-    now = _now()
+async def requeue_interrupted(path: Optional[str] = None) -> None:
+    """Crash recovery: a 'running' row found at
+    startup means the *server* stopped mid-run, not that the experiment itself
+    failed. Re-queue it, clear ``pid``/timestamps/stale progress and keep
+    its original ``enqueue_seq`` instead of marking it failed, so the
+    dispatcher picks it back up on the next poll.
+    """
 
     def _set():
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:
             conn.execute(
-                "UPDATE experiments SET status='failed', finished_at=?, "
-                "error='Server interrupted while experiment was running' "
-                "WHERE status='running'",
-                (now,),
+                "UPDATE experiments SET status='queued', pid=NULL, "
+                "started_at=NULL, finished_at=NULL, progress_json=NULL "
+                "WHERE status='running'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_sync(_set)
+
+
+async def restore_timestamps(
+    exp_id: str,
+    created_at: Optional[float] = None,
+    started_at: Optional[float] = None,
+    finished_at: Optional[float] = None,
+    path: Optional[str] = None,
+) -> None:
+    """Overwrite an experiment's timestamps with archived values. ``created_at`` is only overwritten when provided —
+    the column is ``NOT NULL`` and :func:`insert_experiment` already stamped
+    a default at insertion time."""
+
+    def _set():
+        conn = _connect(path or _DEFAULT_DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE experiments SET created_at=COALESCE(?, created_at), "
+                "started_at=?, finished_at=? WHERE id=?",
+                (created_at, started_at, finished_at, exp_id),
             )
             conn.commit()
         finally:
@@ -341,32 +376,60 @@ async def delete_experiment(exp_id: str, path: Optional[str] = None) -> bool:
 
 
 async def dequeue_next(path: Optional[str] = None) -> Optional[Tuple[str, str]]:
-    """Pop the next queued experiment (id, spec_json) or None.
+    """Atomically claim the next queued experiment as ``(id, spec_json)``.
 
-    Only dequeues when the queue is not paused and no experiment is running.
+    A single ``UPDATE ... RETURNING`` transitions the row straight from
+    'queued' to 'running' (stamping ``started_at``), gated on the queue being
+    unpaused and no other experiment already running. This is done in one atomic operation to prevent race conditions.
+    Returns ``None`` if paused, another experiment is already running, or the queue is empty.
     """
+    now = _now()
 
-    def _pop():
+    def _claim():
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:
-            qs = conn.execute("SELECT paused FROM queue_state WHERE id=1").fetchone()
-            if qs and qs["paused"]:
-                return None
-            running = conn.execute(
-                "SELECT COUNT(*) FROM experiments WHERE status='running'"
-            ).fetchone()[0]
-            if running > 0:
-                return None
             row = conn.execute(
-                "SELECT id, spec_json FROM experiments WHERE status='queued' "
-                "ORDER BY enqueue_seq ASC LIMIT 1"
+                """
+                UPDATE experiments
+                SET status='running', started_at=?
+                WHERE id = (
+                    SELECT id FROM experiments
+                    WHERE status='queued'
+                    ORDER BY enqueue_seq ASC
+                    LIMIT 1
+                )
+                AND (SELECT paused FROM queue_state WHERE id=1) = 0
+                AND (SELECT COUNT(*) FROM experiments WHERE status='running') = 0
+                RETURNING id, spec_json
+                """,
+                (now,),
             ).fetchone()
             conn.commit()
             return (row["id"], row["spec_json"]) if row else None
         finally:
             conn.close()
 
-    return await _run_sync(_pop)
+    return await _run_sync(_claim)
+
+
+async def set_pid(exp_id: str, pid: int, path: Optional[str] = None) -> None:
+    """Record the live subprocess pid for an already-'running' experiment.
+
+    The atomic :func:`dequeue_next` claim already set ``status``/
+    ``started_at``; this just attaches the pid once the subprocess has
+    actually been spawned (which happens slightly later, after the
+    experiment dir / spec file are written to disk).
+    """
+
+    def _set():
+        conn = _connect(path or _DEFAULT_DB_PATH)
+        try:
+            conn.execute("UPDATE experiments SET pid=? WHERE id=?", (pid, exp_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_sync(_set)
 
 
 # -- queue_state -----------------------------------------------------------

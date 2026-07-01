@@ -32,8 +32,8 @@ else validation ok
     EI -> FS: extract_import_zip(zip_path, results_root)
     note right of FS: preserve dir structure\nskip/overwrite duplicates
     EI -> DB: restore_experiment_to_db(experiment.json, run_dirs)
-    DB -> DB: insert_experiment(origin='import', status='completed')
-    DB -> DB: set_completed(new_id, run_dirs)
+    DB -> DB: insert_experiment(origin='import')
+    note right of DB: Import restores the *archived* status,\nnot always 'completed' —\ncompleted -> set_completed\ncancelled -> set_cancelled\nfailed -> set_failed(archived error)\nqueued/running -> set_failed\n("...original process no longer exists")\nthen restore_timestamps(created_at/started_at/finished_at)\nparsed back from the archived ISO strings
     EI --> API: {imported: [{original_id, new_id, label, run_count}]}
     API --> Browse: 200 {ok: true, imported: [...]}
     Browse -> Browse: st.cache_resource.clear() + st.rerun()

@@ -63,11 +63,25 @@ Client --> QP: update button state
 QP -> QP: user clicks "Cancel" on running experiment
 QP -> Client: POST /experiments/{id}/cancel
 Client -> API: HTTP POST
-API -> API: if running → dispatcher.cancel(id)
-note right of API: dispatcher sends SIGTERM\nto runner subprocess
-API -> DB: set_cancelled(id)
-DB --> API: ok
-API --> Client: 200 {status: "cancelled"}
+API -> DB: get_experiment(id)
+alt unknown id
+    API --> Client: 404 {detail: "Unknown experiment ..."}
+else already completed/failed/cancelled
+    API --> Client: 409 {detail: "... already ... cannot be cancelled"}
+else queued or running
+    API -> API: dispatcher.cancel(id)
+    note right of API: running + self._running_exp_id == id:\nterminate_group(proc) (taskkill /T on Windows;\nkillpg on POSIX) — kills the whole process tree.\nThe exp_id check guards against a stale/reassigned\nproc handle killing a different, just-started experiment.
+    API -> DB: set_cancelled(id)
+    note right of DB: no-op if the row already reached a terminal\nstatus
+    DB --> API: ok
+    API --> Client: 200 ExperimentRecord{status: "cancelled"}
+end
 Client --> QP: update experiment row
+
+== Crash / restart recovery ==
+note over API, DB: On dispatcher startup (service restart), any row still\nmarked 'running' means the *server* died mid-run, not the\nexperiment.
+API -> DB: requeue_interrupted()
+DB -> DB: running -> queued\n(clear pid / started_at / finished_at / progress_json,\nkeep original enqueue_seq)
+note right of DB: the dispatcher's next poll picks it back up\nand restarts its sub-runs from the beginning\n(no population/optimizer/RNG checkpoint)
 
 @enduml

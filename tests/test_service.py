@@ -222,6 +222,30 @@ class TestDatabase:
         assert r2["status"] == "cancelled"
 
     @pytest.mark.anyio
+    async def test_terminal_writes_do_not_clobber_each_other(self, tmp_db):
+        """A terminal status, once set, cannot be overwritten by a later
+        set_completed/set_failed/set_cancelled call to prevent race conditions"""
+        exp_id = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
+        await db.set_running(exp_id, pid=1, path=tmp_db)
+
+        await db.set_completed(exp_id, ["/tmp/runs/real_result"], path=tmp_db)
+        # A late-arriving cancel must not clobber the real, already-recorded
+        # completion.
+        await db.set_cancelled(exp_id, path=tmp_db)
+        r = await db.get_experiment(exp_id, path=tmp_db)
+        assert r["status"] == "completed"
+        assert r["run_dirs"] == ["/tmp/runs/real_result"]
+
+        exp2 = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
+        await db.set_running(exp2, pid=1, path=tmp_db)
+        await db.set_cancelled(exp2, path=tmp_db)
+        # A late-arriving "failed" (e.g. a timeout branch that lost the race)
+        # must not clobber the cancellation.
+        await db.set_failed(exp2, "exceeded timeout", path=tmp_db)
+        r2 = await db.get_experiment(exp2, path=tmp_db)
+        assert r2["status"] == "cancelled"
+
+    @pytest.mark.anyio
     async def test_delete_non_running(self, tmp_db):
         exp_id = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
         assert await db.delete_experiment(exp_id, path=tmp_db)
@@ -244,6 +268,19 @@ class TestDatabase:
         assert pair[0] == ids[0]
 
     @pytest.mark.anyio
+    async def test_dequeue_next_is_atomic_claim(self, tmp_db):
+        """Dequeue_next itself flips the row to 'running' (one
+        UPDATE ... RETURNING)."""
+        exp_id = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
+        pair = await db.dequeue_next(path=tmp_db)
+        assert pair is not None and pair[0] == exp_id
+        record = await db.get_experiment(exp_id, path=tmp_db)
+        assert record["status"] == "running"
+        assert record["started_at"] is not None
+        # A second claim attempt must not pick up anything else.
+        assert await db.dequeue_next(path=tmp_db) is None
+
+    @pytest.mark.anyio
     async def test_dequeue_respects_pause(self, tmp_db):
         await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
         await db.set_paused(True, path=tmp_db)
@@ -262,12 +299,20 @@ class TestDatabase:
         assert await db.dequeue_next(path=tmp_db) is None
 
     @pytest.mark.anyio
-    async def test_crash_recovery(self, tmp_db):
+    async def test_crash_recovery_requeues_interrupted_runs(self, tmp_db):
+        """A 'running' row found at startup means the
+        *server* crashed, not the experiment — it is re-queued, not failed."""
         exp_id = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
         await db.set_running(exp_id, pid=1, path=tmp_db)
-        await db.set_interrupted_to_failed(path=tmp_db)
+        await db.requeue_interrupted(path=tmp_db)
         r = await db.get_experiment(exp_id, path=tmp_db)
-        assert r["status"] == "failed"
+        assert r["status"] == "queued"
+        assert r["pid"] is None
+        assert r["started_at"] is None
+        # And it is dequeueable again (didn't lose its place in line).
+        pair = await db.dequeue_next(path=tmp_db)
+        assert pair is not None
+        assert pair[0] == exp_id
 
     @pytest.mark.anyio
     async def test_queue_state(self, tmp_db):
@@ -276,6 +321,16 @@ class TestDatabase:
         await db.set_paused(True, path=tmp_db)
         qs2 = await db.get_queue_state(path=tmp_db)
         assert qs2["paused"]
+
+    @pytest.mark.anyio
+    async def test_set_pid_does_not_change_status(self, tmp_db):
+        exp_id = await db.insert_experiment(json.dumps(_valid_spec_dict()), path=tmp_db)
+        pair = await db.dequeue_next(path=tmp_db)
+        assert pair is not None
+        await db.set_pid(exp_id, 4242, path=tmp_db)
+        r = await db.get_experiment(exp_id, path=tmp_db)
+        assert r["status"] == "running"
+        assert r["pid"] == 4242
 
     @pytest.mark.anyio
     async def test_update_progress(self, tmp_db):
@@ -520,12 +575,48 @@ class TestAppExperiments:
         assert r.status_code == 200
         assert r.json()["status"] in ("cancelled", "queued")
 
+    def test_cancel_unknown_404(self, client):
+        r = client.post("/experiments/nonexistent/cancel")
+        assert r.status_code == 404
+        assert "detail" in r.json()
+
+    def test_cancel_already_terminal_409(self, client):
+        """Cancelling an already-terminal experiment is a conflict"""
+        sub = client.post("/experiments", json=_valid_spec_dict())
+        exp_id = sub.json()["id"]
+        first = client.post(f"/experiments/{exp_id}/cancel")
+        assert first.status_code == 200
+        second = client.post(f"/experiments/{exp_id}/cancel")
+        assert second.status_code == 409
+        assert "detail" in second.json()
+
     def test_delete_terminal(self, client):
         sub = client.post("/experiments", json=_valid_spec_dict())
         exp_id = sub.json()["id"]
         client.post(f"/experiments/{exp_id}/cancel")
         r = client.delete(f"/experiments/{exp_id}")
         assert r.status_code == 200
+        assert r.json() == {"deleted": True}
+
+    def test_delete_unknown_404(self, client):
+        r = client.delete("/experiments/nonexistent")
+        assert r.status_code == 404
+
+    def test_delete_running_409(self, client):
+        """Deleting a running experiment is a conflict.
+        """
+        from deap_pettingzoo.service import db as db_mod
+        from deap_pettingzoo.service import app as app_mod
+
+        client.post("/queue/pause")
+        try:
+            sub = client.post("/experiments", json=_valid_spec_dict())
+            exp_id = sub.json()["id"]
+            asyncio.run(db_mod.set_running(exp_id, pid=1, path=app_mod._db_path))
+            r = client.delete(f"/experiments/{exp_id}")
+            assert r.status_code == 409
+        finally:
+            client.post("/queue/resume")
 
     def test_422_on_invalid_spec(self, client):
         spec = _valid_spec_dict()
