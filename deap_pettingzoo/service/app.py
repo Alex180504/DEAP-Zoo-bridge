@@ -43,7 +43,7 @@ from deap_pettingzoo.service.models import (
 )
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, UploadFile, File, status
+    from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, status
     from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError:  # pragma: no cover
     raise ImportError(
@@ -118,18 +118,22 @@ def create_app(
         lifespan=_lifespan,
     )
 
-    @app.middleware("http")
-    async def _log_unhandled_errors(request, call_next):
-        # HTTPExceptions (4xx) are handled below this in the stack and never
-        # reach here; only genuinely-unhandled (500) errors do.  Log and
-        # re-raise so the response behaviour is unchanged.
-        try:
-            return await call_next(request)
-        except Exception:
-            logger.exception(
-                "Unhandled error on %s %s", request.method, request.url.path
-            )
-            raise
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        """Map every otherwise-unhandled (500) error to the one documented
+        ``{"detail": "..."}`` JSON envelope.
+
+        FastAPI's default handlers cover ``HTTPException`` /
+        ``RequestValidationError`` before this ever runs, so this only sees
+        genuinely-unhandled errors. Without it, Starlette's
+        ``ServerErrorMiddleware`` returns a plain-text body instead.
+        """
+        logger.exception(
+            "Unhandled error on %s %s", request.method, request.url.path
+        )
+        return JSONResponse(
+            status_code=500, content={"detail": "Internal server error"}
+        )
 
     _register_routes(app)
     return app
@@ -313,36 +317,48 @@ def _register_routes(app: FastAPI) -> None:
         raw["position"] = max(0, ahead)
         return _experiment_to_record(raw)
 
+    _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
     @app.post("/experiments/{exp_id}/cancel")
     async def cancel_experiment(exp_id: str):
         if _dispatcher is None:
             raise HTTPException(status_code=503, detail="Dispatcher not running")
-        result = await _dispatcher.cancel(exp_id)
-        if result is None:
-            # Already terminal — fetch it and return the record.
-            raw = await db.get_experiment(exp_id, path=_db_path)
-            if raw is None:
-                raise HTTPException(
-                    status_code=404, detail=f"Unknown experiment {exp_id!r}"
-                )
-            return _experiment_to_record(raw)
+        raw = await db.get_experiment(exp_id, path=_db_path)
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+        if raw["status"] in _TERMINAL_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Experiment {exp_id!r} is already {raw['status']} and cannot be cancelled",
+            )
+        await _dispatcher.cancel(exp_id)
         raw = await db.get_experiment(exp_id, path=_db_path)
         return _experiment_to_record(raw or {"id": exp_id, "status": "cancelled"})
 
     @app.delete("/experiments/{exp_id}")
     async def delete_experiment(exp_id: str):
+        raw = await db.get_experiment(exp_id, path=_db_path)
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+        if raw["status"] == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Experiment {exp_id!r} is running — cancel it first",
+            )
         ok = await db.delete_experiment(exp_id, path=_db_path)
         if not ok:
+            # Status flipped to 'running' between our check and the delete
+            # (race) — surface the same 409 rather than a misleading 404.
             raise HTTPException(
-                status_code=404,
-                detail=f"Experiment {exp_id!r} not found or is running",
+                status_code=409,
+                detail=f"Experiment {exp_id!r} is running — cancel it first",
             )
         # Remove the experiment scratch directory (stdout log, spec, result).
         import shutil as _shutil
         exp_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
         if exp_dir.is_dir():
             _shutil.rmtree(exp_dir, ignore_errors=True)
-        return {"ok": True}
+        return {"deleted": True}
 
     @app.get("/experiments/{exp_id}/progress", response_model=Dict[str, Any])
     async def get_experiment_progress(exp_id: str):

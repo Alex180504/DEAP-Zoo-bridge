@@ -1748,16 +1748,26 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
     }
 
     class Dispatcher {
-        - _running: Task | None
-        - _paused: bool
+        - _running_proc: subprocess.Process | None
+        - _running_exp_id: str | None
         - _worker_limit: int = 1
         --
-        + start()
-        + cancel(experiment_id)
+        + start()  ' crash recovery: db.requeue_interrupted(), not set-failed
+        + cancel(experiment_id)  ' DB decides eligibility; only\n  ' kills if _running_exp_id == experiment_id (proc-identity check —\n  ' _running_proc/_running_exp_id are set together by _run_one and never\n  ' written by cancel(), closing a kill-the-wrong-process race)
         + shutdown()
         .. _run_one branches on spec "kind" ..
         ' kind=="script": Popen([python, user_script.py], cwd=exp_dir)
         '   then synthesise _result.json (rglob manifest.json)
+        ' spawn kwargs: start_new_session=True (POSIX) /
+        '   CREATE_NEW_PROCESS_GROUP (Windows);
+        ' proc.wait() wrapped in asyncio.wait_for(timeout);
+        '   _compute_timeout_seconds(spec) derives the timeout from budget,
+        '   clamped to DEAP_EXPERIMENT_TIMEOUT_{FLOOR,CEILING,PER_UNIT}_S
+        '   (env values parsed defensively via _env_float — bad/blank knobs
+        '   fall back to the default instead of failing every experiment)
+        ' _terminate_group(proc) / _wait_or_kill(proc) — kill the whole tree
+        '   (taskkill /T on Windows, os.killpg on POSIX), used by cancel/
+        '   timeout/shutdown alike
     }
 
     class Runner <<subprocess>> {
@@ -1781,8 +1791,12 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + GET /experiments/{id}/export
         + GET /experiments/{id}/spec
         + DELETE /experiments/{id}
+        ' 404 unknown id; 409 if status=="running" (cancel first)
         + POST /experiments/{id}/cancel
+        ' 404 unknown id; 409 if already terminal
         + POST /experiments/import
+        .. one exception_handler(Exception) -> {"detail": "..."} ..
+        ' A single JSON error envelope for every unhandled 500
         + GET /runs/export
         + GET /queue
         + POST /queue/pause
@@ -1794,7 +1808,18 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + insert_experiment(spec)
         + list_experiments(status, limit, offset)
         + dequeue_next() -> experiment | None
+        ' One UPDATE ... RETURNING atomically claims
+        '   queued -> running (+started_at); no separate set_running step
+        + set_pid(id, pid)  ' attaches the pid once the subprocess is spawned
         + set_running / set_completed / set_failed / set_cancelled
+        ' set_completed/set_failed/set_cancelled all gate on
+        '   "status NOT IN (completed,failed,cancelled)" — once a row is
+        '   terminal, none of them can overwrite it.
+        + requeue_interrupted()
+        ' Crash recovery re-queues a stale 'running'
+        '   row instead of failing it;
+        + restore_timestamps(id, created_at, started_at, finished_at)
+        ' Import restore overwrites timestamps with archived values
         + update_progress(id, progress_json)
         + get_queue_state()
     }
@@ -1816,6 +1841,9 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + validate_import_zip(zip, root) -> ImportValidationResult
         + extract_import_zip(zip, root) -> list
         + restore_experiment_to_db(json, dirs, db) -> str
+        ' Restores the archived status (completed/failed/cancelled)
+        '   + timestamps/error, not always 'completed'; queued/running ->
+        '   failed (the original process no longer exists)
     }
 }
 

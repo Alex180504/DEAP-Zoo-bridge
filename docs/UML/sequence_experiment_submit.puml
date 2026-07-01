@@ -47,20 +47,21 @@ DB --> API: experiment_id
 API --> Client: 201 {id, status="queued", position}
 
 == Dispatch ==
+note over Disp: _loop body wrapped in try/except —\na single hung/erroring experiment can never wedge\nthe queue (F-2.10-01); logs and continues on the next tick.
 Disp -> Disp: _loop: poll every 1s
-Disp -> DB: dequeue_next()\n(min enqueue_seq, not paused)
-DB --> Disp: experiment (spec_json, id)
-Disp -> Disp: parse spec_json → kind ("spec" | "script")
-Disp -> DB: set_running(id)
-Disp -> Disp: open _stdout.log
+Disp -> DB: dequeue_next()\n(One atomic UPDATE...RETURNING,\nqueued -> running + started_at, gated on\nnot-paused + no other 'running' row)
+DB --> Disp: experiment (spec_json, id) — already 'running' in DB
+Disp -> Disp: parse spec_json → kind ("spec" | "script")\nderive per-experiment timeout from budget\n(_compute_timeout_seconds)
+note right of Disp: mkdir / write spec / open _stdout.log\nall inside the same try/except as the spawn below\n — a filesystem error marks failed,\nit cannot kill the dispatcher task
 
 alt kind == "script"
     Disp -> Disp: write user_script.py
-    Disp -> Runner: Popen([python, user_script.py],\n  cwd=<experiment-dir>, env=PYTHONPATH+=DEAP_PROJECT_ROOT,\n  stdout=_stdout.log)
+    Disp -> Runner: Popen([python, user_script.py],\n  cwd=<experiment-dir>, env=PYTHONPATH+=DEAP_PROJECT_ROOT,\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
 else kind == "spec" (default)
-    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  stdout=_stdout.log)
+    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
 end
-note right of Disp: logger.info "Experiment {id} running (pid, log)"\n(diagnostic log — see sequence_logging_pipeline.puml)
+Disp -> DB: set_pid(id, pid)\n(claim already set status/started_at; this only attaches the pid)
+note right of Disp: logger.info "Experiment {id} running (pid, log, timeout)"\n(diagnostic log — see sequence_logging_pipeline.puml)\n Own process group/session so a timeout/cancel\ncan kill the whole tree, not just the immediate process
 
 == Training ==
 Runner -> Runner: configure_logging()\n(console only; level inherited via DEAP_LOG_LEVEL env)
@@ -89,11 +90,17 @@ Runner -> Runner: write _result.json\n{status, run_dirs[], final_metrics{eval_me
 Runner --> Disp: exit 0 (success) or 1 (failure)
 
 == Completion ==
-Disp -> Runner: await proc.wait()
-note right of Disp: kind=="script": synthesise _result.json from exit code\n+ run_dirs discovered via rglob("manifest.json")
-Disp -> Disp: read _result.json
-Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
-note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
+Disp -> Runner: asyncio.wait_for(proc.wait(), timeout)
+alt timeout expires
+    Disp -> Runner: terminate_group(proc)\n(taskkill /T on Windows; killpg on POSIX)\nthen force-kill after a grace period
+    Disp -> DB: set_failed(id, "...timed out...")
+    note right of Disp: logger.error; the next queued experiment\nis picked up on the dispatcher's very next tick
+else proc exits in time
+    note right of Disp: kind=="script": synthesise _result.json from exit code\n+ run_dirs discovered via rglob("manifest.json")
+    Disp -> Disp: read _result.json
+    Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
+    note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
+end
 Disp --> DB: done
 
 @enduml

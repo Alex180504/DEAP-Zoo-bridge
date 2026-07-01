@@ -283,6 +283,7 @@ def _iter_experiment_zip(
                 "created_at": db_record.get("created_at"),
                 "started_at": db_record.get("started_at"),
                 "finished_at": db_record.get("finished_at"),
+                "error": db_record.get("error"),
                 "origin": db_record.get("origin", "ui"),
             }
             zf.writestr("experiment.json", json.dumps(exp_record, indent=2))
@@ -622,6 +623,20 @@ def extract_import_zip(
 # ---------------------------------------------------------------------------
 
 
+def _parse_iso_to_epoch(value: Optional[str]) -> Optional[float]:
+    """Reverse :func:`deap_pettingzoo.service.db._iso` — parse an archived
+    ISO-8601 timestamp back to a Unix epoch float. Returns ``None`` for
+    missing/unparseable values (e.g. a 'queued' run's never-set
+    ``started_at``)."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 async def restore_experiment_to_db(
     experiment_json: Dict[str, Any],
     run_dirs: List[str],
@@ -629,8 +644,11 @@ async def restore_experiment_to_db(
 ) -> str:
     """Insert a restored experiment record into the SQLite database.
 
-    Generates a **new** experiment ID to avoid collisions.  Sets
-    ``origin='import'`` and ``status='completed'``.
+    Generates a **new** experiment ID to avoid collisions and sets
+    ``origin='import'``. Restores the *archived* status (completed / failed /
+    cancelled) and timestamps/error status as an imported ``failed`` run must still read as failed.
+    A 'queued' or 'running' export is a snapshot of a process that no longer
+    exists, so it is restored as ``failed`` with an explanatory message.
 
     Args:
         experiment_json: The ``experiment.json`` payload from the ZIP.
@@ -654,7 +672,31 @@ async def restore_experiment_to_db(
         origin="import",
     )
 
-    # Mark as completed with the extracted run dirs.
-    await db_module.set_completed(new_id, run_dirs, path=db_path)
+    status = experiment_json.get("status") or "completed"
+    error = experiment_json.get("error")
+    if status == "completed":
+        await db_module.set_completed(new_id, run_dirs, path=db_path)
+    elif status == "cancelled":
+        await db_module.set_cancelled(new_id, path=db_path)
+    elif status == "failed":
+        await db_module.set_failed(new_id, error or "Unknown error", run_dirs, path=db_path)
+    else:
+        # 'queued' / 'running' (or any unrecognised value) describe a
+        # process that no longer exists — surface as failed rather than
+        # re-entering the live queue or silently presenting as completed.
+        await db_module.set_failed(
+            new_id,
+            error or f"Imported from a {status!r} state; the original process no longer exists",
+            run_dirs,
+            path=db_path,
+        )
+
+    await db_module.restore_timestamps(
+        new_id,
+        created_at=_parse_iso_to_epoch(experiment_json.get("created_at")),
+        started_at=_parse_iso_to_epoch(experiment_json.get("started_at")),
+        finished_at=_parse_iso_to_epoch(experiment_json.get("finished_at")),
+        path=db_path,
+    )
 
     return new_id
