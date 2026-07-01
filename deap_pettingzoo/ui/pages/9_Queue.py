@@ -135,7 +135,8 @@ def _queue_body() -> None:
                 seed = progress_data.get("seed", "")
 
                 # Compute fraction from current/total (runner doesn't send it).
-                fraction = (current / total) if total > 0 else 0.0
+                # Clamp max as some runs can report `current` slightly over `total`` which streamlit rejects.
+                fraction = min(1.0, max(0.0, current / total)) if total > 0 else 0.0
 
                 sub_label = (
                     f"Run {run_idx}/{total_runs} — {algo} s{seed}  "
