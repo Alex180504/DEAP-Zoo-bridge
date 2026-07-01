@@ -132,6 +132,21 @@ all = [
     "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui,service,ui-full]"
 ]
 
+# Plugin entry-point groups.
+#
+# This package is the *host*, so it declares no entry points of its own.
+# A third-party package extends the algorithm / co-evolution-side catalog by
+# shipping a zero-arg ``register()`` callable under one of these two groups;
+# it is discovered and invoked once at catalog import in every process
+# (worker-safe, unlike a programmatic ``register_algorithm`` call). Example
+# from a *plugin's* pyproject.toml:
+#
+#   [project.entry-points."deap_pettingzoo.algorithms"]
+#   myalgo = "my_pkg.plugin:register"          # register() -> register_algorithm(...)
+#
+#   [project.entry-points."deap_pettingzoo.coevolution_sides"]
+#   myside = "my_pkg.plugin:register_side"     # register_side() -> register_side_state(...)
+
 [tool.setuptools.packages.find]
 include = ["deap_pettingzoo", "deap_pettingzoo.*"]
 

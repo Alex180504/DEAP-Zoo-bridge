@@ -189,3 +189,5 @@ _baseline_pylint.txt
 _baseline_pytest.txt
 
 *.jar
+
+smoke.py
