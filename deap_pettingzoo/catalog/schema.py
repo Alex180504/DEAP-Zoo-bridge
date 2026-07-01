@@ -195,6 +195,11 @@ class ParamSpec:
         item_type: Element type for :attr:`ParamType.LIST`.
         nullable: When ``True`` an empty / ``None`` value is accepted and
             means "leave unset" (the key is omitted from the built config).
+        unavailable_choices: Subset of :attr:`choices` (:attr:`ParamType.ENUM`
+            only) that are declared but currently ungated — e.g. ``"cuda"``
+            on a CPU-only torch build. The UI renders these disabled /
+            annotated; :meth:`coerce` and :meth:`validate` reject them so a
+            stale form submission can never submit one.
     """
 
     name: str
@@ -211,6 +216,7 @@ class ParamSpec:
     target: ParamTarget = ParamTarget.ALGORITHM_PARAMS
     item_type: Optional[ParamType] = None
     nullable: bool = False
+    unavailable_choices: Tuple[Any, ...] = ()
 
     # -- presentation -----------------------------------------------------
 
@@ -218,6 +224,14 @@ class ParamSpec:
     def display_label(self) -> str:
         """The label to show, computed from :attr:`name` when unset."""
         return self.label or humanize(self.name)
+
+    @property
+    def available_choices(self) -> Tuple[Any, ...]:
+        """:attr:`choices` with :attr:`unavailable_choices` removed."""
+        if not self.choices:
+            return ()
+        unavailable = set(self.unavailable_choices)
+        return tuple(c for c in self.choices if c not in unavailable)
 
     # -- coercion ---------------------------------------------------------
 
@@ -283,8 +297,14 @@ class ParamSpec:
         if self.type is ParamType.ENUM:
             # Compare as strings so JSON round-trips of non-string choices work.
             choices = self.choices or ()
+            unavailable = set(self.unavailable_choices)
             for choice in choices:
                 if value == choice or str(value) == str(choice):
+                    if choice in unavailable:
+                        raise ValueError(
+                            f"{self.name!r} choice {choice!r} is currently "
+                            "unavailable in this deployment"
+                        )
                     return choice
             raise ValueError(
                 f"{self.name!r} must be one of {list(choices)!r}, got {value!r}"
@@ -381,6 +401,7 @@ class ParamSpec:
             "target": self.target.value,
             "item_type": self.item_type.value if self.item_type else None,
             "nullable": self.nullable,
+            "unavailable_choices": list(self.unavailable_choices),
         }
 
 

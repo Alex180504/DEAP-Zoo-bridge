@@ -21,6 +21,7 @@ state AlgoTab {
     AlgoTab : See algorithm list (compatible highlighted, incompatible disabled)
     AlgoTab : Select one or more algorithms
     AlgoTab : Per-algo hyperparameter widgets (dynamic from catalog ParamSpec)
+    AlgoTab : Ungated enum choices (e.g. device=cuda on a CPU-only build) are pruned from the widget and rejected server-side if resubmitted
 }
 
 AlgoTab --> BudgetTab : at least 1 algo selected
@@ -29,6 +30,7 @@ state BudgetTab {
     BudgetTab : Budget mode (eval_episodes, env_steps, generations)
     BudgetTab : Budget value
     BudgetTab : Number of seeds
+    BudgetTab : "Load spec into Setup" (re-run) pre-populates mode/value via matching form keys
 }
 
 BudgetTab --> FitnessTab : budget set

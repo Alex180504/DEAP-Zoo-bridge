@@ -41,6 +41,12 @@ from deap_pettingzoo.baselines.agilerl_adapter import (
     translate_budget_to_env_steps,
 )
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.catalog.schema import (
+    ParamSpec,
+    ParamTarget,
+    ParamType,
+)
+from deap_pettingzoo.utils.device_check import cuda_available
 
 logger = logging.getLogger(__name__)
 
@@ -242,11 +248,6 @@ class AgileRLTrainer(BaselineTrainer):
         ``gamma`` / ``tau``) default to AgileRL's own values
         (1e-3 / 1e-2 / 0.95 / 0.01).
         """
-        from deap_pettingzoo.catalog.schema import (
-            ParamSpec,
-            ParamTarget,
-            ParamType,
-        )
 
         I, F, B, E = (
             ParamType.INT,
@@ -255,6 +256,7 @@ class AgileRLTrainer(BaselineTrainer):
             ParamType.ENUM,
         )
         TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        _device_unavailable = () if cuda_available() else ("cuda",) # check for CUDA GPU availability at runtime
         return (
             ParamSpec("batch_size", I, 64, minimum=1, step=1, target=AP,
                       group="Learning",
@@ -288,6 +290,7 @@ class AgileRLTrainer(BaselineTrainer):
                       help="Target-network soft-update rate (AgileRL default: 0.01)."),
             ParamSpec("device", E, "cpu", target=TR, group="Runtime",
                       choices=("cpu", "cuda"),
+                      unavailable_choices=_device_unavailable,
                       help="Torch device for training."),
             ParamSpec("verbose", B, False, target=TR, group="Runtime",
                       advanced=True,

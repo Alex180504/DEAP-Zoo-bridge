@@ -28,6 +28,16 @@ def _torch_cuda_available() -> bool:
         return False
 
 
+def cuda_available() -> bool:
+    """Public alias of :func:`_torch_cuda_available`.
+
+    Used by the catalog to gate the ``"cuda"`` choice of the ``device``
+    :class:`~deap_pettingzoo.catalog.schema.ParamSpec` so the Setup UI never
+    offers a device that would silently fall back (see :func:`resolve_device`).
+    """
+    return _torch_cuda_available()
+
+
 def resolve_device(requested: object) -> str:
     """Resolve a requested torch device to one that actually works.
 
@@ -147,4 +157,5 @@ __all__ = [
     "resolve_device",
     "jax_uses_gpu",
     "warn_on_gpu_contention",
+    "cuda_available",
 ]

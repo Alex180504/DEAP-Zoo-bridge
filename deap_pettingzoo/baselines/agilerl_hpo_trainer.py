@@ -109,6 +109,9 @@ class EvolveHPOTrainer(AgileRLTrainer):
         knobs flow through ``algorithm_params`` and are read in :meth:`train`.
         The six ``prob_*`` floats are reassembled into the AgileRL
         ``Mutations`` probability dict by :meth:`_assemble_mutation_probs`.
+        ``num_envs`` is dropped from the inherited surface: :meth:`_build_env`
+        always builds a single (non-vectorised) parallel env for the HPO
+        rollout loop, so the parameter does not apply here.
         """
         from deap_pettingzoo.catalog.schema import (
             ParamSpec,
@@ -118,7 +121,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
         I, F = ParamType.INT, ParamType.FLOAT
         TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
-        base = list(AgileRLTrainer.describe_hyperparameters())
+        base = [
+            p for p in AgileRLTrainer.describe_hyperparameters()
+            if p.name != "num_envs"
+        ]
         hpo = (
             ParamSpec("population_size", I, 6, minimum=2, step=1, target=TR,
                       group="HPO",

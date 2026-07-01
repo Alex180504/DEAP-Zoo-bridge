@@ -442,8 +442,8 @@ class TestSpecToFormDefaults:
         assert form["env_values"] == {"max_cycles": 25}
         assert form["algo_values"]["ea"]["population_size"] == 50
         assert form["algo_values"]["cma-es"]["sigma"] == 0.5
-        assert form["budget"]["budget_mode"] == "eval_episodes"
-        assert form["budget"]["budget_value"] == 200
+        assert form["budget"]["mode"] == "eval_episodes"
+        assert form["budget"]["value"] == 200
         assert form["budget"]["num_seeds"] == 3
         assert form["fitness"]["aggregation_method"] == "mean"
         assert form["recording"]["enabled"] is True
@@ -455,8 +455,8 @@ class TestSpecToFormDefaults:
         form = spec_to_form_defaults({})
         assert form["env"] == ""
         assert form["algos"] == []
-        assert form["budget"]["budget_mode"] == "env_steps"
-        assert form["budget"]["budget_value"] == 50000
+        assert form["budget"]["mode"] == "env_steps"
+        assert form["budget"]["value"] == 50000
         assert form["raw_text"] == ""
 
     def test_raw_config_to_text(self):
