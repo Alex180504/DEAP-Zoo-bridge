@@ -1612,12 +1612,14 @@ package "deap_pettingzoo.catalog (v0.2+)" #F0F8FF {
         + max: float | None
         + step: float | None
         + choices: list | None
+        + unavailable_choices: tuple  ' (e.g. cuda w/o CUDA)
         + group: str
         + label: str
         + help: str
         + advanced: bool
         --
-        + coerce(value) -> Any
+        + available_choices: tuple  ' choices minus unavailable_choices
+        + coerce(value) -> Any  ' rejects a value in unavailable_choices
         + validate(value) -> list[str]
         + to_dict() -> dict
     }

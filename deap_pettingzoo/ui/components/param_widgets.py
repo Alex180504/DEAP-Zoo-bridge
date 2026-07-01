@@ -76,6 +76,15 @@ def coerce_param(param_spec: Dict[str, Any], value: Any) -> Any:
     return value
 
 
+def available_enum_choices(param_spec: Dict[str, Any]) -> List[Any]:
+    """Return an enum param's ``choices`` with ``unavailable_choices`` dropped.
+    Streamlit-free to allow unit testing.
+    """
+    choices = param_spec.get("choices") or []
+    unavailable = set(param_spec.get("unavailable_choices") or [])
+    return [c for c in choices if c not in unavailable]
+
+
 def _is_default(param_spec: Dict[str, Any], value: Any) -> bool:
     """Return ``True`` when ``value`` equals the spec's default."""
     default = param_spec.get("default")
@@ -232,8 +241,9 @@ def render_param(
             key=key,
         )
     elif ptype == "enum":
-        choices = param_spec.get("choices", [])
-        choice_labels = [str(c) for c in choices]
+        unavailable = set(param_spec.get("unavailable_choices") or [])
+        available = available_enum_choices(param_spec)
+        choice_labels = [str(c) for c in available]
         default_str = str(display_value) if display_value is not None else None
         default_idx = 0
         if default_str is not None:
@@ -241,9 +251,13 @@ def render_param(
                 default_idx = choice_labels.index(default_str)
             except ValueError:
                 default_idx = 0
+        if unavailable:
+            st.caption(
+                f"Unavailable in this deployment: {', '.join(sorted(str(c) for c in unavailable))}."
+            )
         v = st.selectbox(
             label,
-            options=choices,
+            options=available,
             index=default_idx,
             format_func=str,
             help=help_text,

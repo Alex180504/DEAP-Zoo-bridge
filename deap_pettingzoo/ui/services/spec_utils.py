@@ -49,12 +49,13 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
             algo: dict(params) for algo, params in hyperparams.items()
         }
 
-    # budget
+    # Budget keys must match ``_BUDGET_PARAMS`` in ``ui/pages/8_Setup.py``
+    # ("mode" / "value"), mirroring the canonical ``BudgetSpec`` fields.
     budget = spec.get("budget") or {}
     if isinstance(budget, dict):
         form["budget"] = {
-            "budget_mode": budget.get("mode", "env_steps"),
-            "budget_value": budget.get("value", 50000),
+            "mode": budget.get("mode", "env_steps"),
+            "value": budget.get("value", 50000),
             "num_seeds": budget.get("num_seeds", 1),
             "budget_on_consumed": budget.get("budget_on_consumed", False),
         }

@@ -111,6 +111,7 @@ def refresh_defaults(
                     target=spec.target,
                     item_type=spec.item_type,
                     nullable=spec.nullable,
+                    unavailable_choices=spec.unavailable_choices,
                 )
         refreshed.append(spec)
     return refreshed

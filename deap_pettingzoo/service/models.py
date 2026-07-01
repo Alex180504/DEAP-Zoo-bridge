@@ -54,10 +54,16 @@ class BudgetSpecModel(BaseModel):
     mode: str = "env_steps"
     value: int = Field(default=50_000, gt=0)
     num_seeds: int = Field(default=1, ge=1)
+    budget_on_consumed: bool = False
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import BudgetSpec
-        return BudgetSpec(mode=self.mode, value=self.value, num_seeds=self.num_seeds)
+        return BudgetSpec(
+            mode=self.mode,
+            value=self.value,
+            num_seeds=self.num_seeds,
+            budget_on_consumed=self.budget_on_consumed,
+        )
 
 
 class FitnessSettingsModel(BaseModel):
