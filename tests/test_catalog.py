@@ -279,6 +279,45 @@ class TestAlgorithmCatalog:
         assert introspection.drift_report(spec.hyperparameters, discovered) == []
 
 
+class TestOpenAlgorithmRegistry:
+    """The catalog algorithm table is an open registry.
+
+    A registration through the :mod:`deap_pettingzoo.catalog` facade must reach
+    :func:`list_algorithm_names` / :func:`to_json`; the test restores the
+    registry afterwards so the exact-match assertions elsewhere still hold.
+    """
+
+    def test_register_via_facade_and_restore(self):
+        snapshot = dict(cat_algorithms._REGISTRY)
+        try:
+            catalog.register_algorithm(
+                "facade_stub",
+                label="Facade Stub",
+                family="evolutionary",
+                trainer="deap_pettingzoo.baselines.ea_trainer:EATrainer",
+                capabilities={
+                    "discrete_action": True,
+                    "continuous_action": True,
+                    "multidiscrete_action": False,
+                    "needs_global_state": False,
+                    "on_policy": False,
+                    "supports_turn_based": True,
+                },
+                required_modules=("deap",),
+            )
+            assert "facade_stub" in cat_algorithms.list_algorithm_names()
+            assert "facade_stub" in {
+                a["name"] for a in catalog.to_json()["algorithms"]
+            }
+        finally:
+            cat_algorithms._REGISTRY.clear()
+            cat_algorithms._REGISTRY.update(snapshot)
+            cat_algorithms._rebuild_lookups()
+            cat_algorithms.clear_cache()
+        # After restore the built-in set is intact for the exact-match tests.
+        assert set(cat_algorithms.list_algorithm_names()) == _EXPECTED_ALGORITHMS
+
+
 class TestAvailabilityDegradation:
     def test_missing_extra_marks_marl_unavailable(self, monkeypatch):
         availability.clear_cache()

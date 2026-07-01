@@ -55,6 +55,7 @@ __all__ = [
     "ValidationReport",
     "list_algorithms",
     "get_algorithm",
+    "register_algorithm",
     "canonical_algorithm_name",
     "is_algorithm_available",
     "list_environments",
@@ -82,6 +83,18 @@ def get_algorithm(name: str) -> AlgorithmSpec:
     from deap_pettingzoo.catalog import algorithms
 
     return algorithms.get_algorithm(name)
+
+
+def register_algorithm(name: str, **kwargs: Any) -> None:
+    """Register a third-party algorithm into the open catalog.
+
+    Thin facade over :func:`deap_pettingzoo.catalog.algorithms.register_algorithm`
+    (kept lazy so ``import deap_pettingzoo.catalog`` stays dependency-light). See
+    that function for the full keyword-only signature.
+    """
+    from deap_pettingzoo.catalog import algorithms
+
+    return algorithms.register_algorithm(name, **kwargs)
 
 
 def canonical_algorithm_name(name: str) -> Optional[str]:

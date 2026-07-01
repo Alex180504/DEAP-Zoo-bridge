@@ -34,25 +34,61 @@ def register_trainer(name: str, trainer_class: type) -> None:
     _TRAINER_REGISTRY[name] = trainer_class
 
 
+def _sync_from_catalog() -> None:
+    """Register any catalog trainer bindings not yet in the trainer registry.
+
+    Makes the trainer registry a self-healing cache over the catalog: a
+    third-party :func:`deap_pettingzoo.catalog.register_algorithm` becomes
+    resolvable through :func:`get_trainer` on the next miss, with no import-order
+    assumptions and no second registration call. Importing a trainer module does
+    not pull its optional extra (heavy imports are deferred to ``train()``), so
+    a missing extra simply skips that binding.
+    """
+    import importlib
+
+    from deap_pettingzoo.catalog.algorithms import iter_trainer_bindings
+
+    for name, module_path, class_name in iter_trainer_bindings():
+        if name in _TRAINER_REGISTRY:
+            continue
+        try:
+            module = importlib.import_module(module_path)
+            # Walk a possibly-nested ``"Outer.Inner"`` qualname (a plain
+            # getattr would AttributeError on it).
+            trainer_cls = module
+            for part in class_name.split("."):
+                trainer_cls = getattr(trainer_cls, part)
+            register_trainer(name, trainer_cls)
+        except (ImportError, AttributeError):
+            # A missing optional extra (ImportError) or a malformed binding
+            # (AttributeError) skips only this entry — one bad registration
+            # must never poison resolution of the other algorithms.
+            continue
+
+
 def get_trainer(name: str, **kwargs) -> BaselineTrainer:
     """Get a trainer instance by name.
-    
+
     Args:
         name: Algorithm name.
         **kwargs: Trainer-specific initialization arguments.
-        
+
     Returns:
         Trainer instance.
-        
+
     Raises:
         ValueError: If algorithm not registered.
     """
+    if name not in _TRAINER_REGISTRY:
+        # Self-heal: a third-party algorithm registered into the catalog after
+        # this module imported is picked up here before we give up.
+        _sync_from_catalog()
     if name not in _TRAINER_REGISTRY:
         raise ValueError(
             f"Unknown algorithm '{name}'. "
             f"Available: {list(_TRAINER_REGISTRY.keys())}"
         )
-    
+
     return _TRAINER_REGISTRY[name](**kwargs)
 
 
@@ -289,16 +325,7 @@ def _register_builtins():
     so every binding registers; only calling ``train()`` without the matching
     extra raises ImportError.
     """
-    import importlib
-
-    from deap_pettingzoo.catalog.algorithms import iter_trainer_bindings
-
-    for name, module_path, class_name in iter_trainer_bindings():
-        try:
-            module = importlib.import_module(module_path)
-            register_trainer(name, getattr(module, class_name))
-        except ImportError:
-            pass
+    _sync_from_catalog()
 
     # Co-evolution is a meta-trainer, not a standalone catalog algorithm, so it
     # is registered explicitly rather than via the catalog binding list.
