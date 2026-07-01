@@ -158,7 +158,7 @@ package "deap_pettingzoo.environments" {
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
         + {static} replay_registry_snapshot_once(snapshot) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process) --
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
     }
 
     class builtin <<module>> {
@@ -737,6 +737,11 @@ package "deap_pettingzoo.baselines" {
         --
         + register_trainer(name, trainer_class) -> None
         + get_trainer(name, **kwargs) -> BaselineTrainer
+        ' Self-healing cache over the catalog: on a miss get_trainer calls
+        ' _sync_from_catalog() (registers any iter_trainer_bindings() entry not
+        ' yet present) then retries — so a third-party register_algorithm(...)
+        ' resolves with no second call.
+        - _sync_from_catalog() -> None
         + compare_baselines(config: ComparisonConfig) -> dict
         - _register_builtins() -> None
     }
@@ -1070,6 +1075,18 @@ package "deap_pettingzoo.baselines.coevolution" {
     ' Trainer detectors use getattr(s, "is_rl_side", False) instead of
     ' isinstance(RLSideState) so rl_hpo sides trigger the same guards.
   }
+
+  class "sides <<module>>" as CoevSidesModule {
+    ' Open side-state registry: token -> zero-arg loader -> SideState
+    ' subclass. Each loader owns any lazy optional-extra import + friendly error.
+    - _SIDE_STATE_FACTORIES: dict[str, () -> type[SideState]]
+    + make_side_state(side) -> SideState  ' one-line _SIDE_STATE_FACTORIES lookup
+    + register_side_state(token, loader_or_class, *, overwrite=False)
+    ' Side.__post_init__ validates optimizer against set(_SIDE_STATE_FACTORIES),
+    ' so a registered token is automatically a valid Side.optimizer.
+  }
+  CoevSidesModule ..> SideState : builds
+  CoevSidesModule ..> Side : validates optimizer
 
   class EASideState
   class CMAESSideState
@@ -1662,12 +1679,34 @@ package "deap_pettingzoo.catalog (v0.2+)" #F0F8FF {
     class Catalog <<facade>> {
         + list_algorithms() -> list[AlgorithmSpec]
         + get_algorithm(name) -> AlgorithmSpec
+        + register_algorithm(name, *, trainer, side_state=None, ...) -> None
         + list_environments() -> list[EnvironmentSpec]
         + get_environment(name) -> EnvironmentSpec
         + get_coevolution_options() -> dict
         + compatible_algorithms(env, algos) -> dict
         + to_json() -> dict
     }
+
+    class "_AlgorithmDefinition <<dataclass, frozen>>" as AlgorithmDefinition {
+        + name / label / family: str
+        + trainer_module / trainer_class: str  ' dotted "module:QualName"
+        + capabilities: dict
+        + aliases / required_modules / required_extras: tuple
+        + coevolution_optimizer: str | None
+        + side_state: str | None  ' dotted SideState binding
+    }
+
+    class "algorithms <<module>>" as AlgorithmsModule {
+        ' Open, mutable algorithm table (insertion-ordered), seeded from the
+        ' built-ins then extended by register_algorithm / entry-point plugins.
+        - _REGISTRY: dict[str, _AlgorithmDefinition]
+        + register_algorithm(name, *, label, family, trainer, capabilities,\n            aliases=(), coevolution_optimizer=None, side_state=None, ...) -> None
+        + iter_trainer_bindings() -> list[(name, module, class)]
+        - _discover_entry_point_plugins()  ' groups: deap_pettingzoo.algorithms /\n            .coevolution_sides; broken plugin -> RuntimeWarning
+        - _register_builtins()  ' seed + discover (load-once)
+    }
+    AlgorithmsModule *-- AlgorithmDefinition
+    AlgorithmsModule ..> CoevSidesModule : register_algorithm(side_state=)\n forwards register_side_state
 
     class availability <<module>> {
         + module_available(extra_name) -> bool

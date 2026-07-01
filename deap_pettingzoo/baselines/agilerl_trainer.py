@@ -46,7 +46,11 @@ from deap_pettingzoo.catalog.schema import (
     ParamTarget,
     ParamType,
 )
-from deap_pettingzoo.utils.device_check import cuda_available
+# Imported as a module (not `from ... import cuda_available`) so the runtime
+# CUDA gating in describe_hyperparameters() reflects the *live* function — a
+# `from` import binds the name at import time and would ignore later
+# monkeypatching / a device that changes availability between import and call.
+from deap_pettingzoo.utils import device_check
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +260,7 @@ class AgileRLTrainer(BaselineTrainer):
             ParamType.ENUM,
         )
         TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
-        _device_unavailable = () if cuda_available() else ("cuda",) # check for CUDA GPU availability at runtime
+        _device_unavailable = () if device_check.cuda_available() else ("cuda",) # check for CUDA GPU availability at runtime
         return (
             ParamSpec("batch_size", I, 64, minimum=1, step=1, target=AP,
                       group="Learning",

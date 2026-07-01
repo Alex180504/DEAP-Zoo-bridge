@@ -1,0 +1,50 @@
+@startuml
+title Plugin Registration Sequence — entry point -> register -> resolve
+
+actor "Third-party plugin" as Plugin
+participant "catalog.algorithms" as Algos
+participant "coevolution.sides" as Sides
+participant "comparison\n(trainer registry)" as Cmp
+participant "importlib.metadata" as Meta
+
+== Discovery (once, at catalog import in every process) ==
+Algos -> Algos: _register_builtins()\nseed _REGISTRY from _BUILTIN_DEFINITIONS
+Algos -> Meta: entry_points(group="deap_pettingzoo.algorithms")
+Meta --> Algos: [EntryPoint(name, register)]
+loop for each entry point
+  Algos -> Plugin: ep.load()(); i.e. register()
+  alt plugin raises
+    Algos -> Algos: warnings.warn(RuntimeWarning naming ep)\ncatalog stays usable
+  else ok
+    Plugin -> Algos: register_algorithm(name, *, trainer,\n   capabilities, coevolution_optimizer, side_state, ...)
+    Algos -> Algos: _normalize_binding(trainer|side_state) -> "module:QualName"
+    Algos -> Algos: _insert_definition(defn) (name/alias collision guard)\n+ _rebuild_lookups() + clear_cache()
+    opt side_state given
+      Algos -> Sides: register_side_state(coevolution_optimizer, side_binding)
+      Sides -> Sides: _SIDE_STATE_FACTORIES[token] = loader
+    end
+  end
+end
+note over Algos, Sides
+  Programmatic register_algorithm(...) (no entry point) is identical from
+  "_normalize_binding" onward, but runs only in the calling process — it does
+  NOT auto-replay into spawned workers (mirror the custom register_env caveat).
+end note
+
+== Resolve as a standalone algorithm (get_trainer self-heal) ==
+actor User
+User -> Cmp: get_trainer("myalgo")
+alt not in _TRAINER_REGISTRY
+  Cmp -> Algos: iter_trainer_bindings()
+  Algos --> Cmp: [(name, module, class), ...]  ' includes the new algo
+  Cmp -> Cmp: _sync_from_catalog() imports + register_trainer(...)
+end
+Cmp --> User: MyTrainer(**kwargs)
+
+== Resolve as a co-evolution side ==
+User -> Sides: Side(optimizer="myopt", ...)
+Sides -> Sides: __post_init__ validates token in set(_SIDE_STATE_FACTORIES)
+User -> Sides: make_side_state(side)
+Sides -> Sides: loader = _SIDE_STATE_FACTORIES["myopt"]; cls = loader()
+Sides --> User: MySideState(side)
+@enduml

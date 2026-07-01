@@ -23,6 +23,7 @@ the :class:`CoEvolutionTrainer` consumes.
 
 from __future__ import annotations
 
+import importlib
 import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -107,24 +108,15 @@ class Side:
     frozen_policies: Optional[Sequence[PolicyProtocol]] = None
 
     def __post_init__(self) -> None:
-        if self.optimizer not in {
-            "ea",
-            "cma",
-            "frozen",
-            "qdax_map_elites",
-            "qdax_cma_me",
-            "rl",
-            "pso",
-            "rl_hpo",
-            "neat",
-            "hyperneat",
-            "es_hyperneat",
-        }:
+        # The valid optimizer tokens are exactly the keys of the open
+        # ``_SIDE_STATE_FACTORIES`` registry, so a ``register_side_state`` (or
+        # ``register_algorithm(..., side_state=...)`` call makes a new token a
+        # valid ``Side.optimizer`` automatically.
+        valid = set(_SIDE_STATE_FACTORIES)
+        if self.optimizer not in valid:
             raise ValueError(
-                f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
-                "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', "
-                f"'pso', 'rl_hpo', 'neat', 'hyperneat', or "
-                f"'es_hyperneat'; got {self.optimizer!r}."
+                f"Side {self.name!r}: optimizer must be one of "
+                f"{sorted(valid)}; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
             raise ValueError(
@@ -723,7 +715,8 @@ class CMAESSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently 
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
         np_before: Optional[Any] = None
         try:
             if self._py_state is not None:
@@ -1058,73 +1051,191 @@ class FrozenSideState(SideState):
         return self._policies[0]
 
 
-# Factory
+# Open side-state factory registry
+
+
+def _load_qdax_side_state() -> type:
+    """Loader for the QDax co-evolution side (needs the ``qdax`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.qdax.coevolution import QDaxSideState
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'qdax_map_elites'/'qdax_cma_me' requires "
+            "the QDax extra. Install with `pip install deap-pettingzoo[qdax]`."
+        ) from exc
+    return QDaxSideState
+
+
+def _load_rl_side_state() -> type:
+    """Loader for the AgileRL co-evolution side."""
+    from .rl_side import RLSideState
+
+    return RLSideState
+
+
+def _load_rl_hpo_side_state() -> type:
+    """Loader for the AgileRL evolutionary-HPO co-evolution side."""
+    from .rl_hpo_side import RLEvolveHPOSideState
+
+    return RLEvolveHPOSideState
+
+
+def _load_neat_side_state() -> type:
+    """Loader for the NEAT co-evolution side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.coevolution import NeatSideState
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'neat' requires the neat extra. Install "
+            "with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return NeatSideState
+
+
+def _load_hyperneat_side_state() -> type:
+    """Loader for the HyperNEAT co-evolution side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+            HyperNeatSideState,
+        )
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'hyperneat' requires the neat extra. "
+            "Install with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return HyperNeatSideState
+
+
+def _load_es_hyperneat_side_state() -> type:
+    """Loader for the ES-HyperNEAT side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+            ESHyperNeatSideState,
+        )
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'es_hyperneat' requires the neat extra. "
+            "Install with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return ESHyperNeatSideState
+
+
+#: Open registry mapping a ``Side.optimizer`` token to a zero-arg **loader**
+#: returning the matching :class:`SideState` subclass. Each loader owns any
+#: lazy import + the friendly "install the X extra" :class:`ImportError`, so
+#: :func:`make_side_state` stays a one-line lookup and third parties can add a
+#: side without editing this module (see :func:`register_side_state`). This is
+#: the authoritative source for :meth:`Side.__post_init__` validation too.
+_SIDE_STATE_FACTORIES: Dict[str, Callable[[], type]] = {
+    "ea": lambda: EASideState,
+    "cma": lambda: CMAESSideState,
+    "frozen": lambda: FrozenSideState,
+    "pso": lambda: PSOSideState,
+    "rl": _load_rl_side_state,
+    "rl_hpo": _load_rl_hpo_side_state,
+    "qdax_map_elites": _load_qdax_side_state,
+    "qdax_cma_me": _load_qdax_side_state,
+    "neat": _load_neat_side_state,
+    "hyperneat": _load_hyperneat_side_state,
+    "es_hyperneat": _load_es_hyperneat_side_state,
+}
+
+
+def _resolve_side_loader(loader_or_class: Any) -> Callable[[], type]:
+    """Normalise ``register_side_state`` input into a zero-arg class loader.
+
+    Accepts a :class:`SideState` subclass (used directly), a dotted
+    ``"module:QualName"`` string (imported lazily — worker-safe), or an
+    existing zero-arg loader callable (returned as-is).
+    """
+    if isinstance(loader_or_class, type):
+        cls = loader_or_class
+        return lambda: cls
+    if isinstance(loader_or_class, str):
+        dotted = loader_or_class
+
+        def _loader() -> type:
+            return _import_dotted(dotted)
+
+        return _loader
+    if callable(loader_or_class):
+        return loader_or_class
+    raise TypeError(
+        "register_side_state expects a SideState subclass, a dotted "
+        f"'module:QualName' string, or a zero-arg loader; got "
+        f"{loader_or_class!r}."
+    )
+
+
+def _import_dotted(dotted: str) -> type:
+    """Import and return the object named by a dotted ``module:QualName`` path.
+
+    Also allows the ``module.QualName`` form (splits on the last dot).
+    """
+    module_path, sep, qualname = dotted.partition(":")
+    if not sep:
+        module_path, _, qualname = dotted.rpartition(".")
+    if not module_path or not qualname:
+        raise ValueError(
+            f"Invalid dotted side-state binding {dotted!r}; expected "
+            "'module:QualName'."
+        )
+    obj: Any = importlib.import_module(module_path)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def register_side_state(
+    token: str,
+    loader_or_class: Any,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Register a :class:`SideState` factory for a co-evolution optimizer token.
+
+    Once registered, ``token`` is a valid :attr:`Side.optimizer` (validated
+    against this registry) and :func:`make_side_state` builds it.
+
+    Args:
+        token: The ``Side.optimizer`` string this side answers to.
+        loader_or_class: A :class:`SideState` subclass, a dotted
+            ``"module:QualName"`` string (imported lazily on first use — the
+            worker-safe form), or a zero-arg loader returning the subclass
+            (which may own a lazy import + friendly ``ImportError``).
+        overwrite: If ``False`` (default), re-registering an existing token
+            raises :class:`ValueError`; set ``True`` to replace.
+
+    Raises:
+        ValueError: If ``token`` is already registered and ``overwrite`` is
+            ``False``.
+        TypeError: If ``loader_or_class`` is not a class, dotted string, or
+            callable.
+    """
+    if not overwrite and token in _SIDE_STATE_FACTORIES:
+        raise ValueError(
+            f"Co-evolution side optimizer {token!r} is already registered. "
+            "Pass overwrite=True to replace."
+        )
+    _SIDE_STATE_FACTORIES[token] = _resolve_side_loader(loader_or_class)
 
 
 def make_side_state(side: Side) -> SideState:
-    """Construct the appropriate :class:`SideState` subclass for ``side``."""
-    if side.optimizer == "ea":
-        return EASideState(side)
-    if side.optimizer == "cma":
-        return CMAESSideState(side)
-    if side.optimizer == "frozen":
-        return FrozenSideState(side)
-    if side.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
-        try:
-            from deap_pettingzoo.contrib.qdax.coevolution import QDaxSideState
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer={side.optimizer!r} requires "
-                "the QDax extra. Install with `pip install "
-                "deap-pettingzoo[qdax]`."
-            ) from exc
-        return QDaxSideState(side)
-    if side.optimizer == "rl":
-        from .rl_side import RLSideState
+    """Construct the appropriate :class:`SideState` subclass for ``side``.
 
-        return RLSideState(side)
-    if side.optimizer == "pso":
-        return PSOSideState(side)
-    if side.optimizer == "rl_hpo":
-        from .rl_hpo_side import RLEvolveHPOSideState
-        return RLEvolveHPOSideState(side)
-    if side.optimizer == "neat":
-        try:
-            from deap_pettingzoo.contrib.neat.coevolution import NeatSideState
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='neat' requires the "
-                "neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return NeatSideState(side)
-    if side.optimizer == "hyperneat":
-        try:
-            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
-                HyperNeatSideState,
-            )
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='hyperneat' requires the "
-                "neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return HyperNeatSideState(side)
-    if side.optimizer == "es_hyperneat":
-        try:
-            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
-                ESHyperNeatSideState,
-            )
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='es_hyperneat' requires "
-                "the neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return ESHyperNeatSideState(side)
-    raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
-        f"Unknown optimizer {side.optimizer!r}"
-    )
+    Looks ``side.optimizer`` up in the open :data:`_SIDE_STATE_FACTORIES`
+    registry, resolves the concrete class through its loader (triggering any
+    lazy optional-extra import), and instantiates ``cls(side)``.
+    """
+    try:
+        loader = _SIDE_STATE_FACTORIES[side.optimizer]
+    except KeyError:  # pragma: no cover — guarded by Side.__post_init__
+        raise ValueError(
+            f"Unknown optimizer {side.optimizer!r}. Known: "
+            f"{sorted(_SIDE_STATE_FACTORIES)}"
+        ) from None
+    cls = loader()
+    return cls(side)
 
 
 __all__ = [
@@ -1136,4 +1247,5 @@ __all__ = [
     "PSOSideState",
     "GenerationStats",
     "make_side_state",
+    "register_side_state",
 ]

@@ -45,6 +45,7 @@ from .sides import (
     Side,
     SideState,
     make_side_state,
+    register_side_state,
 )
 from .rl_side import RLSideState, SUPPORTED_RL_ALGORITHMS
 from .trainer import (
@@ -70,6 +71,7 @@ __all__ = [
     "SUPPORTED_RL_ALGORITHMS",
     "GenerationStats",
     "make_side_state",
+    "register_side_state",
     # Pools
     "OpponentPool",
     "PopulationPool",

@@ -372,6 +372,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                         seed, rng, num_episodes=3,
                     )
                     gen_fitnesses.append(fit)
+                    agent.fitness.append(fit)   # append fitness to agent's history for AgileRL's tournament/selection
 
                 # Record stats.
                 best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0

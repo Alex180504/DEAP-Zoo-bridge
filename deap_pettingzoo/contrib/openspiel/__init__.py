@@ -47,6 +47,28 @@ def _load_compat_cls():
     return OpenSpielCompatibilityV0
 
 
+class OpenSpielGameFactory:
+    """Module-level, picklable factory for an OpenSpiel game.
+
+    Captures the OpenSpiel ``game_name`` as a plain attribute (no closure),
+    so an :class:`~deap_pettingzoo.environments.registry.EnvSpec` built from
+    it survives
+    :func:`~deap_pettingzoo.environments.registry.get_registry_snapshot` and
+    reaches ``num_workers>1`` workers.
+    :class:`shimmy.OpenSpielCompatibilityV0` is imported lazily in
+    :meth:`__call__`.
+    """
+
+    def __init__(self, game_name: str) -> None:
+        self.game_name = game_name
+
+    def __call__(self, render_mode: Optional[str] = None, **cfg: Any):
+        compat_cls = _load_compat_cls()
+        # Merge any caller-supplied overrides on top of the fixed game_name.
+        cfg.setdefault("game_name", self.game_name)
+        return compat_cls(render_mode=render_mode, **cfg)
+
+
 def register_openspiel_game(
     name: str,
     *,
@@ -105,12 +127,9 @@ def register_openspiel_game(
             f"got api={api!r}."
         )
 
-    compat_cls = _load_compat_cls()
-
-    def _factory(render_mode=None, **cfg):
-        # Merge any caller-supplied overrides on top of the fixed game_name.
-        cfg.setdefault("game_name", game_name)
-        return compat_cls(render_mode=render_mode, **cfg)
+    # Fail fast if the extra is missing; the factory re-imports lazily.
+    _load_compat_cls()
+    _factory = OpenSpielGameFactory(game_name)
 
     merged_tags = set(tags or ()) | {"shimmy", "openspiel", "turn_based"}
     combined_notes = notes
@@ -134,4 +153,4 @@ def register_openspiel_game(
     )
 
 
-__all__ = ["register_openspiel_game"]
+__all__ = ["register_openspiel_game", "OpenSpielGameFactory"]
