@@ -592,22 +592,58 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
         :func:`replay_registry_snapshot_once`.
 
     .. note::
-        Entries whose ``factory`` is not picklable (e.g. built-in envs
-        registered with a bare module object) are silently omitted from
-        the snapshot.  Built-in environments (MPE2, aquarium) are
+        Entries whose ``factory`` is not picklable are omitted from the
+        snapshot.  Built-in environments (MPE2, aquarium) are registered
+        with a bare **module** object (also not picklable) but are
         auto-registered in every worker process at import time via
-        :mod:`deap_pettingzoo.environments.builtin`, so they do not
-        need to be propagated through the snapshot.
+        :mod:`deap_pettingzoo.environments.builtin`, so they do not need
+        to be propagated through the snapshot and their omission is
+        silent.  Any *other* non-picklable factory — a lambda, a closure,
+        or a locally-defined class — is a custom :func:`register_env` that
+        will **not** reach ``num_workers>1`` workers (surfacing later as a
+        cryptic "unregistered env"): each such drop emits a
+        :class:`RuntimeWarning` naming the env so the cause is visible at
+        snapshot time rather than deep inside a worker. Register custom
+        envs with a module-level factory function/class to make them
+        propagate.
     """
+    import inspect
     import pickle
 
     result = []
     for name, spec in _REGISTRY.items():
         try:
             pickle.dumps(spec)
-            result.append((name, spec))
         except Exception:  # noqa: BLE001
-            pass
+            # Module-object factories are re-registered in every worker at import time;
+            # their omission is expected and silent. Warn only for the surprising cases.
+            if not inspect.ismodule(spec.factory):
+                # Pinpoint the source: the factory itself, or something in the
+                # wrapper chain / params / teams (so the message doesn't blame
+                # a factory that actually pickles fine).
+                try:
+                    pickle.dumps(spec.factory)
+                    culprit = (
+                        "non-picklable metadata (a wrapper / param / team — "
+                        "the factory itself pickles fine)"
+                    )
+                except Exception:  # noqa: BLE001
+                    culprit = (
+                        "a non-picklable factory "
+                        f"({type(spec.factory).__name__})"
+                    )
+                warnings.warn(
+                    f"Environment {name!r} has {culprit} and will not propagate "
+                    "to parallel workers (num_workers>1); it must be "
+                    "re-registered there. Use a module-level factory function "
+                    "or class (and picklable wrappers) instead of a "
+                    "lambda/closure so it can be pickled into the worker "
+                    "snapshot.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            continue
+        result.append((name, spec))
     return result
 
 
@@ -638,6 +674,8 @@ def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
             tags=set(spec.tags),
             api=spec.api,
             wrappers=spec.wrappers,
+            params=spec.params,
+            teams=spec.teams,
             overwrite=True,
         )
 

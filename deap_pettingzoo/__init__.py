@@ -9,6 +9,7 @@ __version__ = "0.1.0"
 __author__ = "Alex"
 
 from deap_pettingzoo import genomes, policies, evaluators, environments, utils
+from deap_pettingzoo.catalog import register_algorithm
 
 __all__ = [
     "genomes",
@@ -16,4 +17,5 @@ __all__ = [
     "evaluators",
     "environments",
     "utils",
+    "register_algorithm",
 ]
