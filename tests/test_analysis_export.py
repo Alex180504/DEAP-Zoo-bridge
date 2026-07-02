@@ -109,3 +109,28 @@ def test_export_infers_format_and_rejects_unknown(tmp_path: Path):
     assert json_path.is_file()
     with pytest.raises(ValueError, match="fmt must be"):
         exp.export(tmp_path / "out.xyz")
+
+
+def test_export_parquet_roundtrip_with_torch_imported(tmp_path: Path):
+    """Guards the Windows pyarrow/torch import-order crash.
+
+    ``pd.DataFrame.to_parquet``/``read_parquet`` hard-crash the process on
+    Windows (access violation in ``pyarrow.pandas_compat.convert_column``)
+    if pyarrow's DLLs initialize *after* torch's in the same process.
+    ``tests/conftest.py`` eagerly imports pyarrow before any test module
+    runs to fix the load order; this test imports torch afterward (the
+    exact scenario that used to crash) and exercises the real parquet
+    export/read path to confirm the fix holds.
+    """
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("torch")
+    import torch  # noqa: F401
+
+    exp = _seed_experiment(tmp_path)
+    out = tmp_path / "campaign.parquet"
+    returned = exp.export(out, fmt="parquet")
+    assert returned == out
+    reloaded = pd.read_parquet(out)
+    assert len(reloaded) == 6
+    assert {"algorithm", "seed", "score", "budget_mode"} <= set(reloaded.columns)
