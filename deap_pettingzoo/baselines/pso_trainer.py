@@ -167,7 +167,7 @@ class PSOTrainer(BaselineTrainer):
                 target=TR,
                 group="Parallelism",
                 advanced=True,
-                choices=("process", "scoop", "dask"),
+                choices=("process", "dask"),
                 help="Parallel executor backend.",
             ),
             ParamSpec(
@@ -320,7 +320,7 @@ class PSOTrainer(BaselineTrainer):
             else self.parallel_backend
         )
         # One snapshot, reused for the process-pool initializer and shipped on
-        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
+        # the worker spec so Dask workers can re-register custom envs too.
         registry_snapshot = get_registry_snapshot()
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,

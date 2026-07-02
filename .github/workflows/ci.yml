@@ -96,7 +96,7 @@ jobs:
           pip install -c "$C" packaging accelerate dill flatten-dict google-cloud-storage \
             h5py hydra-core minari omegaconf redis tensordict termcolor tqdm wandb
           pip install fastrand pymunk
-          pip install -c "$C" -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,scoop,dask,ui,service]"
+          pip install -c "$C" -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,dask,ui,service]"
           # JAX/QDax: jaxmarl is dropped (no test imports it) and qdax's
           # brax>=0.10.4 pin is bypassed with --no-deps (it runs on brax 0.10.3);
           # the constraints file keeps the jax/brax stack from being bumped.

@@ -79,7 +79,7 @@ class _NeatWorkerSpec:
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
     max_steps: int = 500
-    #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
+    #: Registry snapshot replayed once per worker so Dask workers (and
     #: any worker missing a runtime registration) can resolve ``env_name``.
     registry_snapshot: Optional[List] = None
 
@@ -141,7 +141,7 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
 
     genome, spec = payload
 
-    # Re-register custom envs so SCOOP/Dask workers can resolve env_name; no-op
+    # Re-register custom envs so Dask workers can resolve env_name; no-op
     # on repeat calls and for built-in-only snapshots.
     replay_registry_snapshot_once(spec.registry_snapshot)
 

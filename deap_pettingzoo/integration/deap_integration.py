@@ -698,7 +698,7 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     if evaluator is not None and cached_spec == spec:
         return evaluator
 
-    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # Re-register custom envs so Dask workers (no initializer hook) can
     # build them; no-op on repeat calls and for built-in-only snapshots.
     from deap_pettingzoo.environments.registry import (
         replay_registry_snapshot_once,
@@ -745,7 +745,7 @@ def _worker_evaluate(
     Args:
         payload_and_spec: ``(_GenomePayload, _EvalWorkerSpec)`` tuple.
             We pack both so every call carries enough context to
-            rebuild the evaluator — necessary because SCOOP / Dask do
+            rebuild the evaluator — necessary because Dask does
             not expose an init hook.
 
     Returns:
@@ -754,7 +754,7 @@ def _worker_evaluate(
         ``steps_delta`` is the real number of env ticks this single
         evaluation consumed. The delta is measured around the evaluate
         call so it is robust to the per-process cached evaluator (and to
-        SCOOP / Dask in-process fallbacks) to prevent double counting regardless
+        Dask's in-process fallback) to prevent double counting regardless
         of backend.
     """
     payload, spec = payload_and_spec
@@ -973,7 +973,7 @@ def _mixed_worker_evaluate(
 
     payload, spec = payload_and_spec
 
-    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # Re-register custom envs so Dask workers (no initializer hook) can
     # resolve the env factory; no-op on repeat calls.
     replay_registry_snapshot_once(spec.registry_snapshot)
 
@@ -1126,7 +1126,7 @@ def make_mixed_parallel_evaluate_map(
 
     from deap_pettingzoo.environments.registry import get_registry_snapshot
 
-    # Snapshot custom env registrations once so SCOOP/Dask workers (no
+    # Snapshot custom env registrations once so Dask workers (no
     # initializer hook) can resolve the env factory.
     registry_snapshot = get_registry_snapshot()
 

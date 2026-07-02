@@ -80,15 +80,14 @@ class _RolloutSpec:
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
     #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
     nvec: Optional[tuple] = None
-    #: Registry snapshot replayed in the worker so SCOOP/Dask (and the
+    #: Registry snapshot replayed in the worker so Dask (and the
     #: initializer-less process path here) can resolve runtime-registered envs.
     registry_snapshot: Optional[list] = None
 
 
 # Module-global cache populated lazily on each worker. Same pattern
 # as ``deap_pettingzoo.integration.deap_integration._WORKER_CACHE`` —
-# works uniformly for ProcessPoolExecutor, SCOOP (no init hook), and
-# Dask workers.
+# works uniformly for ProcessPoolExecutor and Dask workers (no init hook).
 _NUMPY_WORKER_CACHE: dict = {}
 
 
@@ -150,7 +149,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
             # `_extract_key` above is `type(...).__qualname__`, which is
             # "function" for ANY plain function — it cannot tell two
             # different module-level extractors apart. A persistent worker
-            # pool (dask/scoop) reused across scoring-function instances
+            # pool (dask) reused across scoring-function instances
             # could therefore swap in a genuinely different extractor on a
             # cache "hit"; re-validate it rather than trusting a stale
             # `_checked_extractor=True` left over from the previous one.
@@ -427,7 +426,7 @@ def make_numpy_scoring_function(
             :func:`close_scoring_function` on the returned callable to
             tear down the pool explicitly; trainers do this in a
             ``try / finally``.
-        parallel_backend: One of ``"process"``, ``"scoop"``, ``"dask"``.
+        parallel_backend: One of ``"process"``, ``"dask"``.
             See :mod:`deap_pettingzoo.utils.parallel` for details.
         worker_imports: Optional module names imported inside each worker
             before env construction. Use this when the env is registered by

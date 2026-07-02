@@ -93,7 +93,7 @@ class _RLDriverContext:
     env_name: Optional[str] = None
     #: Env kwargs forwarded to :class:`PettingZooWrapper`.
     env_config: Optional[Dict[str, Any]] = None
-    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
 
 
@@ -150,7 +150,7 @@ class _RLRolloutPayload:
     opponent_snapshots: Dict[str, Any]  # Dict[str, OpponentSnapshot]
     #: Maps opponent side name → role_prefixes.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
-    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
 
 

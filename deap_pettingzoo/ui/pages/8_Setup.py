@@ -155,7 +155,7 @@ _PARALLELISM_PARAMS: List[Dict[str, Any]] = [
     {
         "name": "parallel_backend",
         "type": "enum",
-        "choices": ["process", "scoop", "dask"],
+        "choices": ["process", "dask"],
         "default": "process",
         "advanced": True,
         "label": "Backend",
