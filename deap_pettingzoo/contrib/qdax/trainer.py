@@ -12,6 +12,11 @@ fast JAX-native scoring path is used
 
 Hyperparameters are consumed from :attr:`TrainingConfig.algorithm_params`.
 See each trainer's ``_DEFAULT_PARAMS`` for the keys and defaults.
+``TrainingConfig.seed`` and ``TrainingConfig.max_steps_per_episode`` are
+primary fields honored via :func:`_apply_universal_keys` — ``seed``
+always overrides ``algorithm_params['seed']``; ``max_steps_per_episode``
+fills ``algorithm_params['episode_length']`` only when the caller has not
+set it explicitly.
 """
 
 from __future__ import annotations
@@ -123,6 +128,25 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "verbose": True,
     "progress_every": 1,
 }
+
+
+def _apply_universal_keys(config: TrainingConfig, params: Dict[str, Any]) -> None:
+    """Thread ``TrainingConfig``'s first-class ``seed``/``max_steps_per_episode``
+    into the QDax ``algorithm_params`` dict, in place.
+
+    QDax's algorithm-specific defaults (``_DEFAULT_MAP_ELITES_PARAMS`` /
+    ``_DEFAULT_CMA_ME_PARAMS``) already carry a ``seed`` and an
+    ``episode_length`` (the JAX-scan rollout length, QDax's analogue of
+    ``max_steps_per_episode``). ``config.seed``, when set, always takes precendence.
+    ``config.max_steps_per_episode``
+    only fills ``episode_length`` when the caller has not explicitly set it
+    in ``algorithm_params`` — an explicit ``episode_length`` still precedes.
+    """
+    if config.seed is not None:
+        params["seed"] = int(config.seed)
+    explicit = config.algorithm_params or {}
+    if config.max_steps_per_episode is not None and "episode_length" not in explicit:
+        params["episode_length"] = int(config.max_steps_per_episode)
 
 
 def _require_descriptor_fn(params: Dict[str, Any]):
@@ -540,6 +564,7 @@ class MAPElitesTrainer(BaselineTrainer):
         from qdax.utils.metrics import default_qd_metrics
 
         params = {**_DEFAULT_MAP_ELITES_PARAMS, **(config.algorithm_params or {})}
+        _apply_universal_keys(config, params)
         env, module, layer_sizes, descriptor_fn, scoring_fn, init_params = (
             _build_env_and_scoring(config, params)
         )
@@ -760,6 +785,7 @@ class CMAMETrainer(BaselineTrainer):
         )
 
         params = {**_DEFAULT_CMA_ME_PARAMS, **(config.algorithm_params or {})}
+        _apply_universal_keys(config, params)
         env, module, layer_sizes, descriptor_fn, scoring_fn, _ = (
             _build_env_and_scoring(config, params)
         )
@@ -972,7 +998,7 @@ def _maybe_record_qdax_champion(
     controller = RecordingController(
         config, log,
         max_steps=int(recording_max_steps or 500),
-        seed=config.algorithm_params.get("seed"),
+        seed=config.seed if config.seed is not None else config.algorithm_params.get("seed"),
     )
     controller.finalize(
         lambda: champion_policy,
@@ -1017,7 +1043,7 @@ def _persist_qdax_results(
 
     If ``repertoire_path`` points to an existing file, it is registered
     in ``manifest.artifacts['policy']`` so the analysis loader can
-    rebuild a policy for the UI's Live Rollout page.
+    rebuild a policy.
     """
     from deap_pettingzoo.baselines._logging_helpers import (
         build_logger,

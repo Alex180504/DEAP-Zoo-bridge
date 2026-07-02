@@ -40,10 +40,11 @@ Trainer -> RR: _RecordingReporter(record_fn)
 Trainer -> Pop: add_reporter(recording_reporter)
 
 == Parallel or sequential eval ==
-alt num_workers > 1
+Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_workers if != 1 else self._num_workers)\n  backend = config.parallel_backend if != "process" else self._parallel_backend\n  (config takes precedence over the trainer-constructor default)
+alt effective_workers > 1
     Trainer -> Trainer: get_registry_snapshot()
-    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint,\n  registry_snapshot=snapshot, ...)
-    Trainer -> Executor: make_executor(n_workers,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))\n  note: snapshot also rides on the spec so SCOOP/Dask\n  workers replay it (replay_registry_snapshot_once)
+    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, max_steps,\n  registry_snapshot=snapshot, ...)
+    Trainer -> Executor: make_executor(effective_workers, backend=backend,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))\n  note: snapshot also rides on the spec so SCOOP/Dask\n  workers replay it (replay_registry_snapshot_once)
 
     loop n_generations
         Trainer -> Pop: run(parallel_eval_function, n=1)
@@ -54,12 +55,14 @@ alt num_workers > 1
             Executor -> Executor: evaluate genome across eval_eps episodes
             Executor --> Pop: [(genome_id, (fitness, steps)), ...]\n  worker returns real env-tick count;\n  driver sums deltas into step_sink
         end
+        Pop -> Trainer: on_generation(best_fitness, gen_steps)\n
+        Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)\n  self._env_steps_history.append(gen_steps)
 
         Pop -> Pop: reproduce / speciate
     end
     Trainer -> Executor: executor.__exit__()
     Trainer -> Trainer: self._env_steps_consumed += step_sink[0]
-else num_workers == 1 (sequential)
+else effective_workers == 1 (sequential)
     loop n_generations
         Trainer -> Pop: run(eval_function, n=1)
         activate Pop

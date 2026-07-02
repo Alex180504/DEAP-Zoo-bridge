@@ -85,6 +85,7 @@ class HyperNEATTrainer(NEATTrainer):
         reject_consumed_budgeting(config, "HyperNEATTrainer")
         self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
+        max_steps = self._resolve_max_steps(config)
 
         pop_size = int(params.get("pop_size", 50))
         n_generations = params.get("n_generations", None)
@@ -122,7 +123,7 @@ class HyperNEATTrainer(NEATTrainer):
         cppn_input_size = 5
         cppn_output_size = 1
         overrides = dict(params.get("neat_config_overrides", {}))
-        seed = params.get("seed", None)
+        seed = config.seed if config.seed is not None else params.get("seed", None)
         neat_config = build_cppn_config(
             input_size=cppn_input_size,
             output_size=cppn_output_size,
@@ -134,7 +135,7 @@ class HyperNEATTrainer(NEATTrainer):
         # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="hyperneat")
         self._recorder = RecordingController(
-            config, log, max_steps=500, seed=seed,
+            config, log, max_steps=max_steps, seed=seed,
         )
 
         # --- Create population -------------------------------------------
@@ -161,15 +162,17 @@ class HyperNEATTrainer(NEATTrainer):
                 self._recorder.observe(
                     ProgressEvent(
                         unit="generation", current=gen,
-                        total=n_generations, env_steps=gen * 500,
+                        total=n_generations, env_steps=gen * max_steps,
                     ),
                     lambda: _hn_champion(best_genome),
                 )
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
+        effective_workers, backend = self._resolve_parallelism(config)
+
         # --- Parallel or sequential eval -------------------------------------
-        if self._num_workers > 1:
+        if effective_workers > 1:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -192,21 +195,28 @@ class HyperNEATTrainer(NEATTrainer):
                 substrate_spec=_substrate_to_spec(substrate),
                 phenotype_activation=activation,
                 weight_threshold=weight_threshold,
+                max_steps=max_steps,
                 registry_snapshot=snapshot,
             )
 
+            def _on_generation(best_fitness: float, _gen_steps: int) -> None:
+                self._generation_num += 1
+                self._fitness_history.append(best_fitness)
+
             _parallel_steps = [0]
             with make_executor(
-                self._num_workers,
+                effective_workers,
+                backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
             ) as executor:
                 _eval_genomes = make_neat_parallel_evaluate(
-                    executor, worker_spec, step_sink=_parallel_steps
+                    executor,
+                    worker_spec,
+                    step_sink=_parallel_steps,
+                    on_generation=_on_generation,
                 )
                 _run_neat(pop, _eval_genomes, n_generations)
-                if not self._fitness_history:
-                    self._fitness_history.append(0.0)
             self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
@@ -234,7 +244,7 @@ class HyperNEATTrainer(NEATTrainer):
                             ep_rew = 0.0
                             done = False
                             _steps = 0
-                            while not done and _steps < 500:
+                            while not done and _steps < max_steps:
                                 actions = {}
                                 for agent in observations:
                                     actions[agent] = policy.get_action(
@@ -277,7 +287,7 @@ class HyperNEATTrainer(NEATTrainer):
 
         self._recorder.finalize(
             lambda: _hn_champion(best_genome),
-            iteration=n_generations, env_steps=n_generations * 500,
+            iteration=n_generations, env_steps=n_generations * max_steps,
         )
 
         try:
@@ -289,7 +299,7 @@ class HyperNEATTrainer(NEATTrainer):
         self._log(
             config, best_genome, pop_size, elapsed,
             algorithm="HyperNEAT",
-            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+            nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
         if config.recording.enabled:
             log.close()
@@ -302,7 +312,7 @@ class HyperNEATTrainer(NEATTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * 500
+                    n_generations * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
@@ -325,6 +335,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         reject_consumed_budgeting(config, "ESHyperNEATTrainer")
         self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
+        max_steps = self._resolve_max_steps(config)
 
         pop_size = int(params.get("pop_size", 50))
         n_generations = params.get("n_generations", None)
@@ -358,7 +369,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         cppn_input_size = 5
         cppn_output_size = 1
         overrides = dict(params.get("neat_config_overrides", {}))
-        seed = params.get("seed", None)
+        seed = config.seed if config.seed is not None else params.get("seed", None)
         neat_config = build_cppn_config(
             input_size=cppn_input_size,
             output_size=cppn_output_size,
@@ -370,7 +381,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="es-hyperneat")
         self._recorder = RecordingController(
-            config, log, max_steps=500, seed=seed,
+            config, log, max_steps=max_steps, seed=seed,
         )
 
         pop = neat.Population(neat_config, seed=seed)
@@ -396,7 +407,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 self._recorder.observe(
                     ProgressEvent(
                         unit="generation", current=gen,
-                        total=n_generations, env_steps=gen * 500,
+                        total=n_generations, env_steps=gen * max_steps,
                     ),
                     lambda: _esn_champion(best_genome),
                 )
@@ -405,8 +416,10 @@ class ESHyperNEATTrainer(NEATTrainer):
                 _RecordingReporter(_record_champion)
             )
 
+        effective_workers, backend = self._resolve_parallelism(config)
+
         # --- Parallel or sequential eval -------------------------------------
-        if self._num_workers > 1:
+        if effective_workers > 1:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -428,21 +441,28 @@ class ESHyperNEATTrainer(NEATTrainer):
                 seed=seed if seed is not None else 0,
                 substrate_spec=_substrate_to_spec(substrate),
                 es_params=dict(es_params),
+                max_steps=max_steps,
                 registry_snapshot=snapshot,
             )
 
+            def _on_generation(best_fitness: float, _gen_steps: int) -> None:
+                self._generation_num += 1
+                self._fitness_history.append(best_fitness)
+
             _parallel_steps = [0]
             with make_executor(
-                self._num_workers,
+                effective_workers,
+                backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
             ) as executor:
                 _eval_genomes = make_neat_parallel_evaluate(
-                    executor, worker_spec, step_sink=_parallel_steps
+                    executor,
+                    worker_spec,
+                    step_sink=_parallel_steps,
+                    on_generation=_on_generation,
                 )
                 _run_neat(pop, _eval_genomes, n_generations)
-                if not self._fitness_history:
-                    self._fitness_history.append(0.0)
             self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
@@ -469,7 +489,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                             ep_rew = 0.0
                             done = False
                             _steps = 0
-                            while not done and _steps < 500:
+                            while not done and _steps < max_steps:
                                 actions = {}
                                 for agent in observations:
                                     actions[agent] = policy.get_action(
@@ -511,7 +531,7 @@ class ESHyperNEATTrainer(NEATTrainer):
 
         self._recorder.finalize(
             lambda: _esn_champion(best_genome),
-            iteration=n_generations, env_steps=n_generations * 500,
+            iteration=n_generations, env_steps=n_generations * max_steps,
         )
 
         try:
@@ -523,7 +543,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         self._log(
             config, best_genome, pop_size, elapsed,
             algorithm="ES-HyperNEAT",
-            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+            nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
         if config.recording.enabled:
             log.close()
@@ -536,7 +556,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * 500
+                    n_generations * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },

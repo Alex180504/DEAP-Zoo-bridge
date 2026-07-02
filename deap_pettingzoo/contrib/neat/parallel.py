@@ -17,7 +17,7 @@ Driver:  genome ──pickle──→ Worker: rebuild genome via pickle
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -61,6 +61,9 @@ class _NeatWorkerSpec:
     weight_threshold:
         Minimum absolute CPPN output below which phenotype connection
         weights are zeroed.  Default 0.1 (HyperNEAT / ES-HyperNEAT).
+    max_steps:
+        Hard cap on env steps per rollout episode, mirrors
+        ``TrainingConfig.max_steps_per_episode`` on the driver.
     """
 
     env_name: str
@@ -75,6 +78,7 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    max_steps: int = 500
     #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
     #: any worker missing a runtime registration) can resolve ``env_name``.
     registry_snapshot: Optional[List] = None
@@ -201,7 +205,7 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
             ep_rew = 0.0
             done = False
             _steps = 0
-            while not done and _steps < 500:
+            while not done and _steps < spec.max_steps:
                 actions = {}
                 for agent in observations:
                     actions[agent] = policy.get_action(observations[agent])
@@ -227,6 +231,7 @@ def make_neat_parallel_evaluate(
     worker_spec: _NeatWorkerSpec,
     *,
     step_sink: Optional[List[int]] = None,
+    on_generation: Optional[Callable[[float, int], None]] = None,
 ) -> "Any":
     """Return a callable suitable as a neat fitness function.
 
@@ -247,6 +252,12 @@ def make_neat_parallel_evaluate(
         env-step counts returned by the workers are summed into
         ``step_sink[0]`` across every generation, so the driver can report a
         real consumed-steps total for the parallel path.
+    on_generation:
+        Optional ``(best_fitness, env_steps) -> None`` callback invoked once
+        per generation with this generation's best genome fitness and total
+        real env steps. Lets the driver append to a per-generation
+        ``fitness_history``/``generation`` counter on the parallel path,
+        which the fitness-only assignment below does not otherwise expose.
 
     Returns
     -------
@@ -267,7 +278,10 @@ def make_neat_parallel_evaluate(
         # Assign fitnesses back to genomes; aggregate real steps if requested.
         for (_genome_id, genome), (fitness, _steps) in zip(genomes_and_ids, results):
             genome.fitness = float(fitness)
+        gen_steps = sum(int(steps) for _fitness, steps in results)
         if step_sink is not None:
-            step_sink[0] += sum(int(steps) for _fitness, steps in results)
+            step_sink[0] += gen_steps
+        if on_generation is not None and results:
+            on_generation(max(float(fitness) for fitness, _steps in results), gen_steps)
 
     return _parallel_fitness

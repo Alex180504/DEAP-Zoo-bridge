@@ -30,8 +30,8 @@ def _hpo_config(
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=budget,
         num_seeds=1,
+        seed=seed,
         algorithm_params={
-            "seed": seed,
             "max_steps_per_episode": 25,
             "population_size": 2,
             "evo_every_n_steps": evo_every,

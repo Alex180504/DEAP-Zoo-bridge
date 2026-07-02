@@ -1,4 +1,4 @@
-"""Numpy-boundary scoring function builder for QDax (Goal 2).
+"""Numpy-boundary scoring function builder for QDax.
 
 Lets QDax drive a **PettingZoo** env through the slow per-step
 numpy<->JAX boundary. Positioned as a validation / debugging tool: it
@@ -57,8 +57,12 @@ class _RolloutSpec:
     * ``descriptor_fn`` — must itself be a module-top-level callable
       (pickleable), i.e. a top-level class instance rather than a
       lambda/closure, so it survives cross-process transport.
-        * ``extract_state_fn`` — same pickle constraint; default is the
-            numpy extractor in this module.
+        * ``state_extractor`` — same pickle constraint; default is the
+            numpy extractor in this module. Distinct from the
+            ``position_extractor`` contract in
+            :mod:`deap_pettingzoo.contrib.qdax.position_extractors` (used by
+            ``QDaxSideState``) — this one returns a ``(positions,
+            velocities)`` 2-tuple, not a single ``(N, 2)`` array.
         * ``worker_imports`` — optional module names imported in the worker
             before env construction so import-time ``register_env(...)`` side
             effects are replayed under ``spawn``.
@@ -72,7 +76,7 @@ class _RolloutSpec:
     descriptor_fn: Callable
     action_type: str
     eval_episodes: int = 1
-    extract_state_fn: Optional[Callable] = None
+    state_extractor: Optional[Callable] = None
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
     #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
     nvec: Optional[tuple] = None
@@ -109,11 +113,11 @@ def _ensure_worker_context(spec: _RolloutSpec):
     The cache is keyed on stable structural fields that fully identify
     the rollout context: ``env_name``, ``env_config``, ``layer_sizes``,
     ``activation``, ``action_type``, and the *type* of the
-    ``descriptor_fn`` / ``extract_state_fn`` callables. We do not use
-    the object ``id()`` for callable fields because pickling/unpickling
+    ``descriptor_fn`` / ``state_extractor`` callables.
+    The object ``id()`` id not used for callable fields because pickling/unpickling
     across the process boundary produces a new object with a different
     ``id`` on every task — which would invalidate the cache every call.
-    Instead we refresh the callable handles in-place when the signature
+    Instead refresh the callable handles in-place when the signature
     matches, so the cached env + module are reused across tasks while
     the callable references are kept up-to-date.
     """
@@ -121,8 +125,8 @@ def _ensure_worker_context(spec: _RolloutSpec):
     _env_cfg = spec.env_config or {}
     _env_cfg_frozen = tuple(sorted(_env_cfg.items()))
     _extract_key = (
-        type(spec.extract_state_fn).__qualname__
-        if spec.extract_state_fn is not None
+        type(spec.state_extractor).__qualname__
+        if spec.state_extractor is not None
         else None
     )
     _worker_imports = tuple(str(name) for name in (spec.worker_imports or ()))
@@ -141,8 +145,16 @@ def _ensure_worker_context(spec: _RolloutSpec):
         # Refresh callable handles so the cached ones match the
         # freshly-unpickled spec on each task.
         _NUMPY_WORKER_CACHE["descriptor_fn"] = spec.descriptor_fn
-        if spec.extract_state_fn is not None:
-            _NUMPY_WORKER_CACHE["extract"] = spec.extract_state_fn
+        if spec.state_extractor is not None:
+            _NUMPY_WORKER_CACHE["extract"] = spec.state_extractor
+            # `_extract_key` above is `type(...).__qualname__`, which is
+            # "function" for ANY plain function — it cannot tell two
+            # different module-level extractors apart. A persistent worker
+            # pool (dask/scoop) reused across scoring-function instances
+            # could therefore swap in a genuinely different extractor on a
+            # cache "hit"; re-validate it rather than trusting a stale
+            # `_checked_extractor=True` left over from the previous one.
+            _NUMPY_WORKER_CACHE["_checked_extractor"] = False
         return _NUMPY_WORKER_CACHE
 
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
@@ -156,7 +168,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
     replay_registry_snapshot_once(spec.registry_snapshot)
     module = make_flax_mlp(spec.layer_sizes, activation=spec.activation)
     env = PettingZooWrapper(spec.env_name, env_config=spec.env_config or {})
-    extract = spec.extract_state_fn or _extract_positions_velocities_np
+    extract = spec.state_extractor or _extract_positions_velocities_np
 
     _NUMPY_WORKER_CACHE.clear()
     _NUMPY_WORKER_CACHE.update(
@@ -164,9 +176,48 @@ def _ensure_worker_context(spec: _RolloutSpec):
         module=module,
         env=env,
         extract=extract,
+        _checked_extractor=False,
         descriptor_fn=spec.descriptor_fn,
     )
     return _NUMPY_WORKER_CACHE
+
+
+def _call_state_extractor(extract, obs, agents, ctx: dict):
+    """Call ``extract`` and validate its output shape on the first call.
+
+    A ``position_extractor`` (the :mod:`deap_pettingzoo.contrib.qdax.position_extractors`
+    contract) returns a single ``(N, 2)`` array, not a ``(positions, velocities)``
+    2-tuple. Passing one where a ``state_extractor`` is expected either
+    raises an opaque unpacking error or silently mis-splits rows into
+    "positions" and "velocities" — catch it immediately instead. Checked
+    once per worker context (not every call) to keep the hot rollout loop
+    cheap.
+    """
+    raw = extract(obs, agents)
+    if ctx.get("_checked_extractor", False):
+        return raw
+    if not (isinstance(raw, tuple) and len(raw) == 2):
+        raise ValueError(
+            "state_extractor must return a (positions, velocities) 2-tuple, "
+            f"got {type(raw).__name__}. This looks like a position_extractor "
+            "(a single (N, 2) array) — see "
+            "deap_pettingzoo.contrib.qdax.position_extractors, which is a "
+            "different contract used by QDaxSideState."
+        )
+    positions, velocities = raw
+    import numpy as np
+
+    num_agents = len(agents)
+    for name, arr in (("positions", positions), ("velocities", velocities)):
+        shape = np.asarray(arr).shape
+        if len(shape) != 2 or shape[0] != num_agents:
+            raise ValueError(
+                f"state_extractor must return (positions, velocities) each "
+                f"shaped (num_agents={num_agents}, D); got {name} with shape "
+                f"{shape}."
+            )
+    ctx["_checked_extractor"] = True
+    return raw
 
 
 def _pad_agent_state(positions, velocities, agent_count: int):
@@ -223,7 +274,7 @@ def _rollout_once(
     params = flat_to_pytree(flat_params, spec.layer_sizes)
     obs = env.reset(seed=int(seed))
     agents = list(env.agents)
-    pos0, vel0 = extract(obs, agents)
+    pos0, vel0 = _call_state_extractor(extract, obs, agents, ctx)
     pos_hist: List[np.ndarray] = [pos0]
     vel_hist: List[np.ndarray] = [vel0]
     total_reward = 0.0
@@ -263,7 +314,10 @@ def _rollout_once(
         obs, rewards, terms, truncs, _infos = env.step(actions)
         total_reward += float(sum(rewards.values()))
         if env.agents:
-            p, v = _pad_agent_state(*extract(obs, list(env.agents)), len(agents))
+            p, v = _pad_agent_state(
+                *_call_state_extractor(extract, obs, list(env.agents), ctx),
+                len(agents),
+            )
             pos_hist.append(p)
             vel_hist.append(v)
         done = all(terms.values()) or all(truncs.values())
@@ -335,7 +389,7 @@ def make_numpy_scoring_function(
     env_config: Optional[dict] = None,
     action_type: str = "discrete",
     nvec: Optional[Sequence[int]] = None,
-    extract_state_fn: Optional[Callable] = None,
+    state_extractor: Optional[Callable] = None,
     activation: str = "tanh",
     num_workers: int = 1,
     parallel_backend: str = "process",
@@ -362,12 +416,15 @@ def make_numpy_scoring_function(
             ``"continuous"`` (tanh).
         nvec: Per-sub-action choice counts; required when
             ``action_type == "multidiscrete"``.
-        extract_state_fn: Optional observation → (positions, velocities)
-            extractor. Must be picklable when ``num_workers > 1``.
+        state_extractor: Optional observation -> (positions, velocities)
+            extractor. Must be picklable when ``num_workers > 1``. Distinct
+            from the ``position_extractor`` contract in
+            :mod:`deap_pettingzoo.contrib.qdax.position_extractors` (used by
+            ``QDaxSideState``).
         eval_episodes: Number of rollout episodes to average per genotype.
             Descriptors are averaged elementwise across those rollouts.
         num_workers: Number of worker processes for per-individual
-            rollouts. ``0`` / ``1`` → serial in-process. ``>1`` spawns
+            rollouts. ``0`` / ``1`` -> serial in-process. ``>1`` spawns
             a persistent :class:`ProcessPoolExecutor` on first call
             and reuses it across QD iterations. Call
             :func:`close_scoring_function` on the returned callable to
@@ -414,7 +471,7 @@ def make_numpy_scoring_function(
         descriptor_fn=descriptor_fn,
         action_type=action_type,
         nvec=tuple(int(x) for x in nvec) if nvec is not None else None,
-        extract_state_fn=extract_state_fn,
+        state_extractor=state_extractor,
         worker_imports=tuple(str(name) for name in worker_imports),
         # Propagate runtime-registered custom envs to workers (no init hook).
         registry_snapshot=get_registry_snapshot(),
