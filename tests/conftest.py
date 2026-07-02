@@ -11,6 +11,17 @@ that are not bugs in this codebase.
 
 from __future__ import annotations
 
+# Windows-only: importing pyarrow *after* torch in the same process hard
+# crashes (access violation in pyarrow.pandas_compat.convert_column) the
+# first time pandas touches parquet I/O. Eagerly importing
+# pyarrow here, before any test module gets a chance to import torch/jax,
+# fixes the DLL init order for the whole session regardless of collection
+# order. No-op (and harmless) if pyarrow is not installed.
+try:
+    import pyarrow  # noqa: F401
+except ImportError:
+    pass
+
 import warnings
 
 
