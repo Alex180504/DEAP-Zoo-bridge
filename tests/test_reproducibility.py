@@ -15,6 +15,11 @@ pytest.importorskip("pettingzoo.mpe")
 
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
+from deap_pettingzoo.baselines.coevolution import (
+    CoEvolutionConfig,
+    CoEvolutionTrainer,
+    Side,
+)
 from deap_pettingzoo.baselines.ea_trainer import EATrainer
 
 
@@ -68,6 +73,48 @@ class TestCMAReproducibility:
         assert _fitness_history(result1) == _fitness_history(result2), (
             "CMA train() is not reproducible — regression."
         )
+
+# Co-evolution trainer reproducibility
+
+class TestCoevolutionReproducibility:
+    """Two same-seed ``CoEvolutionTrainer.train()`` calls must produce
+    identical per-side fitness histories."""
+
+    @staticmethod
+    def _config(seed: int) -> TrainingConfig:
+        cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side("pursuers", ("adversary",), "ea",
+                     {"population_size": 4, "hidden_size": 8, "seed": seed}),
+                Side("evaders", ("agent",), "ea",
+                     {"population_size": 4, "hidden_size": 8, "seed": seed + 1}),
+            ],
+            k_opponents=2,
+            max_steps_per_episode=20,
+            seed=seed,
+        )
+        return TrainingConfig(
+            env_name="simple_tag_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=80,
+            coevolution_config=cfg,
+        )
+
+    def test_coevolution_train_is_reproducible(self):
+        result1 = CoEvolutionTrainer().train(self._config(seed=42))
+        result2 = CoEvolutionTrainer().train(self._config(seed=42))
+        hist1 = result1.metrics["per_side_history"]
+        hist2 = result2.metrics["per_side_history"]
+        assert set(hist1) == set(hist2)
+        for name in hist1:
+            series1 = [r["max"] for r in hist1[name]]
+            series2 = [r["max"] for r in hist2[name]]
+            assert series1 == series2, (
+                f"{name}: coevolution train() is not reproducible at a "
+                "fixed seed — F-4.2-02 regression."
+            )
+
 
 # num_seeds must not leak into the genome seed
 
