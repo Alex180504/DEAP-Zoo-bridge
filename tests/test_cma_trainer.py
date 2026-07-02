@@ -82,12 +82,15 @@ class TestCMAESTrainerTraining:
             use ``>=`` rather than ``>`` when comparing fitness values because such a small budget 
             may cause the optimiser to plateau naturally without it being a bug.
         """
-        trainer = CMAESTrainer(hidden_size=16, population_size=6, sigma0=0.3)
+        # population_size=8 / budget_value=4000 (rather than 6 / 3000) so the
+        # non-tautological improvement check below is reliably satisfied —
+        # verified stable across seeds 0-9.
+        trainer = CMAESTrainer(hidden_size=16, population_size=8, sigma0=0.3)
 
         config = TrainingConfig(
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=3000,
+            budget_value=4000,
             max_steps_per_episode=100, seed=0,
         )
 
@@ -108,7 +111,8 @@ class TestCMAESTrainerTraining:
         assert len(history) >= 2, (
             "need at least two generations to assess improvement"
         )
-        best_ever_end = max(rec["max"] for rec in history)
+        # Compare gen 0 against the best of *later* generations only.
+        best_ever_end = max(rec["max"] for rec in history[1:])
         assert best_ever_end >= history[0]["max"], (
             f"best-ever fitness regressed: gen0_max={history[0]['max']}, "
             f"best_ever={best_ever_end}"
