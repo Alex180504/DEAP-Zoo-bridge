@@ -52,22 +52,24 @@ class ParamType(str, Enum):
 class ParamTarget(str, Enum):
     """Where a parameter's value is routed when building backend configs.
 
-    The unified training API has historically split hyperparameters across
-    two channels (see ``docs/api/configuration_schemas.md``):
-
     * :attr:`TRAINER` — architecture / operator choices consumed by the
       trainer **constructor** (``ComparisonConfig.algorithm_configs[name]
       ["trainer_params"]``).
     * :attr:`ALGORITHM_PARAMS` — per-run knobs merged into
-      ``TrainingConfig.algorithm_params`` (e.g. ``seed``,
-      ``max_steps_per_episode``, ``num_envs``, AgileRL passthroughs).
+      ``TrainingConfig.algorithm_params`` (e.g. ``num_envs``, AgileRL
+      passthroughs) — algorithm-specific hyperparameters only.
     * :attr:`ENV_CONFIG` — keyword arguments forwarded to the environment
       factory (``TrainingConfig.env_config``).
+    * :attr:`RUN_CONFIG` — universal per-run knobs (``seed``,
+      ``max_steps_per_episode``) routed onto the
+      :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attribute of
+      the same name.
     """
 
     TRAINER = "trainer"
     ALGORITHM_PARAMS = "algorithm_params"
     ENV_CONFIG = "env_config"
+    RUN_CONFIG = "run_config"
 
 
 def humanize(name: str) -> str:

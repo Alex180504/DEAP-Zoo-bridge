@@ -397,17 +397,20 @@ def _effective_hyperparameters(
 
 def _split_hyperparameters(
     values: Mapping[str, Any], algo_spec
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Partition + coerce hyperparameters into (trainer_params, algorithm_params).
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Partition + coerce hyperparameters into (trainer, algorithm, run_config).
 
     Routing follows each :class:`ParamSpec.target`. Values are coerced to their
     declared types; nullable params left as ``None`` are dropped so the trainer
-    falls back to its own default.
+    falls back to its own default. ``run_config`` holds universal per-run knobs
+    (``seed`` / ``max_steps_per_episode``) destined for the matching
+    :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attribute.
     """
     from deap_pettingzoo.catalog.schema import ParamTarget
 
     trainer_params: Dict[str, Any] = {}
     algorithm_params: Dict[str, Any] = {}
+    run_config: Dict[str, Any] = {}
     for name, value in values.items():
         param = algo_spec.hyperparameter(name)
         if param is None:
@@ -422,9 +425,11 @@ def _split_hyperparameters(
             continue
         if param.target is ParamTarget.TRAINER:
             trainer_params[name] = coerced
+        elif param.target is ParamTarget.RUN_CONFIG:
+            run_config[name] = coerced
         else:
             algorithm_params[name] = coerced
-    return trainer_params, algorithm_params
+    return trainer_params, algorithm_params, run_config
 
 
 # ---------------------------------------------------------------------------
@@ -578,10 +583,12 @@ def build_configs(
     for algo in spec.algorithms:
         algo_spec = cat_algorithms.get_algorithm(algo)
         effective = _effective_hyperparameters(spec, algo, algo_spec)
-        trainer_params, base_algo_params = _split_hyperparameters(effective, algo_spec)
+        trainer_params, base_algo_params, base_run_config = _split_hyperparameters(
+            effective, algo_spec
+        )
         logger.debug(
-            "Resolved hyperparameters for %s: trainer=%s, algo=%s",
-            algo, trainer_params, base_algo_params,
+            "Resolved hyperparameters for %s: trainer=%s, algo=%s, run=%s",
+            algo, trainer_params, base_algo_params, base_run_config,
         )
         # Population-based trainers consume parallelism via first-class
         # TrainingConfig fields; MARL trainers ignore them (they parallelise
@@ -594,7 +601,8 @@ def build_configs(
             cfg_parallel_backend = "process"
         for seed_idx in range(num_seeds):
             algo_params = dict(base_algo_params)
-            algo_params["seed"] = seed_idx
+            run_config = dict(base_run_config)
+            run_config["seed"] = seed_idx
             out_dir = (
                 output_root / cat_algorithms.canonical_name(algo) / f"seed_{seed_idx}"
                 if output_root is not None
@@ -605,6 +613,8 @@ def build_configs(
                 budget_mode=budget_mode,
                 budget_value=spec.budget.value,
                 num_seeds=1,
+                seed=run_config.get("seed"),
+                max_steps_per_episode=run_config.get("max_steps_per_episode"),
                 algorithm_params=algo_params,
                 env_config=dict(env_config),
                 output_dir=out_dir,
@@ -686,7 +696,8 @@ def _build_coevolution_plan(
             budget_mode=budget_mode,
             budget_value=spec.budget.value,
             num_seeds=1,
-            algorithm_params={"coevolution": coev_config, "seed": seed_idx},
+            seed=seed_idx,
+            coevolution_config=coev_config,
             env_config=dict(env_config),
             output_dir=out_dir,
             recording=recording_config,

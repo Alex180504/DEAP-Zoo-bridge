@@ -134,7 +134,7 @@ class TestEATrainer:
             env_name='simple_spread_v3',
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=10000,  # 10k steps
-            algorithm_params={'max_steps_per_episode': 200},
+            max_steps_per_episode=200,
         )
         params = trainer._translate_budget(config)
         # 10000 / (20 * 200) = 2.5 -> 2 generations
@@ -162,7 +162,7 @@ class TestEATrainer:
             env_name='simple_spread_v3',
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=5000,  # Very small budget
-            algorithm_params={'max_steps_per_episode': 100},
+            max_steps_per_episode=100,
         )
         
         result = trainer.train(config)
@@ -174,9 +174,84 @@ class TestEATrainer:
         assert result.training_time > 0
 
 
+class TestRunConfigFields:
+    """``seed`` / ``max_steps_per_episode`` are read
+    ``TrainingConfig`` fields read directly by EA/CMA/PSO/AgileRL trainers,
+    not an untyped ``algorithm_params`` field."""
+
+    def test_ea_translate_budget_reads_config_max_steps_per_episode(self):
+        trainer = EATrainer(population_size=10)
+        config = TrainingConfig(
+            env_name='simple_spread_v3',
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=100,
+            max_steps_per_episode=37,
+        )
+        assert trainer._translate_budget(config)['max_steps_per_episode'] == 37
+
+    def test_cma_translate_budget_reads_config_max_steps_per_episode(self):
+        from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
+
+        trainer = CMAESTrainer(population_size=10)
+        config = TrainingConfig(
+            env_name='simple_spread_v3',
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=100,
+            max_steps_per_episode=41,
+        )
+        assert trainer._translate_budget(config)['max_steps_per_episode'] == 41
+
+    def test_pso_translate_budget_reads_config_max_steps_per_episode(self):
+        from deap_pettingzoo.baselines.pso_trainer import PSOTrainer
+
+        trainer = PSOTrainer(population_size=10)
+        config = TrainingConfig(
+            env_name='simple_spread_v3',
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=100,
+            max_steps_per_episode=53,
+        )
+        assert trainer._translate_budget(config)['max_steps_per_episode'] == 53
+
+    def test_agilerl_train_seed_is_config_field_not_algorithm_params(self):
+        """``config.seed`` (not ``algorithm_params['seed']``) drives the run."""
+        pytest.importorskip("agilerl", reason="AgileRL required.")
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+
+        trainer = MADDPGTrainer(verbose=False)
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=4,
+            seed=123,
+        )
+
+        captured = {}
+
+        class DummyLogger:
+            def row(self, *_args, **_kwargs):
+                return None
+
+        def fake_run_off_policy(_env, _agent, _agent_ids, _budget, _params, seed, **_kw):
+            captured["seed"] = seed
+            return {"episode_rewards": [], "num_episodes": 0, "env_steps": 4}
+
+        with patch.object(trainer, "_import_algorithm", return_value=object()), \
+             patch.object(trainer, "_build_agent", return_value=SimpleNamespace()), \
+             patch.object(trainer, "_run_off_policy", side_effect=fake_run_off_policy), \
+             patch("deap_pettingzoo.baselines._logging_helpers.build_logger", return_value=nullcontext(DummyLogger())), \
+             patch("deap_pettingzoo.baselines._logging_helpers.write_summary"), \
+             patch("deap_pettingzoo.utils.logging.save_agilerl_agent"):
+            result = trainer.train(config)
+
+        assert captured["seed"] == 123
+        assert result.seed == 123
+
+
 class TestUnifiedEvaluator:
     """Test unified evaluator."""
-    
+
     def test_evaluator_initialization(self):
         """Test evaluator can be initialized."""
         evaluator = UnifiedEvaluator(max_steps=200)
@@ -191,7 +266,7 @@ class TestUnifiedEvaluator:
             env_name='simple_spread_v3',
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=5000,
-            algorithm_params={'max_steps_per_episode': 100},
+            max_steps_per_episode=100,
         )
         training_result = trainer.train(config)
         

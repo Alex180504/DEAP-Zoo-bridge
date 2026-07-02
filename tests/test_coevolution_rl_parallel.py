@@ -75,7 +75,7 @@ def _tcfg(
         env_config={"continuous_actions": True} if env_config is None else env_config,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
-        algorithm_params={"coevolution": coev_cfg},
+        coevolution_config=coev_cfg,
     )
 
 

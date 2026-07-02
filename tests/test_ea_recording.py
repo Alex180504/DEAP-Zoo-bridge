@@ -41,7 +41,7 @@ def test_ea_records_per_generation(tmp_path: Path):
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=4 * 5 * 50,  # population * generations * steps
-        algorithm_params={"max_steps_per_episode": 50, "seed": 0},
+        max_steps_per_episode=50, seed=0,
         output_dir=tmp_path,
         recording=RecordingConfig(
             enabled=True, mode=RecordingMode.EVERY, fps=10,
@@ -60,7 +60,7 @@ def test_ea_recording_disabled_writes_nothing(tmp_path: Path):
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=4 * 2 * 25,
-        algorithm_params={"max_steps_per_episode": 25, "seed": 0},
+        max_steps_per_episode=25, seed=0,
         output_dir=tmp_path,
     )
     trainer.train(config)
@@ -75,7 +75,7 @@ def test_ea_count_mode_caps_recordings(tmp_path: Path):
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=4 * 5 * 50,
-        algorithm_params={"max_steps_per_episode": 50, "seed": 0},
+        max_steps_per_episode=50, seed=0,
         output_dir=tmp_path,
         recording=RecordingConfig(
             enabled=True,

@@ -290,7 +290,7 @@ class TestEATrainerOverAEC:
             env_name=aec_registration,
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=4,  # 2 generations at pop=2
-            algorithm_params={"seed": 0},
+            seed=0,
         )
         result = trainer.train(config)
         assert np.isfinite(result.metrics["final_fitness"])

@@ -182,7 +182,7 @@ def test_coev_rl_side_emits_nonzero_env_steps(tmp_path: Path) -> None:
         env_config={"continuous_actions": True},
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,
-        algorithm_params={"coevolution": coev_cfg},
+        coevolution_config=coev_cfg,
         output_dir=tmp_path,
     )
     CoEvolutionTrainer().train(training_cfg)

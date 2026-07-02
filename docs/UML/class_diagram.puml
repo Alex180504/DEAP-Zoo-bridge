@@ -424,6 +424,9 @@ package "deap_pettingzoo.baselines" {
         + budget_mode: BudgetMode
         + budget_value: int
         + num_seeds: int
+        + seed: Optional[int] = None
+        + max_steps_per_episode: Optional[int] = None
+        + coevolution_config: Optional[CoEvolutionConfig] = None
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
@@ -433,6 +436,8 @@ package "deap_pettingzoo.baselines" {
         + recording: RecordingConfig
         -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
         -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
+        -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
+        -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
     }
 
     class RecordingConfig <<dataclass>> {
@@ -1262,7 +1267,7 @@ package "deap_pettingzoo.baselines.coevolution" {
   CompositePool o-- "*" OpponentPool
 
   CoEvolutionConfig *-- "1..*" Side
-  CoEvolutionTrainer ..> CoEvolutionConfig : consumes
+  CoEvolutionTrainer ..> CoEvolutionConfig : "consumes via config.coevolution_config"
   CoEvolutionTrainer ..> SideState : "builds per side"
   CoEvolutionTrainer ..> CoEvolutionEvaluator : uses
   CoEvolutionEvaluator ..> OpponentPool : "samples one per side"

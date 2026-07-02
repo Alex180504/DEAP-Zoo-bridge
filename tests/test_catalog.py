@@ -216,10 +216,10 @@ class TestAlgorithmCatalog:
     def test_every_algorithm_has_hyperparameters(self):
         for spec in catalog.list_algorithms():
             assert spec.hyperparameters, f"{spec.name} has no hyperparameters"
-            # Every spec must have a seed knob routed to algorithm_params.
+            # Every spec must have a seed knob routed to the TrainingConfig.seed field.
             seed = spec.hyperparameter("seed")
             assert seed is not None
-            assert seed.target is ParamTarget.ALGORITHM_PARAMS
+            assert seed.target is ParamTarget.RUN_CONFIG
 
     def test_coevolution_optimizer_mapping(self):
         assert catalog.get_algorithm("ea").coevolution_optimizer == "ea"
@@ -434,7 +434,7 @@ class TestCoevolutionAlgorithmInjection:
             },
         })
         plan = build_configs(spec, output_root=None)
-        coev = plan.sub_runs[0].config.algorithm_params["coevolution"]
+        coev = plan.sub_runs[0].config.coevolution_config
         return {s.name: s for s in coev.sides}
 
     def test_hpo_side_algorithm_injected(self):

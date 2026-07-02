@@ -29,7 +29,7 @@ def _tiny_config(tmp_path=None, **kwargs):
         env_name=ENV,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,
-        algorithm_params={"seed": 0, "max_steps_per_episode": 10},
+        seed=0, max_steps_per_episode=10,
         output_dir=tmp_path,
         **kwargs,
     )

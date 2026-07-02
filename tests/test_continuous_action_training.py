@@ -178,7 +178,7 @@ def test_ea_trainer_continuous_smoke(env_name):
         env_name=env_name,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,  # ~2 generations at pop=4
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config={"continuous_actions": True},
     )
     result = trainer.train(config)
@@ -210,7 +210,7 @@ def test_cmaes_trainer_continuous_smoke(env_name):
         env_name=env_name,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,  # ~2 generations at pop=6
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config={"continuous_actions": True},
     )
     result = trainer.train(config)
@@ -298,7 +298,7 @@ def test_ea_trainer_box_genome_uses_linear_output():
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=2,
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config={"continuous_actions": True},
     )
     result = trainer.train(config)

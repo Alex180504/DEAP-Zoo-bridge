@@ -116,7 +116,7 @@ class TestAdapter:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=4,
-            algorithm_params={"seed": 0, "num_envs": 2},
+            seed=0, algorithm_params={"num_envs": 2},
         )
 
         captured = {}

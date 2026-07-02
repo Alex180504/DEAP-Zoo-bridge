@@ -37,7 +37,7 @@ class TestCMAESTrainerBasics:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=10000,
-            algorithm_params={"max_steps_per_episode": 200},
+            max_steps_per_episode=200,
         )
         params = trainer._translate_budget(config)
         # 10000 / (20 * 200) = 2.5 -> 2 generations, matches EATrainer math.
@@ -59,7 +59,7 @@ class TestCMAESTrainerBasics:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=100,
-            algorithm_params={"max_steps_per_episode": 200},
+            max_steps_per_episode=200,
         )
         params = trainer._translate_budget(config)
         assert params["num_generations"] == 1
@@ -88,7 +88,7 @@ class TestCMAESTrainerTraining:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=3000,
-            algorithm_params={"max_steps_per_episode": 100, "seed": 0},
+            max_steps_per_episode=100, seed=0,
         )
 
         result = trainer.train(config)
@@ -121,7 +121,7 @@ class TestCMAESTrainerTraining:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=3000,
-            algorithm_params={"max_steps_per_episode": 100, "seed": 0},
+            max_steps_per_episode=100, seed=0,
         )
         training_result = trainer.train(config)
 

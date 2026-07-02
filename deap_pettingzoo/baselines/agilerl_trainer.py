@@ -243,9 +243,12 @@ class AgileRLTrainer(BaselineTrainer):
 
         The four AgileRL subclasses share one hyperparameter surface. Only
         ``device`` / ``verbose`` are constructor arguments
-        (:class:`~deap_pettingzoo.catalog.schema.ParamTarget.TRAINER`); every
-        other knob is merged over :attr:`DEFAULT_PARAMS` and passed through
-        ``algorithm_params``. Off-policy-only knobs (``memory_size``,
+        (:class:`~deap_pettingzoo.catalog.schema.ParamTarget.TRAINER`);
+        ``seed`` / ``max_steps_per_episode`` are first-class
+        :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attributes
+        (``RUN_CONFIG``); every other knob is merged over
+        :attr:`DEFAULT_PARAMS` and passed through ``algorithm_params``.
+        Off-policy-only knobs (``memory_size``,
         ``learning_delay``, ``learn_step``) and the on-policy ``rollout_steps``
         are both surfaced; the inactive ones are ignored by the running
         algorithm. Optimiser passthroughs (``lr_actor`` / ``lr_critic`` /
@@ -259,7 +262,11 @@ class AgileRLTrainer(BaselineTrainer):
             ParamType.BOOL,
             ParamType.ENUM,
         )
-        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        TR, AP, RC = (
+            ParamTarget.TRAINER,
+            ParamTarget.ALGORITHM_PARAMS,
+            ParamTarget.RUN_CONFIG,
+        )
         _device_unavailable = () if device_check.cuda_available() else ("cuda",) # check for CUDA GPU availability at runtime
         return (
             ParamSpec("batch_size", I, 64, minimum=1, step=1, target=AP,
@@ -299,11 +306,11 @@ class AgileRLTrainer(BaselineTrainer):
             ParamSpec("verbose", B, False, target=TR, group="Runtime",
                       advanced=True,
                       help="Print per-interval training progress."),
-            ParamSpec("seed", I, None, minimum=0, step=1, target=AP,
+            ParamSpec("seed", I, None, minimum=0, step=1, target=RC,
                       group="Run", nullable=True,
                       help="Random seed for this run (None = unseeded)."),
             ParamSpec("max_steps_per_episode", I, None, minimum=1, step=1,
-                      target=AP, group="Run", nullable=True,
+                      target=RC, group="Run", nullable=True,
                       help="Hard cap on env steps per evaluation episode."),
         )
 
@@ -359,7 +366,8 @@ class AgileRLTrainer(BaselineTrainer):
 
         params = dict(self.DEFAULT_PARAMS)
         params.update(config.algorithm_params or {})
-        seed = int(params.pop("seed", 0))
+        params.pop("seed", None)  # config.seed is the authoritative source
+        seed = int(config.seed) if config.seed is not None else 0
         self._seed_everything(seed)
 
         # ``num_envs`` controls vectorized rollout collection.

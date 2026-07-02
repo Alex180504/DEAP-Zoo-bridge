@@ -11,7 +11,7 @@ def _tiny_config(seed: int = 0) -> TrainingConfig:
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,  # pop_size=6 -> 2 generations
         num_seeds=1,
-        algorithm_params={"seed": seed, "max_steps_per_episode": 10},
+        seed=seed, max_steps_per_episode=10,
     )
 
 
