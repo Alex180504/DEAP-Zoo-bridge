@@ -51,6 +51,32 @@ class TestHyperNEATTrainer:
         assert isinstance(action, (int, np.integer))
         assert 0 <= action < 5
 
+    def test_train_parallel_updates_fitness_history_and_generation(self, tmp_path):
+        """TrainingConfig.num_workers must actually
+        route through parallel evaluation, even when the trainer was
+        constructed with the (serial) default of 1."""
+        n_generations = 3
+        cfg = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=1,
+            num_seeds=1,
+            algorithm_params={
+                "pop_size": 4,
+                "eval_episodes_per_genome": 1,
+                "substrate_hidden_layers": [4],
+                "n_generations": n_generations,
+            },
+            env_config={"max_cycles": 10, "continuous_actions": False},
+            seed=0,
+            num_workers=2,
+            output_dir=tmp_path,
+        )
+        trainer = HyperNEATTrainer(num_workers=2)
+        result = trainer.train(cfg)
+        assert result.metrics["final_generation"] == n_generations
+        assert len(result.metrics["fitness_history"]) == n_generations
+
 
 class TestESHyperNEATTrainer:
     @pytest.fixture

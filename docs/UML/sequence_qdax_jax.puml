@@ -63,6 +63,13 @@ Trainer -> QDax : init(init_genotypes, centroids, key)
 QDax -> Scoring : scoring_fn(init_genotypes, key)
 Scoring -> JaxEnv : jit(vmap(reset/step))\nrolls out all genotypes
 JaxEnv --> Scoring : trajectories
+note right of Scoring
+  Post-done frames are frozen at their last
+  pre-done (positions, velocities) via
+  jnp.where(alive, ...) inside the lax.scan
+  step, mirroring the numpy path's
+  pad-with-last-live-frame behaviour.
+end note
 Scoring --> QDax : (fitness, descriptor, extras)
 QDax -> Repertoire : MapElitesRepertoire.init(...)
 activate Repertoire

@@ -72,6 +72,36 @@ class TestHyperNeatSideState:
         action = opp.get_action(obs)
         assert isinstance(action, (int, np.integer))
 
+    def test_real_snapshot_rebuild_step(self, side, env):
+        """The real producer chain (train one
+        generation -> current_pool() -> snapshot_opponents() -> rebuild ->
+        step) must not crash with an input-size mismatch.
+        """
+        from deap_pettingzoo.baselines.coevolution.pools import (
+            rebuild_opponent_policy,
+        )
+
+        state = make_side_state(side)
+        state.initialise(env)
+
+        class _StubEvaluator:
+            _env = env
+
+        state.step_generation(lambda _side: _StubEvaluator())
+
+        pool = state.current_pool()
+        rng = np.random.default_rng(0)
+        [snapshot] = pool.snapshot_opponents(rng, 1)
+        assert snapshot.kind == "hyperneat"
+
+        policy = rebuild_opponent_policy(
+            snapshot, action_space=env.action_space(env.possible_agents[0])
+        )
+        obs = env.reset()
+        agent0 = env.possible_agents[0]
+        action = policy.get_action(obs[agent0])
+        assert isinstance(action, (int, np.integer))
+
 
 class TestESHyperNeatSideState:
     @pytest.fixture
@@ -115,4 +145,32 @@ class TestESHyperNeatSideState:
         assert policy is not None
         obs = np.random.randn(18).astype(np.float32)
         action = policy.get_action(obs)
+        assert isinstance(action, (int, np.integer))
+
+    def test_real_snapshot_rebuild_step(self, side, env):
+        """Test the real snapshot rebuild step, 
+        mirroring `test_real_snapshot_rebuild_step` for ES-HyperNEAT."""
+        from deap_pettingzoo.baselines.coevolution.pools import (
+            rebuild_opponent_policy,
+        )
+
+        state = make_side_state(side)
+        state.initialise(env)
+
+        class _StubEvaluator:
+            _env = env
+
+        state.step_generation(lambda _side: _StubEvaluator())
+
+        pool = state.current_pool()
+        rng = np.random.default_rng(0)
+        [snapshot] = pool.snapshot_opponents(rng, 1)
+        assert snapshot.kind == "es_hyperneat"
+
+        policy = rebuild_opponent_policy(
+            snapshot, action_space=env.action_space(env.possible_agents[0])
+        )
+        obs = env.reset()
+        agent0 = env.possible_agents[0]
+        action = policy.get_action(obs[agent0])
         assert isinstance(action, (int, np.integer))

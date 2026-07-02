@@ -43,6 +43,7 @@ from deap_pettingzoo.baselines.base import (
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
+from deap_pettingzoo.utils.parallel import resolve_num_workers
 
 from .config import build_neat_config
 from .policy import NeatPolicy
@@ -116,18 +117,23 @@ class NEATTrainer(BaselineTrainer):
     * ``pop_size`` (int, default 50) — NEAT population size.
     * ``n_generations`` (int, optional) — explicit generation budget
       (bypasses the budget_mode translation when set).
-    * ``neat_config_overrides`` (dict) — section→key→value overrides
+    * ``neat_config_overrides`` (dict) — section -> key -> value overrides
       passed to :func:`build_neat_config`.
     * ``eval_episodes_per_genome`` (int, default 1) — number of
       episodes used to evaluate each genome's fitness.
-    * ``seed`` (int, optional) — RNG seed passed to both the NEAT
-      config and the env reset.
     * ``action_aggregator`` (str, default "mean") — how to combine
       per-episode rewards into a scalar fitness: ``"mean"`` or
       ``"sum"``.
+
+    ``TrainingConfig.seed`` and ``TrainingConfig.max_steps_per_episode`` are
+    primary fields (read directly, not via ``algorithm_params``); see
+    :class:`~deap_pettingzoo.baselines.base.TrainingConfig`.
+    ``num_workers``/``parallel_backend`` are also primary fields — the
+    constructor values below are only the fallback used when the config
+    leaves them at their defaults (mirrors ``EATrainer``).
     """
 
-    def __init__(self, num_workers: int = 1) -> None:
+    def __init__(self, num_workers: int = 1, parallel_backend: str = "process") -> None:
         self._fitness_history: List[float] = []
         self._env_steps_history: List[int] = []
         self._generation_num: int = 0
@@ -138,6 +144,7 @@ class NEATTrainer(BaselineTrainer):
         if num_workers < 1:
             raise ValueError(f"num_workers must be >= 1, got {num_workers}")
         self._num_workers = int(num_workers)
+        self._parallel_backend = str(parallel_backend)
 
     # ------------------------------------------------------------------
     # BaselineTrainer interface
@@ -159,6 +166,35 @@ class NEATTrainer(BaselineTrainer):
             "algorithm": "NEAT",
         }
 
+    def _resolve_parallelism(self, config: TrainingConfig) -> tuple[int, str]:
+        """Resolve ``(effective_workers, backend)``, config-vs-constructor.
+
+        ``config.num_workers``/``config.parallel_backend`` are primary
+        ``TrainingConfig`` fields; the trainer-constructor value is the
+        fallback used only when the config leaves them at their defaults
+        (mirrors ``EATrainer``). Shared by ``NEATTrainer``/``HyperNEATTrainer``/
+        ``ESHyperNEATTrainer``.
+        """
+        requested_workers = (
+            config.num_workers if config.num_workers != 1 else self._num_workers
+        )
+        effective_workers = resolve_num_workers(requested_workers)
+        backend = (
+            config.parallel_backend
+            if config.parallel_backend != "process"
+            else self._parallel_backend
+        )
+        return effective_workers, backend
+
+    @staticmethod
+    def _resolve_max_steps(config: TrainingConfig, default: int = 500) -> int:
+        """Resolve the per-episode step cap, first-class field over ``default``."""
+        return (
+            config.max_steps_per_episode
+            if config.max_steps_per_episode is not None
+            else default
+        )
+
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
         reject_consumed_budgeting(config, "NEATTrainer")
@@ -167,6 +203,7 @@ class NEATTrainer(BaselineTrainer):
         self._env_steps_consumed = 0
         self._env_steps_history = []
         params = dict(config.algorithm_params)
+        max_steps = self._resolve_max_steps(config)
 
         # --- Resolve budget to generations -----------------------------------
         pop_size = int(params.get("pop_size", 50))
@@ -198,7 +235,7 @@ class NEATTrainer(BaselineTrainer):
         output_size = required_output_size(shared_action_space)
 
         overrides = dict(params.get("neat_config_overrides", {}))
-        seed = params.get("seed", None)
+        seed = config.seed if config.seed is not None else params.get("seed", None)
         neat_config = build_neat_config(
             input_size=input_size,
             output_size=output_size,
@@ -210,7 +247,7 @@ class NEATTrainer(BaselineTrainer):
         # --- Logger + unified champion-rollout recording ---------------------
         log = build_logger(config, algorithm="neat")
         self._recorder = RecordingController(
-            config, log, max_steps=500, seed=seed,
+            config, log, max_steps=max_steps, seed=seed,
         )
 
         # --- Create initial population ---------------------------------------
@@ -237,15 +274,17 @@ class NEATTrainer(BaselineTrainer):
                         unit="generation",
                         current=gen,
                         total=n_generations,
-                        env_steps=gen * 500,
+                        env_steps=gen * max_steps,
                     ),
                     lambda: _neat_champion(best_genome),
                 )
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
+        effective_workers, backend = self._resolve_parallelism(config)
+
         # --- Parallel or sequential eval -------------------------------------
-        if self._num_workers > 1:
+        if effective_workers > 1:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -263,18 +302,33 @@ class NEATTrainer(BaselineTrainer):
                 action_space_args=_act_hint.get("args", {}),
                 eval_episodes_per_genome=eval_eps,
                 seed=seed if seed is not None else 0,
+                max_steps=max_steps,
                 registry_snapshot=snapshot,
             )
             _executor = make_executor(
-                self._num_workers,
+                effective_workers,
+                backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
             )
             _executor_ctx = _executor
             # 1-element sink so worker step-deltas aggregate across generations.
             _parallel_steps = [0]
+
+            def _on_generation(best_fitness: float, gen_steps: int) -> None:
+                # Parallel path: neat.Population.run() never touches these
+                # driver-side counters (only the fitness assignment happens in
+                # the worker-shipped callable), so they'd otherwise stay at 0
+                # regardless of how many generations actually ran.
+                self._generation_num += 1
+                self._fitness_history.append(best_fitness)
+                self._env_steps_history.append(gen_steps)
+
             _eval_genomes = make_neat_parallel_evaluate(
-                _executor, worker_spec, step_sink=_parallel_steps
+                _executor,
+                worker_spec,
+                step_sink=_parallel_steps,
+                on_generation=_on_generation,
             )
             _is_parallel = True
         else:
@@ -303,7 +357,7 @@ class NEATTrainer(BaselineTrainer):
                             episode_reward = 0.0
                             done = False
                             _steps = 0
-                            while not done and _steps < 500:
+                            while not done and _steps < max_steps:
                                 actions = {}
                                 for agent in observations:
                                     actions[agent] = policy.get_action(
@@ -347,10 +401,6 @@ class NEATTrainer(BaselineTrainer):
                     best_genome = pop.run(_eval_genomes, n=n_generations)
                 # Fold the aggregated worker step-deltas into the run total.
                 self._env_steps_consumed += int(_parallel_steps[0])
-                if not self._fitness_history:
-                    self._fitness_history.append(
-                        float(best_genome.fitness if best_genome else 0.0)
-                    )
             else:
                 best_genome = pop.run(_eval_genomes, n=n_generations)
         except neat.CompleteExtinctionException:
@@ -372,7 +422,7 @@ class NEATTrainer(BaselineTrainer):
         self._recorder.finalize(
             lambda: _neat_champion(best_genome),
             iteration=n_generations,
-            env_steps=n_generations * 500,
+            env_steps=n_generations * max_steps,
         )
 
         try:
@@ -383,7 +433,7 @@ class NEATTrainer(BaselineTrainer):
 
         self._log(
             config, best_genome, pop_size, elapsed, algorithm="NEAT",
-            nominal_env_steps_per_iteration=pop_size * eval_eps * 500,
+            nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
         if config.recording.enabled:
             log.close()
@@ -396,9 +446,9 @@ class NEATTrainer(BaselineTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 # Nominal ceiling: every genome evaluated for ``eval_eps``
-                # episodes of up to 500 ticks, across ``n_generations``.
+                # episodes of up to ``max_steps`` ticks, across ``n_generations``.
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * 500
+                    n_generations * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
