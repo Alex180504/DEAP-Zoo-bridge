@@ -168,7 +168,8 @@ addopts = [
 
 [tool.black]
 line-length = 88
-target-version = ["py311", "py312"]
+# py311-formatted code stays valid on 3.12.
+target-version = ["py311"]
 include = '\.pyi?$'
 
 [tool.isort]
