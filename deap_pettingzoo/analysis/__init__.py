@@ -62,6 +62,7 @@ from deap_pettingzoo.analysis.policies import (
     PolicyReloadUnavailable,
     load_policy,
 )
+from deap_pettingzoo.analysis.report import build_report
 from deap_pettingzoo.analysis.rliable_bridge import (
     aggregate_metrics_forest,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "RunRecord",
     "aggregate_metrics_forest",
     "bootstrap_ci",
+    "build_report",
     "cliffs_delta",
     "cohens_d",
     "collect_score_matrices",
