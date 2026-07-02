@@ -110,6 +110,36 @@ class TestSnapshotWarnsOnUnpicklableFactory:
         ]
 
 
+class TestSnapshotWarnsOnMainModuleFactory:
+    """Factories defined in the driver script (``__main__``) pickle fine by
+    reference but never resolve on remote Dask workers — the snapshot must
+    warn (and keep the entry) when the target executor is remote."""
+
+    def _main_module_factory(self):
+        # An instance attribute shadows the class's real __module__, mimicking
+        # a factory defined in the driver script while staying picklable.
+        factory = _PicklableFactory("x")
+        factory.__module__ = "__main__"
+        return factory
+
+    def test_warns_and_keeps_entry_when_target_remote(self, temp_env):
+        name = "_pickle_main_env_v0"
+        temp_env(name, self._main_module_factory())
+        with pytest.warns(RuntimeWarning, match="__main__"):
+            snapshot = get_registry_snapshot(target_remote=True)
+        # Warned, not dropped: local-cluster runs still resolve it.
+        assert name in {n for n, _ in snapshot}
+
+    def test_silent_when_target_is_local(self, temp_env):
+        name = "_pickle_main_env_v1"
+        temp_env(name, self._main_module_factory())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            snapshot = get_registry_snapshot()
+        assert name in {n for n, _ in snapshot}
+        assert not [w for w in caught if name in str(w.message)]
+
+
 class TestSnapshotKeepsPicklableFactory:
     def test_module_level_callable_survives(self, temp_env):
         name = "_pickle_ok_env_v0"
