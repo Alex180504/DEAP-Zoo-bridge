@@ -46,8 +46,8 @@ _INSTALL_HINT = (
 def _require_qdax():
     """Import qdax / jax / flax or raise a clear :class:`ImportError`."""
     try:
-        import jax  # noqa: F401
         import flax  # noqa: F401
+        import jax  # noqa: F401
         import qdax  # noqa: F401
     except ImportError as exc:  # pragma: no cover - optional dep
         raise ImportError(_INSTALL_HINT) from exc

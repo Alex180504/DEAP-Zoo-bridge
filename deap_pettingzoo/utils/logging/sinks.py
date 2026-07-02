@@ -47,7 +47,9 @@ class _BaseSink:
     def log_row(self, table: str, row: Mapping[str, Any]) -> None:  # pragma: no cover
         pass
 
-    def log_scalar(self, name: str, value: float, step: int) -> None:  # pragma: no cover
+    def log_scalar(
+        self, name: str, value: float, step: int
+    ) -> None:  # pragma: no cover
         pass
 
     def log_artifact(self, name: str, path: Path) -> None:  # pragma: no cover

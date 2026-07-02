@@ -44,7 +44,6 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Callable, Iterable, Iterator, Optional, Tuple
 
-
 __all__ = [
     "resolve_num_workers",
     "make_executor",
@@ -75,9 +74,7 @@ def resolve_num_workers(requested: Optional[int]) -> int:
         return 1
     n = int(requested)
     if n < 0:
-        raise ValueError(
-            f"num_workers must be >= 0 (or None), got {requested!r}."
-        )
+        raise ValueError(f"num_workers must be >= 0 (or None), got {requested!r}.")
     cpu = os.cpu_count() or 1
     if n == 0:
         return 1

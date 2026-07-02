@@ -1,6 +1,5 @@
 """Policy implementations for converting genomes to agent behaviors."""
 
-from .feedforward_neural import FeedforwardNeuralPolicy
 from .action_heads import (
     ActionHead,
     BoxHead,
@@ -9,13 +8,14 @@ from .action_heads import (
     make_head,
     required_output_size,
 )
+from .feedforward_neural import FeedforwardNeuralPolicy
 
 __all__ = [
-    'FeedforwardNeuralPolicy',
-    'ActionHead',
-    'BoxHead',
-    'DiscreteHead',
-    'MultiDiscreteHead',
-    'make_head',
-    'required_output_size',
+    "FeedforwardNeuralPolicy",
+    "ActionHead",
+    "BoxHead",
+    "DiscreteHead",
+    "MultiDiscreteHead",
+    "make_head",
+    "required_output_size",
 ]

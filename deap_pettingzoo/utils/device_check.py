@@ -14,7 +14,6 @@ from __future__ import annotations
 import warnings
 from typing import Sequence
 
-
 _warned_devices: set = set()
 
 

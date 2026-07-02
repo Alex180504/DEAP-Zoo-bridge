@@ -49,9 +49,9 @@ logger = logging.getLogger(__name__)
 # across algorithms/envs/hardware, therefore it isclamped to [floor, ceiling] so it can
 # never be absurdly short or run forever. All three are overridable per
 # deployment via env vars.
-_DEFAULT_TIMEOUT_FLOOR_S = 1          # 1 second
-_DEFAULT_TIMEOUT_CEILING_S = 12 * 60 * 60   # 12 hours
-_DEFAULT_TIMEOUT_PER_UNIT_S = 0.25         # seconds per (budget unit * seed * sub-run)
+_DEFAULT_TIMEOUT_FLOOR_S = 1  # 1 second
+_DEFAULT_TIMEOUT_CEILING_S = 12 * 60 * 60  # 12 hours
+_DEFAULT_TIMEOUT_PER_UNIT_S = 0.25  # seconds per (budget unit * seed * sub-run)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -65,9 +65,7 @@ def _env_float(name: str, default: float) -> float:
     try:
         return float(raw)
     except ValueError:
-        logger.warning(
-            "Ignoring invalid %s=%r; using default %s", name, raw, default
-        )
+        logger.warning("Ignoring invalid %s=%r; using default %s", name, raw, default)
         return default
 
 
@@ -135,9 +133,7 @@ async def _terminate_group(
         pass
 
 
-async def _wait_or_kill(
-    proc: "asyncio.subprocess.Process", grace: float = 5.0
-) -> None:
+async def _wait_or_kill(proc: "asyncio.subprocess.Process", grace: float = 5.0) -> None:
     """Wait up to ``grace`` seconds for ``proc`` to exit; force-kill its
     process group if it doesn't."""
     try:
@@ -217,9 +213,10 @@ class Dispatcher:
         self._task: Optional[asyncio.Task] = None
         self._running_proc: Optional[asyncio.subprocess.Process] = None
         self._running_exp_id: Optional[str] = None
-        self._experiments_dir = experiments_dir or Path(
-            os.environ.get("DEAP_RESULTS_ROOT", "results")
-        ) / "_experiments"
+        self._experiments_dir = (
+            experiments_dir
+            or Path(os.environ.get("DEAP_RESULTS_ROOT", "results")) / "_experiments"
+        )
 
     # -- lifecycle (called from FastAPI lifespan) --------------------------
 
@@ -369,7 +366,11 @@ class Dispatcher:
             await db.set_pid(exp_id, proc.pid, path=self._db_path)
             logger.info(
                 "Experiment %s running (kind=%s, pid=%s, log=%s, timeout=%.0fs)",
-                exp_id, kind, proc.pid, log_path, timeout_s,
+                exp_id,
+                kind,
+                proc.pid,
+                log_path,
+                timeout_s,
             )
 
             timed_out = False
@@ -388,7 +389,8 @@ class Dispatcher:
             if timed_out:
                 logger.error(
                     "Experiment %s exceeded timeout of %.0fs; killing process group",
-                    exp_id, timeout_s,
+                    exp_id,
+                    timeout_s,
                 )
                 await _terminate_group(proc)
                 await _wait_or_kill(proc)
@@ -438,7 +440,8 @@ class Dispatcher:
         if not result_path.exists():
             logger.error(
                 "Experiment %s: runner exited with code %s but no _result.json",
-                exp_id, returncode,
+                exp_id,
+                returncode,
             )
             await db.set_failed(
                 exp_id,
@@ -479,7 +482,7 @@ class Dispatcher:
         The DB decides *whether* a cancel applies (F-7.2-04) — but
         ``self._running_proc`` is mutated by the separate ``_run_one``
         coroutine over the experiment's lifetime. This only reads (never writes)
-        ``self._running_proc``/``self._running_exp_id`` — and double-checks 
+        ``self._running_proc``/``self._running_exp_id`` — and double-checks
         ``self._running_exp_id == exp_id``
         before treating it as "the" process to kill, so a stale/reassigned
         handle can never cause the wrong process to be terminated.

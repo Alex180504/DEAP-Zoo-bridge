@@ -23,10 +23,10 @@ METRICS_REQUIRED_COLUMNS: tuple[str, ...] = (
 #: Required columns on every row written to ``episodes.csv``.
 EPISODES_COLUMNS: tuple[str, ...] = (
     "episode_idx",  # int
-    "seed",         # int or empty
-    "reward",       # float (team/aggregate reward)
-    "length",       # int
-    "success",      # 0/1, env-defined; -1 if unknown
+    "seed",  # int or empty
+    "reward",  # float (team/aggregate reward)
+    "length",  # int
+    "success",  # 0/1, env-defined; -1 if unknown
 )
 
 #: Required columns on every row of ``trajectories.parquet``.

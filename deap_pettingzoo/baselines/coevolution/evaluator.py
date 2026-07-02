@@ -30,7 +30,6 @@ from deap_pettingzoo.evaluators.mixed_policy import _invoke_get_action
 
 from .pools import OpponentPool, OpponentSnapshot, rebuild_opponent_policy
 
-
 #: Map ``(genome, agent_id, action_space) -> PolicyProtocol``. Matches the
 #: learner factory signature used by :class:`MixedPolicyEvaluator` so the
 #: same factory works in both evaluators.
@@ -146,8 +145,7 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
 
     # Partition agents by role prefix (re-derived per episode; cheap).
     learner_agents: List[str] = [
-        a for a in agents
-        if any(a.startswith(p) for p in payload.learner_role_prefixes)
+        a for a in agents if any(a.startswith(p) for p in payload.learner_role_prefixes)
     ]
     side_agents: Dict[str, List[str]] = {
         name: [a for a in agents if any(a.startswith(p) for p in prefixes)]
@@ -222,9 +220,7 @@ def _run_episode(
                     learner_policies[agent], obs, mask, deterministic=True
                 )
             elif agent in opponent_policies:
-                actions[agent] = _invoke_get_action(
-                    opponent_policies[agent], obs, mask
-                )
+                actions[agent] = _invoke_get_action(opponent_policies[agent], obs, mask)
 
         observations, rewards, terms, truncs, _ = env.step(actions)
 
@@ -354,8 +350,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self.learner_role_prefixes: Tuple[str, ...] = tuple(learner_role_prefixes)
         self.learner_factory = learner_factory
         self.opponent_sides: List[Tuple[str, Tuple[str, ...], OpponentPool]] = [
-            (name, tuple(prefixes), pool)
-            for name, prefixes, pool in opponent_sides
+            (name, tuple(prefixes), pool) for name, prefixes, pool in opponent_sides
         ]
         self.k_opponents = int(k_opponents)
         self.aggregation = aggregation
@@ -461,8 +456,14 @@ class CoEvolutionEvaluator(BaseEvaluator):
             **and** ``k_opponents > 1``.  Single-episode evaluations skip
             the executor overhead entirely.
         """
-        if individual is None or not hasattr(individual, "genome") or individual.genome is None:
-            raise ValueError("CoEvolutionEvaluator requires an individual with a 'genome'.")
+        if (
+            individual is None
+            or not hasattr(individual, "genome")
+            or individual.genome is None
+        ):
+            raise ValueError(
+                "CoEvolutionEvaluator requires an individual with a 'genome'."
+            )
 
         if rng is None:
             rng = np.random.default_rng(seed)
@@ -529,7 +530,9 @@ class CoEvolutionEvaluator(BaseEvaluator):
         per_side_snapshots: Dict[str, List[OpponentSnapshot]] = {}
         side_role_prefixes: Dict[str, Tuple[str, ...]] = {}
         for side_name, prefixes, pool in self.opponent_sides:
-            per_side_snapshots[side_name] = pool.snapshot_opponents(rng, self.k_opponents)
+            per_side_snapshots[side_name] = pool.snapshot_opponents(
+                rng, self.k_opponents
+            )
             side_role_prefixes[side_name] = prefixes
 
         payloads: List[_EpisodePayload] = []

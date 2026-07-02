@@ -16,8 +16,10 @@ import numpy as np
 
 def _lazy_plt():
     import matplotlib
+
     matplotlib.use("Agg", force=False)
     import matplotlib.pyplot as plt  # noqa: WPS433
+
     return plt
 
 
@@ -348,4 +350,3 @@ def plot_per_env_eval(
         fig.suptitle(title)
     fig.tight_layout()
     return fig
-

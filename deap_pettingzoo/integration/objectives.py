@@ -170,8 +170,7 @@ class FitnessSpec:
             self.lexicase_mode == "per_agent"
             and self.objectives
             and any(
-                o.source not in ("reward", "reward_component")
-                for o in self.objectives
+                o.source not in ("reward", "reward_component") for o in self.objectives
             )
         ):
             raise ValueError(

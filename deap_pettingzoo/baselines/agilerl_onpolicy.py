@@ -100,9 +100,7 @@ class OnPolicyRolloutBuffer:
             self.rewards[a].append(
                 np.array([float(reward.get(a, np.nan))], dtype=np.float32)
             )
-            self.dones[a].append(
-                np.asarray(done[a], dtype=np.float32).reshape(1)
-            )
+            self.dones[a].append(np.asarray(done[a], dtype=np.float32).reshape(1))
 
     def experiences(
         self, bootstrap_obs: Dict[str, Any], next_done: Dict[str, Any]
@@ -192,9 +190,7 @@ def train_agent_on_policy(
         info = info or {}
         episode_over = False
         while steps < target_steps and not episode_over:
-            action_obs = {
-                a: sanitize_obs(obs[a]) for a in learner_ids if a in obs
-            }
+            action_obs = {a: sanitize_obs(obs[a]) for a in learner_ids if a in obs}
             if not action_obs:
                 break
             if len(action_obs) < len(learner_ids):

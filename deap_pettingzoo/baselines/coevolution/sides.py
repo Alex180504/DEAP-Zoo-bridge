@@ -59,7 +59,6 @@ from .pools import (
 )
 from .samplers import Sampler, uniform_sampler
 
-
 # Side declaration
 
 
@@ -119,9 +118,7 @@ class Side:
                 f"{sorted(valid)}; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
-            raise ValueError(
-                f"Side {self.name!r}: role_prefixes must be non-empty."
-            )
+            raise ValueError(f"Side {self.name!r}: role_prefixes must be non-empty.")
         self.role_prefixes = tuple(self.role_prefixes)
         if not (0.0 <= self.archive_mix <= 1.0):
             raise ValueError(
@@ -169,7 +166,7 @@ class SideState:
 
     Subclasses must implement :meth:`initialise`, :meth:`step_generation`,
     :meth:`current_pool`, and :meth:`best_policy`.
-    
+
     Notes:
         Subclasses that use ``np.random.*`` operators set this after
         seeding in :meth:`initialise` (via the trainer). When set,
@@ -246,9 +243,7 @@ def _make_feedforward_policy_factory(
                 "Feedforward policy factory expected FixedTopologyGenome "
                 f"(or item.genome of that type); got {type(genome)}."
             )
-        return FeedforwardNeuralPolicy(
-            genome, action_space=action_space, masked=masked
-        )
+        return FeedforwardNeuralPolicy(genome, action_space=action_space, masked=masked)
 
     return _factory
 
@@ -263,13 +258,9 @@ def _resolve_side_action_space(
     already enforced by :func:`_resolve_shared_action_space` in the
     plain :class:`EATrainer`.
     """
-    side_agents = [
-        a for a in env.possible_agents if a.startswith(role_prefixes)
-    ]
+    side_agents = [a for a in env.possible_agents if a.startswith(role_prefixes)]
     if not side_agents:
-        raise ValueError(
-            f"No env agents match role_prefixes={role_prefixes!r}."
-        )
+        raise ValueError(f"No env agents match role_prefixes={role_prefixes!r}.")
     reference = env.action_space(side_agents[0])
     divergent = [a for a in side_agents[1:] if env.action_space(a) != reference]
     if divergent:
@@ -365,7 +356,9 @@ class EASideState(SideState):
         output_size = required_output_size(self._action_space)
 
         setup_deap_creators()
-        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
@@ -569,7 +562,7 @@ def _evaluate_with(individual: Any, evaluator: Any) -> Tuple[float, ...]:
     return evaluator.evaluate(individual)
 
 
-# 
+#
 # CMA-ES side
 
 
@@ -627,7 +620,9 @@ class CMAESSideState(SideState):
         elif self.seed is not None:
             np.random.seed(int(self.seed))
 
-        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
@@ -659,7 +654,9 @@ class CMAESSideState(SideState):
             def evaluate(self, individual, **_kwargs):  # pragma: no cover
                 return (0.0,)
 
-        self.toolbox = register_cma_toolbox(self.strategy, self._ind_init, _NoopEvaluator())
+        self.toolbox = register_cma_toolbox(
+            self.strategy, self._ind_init, _NoopEvaluator()
+        )
         # Seed the population — needed so other sides can sample from
         # this side before first step_generation is completed.
         self.population = self.toolbox.generate()
@@ -832,12 +829,13 @@ class PSOSideState(SideState):
         self._ind_init = None
 
     def initialise(
-        self, env: PettingZooWrapper, rng: Optional[np.random.Generator] = None,
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
     ) -> None:
         sample_obs = env.reset(seed=0)
         learner_agent = next(
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         )
         input_size = len(sample_obs[learner_agent])
         self._action_space = _resolve_side_action_space(env, self.side.role_prefixes)
@@ -850,7 +848,9 @@ class PSOSideState(SideState):
         else:
             pso_seed = None
 
-        _is_box = hasattr(self._action_space, 'low') and hasattr(self._action_space, 'high')
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
@@ -858,15 +858,19 @@ class PSOSideState(SideState):
             "weight_range": self.weight_range,
         }
         from deap_pettingzoo.integration.pso_integration import (
-            setup_pso_swarm,
             make_pso_ind_init,
             register_pso_toolbox,
+            setup_pso_swarm,
         )
+
         self.pso_state, _ = setup_pso_swarm(
             genome_config=genome_config,
             population_size=self.population_size,
-            phi1=self.phi1, phi2=self.phi2, weight=self.weight,
-            smin=self.smin, smax=self.smax,
+            phi1=self.phi1,
+            phi2=self.phi2,
+            weight=self.weight,
+            smin=self.smin,
+            smax=self.smax,
             seed=pso_seed,
         )
         self._ind_init = make_pso_ind_init(genome_config, self.pso_state)
@@ -876,11 +880,14 @@ class PSOSideState(SideState):
                 return (0.0,)
 
         self.toolbox = register_pso_toolbox(
-            self.pso_state, self._ind_init, _NoopEvaluator(),
+            self.pso_state,
+            self._ind_init,
+            _NoopEvaluator(),
         )
         self.population = self.toolbox.generate()
         self._policy_factory = _make_feedforward_policy_factory(
-            self._action_space, masked=self.masked,
+            self._action_space,
+            masked=self.masked,
         )
 
     def rebind_evaluator(self, evaluator: Any) -> None:
@@ -968,14 +975,16 @@ class PSOSideState(SideState):
     def current_pool(self) -> OpponentPool:
         assert self._policy_factory is not None
         pop_pool: OpponentPool = PopulationPool(
-            self.population, self._policy_factory,
+            self.population,
+            self._policy_factory,
             sampler=self.side.opponent_sampler,
         )
         if self.side.use_archive_in_opponent_pool and self.side.hof is not None:
             if len(self.side.hof) == 0:
                 return pop_pool
             archive_pool = ArchivePool(
-                self.side.hof, self._policy_factory,
+                self.side.hof,
+                self._policy_factory,
                 sampler=self.side.archive_sampler,
             )
             weights = (1.0 - self.side.archive_mix, self.side.archive_mix)
@@ -1011,12 +1020,9 @@ class FrozenSideState(SideState):
         policies = list(side.frozen_policies or [])
         if not policies:
             raise ValueError(
-                f"FrozenSideState({side.name!r}): frozen_policies must be "
-                "non-empty."
+                f"FrozenSideState({side.name!r}): frozen_policies must be " "non-empty."
             )
-        self._pool = FrozenPolicyPool(
-            policies, sampler=side.opponent_sampler
-        )
+        self._pool = FrozenPolicyPool(policies, sampler=side.opponent_sampler)
         self._policies = policies
 
     def initialise(
@@ -1035,7 +1041,11 @@ class FrozenSideState(SideState):
         stats = GenerationStats(
             generation=self.generation,
             side_name=self.side.name,
-            mean=0.0, std=0.0, min=0.0, max=0.0, best_fitness=0.0,
+            mean=0.0,
+            std=0.0,
+            min=0.0,
+            max=0.0,
+            best_fitness=0.0,
         )
         self.history.append(stats)
         return stats

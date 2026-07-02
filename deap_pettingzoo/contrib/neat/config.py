@@ -15,12 +15,11 @@ they can be overridden via the ``overrides`` dict.
 
 from __future__ import annotations
 
-import tempfile
 import os
+import tempfile
 from typing import Any, Dict, Optional
 
 import neat
-
 
 # ---------------------------------------------------------------------------
 # Sensible defaults for small-medium neuroevolution problems
@@ -179,7 +178,7 @@ def build_neat_config(
 # CPPN-specific config
 # ---------------------------------------------------------------------------
 
-#: CPPN-compatible activation functions — includes periodic (sin), 
+#: CPPN-compatible activation functions — includes periodic (sin),
 #: Gaussian, absolute-value, and clamped variants that enable the CPPN
 #: to produce regular patterns.
 CPPN_ACTIVATION_OPTIONS = "sin sigmoid gauss tanh relu identity abs clamped square"

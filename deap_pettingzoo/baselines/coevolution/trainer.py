@@ -76,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 # Worker initializer
 
+
 def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     """ProcessPoolExecutor worker initializer.
 
@@ -120,12 +121,11 @@ def _format_progress_entry(stats: GenerationStats) -> str:
         filled_niches=stats.filled_niches,
         total_niches=stats.total_niches,
     )
-    return (
-        f"{stats.side_name}: {summary}"
-    )
+    return f"{stats.side_name}: {summary}"
 
 
 # QDax-specific evaluator
+
 
 class _QDaxPolicyEvaluator:
     """Thin evaluator that accepts a pre-constructed policy (FlaxPolicyAdapter)
@@ -138,9 +138,19 @@ class _QDaxPolicyEvaluator:
     against sampled opponents and returns a scalar fitness.
     """
 
-    def __init__(self, env_wrapper, learner_role_prefixes, opponent_sides,
-                 k_opponents, aggregation, max_steps, rng_factory,
-                 executor=None, env_name=None, env_config=None):
+    def __init__(
+        self,
+        env_wrapper,
+        learner_role_prefixes,
+        opponent_sides,
+        k_opponents,
+        aggregation,
+        max_steps,
+        rng_factory,
+        executor=None,
+        env_name=None,
+        env_config=None,
+    ):
         self._env = env_wrapper
         self._learner_prefixes = learner_role_prefixes
         self._opponent_sides = opponent_sides
@@ -148,7 +158,7 @@ class _QDaxPolicyEvaluator:
         self._aggregation = aggregation
         self._max_steps = max_steps
         self._rng_factory = rng_factory  # callable () -> Generator
-        self._executor = executor        # ProcessPoolExecutor or None
+        self._executor = executor  # ProcessPoolExecutor or None
         self._env_name = env_name
         self._env_config = env_config
         # Optional hook called at each episode step with (obs_dict, env_wrapper).
@@ -160,13 +170,15 @@ class _QDaxPolicyEvaluator:
         self.env_steps_consumed: int = 0
 
         self._learner_agents = [
-            a for a in env_wrapper.possible_agents
+            a
+            for a in env_wrapper.possible_agents
             if any(a.startswith(p) for p in learner_role_prefixes)
         ]
         self._side_agents: Dict[str, list] = {}
         for side_name, prefixes, _pool in opponent_sides:
             self._side_agents[side_name] = [
-                a for a in env_wrapper.possible_agents
+                a
+                for a in env_wrapper.possible_agents
                 if any(a.startswith(p) for p in prefixes)
             ]
 
@@ -216,7 +228,9 @@ class _QDaxPolicyEvaluator:
             for agent, obs in observations.items():
                 mask = infos.get(agent, {}).get("action_mask")
                 if agent in self._learner_agents:
-                    actions[agent] = _invoke_get_action(policy, obs, mask, deterministic=True)
+                    actions[agent] = _invoke_get_action(
+                        policy, obs, mask, deterministic=True
+                    )
                 elif agent in opp_policies:
                     actions[agent] = _invoke_get_action(opp_policies[agent], obs, mask)
             observations, rew, terms, truncs, _ = self._env.step(actions)
@@ -229,11 +243,12 @@ class _QDaxPolicyEvaluator:
                 break
         self.env_steps_consumed += int(steps)
         return total
+
+
 from deap_pettingzoo.utils.device_check import (
     torch_uses_cuda,
     warn_on_gpu_contention,
 )
-
 
 VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
 VALID_SCHEDULES = ("synchronous", "alternating")
@@ -373,8 +388,7 @@ class CoEvolutionConfig:
             )
         if self.mode == "cooperative" and len(self.sides) < 2:
             raise ValueError(
-                "cooperative mode requires at least 2 sides; got "
-                f"{len(self.sides)}."
+                "cooperative mode requires at least 2 sides; got " f"{len(self.sides)}."
             )
         if self.reporting_side is None:
             self.reporting_side = self.sides[0].name
@@ -389,9 +403,7 @@ class CoEvolutionConfig:
                 f"alternating_generations must be >= 1, got {self.alternating_generations}."
             )
         if self.snapshot_every < 1:
-            raise ValueError(
-                f"snapshot_every must be >= 1, got {self.snapshot_every}."
-            )
+            raise ValueError(f"snapshot_every must be >= 1, got {self.snapshot_every}.")
         if self.parallel_backend not in SUPPORTED_BACKENDS:
             raise ValueError(
                 f"parallel_backend={self.parallel_backend!r} invalid; "
@@ -469,9 +481,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             else num_generations
         )
 
-        env = PettingZooWrapper(
-            config.env_name, env_config=config.env_config or None
-        )
+        env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
 
         # Stash env-construction metadata so _build_evaluator can pass
         # it down to CoEvolutionEvaluator workers.
@@ -532,14 +542,22 @@ class CoEvolutionTrainer(BaselineTrainer):
 
             if coev_cfg.schedule == "synchronous":
                 realized = self._run_synchronous_loop(
-                    env, states, coev_cfg, config,
-                    max_iters, per_side_history,
+                    env,
+                    states,
+                    coev_cfg,
+                    config,
+                    max_iters,
+                    per_side_history,
                     consumed_budget=consumed_budget,
                 )
             else:  # alternating
                 realized = self._run_alternating_loop(
-                    env, states, coev_cfg, config,
-                    max_iters, per_side_history,
+                    env,
+                    states,
+                    coev_cfg,
+                    config,
+                    max_iters,
+                    per_side_history,
                     consumed_budget=consumed_budget,
                 )
 
@@ -622,9 +640,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                     "name": s.name,
                     "role_prefixes": list(s.role_prefixes),
                     "optimizer": s.optimizer,
-                    "hof": (
-                        type(s.hof).__name__ if s.hof is not None else None
-                    ),
+                    "hof": (type(s.hof).__name__ if s.hof is not None else None),
                 }
                 for s in coev_cfg.sides
             ],
@@ -691,12 +707,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             np.random.set_state(previous_np_state)
 
         rl_cuda_sides = [
-            name for name, s in states.items()
-            if getattr(s, "is_rl_side", False)
-            and torch_uses_cuda(s.resolved_device)
+            name
+            for name, s in states.items()
+            if getattr(s, "is_rl_side", False) and torch_uses_cuda(s.resolved_device)
         ]
         qdax_sides = [
-            name for name, s in states.items()
+            name
+            for name, s in states.items()
             if s.side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
         ]
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
@@ -718,8 +735,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 "CoEvolutionConfig: num_workers="
                 f"{coev_cfg.num_workers} but an RL side is present. "
                 "EA/CMA learner sides evaluate against RL opponents in "
-                "parallel via FrozenRLPolicyWrapper CPU snapshots. "
-                + rl_detail,
+                "parallel via FrozenRLPolicyWrapper CPU snapshots. " + rl_detail,
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -749,7 +765,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             or 500
         )
         self._recorder = RecordingController(
-            config, self._recording_log,
+            config,
+            self._recording_log,
             max_steps=self._recording_max_steps,
             seed=coev_cfg.seed,
         )
@@ -882,11 +899,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             realized = _g + 1
             consumed = self._aggregate_consumed(history)
             # Progress + champion recording happen together in the callback.
-            self._invoke_generation_callback(coev_cfg, realized, states, consumed=consumed)
+            self._invoke_generation_callback(
+                coev_cfg, realized, states, consumed=consumed
+            )
             _side_info = "  ".join(
-                _format_progress_entry(h[-1])
-                for n, h in history.items()
-                if h
+                _format_progress_entry(h[-1]) for n, h in history.items() if h
             )
             print(
                 f"[CoEv] gen {realized}/{max_iters}  "
@@ -925,17 +942,15 @@ class CoEvolutionTrainer(BaselineTrainer):
                     if total >= max_iters or stop:
                         break
                     _gt = time.time()
-                    self._run_alternating_step(
-                        env, states, coev_cfg, history, name
-                    )
+                    self._run_alternating_step(env, states, coev_cfg, history, name)
                     total += 1
                     consumed = self._aggregate_consumed(history)
                     # Progress + champion recording happen in the callback.
-                    self._invoke_generation_callback(coev_cfg, total, states, consumed=consumed)
+                    self._invoke_generation_callback(
+                        coev_cfg, total, states, consumed=consumed
+                    )
                     _side_info = "  ".join(
-                        _format_progress_entry(h[-1])
-                        for n, h in history.items()
-                        if h
+                        _format_progress_entry(h[-1]) for n, h in history.items() if h
                     )
                     print(
                         f"[CoEv] step {total}/{max_iters} ({name})  "
@@ -996,9 +1011,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                         {
                             "iteration": int(s.generation),
                             "env_steps": _cumulative_env_steps,
-                            "nominal_env_steps": int(
-                                s.generation * _nominal_per_gen
-                            ),
+                            "nominal_env_steps": int(s.generation * _nominal_per_gen),
                             "wall_time": float(s.wall_time_s),
                             "side": name,
                             "mean": s.mean,
@@ -1042,13 +1055,14 @@ class CoEvolutionTrainer(BaselineTrainer):
         were supplied by the caller; QDax repertoires live in their
         own subprocesses and are out of scope for this hook).
         """
+        import json as _json
+
         from deap_pettingzoo.utils.logging import KIND_COEVOLUTION
         from deap_pettingzoo.utils.logging.checkpoints import (
             _checkpoints_dir,
             _is_real_logger,
             _register,
         )
-        import json as _json
 
         if not _is_real_logger(log):
             return
@@ -1147,13 +1161,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             if s.optimizer == "frozen":
                 continue
             if s.optimizer == "rl":
-                ep_per_gen += int(
-                    s.optimizer_config.get("rollout_episodes_per_gen", 4)
-                )
+                ep_per_gen += int(s.optimizer_config.get("rollout_episodes_per_gen", 4))
             elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
                 ep_per_gen += (
-                    int(s.optimizer_config.get("batch_size", 20))
-                    * coev_cfg.k_opponents
+                    int(s.optimizer_config.get("batch_size", 20)) * coev_cfg.k_opponents
                 )
             else:
                 ep_per_gen += (
@@ -1273,7 +1284,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         All opponent sampling happens on the driver before any worker is
         launched, so pool RNGs mutate exactly once per batch call.
         """
-        from .evaluator import CoEvolutionEvaluator, _EpisodePayload, _episode_rollout
+        from .evaluator import CoEvolutionEvaluator, _episode_rollout, _EpisodePayload
 
         if self._resolved_workers <= 1:
             return None
@@ -1321,9 +1332,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                             side_role_prefixes=side_role_prefixes,
                             episode_seed=None,
                             max_steps=max_steps,
-                            registry_snapshot=getattr(
-                                self, "_registry_snapshot", None
-                            ),
+                            registry_snapshot=getattr(self, "_registry_snapshot", None),
                         )
                     )
             # Dispatch all N×k episodes in parallel.
@@ -1369,8 +1378,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         ordered_states = sorted(
             states.items(),
             key=lambda item: (
-                0 if item[1].side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
-                else 1
+                0 if item[1].side.optimizer in {"qdax_map_elites", "qdax_cma_me"} else 1
             ),
         )
         for name, state in ordered_states:
@@ -1420,7 +1428,9 @@ class CoEvolutionTrainer(BaselineTrainer):
             child generator to avoid shared state.
         """
         opp_sides = self._collect_opponent_sides(
-            states, learner_state.side.name, coev_cfg,
+            states,
+            learner_state.side.name,
+            coev_cfg,
             pool_snapshot=pool_snapshot,
         )
         if learner_state.side.optimizer == "rl":
@@ -1428,17 +1438,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             # dispatch rollout episodes to worker processes in parallel.
             # The executor is only handed over when resolved_workers > 1;
             # for serial runs None keeps the existing _collect_episode path.
-            rl_executor = (
-                self._executor if self._resolved_workers > 1 else None
-            )
+            rl_executor = self._executor if self._resolved_workers > 1 else None
             return _RLDriverContext(
                 env_wrapper=env,
                 learner_role_prefixes=learner_state.side.role_prefixes,
                 opponent_sides=opp_sides,
                 max_steps=coev_cfg.max_steps_per_episode,
-                rng=np.random.default_rng(
-                    self._rng.integers(0, 2**63 - 1)
-                ),
+                rng=np.random.default_rng(self._rng.integers(0, 2**63 - 1)),
                 executor=rl_executor,
                 env_name=self._env_name,
                 env_config=self._env_config,
@@ -1569,7 +1575,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             pool_snapshot[name] = pool
         for name, state in states.items():
             self._step_one_side(
-                env, state, states, coev_cfg, history,
+                env,
+                state,
+                states,
+                coev_cfg,
+                history,
                 pool_snapshot=pool_snapshot,
             )
 
@@ -1584,9 +1594,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._step_one_side(env, states[name], states, coev_cfg, history)
 
 
-def _build_learner_factory(
-    learner_state: SideState, coev_cfg: CoEvolutionConfig
-):
+def _build_learner_factory(learner_state: SideState, coev_cfg: CoEvolutionConfig):
     """Build the ``learner_factory`` the evaluator will call.
 
     Returns ``(genome, agent_id, action_space) -> PolicyProtocol`` that

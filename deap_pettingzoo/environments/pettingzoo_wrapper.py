@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 
 from .registry import (
@@ -41,6 +42,7 @@ def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
         import pygame as _pygame
     except ImportError:
         import warnings
+
         warnings.warn(
             "pygame is not installed; _patch_fixed_cam_range will be skipped. "
             "Install it to enable stable-viewport frame recording.",
@@ -165,7 +167,7 @@ class PettingZooWrapper:
         # Episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {}
-        #: Most recent infos dict returned by the underlying env's ``reset``/``step``. 
+        #: Most recent infos dict returned by the underlying env's ``reset``/``step``.
         #: Evaluators read ``last_infos[agent].get("action_mask")`` to forward legal-action
         #: masks to mask-aware policies (see :class:`~deap_pettingzoo.policies.action_heads.MaskedDiscreteHead`).
         self.last_infos: Dict[str, Dict[str, Any]] = {}
@@ -186,52 +188,50 @@ class PettingZooWrapper:
     @property
     def agents(self) -> List[str]:
         """Get list of currently active agents."""
-        return self.env.agents if hasattr(self.env, 'agents') else []
-    
+        return self.env.agents if hasattr(self.env, "agents") else []
+
     @property
     def num_agents(self) -> int:
         """Get number of currently active agents."""
         return len(self.agents)
-    
+
     def observation_space(self, agent: str):
         """
         Get observation space for agent.
-        
+
         Args:
             agent: Agent name
-            
+
         Returns:
             Observation space for the agent
         """
         return self.env.observation_space(agent)
-    
+
     def action_space(self, agent: str):
         """
         Get action space for agent.
-        
+
         Args:
             agent: Agent name
-            
+
         Returns:
             Action space for the agent
         """
         return self.env.action_space(agent)
-    
+
     def reset(
-        self,
-        seed: Optional[int] = None,
-        options: Optional[Dict[str, Any]] = None
+        self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, np.ndarray]:
         """
         Reset environment to initial state.
-        
+
         Args:
             seed: Random seed for reproducibility
             options: Optional reset options
-            
+
         Returns:
             Dict mapping agent names to initial observations
-            
+
         Example:
             >>> observations = wrapper.reset(seed=42)
             >>> print(observations.keys())
@@ -239,30 +239,33 @@ class PettingZooWrapper:
         """
         # Reset environment
         observations, infos = self.env.reset(seed=seed, options=options)
-        
+
         # Reset episode tracking
         self.episode_length = 0
         self.cumulative_rewards = {agent: 0.0 for agent in observations.keys()}
         self.last_infos = dict(infos) if infos is not None else {}
-        
+
         return observations
-    
-    def step(
-        self,
-        actions: Dict[str, np.ndarray]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]]:
+
+    def step(self, actions: Dict[str, np.ndarray]) -> Tuple[
+        Dict[str, np.ndarray],
+        Dict[str, float],
+        Dict[str, bool],
+        Dict[str, bool],
+        Dict[str, Any],
+    ]:
         """
         Execute one environment step.
-        
+
         Args:
             actions: Dict mapping agent names to action arrays
-            
+
         Returns:
             Tuple of (observations, rewards, dones, truncated, infos)
-            
+
         Raises:
             ValueError: If actions missing for active agents or wrong shape
-            
+
         Example:
             >>> actions = {agent: policy.forward(obs) for agent, obs in observations.items()}
             >>> obs, rewards, dones, truncated, infos = wrapper.step(actions)
@@ -270,44 +273,50 @@ class PettingZooWrapper:
         # Validate all active agents have actions
         active_agents = set(self.agents)
         action_agents = set(actions.keys())
-        
+
         if not action_agents.issuperset(active_agents):
             missing = active_agents - action_agents
             raise ValueError(
                 f"Missing actions for agents: {missing}. "
                 f"Expected actions for: {active_agents}"
             )
-        
+
         # Convert and validate actions
         converted_actions = {}
         for agent, action in actions.items():
             if agent in active_agents:
                 action_space = self.action_space(agent)
-                
+
                 # Convert numpy array to appropriate format
-                if hasattr(action, 'shape'):
+                if hasattr(action, "shape"):
                     # If action is array, convert based on space type
-                    if hasattr(action_space, 'n'):  # Discrete space
+                    if hasattr(action_space, "n"):  # Discrete space
                         # Take argmax for discrete actions
-                        action_value = int(np.argmax(action)) if action.size > 1 else int(action.item())
+                        action_value = (
+                            int(np.argmax(action))
+                            if action.size > 1
+                            else int(action.item())
+                        )
                     else:  # Box space
                         action_value = action
                 else:
                     # Already a scalar
                     action_value = action
-                
+
                 # Validate action
                 if not action_space.contains(action_value):
                     raise ValueError(
                         f"Action for agent '{agent}' not in action space: "
                         f"got {action_value}, space is {action_space}"
                     )
-                
+
                 converted_actions[agent] = action_value
-        
+
         # Execute step
-        observations, rewards, terminations, truncations, infos = self.env.step(converted_actions)
-        
+        observations, rewards, terminations, truncations, infos = self.env.step(
+            converted_actions
+        )
+
         # Update episode tracking
         self.episode_length += 1
         for agent, reward in rewards.items():
@@ -316,24 +325,24 @@ class PettingZooWrapper:
             else:
                 self.cumulative_rewards[agent] = reward
         self.last_infos = dict(infos) if infos is not None else {}
-        
+
         return observations, rewards, terminations, truncations, infos
-    
+
     def render(self) -> Optional[np.ndarray]:
         """
         Render environment.
-        
+
         Returns:
             RGB array if render_mode='rgb_array', otherwise None
         """
-        if self.render_mode == 'rgb_array':
+        if self.render_mode == "rgb_array":
             return self.env.render()
-        elif self.render_mode == 'human':
+        elif self.render_mode == "human":
             self.env.render()
             return None
         else:
             return None
-    
+
     def close(self) -> None:
         """Close environment and cleanup resources.
 
@@ -342,15 +351,15 @@ class PettingZooWrapper:
         which would otherwise kill the whole Python process. We catch
         ``SystemExit`` (and defensively ``Exception``) so closing is safe.
         """
-        if self.env is not None and hasattr(self.env, 'close'):
+        if self.env is not None and hasattr(self.env, "close"):
             try:
                 self.env.close()
             except SystemExit:
                 pass
-            except Exception: 
+            except Exception:
                 pass
         self.env = None
-    
+
     def __repr__(self) -> str:
         """String representation of wrapper."""
         return (

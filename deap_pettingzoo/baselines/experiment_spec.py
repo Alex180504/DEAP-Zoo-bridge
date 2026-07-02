@@ -42,7 +42,6 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -255,9 +254,7 @@ class CoevolutionSettings:
             aggregation=str(data.get("aggregation", "mean")),
             alternating_generations=int(data.get("alternating_generations", 1)),
             reporting_side=data.get("reporting_side"),
-            sides=[
-                CoevolutionSideSpec.from_dict(s) for s in data.get("sides", [])
-            ],
+            sides=[CoevolutionSideSpec.from_dict(s) for s in data.get("sides", [])],
         )
 
 
@@ -359,19 +356,13 @@ class BuiltPlan:
 
 def _catalog_env_defaults(env_spec) -> Dict[str, Any]:
     """Non-null env-config defaults from the catalog."""
-    return {
-        p.name: p.default
-        for p in env_spec.env_config
-        if p.default is not None
-    }
+    return {p.name: p.default for p in env_spec.env_config if p.default is not None}
 
 
 def _catalog_algo_defaults(algo_spec) -> Dict[str, Any]:
     """Non-null hyperparameter defaults from the catalog."""
     return {
-        p.name: p.default
-        for p in algo_spec.hyperparameters
-        if p.default is not None
+        p.name: p.default for p in algo_spec.hyperparameters if p.default is not None
     }
 
 
@@ -464,6 +455,7 @@ def _maybe_auto_pad_env(
     # Detect heterogeneous observations.
     try:
         from deap_pettingzoo.baselines.compatibility import inspect_environment
+
         info = inspect_environment(spec.environment)
         if info.obs_dim is not None or info.num_agents <= 1:
             return spec.environment  # homogeneous — nothing to do
@@ -479,9 +471,9 @@ def _maybe_auto_pad_env(
     # Already padded or already has custom wrappers?
     padded_name = f"{spec.environment}{_AUTO_PADDED_SUFFIX}"
     from deap_pettingzoo.environments.registry import (
+        get_env_spec,
         is_registered,
         register_env,
-        get_env_spec,
     )
 
     if is_registered(padded_name):
@@ -588,7 +580,10 @@ def build_configs(
         )
         logger.debug(
             "Resolved hyperparameters for %s: trainer=%s, algo=%s, run=%s",
-            algo, trainer_params, base_algo_params, base_run_config,
+            algo,
+            trainer_params,
+            base_algo_params,
+            base_run_config,
         )
         # Population-based trainers consume parallelism via first-class
         # TrainingConfig fields; MARL trainers ignore them (they parallelise
@@ -659,9 +654,10 @@ def _build_coevolution_plan(
             if side_spec.algorithm == "frozen":
                 optimizer = "frozen"
             else:
-                optimizer = cat_algorithms.coevolution_optimizer_for(
-                    side_spec.algorithm
-                ) or side_spec.algorithm
+                optimizer = (
+                    cat_algorithms.coevolution_optimizer_for(side_spec.algorithm)
+                    or side_spec.algorithm
+                )
                 # RL / RL-HPO sides resolve their concrete AgileRL algorithm
                 # from ``optimizer_config['algorithm']``; inject the catalog name
                 # the user picked (the UI sends empty per-side hyperparameters).
@@ -784,8 +780,7 @@ def _validate_environment(spec, report, cat_environments):
             report.add(
                 f"env_config.{name}",
                 "unknown_param",
-                f"Unknown env-config parameter {name!r} for "
-                f"{spec.environment!r}.",
+                f"Unknown env-config parameter {name!r} for " f"{spec.environment!r}.",
                 severity="warning",
             )
             continue
@@ -803,20 +798,15 @@ def _validate_budget(spec, report):
             f"{list(_VALID_BUDGET_MODES)}.",
         )
     if budget.value <= 0:
-        report.add(
-            "budget.value", "out_of_range", "Budget value must be positive."
-        )
+        report.add("budget.value", "out_of_range", "Budget value must be positive.")
     if budget.num_seeds < 1:
-        report.add(
-            "budget.num_seeds", "out_of_range", "Number of seeds must be >= 1."
-        )
+        report.add("budget.num_seeds", "out_of_range", "Number of seeds must be >= 1.")
     if budget.budget_on_consumed and budget.mode == "env_steps":
         for algo in spec.algorithms:
             canonical = algo.lower().strip()
             if canonical in ("ea", "genetic", "ga"):
-                strategy = (
-                    (spec.hyperparameters.get(algo) or {})
-                    .get("strategy", "simple")
+                strategy = (spec.hyperparameters.get(algo) or {}).get(
+                    "strategy", "simple"
                 )
                 if strategy not in ("simple", None, ""):
                     report.add(
@@ -834,9 +824,7 @@ def _validate_recording(spec, report):
     if rec.fps <= 0:
         report.add("recording.fps", "out_of_range", "FPS must be positive.")
     if rec.fmt not in ("mp4", "gif"):
-        report.add(
-            "recording.fmt", "invalid_format", "Format must be 'mp4' or 'gif'."
-        )
+        report.add("recording.fmt", "invalid_format", "Format must be 'mp4' or 'gif'.")
     if rec.max_recordings is not None and rec.max_recordings < 1:
         report.add(
             "recording.max_recordings",
@@ -958,6 +946,7 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
     if env_spec is not None:
         try:
             from deap_pettingzoo.catalog import compatibility as cat_compat
+
             compatible = cat_compat.compatible_algorithms(env_spec.name)
         except Exception:  # pragma: no cover - env build failure
             compatible = []
@@ -965,8 +954,11 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         # Detect heterogeneous observation sizes (EA/CMA/PSO require homogeneous).
         try:
             from deap_pettingzoo.baselines.compatibility import inspect_environment
+
             env_info = inspect_environment(env_spec.name)
-            env_has_heterogeneous_obs = env_info.obs_dim is None and env_info.num_agents > 1
+            env_has_heterogeneous_obs = (
+                env_info.obs_dim is None and env_info.num_agents > 1
+            )
         except Exception:
             pass
 
@@ -991,8 +983,7 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
             report.add(
                 "budget.mode",
                 "budget_mode_unsupported",
-                f"{canonical!r} does not support budget mode "
-                f"{spec.budget.mode!r}.",
+                f"{canonical!r} does not support budget mode " f"{spec.budget.mode!r}.",
             )
         _validate_hyperparameters(spec, report, algo, algo_spec)
         _validate_aggregation(spec, report, algo_spec)
@@ -1000,12 +991,10 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         # EA / CMA-ES / PSO require homogeneous observation sizes.
         # When SuperSuit is available, build_configs auto-pads — warn
         # instead of blocking.  Without SuperSuit, this is a hard error.
-        if (
-            env_has_heterogeneous_obs
-            and algo_spec.family == "evolutionary"
-        ):
+        if env_has_heterogeneous_obs and algo_spec.family == "evolutionary":
             try:
                 import supersuit  # noqa: F401
+
                 severity = "warning"
                 hint = (
                     "Observations will be auto-padded with SuperSuit "
@@ -1027,11 +1016,7 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
                 f"observations. {hint}",
                 severity=severity,
             )
-        if (
-            env_spec is not None
-            and compatible
-            and canonical not in compatible
-        ):
+        if env_spec is not None and compatible and canonical not in compatible:
             report.add(
                 f"algorithms.{canonical}",
                 "incompatible",
@@ -1072,14 +1057,11 @@ def _validate_coevolution(spec, report, env_spec, cat_algorithms):
         )
 
     eligible = {
-        entry["optimizer"]
-        for entry in cat_coevolution.eligible_side_optimizers()
+        entry["optimizer"] for entry in cat_coevolution.eligible_side_optimizers()
     }
     side_names = [s.name for s in coev.sides]
     if len(set(side_names)) != len(side_names):
-        report.add(
-            "coevolution.sides", "duplicate_side", "Side names must be unique."
-        )
+        report.add("coevolution.sides", "duplicate_side", "Side names must be unique.")
 
     covered_prefixes: List[str] = []
     for idx, side in enumerate(coev.sides):
@@ -1106,9 +1088,7 @@ def _validate_coevolution(spec, report, env_spec, cat_algorithms):
     # Every declared team prefix should be controlled by some side.
     if env_spec is not None and env_spec.teams:
         for team in env_spec.teams:
-            if not any(
-                prefix in covered_prefixes for prefix in team.agent_prefixes
-            ):
+            if not any(prefix in covered_prefixes for prefix in team.agent_prefixes):
                 report.add(
                     "coevolution.sides",
                     "uncovered_team",

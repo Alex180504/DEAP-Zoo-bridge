@@ -2,7 +2,7 @@
 
 Wraps an AgileRL evolutionary-HPO population (:class:`EvolveHPOTrainer`)
 behind the :class:`SideState` protocol so it can participate in
-bidirectional EA/CMA/PSO vs RL co-evolution.  
+bidirectional EA/CMA/PSO vs RL co-evolution.
 
 The population evolves internally; only the **current champion** is
 exposed to opponent sides each generation (via a frozen CPU snapshot).
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 
-from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 
 from .pools import FrozenPolicyPool, OpponentPool, RLPolicyPool
@@ -28,15 +28,15 @@ from .sides import GenerationStats, Side, SideState
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     # Underscore keys (historical / programmatic).
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
-    "matd3_hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
-    "ippo_hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "matd3_hpo": ("agilerl.algorithms.matd3", "MATD3", False),
+    "ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
     "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
     # Hyphenated catalog names (injected into ``optimizer_config['algorithm']``
     # by ``experiment_spec._build_coevolution_plan``). Mirrors the dual-key
     # pattern ``rl_side.SUPPORTED_RL_ALGORITHMS`` uses for grouped IPPO.
     "maddpg-hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
-    "matd3-hpo":  ("agilerl.algorithms.matd3",  "MATD3",  False),
-    "ippo-hpo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "matd3-hpo": ("agilerl.algorithms.matd3", "MATD3", False),
+    "ippo-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
     "ippo-grouped-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
 }
 
@@ -82,6 +82,7 @@ class RLEvolveHPOSideState(SideState):
         self.population_size = int(cfg.get("population_size", 6))
         self.evo_every = int(cfg.get("evo_every_n_steps", 20_000))
         from deap_pettingzoo.utils.device_check import resolve_device
+
         self.device = resolve_device(cfg.get("device", "cpu"))
         self.seed = cfg.get("seed", None)
         self.agent_ctor_kwargs = dict(cfg.get("agent_ctor_kwargs", {}))
@@ -102,7 +103,9 @@ class RLEvolveHPOSideState(SideState):
     # ------------------------------------------------------------------
 
     def initialise(
-        self, env: PettingZooWrapper, rng: Optional[np.random.Generator] = None,
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
     ) -> None:
         self.resolved_device = self.device
         if rng is not None:
@@ -112,8 +115,7 @@ class RLEvolveHPOSideState(SideState):
 
         # Resolve learner agents.
         self._learner_ids: List[str] = [
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         ]
         if not self._learner_ids:
             raise ValueError(
@@ -124,13 +126,15 @@ class RLEvolveHPOSideState(SideState):
 
         # Build HPO population.
         try:
-            from agilerl.hpo.mutation import Mutations
-            from agilerl.hpo.tournament import TournamentSelection
+            import importlib
+
             from agilerl.algorithms.core.registry import (
                 HyperparameterConfig,
                 RLParameter,
             )
-            import importlib
+            from agilerl.hpo.mutation import Mutations
+            from agilerl.hpo.tournament import TournamentSelection
+
             mod = importlib.import_module(self._algo_module)
             alg_cls = getattr(mod, self._algo_class)
         except ImportError as exc:  # pragma: no cover
@@ -161,7 +165,8 @@ class RLEvolveHPOSideState(SideState):
         if self._on_policy:
             self._maybe_apply_grouping_patch()
         self._champion_wrapper = AgileRLPolicyWrapper(
-            self._population[0], self._learner_ids,
+            self._population[0],
+            self._learner_ids,
             algorithm_name=self._algo_key,
         )
 
@@ -240,7 +245,8 @@ class RLEvolveHPOSideState(SideState):
         # Select by fitness: keep top 1/4 elites, mutate the rest.
         ranked = sorted(
             zip(self._population, fitnesses),
-            key=lambda x: x[1], reverse=True,
+            key=lambda x: x[1],
+            reverse=True,
         )
         elite_count = max(1, self.population_size // 4)
         elites = [a for a, _ in ranked[:elite_count]]
@@ -256,7 +262,9 @@ class RLEvolveHPOSideState(SideState):
         # using ranked[0][0] avoids pairing stale fitnesses with mutated agents).
         best_agent = ranked[0][0]
         self._champion_wrapper = AgileRLPolicyWrapper(
-            best_agent, self._learner_ids, algorithm_name=self._algo_key,
+            best_agent,
+            self._learner_ids,
+            algorithm_name=self._algo_key,
         )
 
         stats = GenerationStats(
@@ -298,6 +306,7 @@ class RLEvolveHPOSideState(SideState):
             HyperparameterConfig,
             RLParameter,
         )
+
         if not hp_config_spec:
             return HyperparameterConfig()
         params = {}
@@ -307,7 +316,10 @@ class RLEvolveHPOSideState(SideState):
                 grow = float(spec[2]) if len(spec) > 2 else 1.5
                 shrink = float(spec[3]) if len(spec) > 3 else 0.75
                 params[name] = RLParameter(
-                    min=lo, max=hi, grow_factor=grow, shrink_factor=shrink,
+                    min=lo,
+                    max=hi,
+                    grow_factor=grow,
+                    shrink_factor=shrink,
                 )
             else:
                 params[name] = spec
@@ -337,13 +349,15 @@ class RLEvolveHPOSideState(SideState):
             kwargs["hp_config"] = hp_config
 
         try:
-            return list(alg_cls.population(
-                size=size,
-                observation_spaces=obs_spaces,
-                action_spaces=act_spaces,
-                agent_ids=agent_ids,
-                **kwargs,
-            ))
+            return list(
+                alg_cls.population(
+                    size=size,
+                    observation_spaces=obs_spaces,
+                    action_spaces=act_spaces,
+                    agent_ids=agent_ids,
+                    **kwargs,
+                )
+            )
         except TypeError:
             pop = []
             for i in range(size):
@@ -376,6 +390,7 @@ class RLEvolveHPOSideState(SideState):
         from agilerl.components.multi_agent_replay_buffer import (
             MultiAgentReplayBuffer,
         )
+
         from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 
         steps = 0
@@ -416,7 +431,11 @@ class RLEvolveHPOSideState(SideState):
                 # that have already terminated so AgileRL sees a full roster.
                 learner_obs = {a: ob for a, ob in obs.items() if a in learner_id_set}
                 if len(learner_obs) < len(learner_ids):
-                    _ref = next(iter(learner_obs.values())) if learner_obs else obs_placeholders[learner_ids[0]]
+                    _ref = (
+                        next(iter(learner_obs.values()))
+                        if learner_obs
+                        else obs_placeholders[learner_ids[0]]
+                    )
                     for a in learner_ids:
                         if a not in learner_obs:
                             learner_obs[a] = np.zeros_like(_ref)
@@ -451,9 +470,7 @@ class RLEvolveHPOSideState(SideState):
                                 if opp_act.ndim > 0 and opp_act.shape[0] == 1:
                                     opp_act = opp_act[0]
                                 env_actions[a] = (
-                                    opp_act.item()
-                                    if opp_act.shape == ()
-                                    else opp_act
+                                    opp_act.item() if opp_act.shape == () else opp_act
                                 )
                             except Exception:
                                 env_actions[a] = env.action_space(a).sample()
@@ -480,12 +497,20 @@ class RLEvolveHPOSideState(SideState):
                     a: next_obs.get(a, obs_placeholders[a]) for a in learner_ids
                 }
                 done_dict = AgileRLTrainer._build_done_dict(
-                    terms, truncs, list(learner_ids), is_vec=False, num_envs=1,
+                    terms,
+                    truncs,
+                    list(learner_ids),
+                    is_vec=False,
+                    num_envs=1,
                 )
 
                 memory.save_to_memory(
-                    full_obs, full_raw_actions, full_reward, full_next_obs,
-                    done_dict, is_vectorised=False,
+                    full_obs,
+                    full_raw_actions,
+                    full_reward,
+                    full_next_obs,
+                    done_dict,
+                    is_vectorised=False,
                 )
 
                 total_transitions += 1
@@ -539,7 +564,10 @@ class RLEvolveHPOSideState(SideState):
 
             _apply_agilerl_grouping_patch()
         except Exception:  # pragma: no cover - defensive
-            logger.warning("RLEvolveHPOSideState: could not apply grouped-IPPO patch", exc_info=True)
+            logger.warning(
+                "RLEvolveHPOSideState: could not apply grouped-IPPO patch",
+                exc_info=True,
+            )
 
     @staticmethod
     def _train_agent_on_policy(
@@ -561,7 +589,11 @@ class RLEvolveHPOSideState(SideState):
         )
 
         return train_agent_on_policy(
-            agent, env, learner_ids, target_steps, logger=logger,
+            agent,
+            env,
+            learner_ids,
+            target_steps,
+            logger=logger,
         )
 
     @staticmethod
@@ -627,9 +659,7 @@ class RLEvolveHPOSideState(SideState):
                                 if opp_act.ndim > 0 and opp_act.shape[0] == 1:
                                     opp_act = opp_act[0]
                                 step_actions[a] = (
-                                    opp_act.item()
-                                    if opp_act.shape == ()
-                                    else opp_act
+                                    opp_act.item() if opp_act.shape == () else opp_act
                                 )
                             except Exception:
                                 step_actions[a] = env.action_space(a).sample()

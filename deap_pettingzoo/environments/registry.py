@@ -36,7 +36,7 @@ from deap_pettingzoo.catalog.schema import ParamSpec, TeamSpec
 
 class EnvFactory:
     """Factory for constructing PettingZoo environments.
-    
+
     Can be either:
       - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
         ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
@@ -354,7 +354,11 @@ def _attach_simultaneity_guard(env, env_name: str):
 
     def _step(actions, *args, **kwargs):
         result = original_step(actions, *args, **kwargs)
-        if state["expected"] is None or not isinstance(result, tuple) or len(result) < 5:
+        if (
+            state["expected"] is None
+            or not isinstance(result, tuple)
+            or len(result) < 5
+        ):
             return result
         observations = result[0] if isinstance(result[0], dict) else {}
         terminations = result[2] if isinstance(result[2], dict) else {}
@@ -508,6 +512,7 @@ def build_env_from_spec(
         from deap_pettingzoo.environments.jax_parallel import (
             JaxEnvToPettingZooAdapter,
         )
+
         env = JaxEnvToPettingZooAdapter(raw, env_name=name, render_mode=render_mode)
     else:
         preferred = "env" if spec.api == "aec" else "parallel_env"
@@ -629,8 +634,7 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
                     )
                 except Exception:  # noqa: BLE001
                     culprit = (
-                        "a non-picklable factory "
-                        f"({type(spec.factory).__name__})"
+                        "a non-picklable factory " f"({type(spec.factory).__name__})"
                     )
                 warnings.warn(
                     f"Environment {name!r} has {culprit} and will not propagate "

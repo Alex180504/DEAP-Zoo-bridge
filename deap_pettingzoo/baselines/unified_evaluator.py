@@ -5,9 +5,10 @@ This module provides a common evaluation interface that works with
 policies from any training algorithm (EA, MARL, etc.).
 """
 
-from typing import Optional, Dict, Any, Mapping, Sequence, Tuple
 import json
 import logging
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -23,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 class UnifiedEvaluator(BaselineEvaluator):
     """Unified evaluator for any policy type.
-    
+
     Evaluates policies regardless of their training method by using
     the common PolicyProtocol interface.
     """
-    
+
     def __init__(
         self,
         max_steps: int = 500,
@@ -73,7 +74,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         self.record_episode_offset = int(record_episode_offset)
         self.aggregation = aggregation
         self.score_agents = set(score_agents) if score_agents is not None else None
-    
+
     def evaluate(
         self,
         policy: Optional[PolicyProtocol],
@@ -123,9 +124,9 @@ class UnifiedEvaluator(BaselineEvaluator):
         """
 
         if self.frame_recorder is not None and self.frame_recorder.enabled:
-            render_mode: Optional[str] = 'rgb_array'
+            render_mode: Optional[str] = "rgb_array"
         elif render:
-            render_mode = 'human'
+            render_mode = "human"
         else:
             render_mode = None
         config_key = json.dumps(env_config, sort_keys=True) if env_config else None
@@ -155,7 +156,7 @@ class UnifiedEvaluator(BaselineEvaluator):
 
         # Setup RNG for episode seeds
         rng = np.random.default_rng(seed)
-        
+
         # Run episodes
         episode_rewards = []
         episode_lengths = []
@@ -180,7 +181,10 @@ class UnifiedEvaluator(BaselineEvaluator):
 
             # Run episode
             agent_rewards, length = self._run_episode(
-                policy, env, ep_seed, render,
+                policy,
+                env,
+                ep_seed,
+                render,
                 recorder=recorder if recording else None,
                 policy_map=policy_map,
             )
@@ -223,9 +227,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         ``0.0`` (no scoring agent acted).
         """
         if self.score_agents is not None:
-            selected = [
-                r for a, r in agent_rewards.items() if a in self.score_agents
-            ]
+            selected = [r for a, r in agent_rewards.items() if a in self.score_agents]
         else:
             selected = list(agent_rewards.values())
         if not selected:
@@ -233,7 +235,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         if self.aggregation == "mean":
             return float(np.mean(selected))
         return float(np.sum(selected))
-    
+
     def _run_episode(
         self,
         policy: Optional[PolicyProtocol],
@@ -281,11 +283,11 @@ class UnifiedEvaluator(BaselineEvaluator):
         # Track rewards per agent
         agent_rewards = dict.fromkeys(env.possible_agents, 0.0)
         steps = 0
-        
+
         # Run episode
         for step in range(self.max_steps):
             steps = step + 1
-            
+
             # Terminate if no active agents remain
             if not observations:
                 break
@@ -306,7 +308,7 @@ class UnifiedEvaluator(BaselineEvaluator):
                     )
                 except TypeError:
                     actions[agent] = pol.get_action(observations[agent])
-            
+
             # Step environment
             observations, rewards, terminations, truncations, _ = env.step(actions)
 
@@ -321,18 +323,18 @@ class UnifiedEvaluator(BaselineEvaluator):
             for agent, reward in rewards.items():
                 if agent in agent_rewards:
                     agent_rewards[agent] += reward
-            
+
             # Check if episode is done
             if terminations and all(terminations.values()):
                 break
             if truncations and all(truncations.values()):
                 break
-            
+
             if render:
                 env.render()
-        
+
         return agent_rewards, steps
-    
+
     def close(self):
         """Close all cached environments."""
         for env in self._env_cache.values():

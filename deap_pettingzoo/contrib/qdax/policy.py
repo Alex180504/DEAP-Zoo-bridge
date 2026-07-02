@@ -30,7 +30,6 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-
 _ACTIVATION_MAP = {
     "tanh": "tanh",
     "relu": "relu",
@@ -59,8 +58,7 @@ def _resolve_activation(name: str):
     if name in ("linear", "identity"):
         return lambda x: x
     raise ValueError(
-        f"Unsupported activation {name!r}; expected one of "
-        f"{list(_ACTIVATION_MAP)}."
+        f"Unsupported activation {name!r}; expected one of " f"{list(_ACTIVATION_MAP)}."
     )
 
 
@@ -80,9 +78,7 @@ def make_flax_mlp(layer_sizes: Sequence[int], activation: str = "tanh"):
     from flax import linen as nn
 
     if len(layer_sizes) < 2:
-        raise ValueError(
-            f"layer_sizes must have >=2 entries, got {list(layer_sizes)}."
-        )
+        raise ValueError(f"layer_sizes must have >=2 entries, got {list(layer_sizes)}.")
 
     activation_fn = _resolve_activation(activation)
     sizes = tuple(int(s) for s in layer_sizes)

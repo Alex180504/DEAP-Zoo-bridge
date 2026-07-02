@@ -35,13 +35,13 @@ import importlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
-
 __all__ = ["make_numpy_scoring_function", "close_scoring_function"]
 
 
 # --------------------------------------------------------------------------
 # Worker-side helpers (must live at module top level to be picklable).
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class _RolloutSpec:
@@ -287,9 +287,7 @@ def _rollout_once(
     md_bounds = None
     if action_type == "multidiscrete":
         if not spec.nvec:
-            raise ValueError(
-                "multidiscrete action_type requires spec.nvec to be set."
-            )
+            raise ValueError("multidiscrete action_type requires spec.nvec to be set.")
         md_bounds = []
         _off = 0
         for _n in (int(x) for x in spec.nvec):
@@ -299,9 +297,7 @@ def _rollout_once(
     while not done and steps < episode_length and env.agents:
         actions = {}
         for a in env.agents:
-            raw = np.asarray(
-                module.apply({"params": params}, jnp.asarray(obs[a]))
-            )
+            raw = np.asarray(module.apply({"params": params}, jnp.asarray(obs[a])))
             if action_type == "discrete":
                 actions[a] = int(np.argmax(raw))
             elif action_type == "multidiscrete":
@@ -379,6 +375,7 @@ def _numpy_rollout(args):
 # --------------------------------------------------------------------------
 # Public builder
 # --------------------------------------------------------------------------
+
 
 def make_numpy_scoring_function(
     env_name: str,
@@ -489,9 +486,7 @@ def make_numpy_scoring_function(
     def _ensure_executor():
         if state["executor"] is not None:
             return state["executor"]
-        ctx = make_executor(
-            effective_workers, backend=parallel_backend
-        )
+        ctx = make_executor(effective_workers, backend=parallel_backend)
         state["ctx"] = ctx
         state["executor"] = ctx.__enter__()
         # Mirror the live ref onto the public attribute so callers
@@ -502,22 +497,15 @@ def make_numpy_scoring_function(
     def scoring_function(genotypes, key):
         leaves = jax.tree_util.tree_leaves(genotypes)
         batch_size = int(leaves[0].shape[0])
-        seeds = np.asarray(
-            jax.random.randint(key, (batch_size,), 0, 2**30)
-        )
+        seeds = np.asarray(jax.random.randint(key, (batch_size,), 0, 2**30))
         flats = []
         for i in range(batch_size):
-            single_tree = jax.tree_util.tree_map(
-                lambda x, i=i: x[i], genotypes
-            )
+            single_tree = jax.tree_util.tree_map(lambda x, i=i: x[i], genotypes)
             flats.append(pytree_to_flat(single_tree, layer_sizes))
 
         if effective_workers <= 1:
             # Serial: avoid executor overhead entirely.
-            results = [
-                _local_rollout(flat, int(s))
-                for flat, s in zip(flats, seeds)
-            ]
+            results = [_local_rollout(flat, int(s)) for flat, s in zip(flats, seeds)]
         else:
             executor = _ensure_executor()
             payloads = [

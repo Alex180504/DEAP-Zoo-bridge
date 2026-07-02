@@ -43,7 +43,7 @@ from deap_pettingzoo.service.models import (
 )
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, status
+    from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
     from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError:  # pragma: no cover
     raise ImportError(
@@ -128,9 +128,7 @@ def create_app(
         genuinely-unhandled errors. Without it, Starlette's
         ``ServerErrorMiddleware`` returns a plain-text body instead.
         """
-        logger.exception(
-            "Unhandled error on %s %s", request.method, request.url.path
-        )
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse(
             status_code=500, content={"detail": "Internal server error"}
         )
@@ -148,6 +146,7 @@ def _validate_spec(spec: ExperimentSpecModel) -> ValidationReportModel:
     """Run catalog-level validation on the spec (defense in depth)."""
     dc = spec.to_dataclass()
     from deap_pettingzoo.baselines.experiment_spec import validate_spec
+
     report = validate_spec(dc)
     return ValidationReportModel(
         ok=report.ok,
@@ -197,7 +196,6 @@ def _experiment_to_record(
 
 from deap_pettingzoo.service.logtail import read_tail as _read_tail  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -209,6 +207,7 @@ def _register_routes(app: FastAPI) -> None:
     async def health():
         from deap_pettingzoo.catalog.schema import CATALOG_SCHEMA_VERSION
         from deap_pettingzoo.service.advanced import advanced_enabled
+
         return HealthResponse(
             catalog_version=CATALOG_SCHEMA_VERSION,
             advanced_enabled=advanced_enabled(),
@@ -219,11 +218,13 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/catalog")
     async def get_catalog():
         from deap_pettingzoo import catalog
+
         return catalog.to_json()
 
     @app.get("/catalog/algorithms")
     async def get_catalog_algorithms():
         from deap_pettingzoo import catalog
+
         return [
             a.to_dict(available=catalog.is_algorithm_available(a.name))
             for a in catalog.list_algorithms()
@@ -232,6 +233,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/catalog/algorithms/{name}")
     async def get_catalog_algorithm(name: str):
         from deap_pettingzoo import catalog
+
         try:
             spec = catalog.get_algorithm(name)
         except KeyError:
@@ -241,6 +243,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/catalog/environments")
     async def get_catalog_environments():
         from deap_pettingzoo import catalog
+
         return [
             e.to_dict(available=catalog.is_environment_available(e.name))
             for e in catalog.list_environments()
@@ -249,17 +252,17 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/catalog/environments/{name}")
     async def get_catalog_environment(name: str):
         from deap_pettingzoo import catalog
+
         try:
             spec = catalog.get_environment(name)
         except ValueError:
-            raise HTTPException(
-                status_code=404, detail=f"Unknown environment {name!r}"
-            )
+            raise HTTPException(status_code=404, detail=f"Unknown environment {name!r}")
         return spec.to_dict(available=catalog.is_environment_available(spec.name))
 
     @app.get("/catalog/coevolution")
     async def get_catalog_coevolution():
         from deap_pettingzoo import catalog
+
         return catalog.get_coevolution_options()
 
     @app.get("/catalog/compatibility")
@@ -312,7 +315,9 @@ def _register_routes(app: FastAPI) -> None:
     async def get_experiment(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
         ahead = await db.count_queued_before(exp_id, path=_db_path)
         raw["position"] = max(0, ahead)
         return _experiment_to_record(raw)
@@ -325,7 +330,9 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="Dispatcher not running")
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
         if raw["status"] in _TERMINAL_STATUSES:
             raise HTTPException(
                 status_code=409,
@@ -339,7 +346,9 @@ def _register_routes(app: FastAPI) -> None:
     async def delete_experiment(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
         if raw["status"] == "running":
             raise HTTPException(
                 status_code=409,
@@ -355,6 +364,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         # Remove the experiment scratch directory (stdout log, spec, result).
         import shutil as _shutil
+
         exp_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
         if exp_dir.is_dir():
             _shutil.rmtree(exp_dir, ignore_errors=True)
@@ -364,7 +374,9 @@ def _register_routes(app: FastAPI) -> None:
     async def get_experiment_progress(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
         prog = raw.get("progress")
         if prog is None:
             # Fall back to the _progress.json file.
@@ -418,7 +430,9 @@ def _register_routes(app: FastAPI) -> None:
     ):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
 
         run_dirs_raw = raw.get("run_dirs", [])
         run_dirs = [Path(d) for d in run_dirs_raw if d]
@@ -447,7 +461,9 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/runs/export")
     async def export_runs(
-        run_dirs: str = Query(default="", description="Comma-separated run directory paths"),
+        run_dirs: str = Query(
+            default="", description="Comma-separated run directory paths"
+        ),
         include_frames: bool = Query(default=False),
         include_tb: bool = Query(default=False),
         include_trajectories: bool = Query(default=False),
@@ -457,7 +473,9 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="No run_dirs provided.")
 
         # Reject any path that resolves outside the results root.
-        results_root_resolved = Path(os.environ.get("DEAP_RESULTS_ROOT", "results")).resolve()
+        results_root_resolved = Path(
+            os.environ.get("DEAP_RESULTS_ROOT", "results")
+        ).resolve()
         for p in paths:
             try:
                 p.resolve().relative_to(results_root_resolved)
@@ -467,12 +485,13 @@ def _register_routes(app: FastAPI) -> None:
                     detail=f"Path '{p}' is outside the results root and cannot be exported.",
                 )
 
-        from deap_pettingzoo.service.export_import import (
-            build_export_manifest,
-            _iter_run_files,
-        )
         import io
         import zipfile
+
+        from deap_pettingzoo.service.export_import import (
+            _iter_run_files,
+            build_export_manifest,
+        )
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -499,7 +518,7 @@ def _register_routes(app: FastAPI) -> None:
             iter([zip_bytes]),
             media_type="application/zip",
             headers={
-                "Content-Disposition": "attachment; filename=\"deap_runs_export.zip\""
+                "Content-Disposition": 'attachment; filename="deap_runs_export.zip"'
             },
         )
 
@@ -509,10 +528,11 @@ def _register_routes(app: FastAPI) -> None:
         overwrite_existing: bool = Query(default=False),
     ):
         import tempfile
+
         from deap_pettingzoo.service.export_import import (
-            validate_import_zip,
             extract_import_zip,
             restore_experiment_to_db,
+            validate_import_zip,
         )
 
         # Stream upload to a temp file.
@@ -534,8 +554,14 @@ def _register_routes(app: FastAPI) -> None:
                         "issues": [
                             {"path": e.path, "code": e.code, "message": e.message}
                             for e in validation.errors
-                        ] + [
-                            {"path": w.path, "code": w.code, "message": w.message, "severity": "warning"}
+                        ]
+                        + [
+                            {
+                                "path": w.path,
+                                "code": w.code,
+                                "message": w.message,
+                                "severity": "warning",
+                            }
                             for w in validation.warnings
                         ],
                     },
@@ -544,6 +570,7 @@ def _register_routes(app: FastAPI) -> None:
             # Read experiment.json from the ZIP in memory — do not rely on
             # it being written to disk (extract_import_zip skips metadata files).
             import zipfile as _zipfile
+
             exp_json: dict = {}
             try:
                 with _zipfile.ZipFile(tmp_path, "r") as _zf:
@@ -562,13 +589,15 @@ def _register_routes(app: FastAPI) -> None:
                     run_dirs=exp_info["run_dirs"],
                     db_path=_db_path or db._DEFAULT_DB_PATH,
                 )
-                imported.append({
-                    "original_exp_id": exp_info["experiment_id"],
-                    "new_exp_id": new_id,
-                    "label": exp_info["label"],
-                    "run_count": len(exp_info["run_dirs"]),
-                    "warnings": exp_info.get("warnings", []),
-                })
+                imported.append(
+                    {
+                        "original_exp_id": exp_info["experiment_id"],
+                        "new_exp_id": new_id,
+                        "label": exp_info["label"],
+                        "run_count": len(exp_info["run_dirs"]),
+                        "warnings": exp_info.get("warnings", []),
+                    }
+                )
 
             return {"ok": True, "imported": imported}
 
@@ -584,7 +613,9 @@ def _register_routes(app: FastAPI) -> None:
         """Return the raw ExperimentSpec JSON for re-run pre-population."""
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown experiment {exp_id!r}")
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment {exp_id!r}"
+            )
         return {"spec": raw.get("spec", {})}
 
     # -- run management ----------------------------------------------------
@@ -604,7 +635,9 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/runs/delete")
     async def delete_runs(
-        run_dirs: str = Query(default="", description="Comma-separated run directory paths"),
+        run_dirs: str = Query(
+            default="", description="Comma-separated run directory paths"
+        ),
     ):
         """Delete one or more run directories from disk.
 
@@ -612,6 +645,7 @@ def _register_routes(app: FastAPI) -> None:
         the service container has write access to the results volume.
         """
         import shutil
+
         paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
         if not paths:
             raise HTTPException(status_code=400, detail="No run_dirs provided.")
@@ -621,15 +655,24 @@ def _register_routes(app: FastAPI) -> None:
             try:
                 _check_under_results_root(p)
                 if not p.is_dir():
-                    errors.append({"path": str(p), "error": "Not found or not a directory"})
+                    errors.append(
+                        {"path": str(p), "error": "Not found or not a directory"}
+                    )
                     continue
                 if not (p / "manifest.json").is_file():
-                    errors.append({"path": str(p), "error": "Not a run directory (no manifest.json)"})
+                    errors.append(
+                        {
+                            "path": str(p),
+                            "error": "Not a run directory (no manifest.json)",
+                        }
+                    )
                     continue
                 shutil.rmtree(p)
                 deleted.append(str(p))
             except HTTPException:
-                errors.append({"path": str(p), "error": "Path is outside the results root"})
+                errors.append(
+                    {"path": str(p), "error": "Path is outside the results root"}
+                )
             except OSError as exc:
                 errors.append({"path": str(p), "error": str(exc)})
         return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}
@@ -657,6 +700,7 @@ def _register_routes(app: FastAPI) -> None:
 
     def _require_advanced() -> None:
         from deap_pettingzoo.service.advanced import advanced_enabled
+
         if not advanced_enabled():
             raise HTTPException(
                 status_code=403,
@@ -667,10 +711,9 @@ def _register_routes(app: FastAPI) -> None:
     async def env_install(req: InstallRequest):
         _require_advanced()
         from deap_pettingzoo.service import install_jobs
+
         try:
-            job_id = await install_jobs.start_install(
-                req.manager, req.action, req.args
-            )
+            job_id = await install_jobs.start_install(req.manager, req.action, req.args)
         except install_jobs.InstallValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return InstallStartResponse(job_id=job_id, status="running")
@@ -684,6 +727,7 @@ def _register_routes(app: FastAPI) -> None:
     ):
         _require_advanced()
         from deap_pettingzoo.service import install_jobs
+
         status_dict = install_jobs.get_status(job_id, offset, limit, lines)
         if status_dict is None:
             raise HTTPException(status_code=404, detail=f"Unknown job {job_id!r}")
@@ -693,6 +737,7 @@ def _register_routes(app: FastAPI) -> None:
     async def validate_script(req: ScriptSubmitModel):
         _require_advanced()
         from deap_pettingzoo.service.script_validate import validate_script_source
+
         report = validate_script_source(req.script)
         return ValidationReportModel(ok=report["ok"], issues=report["issues"])
 
@@ -700,6 +745,7 @@ def _register_routes(app: FastAPI) -> None:
     async def submit_script(req: ScriptSubmitModel):
         _require_advanced()
         from deap_pettingzoo.service.script_validate import validate_script_source
+
         report = validate_script_source(req.script)
         if not report["ok"]:
             return JSONResponse(status_code=422, content=report)

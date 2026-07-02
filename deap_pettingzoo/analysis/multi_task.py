@@ -190,4 +190,6 @@ def final_score_table(
                 "score": score,
             }
         )
-    return pd.DataFrame(rows, columns=["algorithm", "env_name", "seed", "run_id", "score"])
+    return pd.DataFrame(
+        rows, columns=["algorithm", "env_name", "seed", "run_id", "score"]
+    )

@@ -28,7 +28,7 @@ import numpy as np
 class ActionHead:
     """Base action-head protocol."""
 
-    #: Whether :meth:`decode` accepts an ``action_mask`` keyword. 
+    #: Whether :meth:`decode` accepts an ``action_mask`` keyword.
     #: Defaults to ``False``; :class:`MaskedDiscreteHead` overrides to ``True``.
     supports_mask: bool = False
 
@@ -153,16 +153,16 @@ class BoxHead(ActionHead):
                 )
             shape = low_arr.shape if low_arr.ndim > 0 else high_arr.shape
         if len(shape) == 0:
-            raise ValueError(
-                f"BoxHead requires a non-empty action shape, got {shape}."
-            )
+            raise ValueError(f"BoxHead requires a non-empty action shape, got {shape}.")
         self._shape = tuple(int(s) for s in shape)
         self._low = np.broadcast_to(low_arr, self._shape).astype(np.float32).copy()
         self._high = np.broadcast_to(high_arr, self._shape).astype(np.float32).copy()
         # Replace non-finite bounds with a sensible default (-1/+1) so
         # unbounded Box spaces still produce finite actions.
         self._low = np.where(np.isfinite(self._low), self._low, -1.0).astype(np.float32)
-        self._high = np.where(np.isfinite(self._high), self._high, 1.0).astype(np.float32)
+        self._high = np.where(np.isfinite(self._high), self._high, 1.0).astype(
+            np.float32
+        )
         self._flat_low = self._low.ravel()
         self._flat_high = self._high.ravel()
 
@@ -322,8 +322,10 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
         return cls(int(action_space.n))
     if hasattr(action_space, "nvec"):
         return MultiDiscreteHead(action_space.nvec)
-    if hasattr(action_space, "low") and hasattr(action_space, "high") and hasattr(
-        action_space, "shape"
+    if (
+        hasattr(action_space, "low")
+        and hasattr(action_space, "high")
+        and hasattr(action_space, "shape")
     ):
         return BoxHead(action_space.low, action_space.high, shape=action_space.shape)
     if hasattr(action_space, "spaces"):

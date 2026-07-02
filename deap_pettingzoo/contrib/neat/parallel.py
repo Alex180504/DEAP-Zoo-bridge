@@ -94,18 +94,14 @@ def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
     if spec.action_space_type == "multidiscrete":
         nvec = spec.action_space_args.get("nvec")
         if nvec is None:
-            raise ValueError(
-                "MultiDiscrete action_space_args must include 'nvec'."
-            )
+            raise ValueError("MultiDiscrete action_space_args must include 'nvec'.")
         return spaces.MultiDiscrete(np.asarray(nvec, dtype=np.int64))
     if spec.action_space_type == "continuous":
         shape = tuple(spec.action_space_args.get("shape", (spec.output_size,)))
         low = np.asarray(spec.action_space_args.get("low", -1.0), dtype=np.float32)
         high = np.asarray(spec.action_space_args.get("high", 1.0), dtype=np.float32)
         return spaces.Box(low=low, high=high, shape=shape, dtype=np.float32)
-    raise ValueError(
-        f"Unknown action_space_type {spec.action_space_type!r}"
-    )
+    raise ValueError(f"Unknown action_space_type {spec.action_space_type!r}")
 
 
 def _rebuild_substrate(spec: _NeatWorkerSpec) -> Any:
@@ -136,7 +132,7 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
         ticks this genome consumed (summed across those episodes). The
         driver discards order-free; ``executor.map`` preserves order.
     """
-    from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
+    from deap_pettingzoo.contrib.neat.config import build_cppn_config, build_neat_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
     from deap_pettingzoo.environments import PettingZooWrapper
     from deap_pettingzoo.environments.registry import (
@@ -170,20 +166,24 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
     # HyperNEAT / ES-HyperNEAT logic.
     if spec.substrate_spec is not None:
         from deap_pettingzoo.contrib.neat.hyperneat import (
-            HyperNeatPolicy,
             ESHyperNeatPolicy,
+            HyperNeatPolicy,
         )
 
         substrate = _rebuild_substrate(spec)
         if spec.es_params is not None:
             policy = ESHyperNeatPolicy(
-                genome, neat_cfg, substrate,
+                genome,
+                neat_cfg,
+                substrate,
                 action_space=action_space,
                 es_params=dict(spec.es_params),
             )
         else:
             policy = HyperNeatPolicy(
-                genome, neat_cfg, substrate,
+                genome,
+                neat_cfg,
+                substrate,
                 action_space=action_space,
                 activation=spec.phenotype_activation,
                 weight_threshold=spec.weight_threshold,
@@ -209,8 +209,8 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
                 actions = {}
                 for agent in observations:
                     actions[agent] = policy.get_action(observations[agent])
-                observations, step_rewards, dones, truncateds, _infos = (
-                    env.step(actions)
+                observations, step_rewards, dones, truncateds, _infos = env.step(
+                    actions
                 )
                 ep_rew += float(sum(step_rewards.values()))
                 done = all(dones.values()) or all(truncateds.values())
@@ -266,7 +266,8 @@ def make_neat_parallel_evaluate(
     """
 
     def _parallel_fitness(
-        genomes_and_ids: list, _neat_cfg: Any,
+        genomes_and_ids: list,
+        _neat_cfg: Any,
     ) -> None:
         """neat fitness-function contract — parallelised."""
         # Build payloads: one (genome, spec) per genome.

@@ -12,11 +12,12 @@ and the PettingZoo evaluation system. It handles:
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from deap import base, creator, tools
-import numpy as np
 
-from ..genomes import FixedTopologyGenome
+import numpy as np
+from deap import base, creator, tools
+
 from ..evaluators import BaseEvaluator
+from ..genomes import FixedTopologyGenome
 
 
 def setup_deap_creators(weights: tuple = (1.0,)) -> None:
@@ -70,14 +71,14 @@ def setup_deap_creators(weights: tuple = (1.0,)) -> None:
 
 def create_deap_individual(
     layer_sizes: List[int],
-    activation: str = 'tanh',
+    activation: str = "tanh",
     output_activation: Optional[str] = None,
     weight_range: tuple = (-1.0, 1.0),
-    random_seed: Optional[int] = None
+    random_seed: Optional[int] = None,
 ) -> Any:
     """
     Create a DEAP individual from genome configuration.
-    
+
     Args:
         layer_sizes: Network architecture [input, hidden..., output]
         activation: Hidden-layer activation function
@@ -85,10 +86,10 @@ def create_deap_individual(
             ``activation`` for backward compatibility.
         weight_range: (min, max) for weight initialization
         random_seed: Seed for reproducibility
-        
+
     Returns:
         DEAP Individual with genome attribute
-        
+
     Example:
         >>> setup_deap_creators()
         >>> ind = create_deap_individual([10, 64, 4], random_seed=42)
@@ -100,31 +101,27 @@ def create_deap_individual(
         activation=activation,
         output_activation=output_activation,
         weight_range=weight_range,
-        random_seed=random_seed
+        random_seed=random_seed,
     )
-    
+
     individual = creator.Individual()
     individual.genome = genome
-    
+
     return individual
 
 
-def evaluate_individual(
-    individual: Any,
-    evaluator: BaseEvaluator,
-    **kwargs
-) -> tuple:
+def evaluate_individual(individual: Any, evaluator: BaseEvaluator, **kwargs) -> tuple:
     """
     Evaluate a DEAP individual using the evaluator.
-    
+
     Args:
         individual: DEAP Individual with genome attribute
         evaluator: Evaluator instance (SingleEpisode or MultiEpisode)
         **kwargs: Additional arguments for evaluator
-        
+
     Returns:
         Tuple containing fitness value (DEAP format)
-        
+
     Example:
         >>> fitness = evaluate_individual(ind, evaluator, seed=42)
         >>> fitness
@@ -134,15 +131,28 @@ def evaluate_individual(
 
 
 SUPPORTED_SELECTION_METHODS = (
-    "tournament", "roulette", "best", "random",
-    "sus", "double_tournament", "lexicase", "epsilon_lexicase",
-    "nsga2", "spea2",
+    "tournament",
+    "roulette",
+    "best",
+    "random",
+    "sus",
+    "double_tournament",
+    "lexicase",
+    "epsilon_lexicase",
+    "nsga2",
+    "spea2",
 )
 SUPPORTED_CROSSOVER_METHODS = (
-    "blend", "one_point", "two_point", "uniform", "sbx", "es_blend",
+    "blend",
+    "one_point",
+    "two_point",
+    "uniform",
+    "sbx",
+    "es_blend",
 )
 SUPPORTED_MUTATION_METHODS = (
-    "gaussian", "polynomial_bounded",
+    "gaussian",
+    "polynomial_bounded",
 )
 
 
@@ -151,7 +161,7 @@ def create_toolbox(
     evaluator: BaseEvaluator,
     selection_config: Optional[Dict[str, Any]] = None,
     crossover_config: Optional[Dict[str, Any]] = None,
-    mutation_config: Optional[Dict[str, Any]] = None
+    mutation_config: Optional[Dict[str, Any]] = None,
 ) -> base.Toolbox:
     """
     Create and configure DEAP toolbox with all genetic operators.
@@ -213,23 +223,23 @@ def create_toolbox(
     mutation_config = mutation_config or {}
 
     # Extract config values
-    layer_sizes = genome_config['layer_sizes']
-    activation = genome_config.get('activation', 'tanh')
-    output_activation = genome_config.get('output_activation', activation)
-    weight_range = genome_config.get('weight_range', (-1.0, 1.0))
-    base_seed = genome_config.get('random_seed', None)
+    layer_sizes = genome_config["layer_sizes"]
+    activation = genome_config.get("activation", "tanh")
+    output_activation = genome_config.get("output_activation", activation)
+    weight_range = genome_config.get("weight_range", (-1.0, 1.0))
+    base_seed = genome_config.get("random_seed", None)
 
     # Create toolbox
     toolbox = base.Toolbox()
 
     # Counter for unique seeds
-    seed_counter = {'count': 0}
+    seed_counter = {"count": 0}
 
     def make_individual():
         """Create individual with unique seed."""
         if base_seed is not None:
-            seed = base_seed + seed_counter['count']
-            seed_counter['count'] += 1
+            seed = base_seed + seed_counter["count"]
+            seed_counter["count"] += 1
         else:
             seed = None
 
@@ -238,7 +248,7 @@ def create_toolbox(
             activation=activation,
             output_activation=output_activation,
             weight_range=weight_range,
-            random_seed=seed
+            random_seed=seed,
         )
 
     # Register individual and population
@@ -399,8 +409,7 @@ def _sel_double_tournament_adapter(
             winner = min(candidate_pool, key=_genome_size)
         else:
             candidate_pool = [
-                _tournament(individuals, parsimony_size,
-                            _genome_size, reverse=False)
+                _tournament(individuals, parsimony_size, _genome_size, reverse=False)
                 for _ in range(fitness_size)
             ]
             winner = max(candidate_pool, key=_fitness_key)
@@ -533,108 +542,106 @@ def _mut_on_weights(individual: Any, tool, **kwargs) -> tuple:
 def crossover_blend(ind1: Any, ind2: Any, alpha: float = 0.5) -> tuple:
     """
     Blend crossover for neural network weights.
-    
+
     Performs blend crossover (BLX-α) on genome weights:
     - child1 = beta * parent1 + (1-beta) * parent2
     - child2 = (1-beta) * parent1 + beta * parent2
     where beta ~ U(0-alpha, 1+alpha)
-    
+
     Args:
         ind1: First parent individual
         ind2: Second parent individual
         alpha: Blend crossover parameter (default: 0.5)
-        
+
     Returns:
         Tuple of (ind1, ind2) after crossover
-        
+
     Example:
         >>> ind1, ind2 = crossover_blend(parent1, parent2, alpha=0.5)
     """
     weights1 = ind1.genome.get_weights()
     weights2 = ind2.genome.get_weights()
-    
+
     # Generate random blending factors
     beta = np.random.uniform(-alpha, 1 + alpha, size=weights1.shape)
-    
+
     # Perform blend crossover
     new_weights1 = beta * weights1 + (1 - beta) * weights2
     new_weights2 = (1 - beta) * weights1 + beta * weights2
-    
+
     # Update genomes
     ind1.genome.set_weights(new_weights1)
     ind2.genome.set_weights(new_weights2)
-    
+
     return ind1, ind2
 
 
 def mutate_gaussian(
-    individual: Any,
-    mu: float = 0.0,
-    sigma: float = 0.2,
-    indpb: float = 0.1
+    individual: Any, mu: float = 0.0, sigma: float = 0.2, indpb: float = 0.1
 ) -> tuple:
     """
     Gaussian mutation for neural network weights.
-    
+
     Each weight has probability `indpb` of being mutated by adding
     Gaussian noise N(mu, sigma).
-    
+
     Args:
         individual: Individual to mutate
         mu: Mean of Gaussian noise (default: 0.0)
         sigma: Standard deviation of Gaussian noise (default: 0.2)
         indpb: Probability of mutating each weight (default: 0.1)
-        
+
     Returns:
         Tuple containing the mutated individual
-        
+
     Example:
         >>> mutated, = mutate_gaussian(ind, sigma=0.3, indpb=0.2)
     """
     weights = individual.genome.get_weights()
-    
+
     # Generate mutation mask (which weights to mutate)
     mutation_mask = np.random.random(weights.shape) < indpb
-    
+
     # Generate Gaussian noise
     noise = np.random.normal(mu, sigma, size=weights.shape)
-    
+
     # Apply mutation only to selected weights
     weights[mutation_mask] += noise[mutation_mask]
-    
+
     # Update genome
     individual.genome.set_weights(weights)
-    
+
     return (individual,)
 
 
 def clone_individual(individual: Any) -> Any:
     """
     Deep clone a DEAP individual including genome.
-    
+
     Args:
         individual: Individual to clone
-        
+
     Returns:
         Deep copy of the individual with cloned genome
-        
+
     Example:
         >>> clone = clone_individual(original)
         >>> clone.genome is not original.genome  # True
     """
     cloned = creator.Individual()
     cloned.genome = individual.genome.clone()
-    
+
     # Clone fitness if it has been evaluated
     if individual.fitness.valid:
         cloned.fitness.values = individual.fitness.values
-    
+
     return cloned
 
 
 # --------------------------------------------------------------------------
 # Process-pool parallel evaluation plumbing
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class _GenomePayload:
@@ -703,9 +710,7 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     from deap_pettingzoo.environments import PettingZooWrapper
     from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 
-    env = PettingZooWrapper(
-        spec.env_name, env_config=spec.env_config or None
-    )
+    env = PettingZooWrapper(spec.env_name, env_config=spec.env_config or None)
     evaluator = SingleEpisodeEvaluator(
         env_wrapper=env,
         max_steps=spec.max_steps,
@@ -785,9 +790,7 @@ def _individual_to_payload(
         weights=np.asarray(genome.get_weights(), dtype=float).copy(),
         layer_sizes=tuple(genome.layer_sizes),
         activation=str(genome.activation),
-        output_activation=str(
-            getattr(genome, "output_activation", genome.activation)
-        ),
+        output_activation=str(getattr(genome, "output_activation", genome.activation)),
         weight_range=tuple(getattr(genome, "_weight_range", (-1.0, 1.0))),
         seed=seed,
     )
@@ -822,11 +825,10 @@ def make_parallel_evaluate_map(
             idiom), letting the driver aggregate a worker-side counter
             that otherwise never crosses back from the subprocess.
     """
+
     def _pmap(_evaluate_ignored, individuals: Iterable[Any]):
         inds = list(individuals)
-        payloads = [
-            (_individual_to_payload(ind), spec) for ind in inds
-        ]
+        payloads = [(_individual_to_payload(ind), spec) for ind in inds]
         results = list(executor.map(_worker_evaluate, payloads))
         if step_sink is not None:
             step_sink[0] += sum(int(steps) for _, steps in results)
@@ -874,8 +876,7 @@ def evaluate_population_parallel(
                 f"eval_seeds length {len(seeds)} != population {len(inds)}"
             )
     payloads = [
-        (_individual_to_payload(ind, seed=s), spec)
-        for ind, s in zip(inds, seeds)
+        (_individual_to_payload(ind, seed=s), spec) for ind, s in zip(inds, seeds)
     ]
     results = list(executor.map(_worker_evaluate, payloads))
     if step_sink is not None:
@@ -886,6 +887,7 @@ def evaluate_population_parallel(
 # --------------------------------------------------------------------------
 # MixedPolicyEvaluator parallel evaluation code
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class _MixedWorkerSpec:
@@ -964,10 +966,10 @@ def _mixed_worker_evaluate(
     This function is module-level and therefore picklable on all
     platforms (including Windows spawn).
     """
-    from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
     from deap_pettingzoo.environments.registry import (
         replay_registry_snapshot_once,
     )
+    from deap_pettingzoo.evaluators.mixed_policy import MixedPolicyEvaluator
 
     payload, spec = payload_and_spec
 
@@ -1101,16 +1103,23 @@ def make_mixed_parallel_evaluate_map(
         return f"{mod}.{name}"
 
     # Sample genome from the evaluator's env to discover topology.
-    temp_env = evaluator.env_wrapper if evaluator.env_wrapper is not None else evaluator.env_factory()
+    temp_env = (
+        evaluator.env_wrapper
+        if evaluator.env_wrapper is not None
+        else evaluator.env_factory()
+    )
     try:
         pursuer_id = next(
-            a for a in temp_env.possible_agents
+            a
+            for a in temp_env.possible_agents
             if a.startswith(evaluator.learner_agent_prefixes)
         )
         obs = temp_env.reset(seed=0)
         input_size = int(obs[pursuer_id].shape[0])
         act_space = temp_env.action_space(pursuer_id)
-        output_size = act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+        output_size = (
+            act_space.n if hasattr(act_space, "n") else int(act_space.shape[0])
+        )
     finally:
         if evaluator.env_wrapper is None:
             temp_env.close()
@@ -1148,11 +1157,12 @@ def make_mixed_parallel_evaluate_map(
                 eval_episodes=spec.eval_episodes,
                 layer_sizes=tuple(genome.layer_sizes),
                 activation=genome.activation,
-                output_activation=getattr(genome, "output_activation", genome.activation),
+                output_activation=getattr(
+                    genome, "output_activation", genome.activation
+                ),
                 registry_snapshot=spec.registry_snapshot,
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
         return list(executor.map(_mixed_worker_evaluate, payloads))
 
     return _pmap
-

@@ -85,9 +85,7 @@ metric = st.text_input("Metric", value="final_fitness")
 
 if st.button("Render"):
     try:
-        out_path = build_report(
-            experiment, out_dir, fmt=fmt, metric=metric
-        )
+        out_path = build_report(experiment, out_dir, fmt=fmt, metric=metric)
     except Exception as exc:  # noqa: BLE001 - surface any rendering error
         st.error(f"Report rendering failed: {exc}")
         st.stop()

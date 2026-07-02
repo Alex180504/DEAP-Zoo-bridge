@@ -39,9 +39,7 @@ _MODE_HELP = {
         "Each side samples opponents from its own archive of past champions "
         "(hall of fame) rather than the live generation."
     ),
-    "cooperative": (
-        "All sides share the same reward sign and are jointly optimised."
-    ),
+    "cooperative": ("All sides share the same reward sign and are jointly optimised."),
 }
 _SCHEDULE_HELP = {
     "synchronous": "All sides advance one generation together.",
@@ -91,7 +89,11 @@ def get_coevolution_options() -> Dict[str, Any]:
             for mode in COEV_MODES
         ],
         "schedules": [
-            {"name": sched, "label": sched.title(), "help": _SCHEDULE_HELP.get(sched, "")}
+            {
+                "name": sched,
+                "label": sched.title(),
+                "help": _SCHEDULE_HELP.get(sched, ""),
+            }
             for sched in COEV_SCHEDULES
         ],
         "aggregations": list(COEV_AGGREGATIONS),

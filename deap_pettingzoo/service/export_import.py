@@ -260,7 +260,9 @@ def _iter_experiment_zip(
             run_dir_rel = []
             for rd in run_dirs:
                 try:
-                    run_dir_rel.append(str(rd.relative_to(experiment_dir)).replace("\\", "/"))
+                    run_dir_rel.append(
+                        str(rd.relative_to(experiment_dir)).replace("\\", "/")
+                    )
                 except ValueError:
                     run_dir_rel.append(rd.name)
             manifest = build_export_manifest(
@@ -297,7 +299,9 @@ def _iter_experiment_zip(
             # 4. Each run directory (preserving relative structure).
             for run_dir in run_dirs:
                 try:
-                    rel_base = str(run_dir.relative_to(experiment_dir)).replace("\\", "/")
+                    rel_base = str(run_dir.relative_to(experiment_dir)).replace(
+                        "\\", "/"
+                    )
                 except ValueError:
                     rel_base = run_dir.name
                 for arcname, filepath in _iter_run_files(
@@ -548,12 +552,14 @@ def extract_import_zip(
     # Service-metadata files live at the ZIP root and must not be extracted
     # into the results tree — they are read from the ZIP in memory by the
     # caller (app.py) and passed directly to restore_experiment_to_db.
-    _SERVICE_META_FILES = frozenset({
-        "deap_export_manifest.json",
-        "experiment.json",
-        "_spec.json",
-        "_result.json",
-    })
+    _SERVICE_META_FILES = frozenset(
+        {
+            "deap_export_manifest.json",
+            "experiment.json",
+            "_spec.json",
+            "_result.json",
+        }
+    )
 
     extracted: List[Dict[str, Any]] = []
 
@@ -581,7 +587,9 @@ def extract_import_zip(
             try:
                 dest.resolve().relative_to(results_root.resolve())
             except ValueError:
-                warnings.append(f"Skipping '{info.filename}' — resolves outside results root.")
+                warnings.append(
+                    f"Skipping '{info.filename}' — resolves outside results root."
+                )
                 continue
 
             # Handle duplicates.
@@ -632,6 +640,7 @@ def _parse_iso_to_epoch(value: Optional[str]) -> Optional[float]:
         return None
     try:
         from datetime import datetime
+
         return datetime.fromisoformat(value).timestamp()
     except (ValueError, TypeError):
         return None
@@ -679,14 +688,17 @@ async def restore_experiment_to_db(
     elif status == "cancelled":
         await db_module.set_cancelled(new_id, path=db_path)
     elif status == "failed":
-        await db_module.set_failed(new_id, error or "Unknown error", run_dirs, path=db_path)
+        await db_module.set_failed(
+            new_id, error or "Unknown error", run_dirs, path=db_path
+        )
     else:
         # 'queued' / 'running' (or any unrecognised value) describe a
         # process that no longer exists — surface as failed rather than
         # re-entering the live queue or silently presenting as completed.
         await db_module.set_failed(
             new_id,
-            error or f"Imported from a {status!r} state; the original process no longer exists",
+            error
+            or f"Imported from a {status!r} state; the original process no longer exists",
             run_dirs,
             path=db_path,
         )

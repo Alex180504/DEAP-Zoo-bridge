@@ -92,7 +92,7 @@ def validate_script_source(src: str) -> Dict[str, Any]:
                 "path": "script",
                 "code": "no_entrypoint",
                 "message": (
-                    "No `if __name__ == \"__main__\":` block or top-level `main()` "
+                    'No `if __name__ == "__main__":` block or top-level `main()` '
                     "found — the script may not run anything when executed."
                 ),
                 "severity": "warning",

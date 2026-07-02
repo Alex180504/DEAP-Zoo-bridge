@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional, Sequence
 
 from deap_pettingzoo.environments.registry import register_env
 
-
 _INSTALL_HINT = (
     "JaxMARL integration requires the 'jaxmarl' optional extra. "
     "Install with: pip install 'deap-pettingzoo[jaxmarl]' "

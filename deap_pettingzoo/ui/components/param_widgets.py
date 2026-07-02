@@ -56,9 +56,7 @@ def coerce_param(param_spec: Dict[str, Any], value: Any) -> Any:
             if str(c) == str_val:
                 return c
         if choices and value is not None:
-            raise ValueError(
-                f"Expected one of {choices!r}, got {value!r}"
-            )
+            raise ValueError(f"Expected one of {choices!r}, got {value!r}")
         return value
     if ptype == "list":
         if isinstance(value, list):
@@ -210,7 +208,9 @@ def render_param(
         step = param_spec.get("step", 1)
         v = st.number_input(
             label,
-            value=int(display_value) if display_value is not None else int(minimum or 0),
+            value=(
+                int(display_value) if display_value is not None else int(minimum or 0)
+            ),
             min_value=minimum,
             max_value=maximum,
             step=step,

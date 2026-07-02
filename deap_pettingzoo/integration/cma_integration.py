@@ -227,7 +227,7 @@ def setup_cma_one_plus_lambda_strategy(
     Raises:
         ValueError: If ``layer_sizes`` is missing or ``parent`` has the
             wrong shape.
-    
+
     Notes:
         DEAP requires the parent to be an Individual with an initialized fitness
         before the first ``update`` call. This function wraps the parent vector as

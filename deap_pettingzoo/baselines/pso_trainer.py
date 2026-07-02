@@ -32,22 +32,22 @@ from deap_pettingzoo.baselines.ea_trainer import (
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
+from deap_pettingzoo.environments.registry import (
+    get_registry_snapshot,
+    replay_registry_snapshot,
+)
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
+from deap_pettingzoo.integration.deap_integration import (
+    _EvalWorkerSpec,
+    evaluate_population_parallel,
+)
 from deap_pettingzoo.integration.pso_integration import (
     make_pso_ind_init,
     make_pso_stats,
     register_pso_toolbox,
     setup_pso_swarm,
 )
-from deap_pettingzoo.integration.deap_integration import (
-    _EvalWorkerSpec,
-    evaluate_population_parallel,
-)
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.environments.registry import (
-    get_registry_snapshot,
-    replay_registry_snapshot,
-)
 from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
@@ -70,43 +70,127 @@ class PSOTrainer(BaselineTrainer):
         I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
         TR, RC = ParamTarget.TRAINER, ParamTarget.RUN_CONFIG
         return (
-            ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
-                      group="Architecture",
-                      help="Hidden layer width of the evolved MLP."),
-            ParamSpec("population_size", I, 50, minimum=2, step=1, target=TR,
-                      group="Population",
-                      help="Number of particles in the swarm."),
-            ParamSpec("phi1", F, 2.0, minimum=0.0, step=0.1, target=TR,
-                      group="Strategy",
-                      help="Cognitive coefficient (pull toward personal best)."),
-            ParamSpec("phi2", F, 2.0, minimum=0.0, step=0.1, target=TR,
-                      group="Strategy",
-                      help="Social coefficient (pull toward global best)."),
-            ParamSpec("weight", F, 0.7298, minimum=0.0, step=0.05, target=TR,
-                      group="Strategy", help="Inertia weight."),
-            ParamSpec("smin", F, None, target=TR, group="Strategy",
-                      advanced=True, nullable=True,
-                      help="Lower clamp on particle velocity (None = unset)."),
-            ParamSpec("smax", F, None, target=TR, group="Strategy",
-                      advanced=True, nullable=True,
-                      help="Upper clamp on particle velocity (None = unset)."),
-            ParamSpec("activation", E, "tanh", target=TR, group="Architecture",
-                      advanced=True,
-                      choices=("tanh", "relu", "sigmoid", "linear"),
-                      help="MLP activation function."),
-            ParamSpec("num_workers", I, 1, minimum=0, step=1, target=TR,
-                      group="Parallelism",
-                      help="Parallel evaluation workers (1 = serial)."),
-            ParamSpec("parallel_backend", E, "process", target=TR,
-                      group="Parallelism", advanced=True,
-                      choices=("process", "scoop", "dask"),
-                      help="Parallel executor backend."),
-            ParamSpec("seed", I, None, minimum=0, step=1, target=RC,
-                      group="Run", nullable=True,
-                      help="Random seed for this run (None = unseeded)."),
-            ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
-                      target=RC, group="Run",
-                      help="Hard cap on environment steps per rollout."),
+            ParamSpec(
+                "hidden_size",
+                I,
+                64,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Architecture",
+                help="Hidden layer width of the evolved MLP.",
+            ),
+            ParamSpec(
+                "population_size",
+                I,
+                50,
+                minimum=2,
+                step=1,
+                target=TR,
+                group="Population",
+                help="Number of particles in the swarm.",
+            ),
+            ParamSpec(
+                "phi1",
+                F,
+                2.0,
+                minimum=0.0,
+                step=0.1,
+                target=TR,
+                group="Strategy",
+                help="Cognitive coefficient (pull toward personal best).",
+            ),
+            ParamSpec(
+                "phi2",
+                F,
+                2.0,
+                minimum=0.0,
+                step=0.1,
+                target=TR,
+                group="Strategy",
+                help="Social coefficient (pull toward global best).",
+            ),
+            ParamSpec(
+                "weight",
+                F,
+                0.7298,
+                minimum=0.0,
+                step=0.05,
+                target=TR,
+                group="Strategy",
+                help="Inertia weight.",
+            ),
+            ParamSpec(
+                "smin",
+                F,
+                None,
+                target=TR,
+                group="Strategy",
+                advanced=True,
+                nullable=True,
+                help="Lower clamp on particle velocity (None = unset).",
+            ),
+            ParamSpec(
+                "smax",
+                F,
+                None,
+                target=TR,
+                group="Strategy",
+                advanced=True,
+                nullable=True,
+                help="Upper clamp on particle velocity (None = unset).",
+            ),
+            ParamSpec(
+                "activation",
+                E,
+                "tanh",
+                target=TR,
+                group="Architecture",
+                advanced=True,
+                choices=("tanh", "relu", "sigmoid", "linear"),
+                help="MLP activation function.",
+            ),
+            ParamSpec(
+                "num_workers",
+                I,
+                1,
+                minimum=0,
+                step=1,
+                target=TR,
+                group="Parallelism",
+                help="Parallel evaluation workers (1 = serial).",
+            ),
+            ParamSpec(
+                "parallel_backend",
+                E,
+                "process",
+                target=TR,
+                group="Parallelism",
+                advanced=True,
+                choices=("process", "scoop", "dask"),
+                help="Parallel executor backend.",
+            ),
+            ParamSpec(
+                "seed",
+                I,
+                None,
+                minimum=0,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Random seed for this run (None = unseeded).",
+            ),
+            ParamSpec(
+                "max_steps_per_episode",
+                I,
+                200,
+                minimum=1,
+                step=1,
+                target=RC,
+                group="Run",
+                help="Hard cap on environment steps per rollout.",
+            ),
         )
 
     def __init__(
@@ -136,6 +220,7 @@ class PSOTrainer(BaselineTrainer):
         if num_workers < 0:
             raise ValueError(f"num_workers must be >= 0, got {num_workers}.")
         from deap_pettingzoo.utils.parallel import SUPPORTED_BACKENDS
+
         if parallel_backend not in SUPPORTED_BACKENDS:
             raise ValueError(
                 f"Unknown parallel_backend {parallel_backend!r}. "
@@ -180,9 +265,10 @@ class PSOTrainer(BaselineTrainer):
         # Seed global RNGs
         if seed is not None:
             from deap_pettingzoo.utils.rng import seed_everything
+
             seed_everything(int(seed))
 
-        is_box = hasattr(action_space, 'low') and hasattr(action_space, 'high')
+        is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
@@ -210,7 +296,9 @@ class PSOTrainer(BaselineTrainer):
         log = build_logger(config, algorithm="pso")
         env_steps_per_iteration = self.population_size * max_steps
         self._recorder = RecordingController(
-            config, log, max_steps=max_steps,
+            config,
+            log,
+            max_steps=max_steps,
             seed=seed,
         )
 
@@ -224,9 +312,7 @@ class PSOTrainer(BaselineTrainer):
         # num_workers / parallel_backend are first-class TrainingConfig fields;
         # the trainer-constructor value is the fallback used only when the
         # config leaves them at their defaults.
-        requested = (
-            config.num_workers if config.num_workers != 1 else self.num_workers
-        )
+        requested = config.num_workers if config.num_workers != 1 else self.num_workers
         effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
@@ -246,7 +332,8 @@ class PSOTrainer(BaselineTrainer):
         )
 
         with make_executor(
-            effective_workers, backend=backend,
+            effective_workers,
+            backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
         ) as executor:
@@ -276,7 +363,9 @@ class PSOTrainer(BaselineTrainer):
                 seeds = _next_seeds(len(population))
                 if effective_workers > 1:
                     fitnesses = evaluate_population_parallel(
-                        population, executor=executor, spec=worker_spec,
+                        population,
+                        executor=executor,
+                        spec=worker_spec,
                         eval_seeds=seeds,
                         step_sink=_parallel_steps,
                     )
@@ -296,18 +385,18 @@ class PSOTrainer(BaselineTrainer):
                 # Extract gbest from toolbox context for champion tracking.
                 gbest_ctx = toolbox._pso_gbest_ctx
                 gbest_fit = gbest_ctx.get("fitness")
-                consumed = (
-                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                consumed = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                fitness_history.append(
+                    {
+                        "generation": gen,
+                        "mean": record["avg"],
+                        "std": record["std"],
+                        "min": record["min"],
+                        "max": record["max"],
+                        "gbest": gbest_fit,
+                        "env_steps": consumed,
+                    }
                 )
-                fitness_history.append({
-                    "generation": gen,
-                    "mean": record["avg"],
-                    "std": record["std"],
-                    "min": record["min"],
-                    "max": record["max"],
-                    "gbest": gbest_fit,
-                    "env_steps": consumed,
-                })
                 if consumed_budget is not None:
                     self._on_progress(
                         progress_callback,
@@ -343,7 +432,8 @@ class PSOTrainer(BaselineTrainer):
         num_generations = gen
         env.close()
         self._recorder.finalize(
-            _pso_champion, iteration=num_generations,
+            _pso_champion,
+            iteration=num_generations,
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
@@ -351,27 +441,41 @@ class PSOTrainer(BaselineTrainer):
 
         best_ind = hof[0]
         best_genome = best_ind.genome
-        policy = GenomePolicyWrapper(best_genome, config.env_name,
-                                     action_space=action_space)
+        policy = GenomePolicyWrapper(
+            best_genome, config.env_name, action_space=action_space
+        )
 
         try:
             with log:
-                dump_fitness_history(log, fitness_history,
+                dump_fitness_history(
+                    log,
+                    fitness_history,
                     env_steps_per_iteration=self.population_size * max_steps,
                     gen_offset=-1,
-                    nominal_env_steps_per_iteration=self.population_size * max_steps)
+                    nominal_env_steps_per_iteration=self.population_size * max_steps,
+                )
                 from deap_pettingzoo.utils.logging import save_ea_genome
-                save_ea_genome(log, best_genome, kind="pso_genome", extra={
-                    "final_fitness": float(best_ind.fitness.values[0]),
-                    "env_name": config.env_name,
-                })
-                write_summary(log, {
-                    "algorithm": "pso",
-                    "final_fitness": float(best_ind.fitness.values[0]),
-                    "num_generations": num_generations,
-                    "population_size": self.population_size,
-                    "dimension": dimension,
-                }, training_time_s=training_time)
+
+                save_ea_genome(
+                    log,
+                    best_genome,
+                    kind="pso_genome",
+                    extra={
+                        "final_fitness": float(best_ind.fitness.values[0]),
+                        "env_name": config.env_name,
+                    },
+                )
+                write_summary(
+                    log,
+                    {
+                        "algorithm": "pso",
+                        "final_fitness": float(best_ind.fitness.values[0]),
+                        "num_generations": num_generations,
+                        "population_size": self.population_size,
+                        "dimension": dimension,
+                    },
+                    training_time_s=training_time,
+                )
         except Exception:
             pass
 
@@ -396,7 +500,8 @@ class PSOTrainer(BaselineTrainer):
                 "pso_config": {
                     "hidden_size": self.hidden_size,
                     "population_size": self.population_size,
-                    "phi1": self.phi1, "phi2": self.phi2,
+                    "phi1": self.phi1,
+                    "phi2": self.phi2,
                     "weight": self.weight,
                     "activation": self.activation,
                 },

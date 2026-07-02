@@ -83,19 +83,23 @@ class EnvironmentInfo:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-serialisable dictionary."""
         return {
-            'env_name': self.env_name,
-            'num_agents': self.num_agents,
-            'agent_ids': self.agent_ids,
-            'has_continuous_actions': self.has_continuous_actions,
-            'has_discrete_actions': self.has_discrete_actions,
-            'has_multidiscrete_actions': self.has_multidiscrete_actions,
-            'has_global_state': self.has_global_state,
-            'obs_dim': self.obs_dim,
-            'act_dim': self.act_dim,
-            'action_low': self.action_low.tolist() if self.action_low is not None else None,
-            'action_high': self.action_high.tolist() if self.action_high is not None else None,
-            'is_turn_based': self.is_turn_based,
-            'extra': self.extra,
+            "env_name": self.env_name,
+            "num_agents": self.num_agents,
+            "agent_ids": self.agent_ids,
+            "has_continuous_actions": self.has_continuous_actions,
+            "has_discrete_actions": self.has_discrete_actions,
+            "has_multidiscrete_actions": self.has_multidiscrete_actions,
+            "has_global_state": self.has_global_state,
+            "obs_dim": self.obs_dim,
+            "act_dim": self.act_dim,
+            "action_low": (
+                self.action_low.tolist() if self.action_low is not None else None
+            ),
+            "action_high": (
+                self.action_high.tolist() if self.action_high is not None else None
+            ),
+            "is_turn_based": self.is_turn_based,
+            "extra": self.extra,
         }
 
 
@@ -133,11 +137,11 @@ class CompatibilityResult:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-serialisable dictionary."""
         return {
-            'compatible': self.compatible,
-            'algorithm': self.algorithm,
-            'env_name': self.env_name,
-            'issues': self.issues,
-            'warnings': self.warnings,
+            "compatible": self.compatible,
+            "algorithm": self.algorithm,
+            "env_name": self.env_name,
+            "issues": self.issues,
+            "warnings": self.warnings,
         }
 
 
@@ -185,21 +189,21 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
         act_space = env.action_space(agent)
 
         # Observation dimension
-        if hasattr(obs_space, 'shape') and obs_space.shape:
+        if hasattr(obs_space, "shape") and obs_space.shape:
             obs_dims.add(int(np.prod(obs_space.shape)))
 
         # Action space type.  Check ``nvec`` before ``shape`` because
         # MultiDiscrete exposes ``shape`` (but no ``low``/``high``) and would
         # otherwise be misclassified as Box and crash on ``.low``.
-        if hasattr(act_space, 'n') and not hasattr(act_space, 'nvec'):
+        if hasattr(act_space, "n") and not hasattr(act_space, "nvec"):
             # gymnasium.spaces.Discrete
             has_discrete = True
             act_dims.add(int(act_space.n))
-        elif hasattr(act_space, 'nvec'):
+        elif hasattr(act_space, "nvec"):
             # gymnasium.spaces.MultiDiscrete — sum(nvec) output units.
             has_multidiscrete = True
             act_dims.add(int(np.sum(act_space.nvec)))
-        elif hasattr(act_space, 'shape') and act_space.shape:
+        elif hasattr(act_space, "shape") and act_space.shape:
             # gymnasium.spaces.Box
             has_continuous = True
             act_dims.add(int(np.prod(act_space.shape)))
@@ -208,12 +212,13 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
                 first_action_high = act_space.high.copy()
 
     # Global state: PettingZoo parallel envs expose .state() when centralised
-    has_global_state = callable(getattr(env, 'state', None))
+    has_global_state = callable(getattr(env, "state", None))
 
     # Turn-based detection — consult the registry spec.
     is_turn_based = False
     try:
         from deap_pettingzoo.environments.registry import get_env_spec
+
         is_turn_based = get_env_spec(env_name).api in (
             "aec_masked",
             "aec_sequential",
@@ -246,9 +251,9 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
 
 
 def check_compatibility(
-    trainer: 'BaselineTrainer',
+    trainer: "BaselineTrainer",
     env_info: EnvironmentInfo,
-    algorithm_name: str = 'unknown',
+    algorithm_name: str = "unknown",
 ) -> CompatibilityResult:
     """Check compatibility between a trainer and an :class:`EnvironmentInfo`.
 
@@ -271,20 +276,20 @@ def check_compatibility(
     # Critical checks
 
     # Action space compatibility
-    if env_info.has_continuous_actions and not caps.get('continuous_action', False):
+    if env_info.has_continuous_actions and not caps.get("continuous_action", False):
         issues.append(
             "Environment has continuous (Box) action spaces, but the algorithm "
             "only supports discrete actions."
         )
 
-    if env_info.has_discrete_actions and not caps.get('discrete_action', False):
+    if env_info.has_discrete_actions and not caps.get("discrete_action", False):
         issues.append(
             "Environment has discrete action spaces, but the algorithm "
             "only supports continuous actions."
         )
 
     if env_info.has_multidiscrete_actions and not caps.get(
-        'multidiscrete_action', False
+        "multidiscrete_action", False
     ):
         issues.append(
             "Environment has MultiDiscrete action spaces, but the algorithm "
@@ -294,7 +299,7 @@ def check_compatibility(
         )
 
     # Global state requirement
-    if caps.get('needs_global_state', False) and not env_info.has_global_state:
+    if caps.get("needs_global_state", False) and not env_info.has_global_state:
         issues.append(
             "Algorithm requires a centralised global state, but the environment "
             "does not expose a state() method."
@@ -302,7 +307,7 @@ def check_compatibility(
 
     # Turn-based carve-out: algorithms that assume simultaneous execution
     # (replay buffer / centralized critic keyed by all-agents-per-step) cannot train on turn-based AEC adapters.
-    if env_info.is_turn_based and not caps.get('supports_turn_based', True):
+    if env_info.is_turn_based and not caps.get("supports_turn_based", True):
         issues.append(
             "Environment is a turn-based AEC game (api='aec_masked' or "
             "'aec_sequential'), but the algorithm's replay buffer / critic "
@@ -339,9 +344,9 @@ def check_compatibility(
 
 
 def validate_compatibility(
-    trainer: 'BaselineTrainer',
+    trainer: "BaselineTrainer",
     env_name: str,
-    algorithm_name: str = 'unknown',
+    algorithm_name: str = "unknown",
 ) -> CompatibilityResult:
     """Inspect ``env_name`` then check compatibility with ``trainer``.
 
@@ -499,7 +504,7 @@ def format_compatibility_matrix(
     envs = list(next(iter(matrix.values())).keys())
 
     # Column widths
-    algo_col = max(len(a) for a in algos + ['Algorithm'])
+    algo_col = max(len(a) for a in algos + ["Algorithm"])
     env_col = max(max(len(e) for e in envs), 10)
 
     header = f"{'Algorithm':<{algo_col}}  " + "  ".join(f"{e:<{env_col}}" for e in envs)

@@ -24,7 +24,7 @@ from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.data import discover_runs
 
 # Matches FrameRecorder filenames `{prefix}episode_NNNN.{ext}`.
-# The prefix is captured non-greedily and may be empty 
+# The prefix is captured non-greedily and may be empty
 # Trainers currently emit `train_`; live-rollout capture uses `live_`.
 _EPISODE_RE = re.compile(r"^(?P<prefix>.*?)episode_\d+\.(?:mp4|gif)$")
 
@@ -183,7 +183,11 @@ if len(prefixes) > 1:
 
 # Precompute labels so the selectbox shows iteration + headline fitness.
 labels = {
-    p: _label_for(p, recordings_meta.get(p.name), _metrics_rows(metrics, recordings_meta.get(p.name)))
+    p: _label_for(
+        p,
+        recordings_meta.get(p.name),
+        _metrics_rows(metrics, recordings_meta.get(p.name)),
+    )
     for p in video_files
 }
 
@@ -254,8 +258,11 @@ else:
 
             x_col = "iteration" if "iteration" in metrics.columns else "env_steps"
             y_col = next(
-                (c for c in ("mean", "max", "best_fitness", "qd_score")
-                 if c in metrics.columns),
+                (
+                    c
+                    for c in ("mean", "max", "best_fitness", "qd_score")
+                    if c in metrics.columns
+                ),
                 None,
             )
             if x_col in metrics.columns and y_col is not None:
@@ -271,11 +278,15 @@ else:
                     )
                 marker_x = rows[x_col].iloc[0]
                 fig.add_vline(
-                    x=marker_x, line_dash="dash", line_color="crimson",
+                    x=marker_x,
+                    line_dash="dash",
+                    line_color="crimson",
                     annotation_text="this recording",
                 )
                 fig.update_layout(
-                    xaxis_title=x_col, yaxis_title=y_col, height=360,
+                    xaxis_title=x_col,
+                    yaxis_title=y_col,
+                    height=360,
                     margin={"l": 40, "r": 20, "t": 20, "b": 40},
                 )
                 st.plotly_chart(fig, use_container_width=True)

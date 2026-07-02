@@ -1,9 +1,10 @@
 from typing import Any, List, Optional, Tuple
+
 import numpy as np
 
+from ..environments import PettingZooWrapper
 from .base_evaluator import BaseEvaluator
 from .single_episode import SingleEpisodeEvaluator
-from ..environments import PettingZooWrapper
 
 
 class MultiEpisodeEvaluator(BaseEvaluator):
@@ -23,16 +24,16 @@ class MultiEpisodeEvaluator(BaseEvaluator):
       historical behaviour.
     """
 
-    VALID_AGGREGATIONS = ['mean', 'median', 'min', 'max']
+    VALID_AGGREGATIONS = ["mean", "median", "min", "max"]
 
     def __init__(
         self,
         env_wrapper: PettingZooWrapper,
         num_episodes: int = 5,
-        aggregation_method: str = 'mean',
+        aggregation_method: str = "mean",
         base_seed: int = 42,
         fitness_spec: Optional[Any] = None,
-        **single_eval_kwargs
+        **single_eval_kwargs,
     ) -> None:
         """
         Initialize multi-episode evaluator.
@@ -88,7 +89,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         ``num_episodes * max_steps`` whenever episodes terminate early
         """
         return self.single_evaluator.env_steps_consumed
-    
+
     def evaluate(
         self,
         individual: Any,
@@ -190,7 +191,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         if individual is None:
             raise ValueError("Individual cannot be None")
 
-        if not hasattr(individual, 'genome'):
+        if not hasattr(individual, "genome"):
             raise ValueError(
                 f"Individual must have 'genome' attribute, got type {type(individual)}"
             )
@@ -228,13 +229,13 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         Returns:
             Aggregated fitness
         """
-        if self.aggregation_method == 'mean':
+        if self.aggregation_method == "mean":
             return float(np.mean(fitnesses))
-        elif self.aggregation_method == 'median':
+        elif self.aggregation_method == "median":
             return float(np.median(fitnesses))
-        elif self.aggregation_method == 'min':
+        elif self.aggregation_method == "min":
             return float(np.min(fitnesses))
-        elif self.aggregation_method == 'max':
+        elif self.aggregation_method == "max":
             return float(np.max(fitnesses))
 
         return 0.0

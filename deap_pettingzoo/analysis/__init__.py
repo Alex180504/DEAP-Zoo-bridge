@@ -28,13 +28,6 @@ functions that need them so that ``import deap_pettingzoo.analysis``
 succeeds with only ``numpy`` available.
 """
 
-from deap_pettingzoo.analysis.loaders import (
-    Experiment,
-    RunRecord,
-    load_experiment,
-    load_run,
-    per_agent_table,
-)
 from deap_pettingzoo.analysis.aggregate import (
     bootstrap_ci,
     iqm,
@@ -49,10 +42,12 @@ from deap_pettingzoo.analysis.compare import (
     pairwise_table,
     welch_t,
 )
-from deap_pettingzoo.analysis.policies import (
-    CoevolutionPolicyBundle,
-    PolicyReloadUnavailable,
-    load_policy,
+from deap_pettingzoo.analysis.loaders import (
+    Experiment,
+    RunRecord,
+    load_experiment,
+    load_run,
+    per_agent_table,
 )
 from deap_pettingzoo.analysis.multi_task import (
     collect_score_matrices,
@@ -61,6 +56,11 @@ from deap_pettingzoo.analysis.multi_task import (
 from deap_pettingzoo.analysis.normalize import (
     NormalizationSpec,
     normalize_score_matrices,
+)
+from deap_pettingzoo.analysis.policies import (
+    CoevolutionPolicyBundle,
+    PolicyReloadUnavailable,
+    load_policy,
 )
 from deap_pettingzoo.analysis.rliable_bridge import (
     aggregate_metrics_forest,

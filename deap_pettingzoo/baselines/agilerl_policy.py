@@ -68,7 +68,8 @@ def _ensure_agilerl_imports() -> None:
         # from a clean slate.  Also evict torch._dynamo because it may hold
         # references into the broken torch._inductor module object.
         _stale = [
-            k for k in list(sys.modules)
+            k
+            for k in list(sys.modules)
             if k.startswith("torch._inductor") or k.startswith("torch._dynamo")
         ]
         for k in _stale:
@@ -114,7 +115,12 @@ def _serialize_actor(actor: Any) -> Dict[str, Any]:
             if "device" in init:
                 init["device"] = "cpu"
             state = {k: v.detach().to("cpu") for k, v in actor.state_dict().items()}
-            return {"mode": "evolvable", "cls": type(actor), "init": init, "state": state}
+            return {
+                "mode": "evolvable",
+                "cls": type(actor),
+                "init": init,
+                "state": state,
+            }
         except Exception:
             pass  # fall through to the generic byte-dump path
 
@@ -452,9 +458,11 @@ class AgileRLPolicyWrapper:
         spaces_map = getattr(self._agent, "possible_action_spaces", None)
         if isinstance(spaces_map, dict):
             slots = [
-                tuple(int(x) for x in spaces_map[a].nvec)
-                if a in spaces_map and hasattr(spaces_map[a], "nvec")
-                else None
+                (
+                    tuple(int(x) for x in spaces_map[a].nvec)
+                    if a in spaces_map and hasattr(spaces_map[a], "nvec")
+                    else None
+                )
                 for a in self._agent_ids
             ]
             if any(s is not None for s in slots):
@@ -606,7 +614,11 @@ class FrozenRLPolicyWrapper:
             action_low = getattr(actor, "action_low", None)
             action_high = getattr(actor, "action_high", None)
             output_activation = getattr(actor, "output_activation", None)
-            if action_low is not None and action_high is not None and output_activation is not None:
+            if (
+                action_low is not None
+                and action_high is not None
+                and output_activation is not None
+            ):
                 # Output bounds per activation: Tanh->[-1,1], Sigmoid/GumbelSoftmax->[0,1]
                 _OUT_BOUNDS: Dict[str, tuple] = {
                     "Tanh": (-1.0, 1.0),

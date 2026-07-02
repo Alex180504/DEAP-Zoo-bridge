@@ -16,14 +16,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 
-from deap_pettingzoo.ui.services import UIState, load_settings
-from deap_pettingzoo.ui.services.api_client import (
-    ApiClient,
-    ApiClientError,
-    ApiUnavailable,
-    ApiValidationError,
-    get_client,
-)
 from deap_pettingzoo.ui.components import (
     WidgetContext,
     build_algo_form,
@@ -32,9 +24,20 @@ from deap_pettingzoo.ui.components import (
     coerce_touched,
     render_validation_report,
 )
-from deap_pettingzoo.ui.components.param_widgets import render_param
 from deap_pettingzoo.ui.components.forms import _render_param_group
-from deap_pettingzoo.ui.services.spec_utils import extract_loaded_spec, spec_to_form_defaults
+from deap_pettingzoo.ui.components.param_widgets import render_param
+from deap_pettingzoo.ui.services import UIState, load_settings
+from deap_pettingzoo.ui.services.api_client import (
+    ApiClient,
+    ApiClientError,
+    ApiUnavailable,
+    ApiValidationError,
+    get_client,
+)
+from deap_pettingzoo.ui.services.spec_utils import (
+    extract_loaded_spec,
+    spec_to_form_defaults,
+)
 
 st.set_page_config(page_title="Experiment setup", layout="wide")
 st.title("Experiment setup")
@@ -195,6 +198,7 @@ def _build_submit_spec(
     if raw_config_text.strip():
         try:
             import yaml
+
             raw = yaml.safe_load(raw_config_text)
             if isinstance(raw, dict):
                 spec["raw_config"] = raw
@@ -271,8 +275,11 @@ def _looks_like_bare_github(args: List[str]) -> bool:
     archive_suffixes = (".zip", ".tar.gz", ".tgz", ".whl")
     for a in args:
         low = a.lower()
-        if "github.com/" in low and not low.startswith("git+") \
-                and not low.endswith(archive_suffixes):
+        if (
+            "github.com/" in low
+            and not low.startswith("git+")
+            and not low.endswith(archive_suffixes)
+        ):
             return True
     return False
 
@@ -350,7 +357,8 @@ def _render_script_editor(client: ApiClient, state: UIState) -> None:
     use_rich = st.checkbox(
         "Rich code editor",
         value=False,
-        help="Syntax-highlighted editor (needs streamlit-code-editor).")
+        help="Syntax-highlighted editor (needs streamlit-code-editor).",
+    )
     src = state.advanced_script
     if use_rich:
         try:
@@ -369,14 +377,20 @@ def _render_script_editor(client: ApiClient, state: UIState) -> None:
             src = returned if returned.strip() else state.advanced_script
             st.caption("Tip: click outside the editor before Validate/Submit.")
         except Exception as exc:  # noqa: BLE001 — fall back to a plain area
-            st.caption(f"Error: Rich editor unavailable ({exc}); using plain text area.")
+            st.caption(
+                f"Error: Rich editor unavailable ({exc}); using plain text area."
+            )
             src = st.text_area(
-                "Python script", value=state.advanced_script, height=400,
+                "Python script",
+                value=state.advanced_script,
+                height=400,
                 label_visibility="collapsed",
             )
     else:
         src = st.text_area(
-            "Python script", value=state.advanced_script, height=400,
+            "Python script",
+            value=state.advanced_script,
+            height=400,
             label_visibility="collapsed",
         )
     state.advanced_script = src
@@ -456,7 +470,13 @@ if page_mode == "Advanced":
     st.stop()
 
 (
-    tab_env, tab_algos, tab_budget, tab_fitness, tab_rec, tab_coev, tab_par,
+    tab_env,
+    tab_algos,
+    tab_budget,
+    tab_fitness,
+    tab_rec,
+    tab_coev,
+    tab_par,
     tab_raw,
 ) = st.tabs(
     [
@@ -501,13 +521,18 @@ with tab_env:
 # Tab 2: Algorithm(s)
 
 with tab_algos:
-    st.markdown(f"**Environment:** `{env_sel}` — compatible algorithms highlighted below.")
+    st.markdown(
+        f"**Environment:** `{env_sel}` — compatible algorithms highlighted below."
+    )
     # Show only installed algos, with compatible ones preselected.
     available_algos = [
-        (name, spec) for name, spec in algo_list.items()
+        (name, spec)
+        for name, spec in algo_list.items()
         if spec.get("available", False) and name != "coevolution"
     ]
-    default_algos = _prev_algos or [n for n, _ in available_algos if n in compatible_algos][:1]
+    default_algos = (
+        _prev_algos or [n for n, _ in available_algos if n in compatible_algos][:1]
+    )
 
     selected_algos = st.multiselect(
         "Algorithm(s)",
@@ -539,7 +564,8 @@ with tab_algos:
 
     # Also show uninstalled algorithms (greyed out).
     unavailable = [
-        (name, spec) for name, spec in algo_list.items()
+        (name, spec)
+        for name, spec in algo_list.items()
         if not spec.get("available", False)
     ]
     if unavailable:
@@ -573,7 +599,8 @@ with tab_budget:
         )
         if _budget_on_consumed and selected_algos:
             _evo_selected = [
-                a for a in selected_algos
+                a
+                for a in selected_algos
                 if algo_list.get(a, {}).get("family") == "evolutionary"
             ]
             if not _evo_selected:
@@ -602,7 +629,9 @@ with tab_fitness:
         agg_options.add("team")
     fitness_ctx = WidgetContext(values=dict(_prev_fitness))
     build_fitness_form(sorted(agg_options), multi_team, fitness_ctx)
-    fitness_values, _ = coerce_touched([], fitness_ctx.values)  # aggregation_method already in ctx
+    fitness_values, _ = coerce_touched(
+        [], fitness_ctx.values
+    )  # aggregation_method already in ctx
     if "aggregation_method" in fitness_ctx.values:
         fitness_values["aggregation_method"] = fitness_ctx.values["aggregation_method"]
 
@@ -635,18 +664,26 @@ with tab_rec:
     recording_values["mode"] = rec_mode
     if rec_mode == "count":
         _prev_n = _prev_recording.get("max_recordings") or 10
-        recording_values["max_recordings"] = int(st.number_input(
-            "Max recordings",
-            value=int(_prev_n), min_value=1, step=1,
-            help="First → start of run, last → end, the rest spaced evenly.",
-        ))
+        recording_values["max_recordings"] = int(
+            st.number_input(
+                "Max recordings",
+                value=int(_prev_n),
+                min_value=1,
+                step=1,
+                help="First → start of run, last → end, the rest spaced evenly.",
+            )
+        )
     elif rec_mode == "interval":
         _prev_step = _prev_recording.get("every_n_steps") or 10000
-        recording_values["every_n_steps"] = int(st.number_input(
-            "Every N env-steps",
-            value=int(_prev_step), min_value=1, step=1000,
-            help="Record one rollout each time this many env steps elapse.",
-        ))
+        recording_values["every_n_steps"] = int(
+            st.number_input(
+                "Every N env-steps",
+                value=int(_prev_step),
+                min_value=1,
+                step=1000,
+                help="Record one rollout each time this many env steps elapse.",
+            )
+        )
     elif rec_mode == "every":
         st.warning(
             "Recording every generation/iteration can produce a very large "
@@ -704,7 +741,9 @@ with tab_coev:
     )
     if not multi_team:
         st.caption("Co-evolution requires a multi-team environment (≥2 teams).")
-    coevolution_values: Dict[str, Any] = {"enabled": st.session_state.get("_coev_enabled", False)}
+    coevolution_values: Dict[str, Any] = {
+        "enabled": st.session_state.get("_coev_enabled", False)
+    }
     if coevolution_values["enabled"]:
         st.info(
             "When co-evolution is enabled the **Algorithm(s)** tab selection is not used — "
@@ -725,12 +764,15 @@ with tab_coev:
             "Opponents per evaluation", value=3, min_value=1, key="_coev_k"
         )
         coevolution_values["aggregation"] = st.selectbox(
-            "Aggregation", options=list(coev_opts.get("aggregations", ["mean"])), key="_coev_agg"
+            "Aggregation",
+            options=list(coev_opts.get("aggregations", ["mean"])),
+            key="_coev_agg",
         )
 
         # Only offer algorithms that are installed and are not the "coevolution" pseudo-algorithm entry.
         coev_algo_options = [
-            n for n, s in algo_list.items()
+            n
+            for n, s in algo_list.items()
             if s.get("available", False) and n != "coevolution"
         ]
 
@@ -739,19 +781,23 @@ with tab_coev:
         sides = []
         for i, team in enumerate(teams):
             team_name = team.get("name", f"team_{i}")
-            st.markdown(f"**Side `{team_name}`** — agents: `{', '.join(team.get('agent_prefixes', []))}`")
+            st.markdown(
+                f"**Side `{team_name}`** — agents: `{', '.join(team.get('agent_prefixes', []))}`"
+            )
             side_algo = st.selectbox(
                 f"Algorithm for {team_name}",
                 options=coev_algo_options,
                 index=0,
                 key=f"_side_algo_{i}",
             )
-            sides.append({
-                "name": team_name,
-                "algorithm": side_algo,
-                "role_prefixes": team.get("agent_prefixes", []),
-                "hyperparameters": {},
-            })
+            sides.append(
+                {
+                    "name": team_name,
+                    "algorithm": side_algo,
+                    "role_prefixes": team.get("agent_prefixes", []),
+                    "hyperparameters": {},
+                }
+            )
         coevolution_values["sides"] = sides
 
 # Tab 7: Parallelism
@@ -776,6 +822,7 @@ with tab_raw:
     if raw_text.strip():
         try:
             import yaml
+
             parsed = yaml.safe_load(raw_text)
             if isinstance(parsed, dict):
                 st.caption(f"Parsed {len(parsed)} top-level keys.")
@@ -791,9 +838,16 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("Validate", use_container_width=True):
         spec, raw_error = _build_submit_spec(
-            env_sel, selected_algos, env_values, algo_forms,
-            budget_values, fitness_values, recording_values,
-            parallelism_values, coevolution_values, raw_text,
+            env_sel,
+            selected_algos,
+            env_values,
+            algo_forms,
+            budget_values,
+            fitness_values,
+            recording_values,
+            parallelism_values,
+            coevolution_values,
+            raw_text,
         )
         if raw_error:
             st.error(f"Raw config tab: {raw_error}")
@@ -810,9 +864,16 @@ with col1:
 with col2:
     if st.button("Submit to queue", use_container_width=True, type="primary"):
         spec, raw_error = _build_submit_spec(
-            env_sel, selected_algos, env_values, algo_forms,
-            budget_values, fitness_values, recording_values,
-            parallelism_values, coevolution_values, raw_text,
+            env_sel,
+            selected_algos,
+            env_values,
+            algo_forms,
+            budget_values,
+            fitness_values,
+            recording_values,
+            parallelism_values,
+            coevolution_values,
+            raw_text,
         )
         if raw_error:
             st.error(f"Raw config tab: {raw_error}")

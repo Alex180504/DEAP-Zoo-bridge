@@ -22,6 +22,7 @@ def _require_rliable():
     try:
         import rliable  # noqa: F401, WPS433
         from rliable import library, metrics  # noqa: WPS433
+
         return library, metrics
     except ImportError as exc:  # pragma: no cover - dep missing
         raise ImportError(

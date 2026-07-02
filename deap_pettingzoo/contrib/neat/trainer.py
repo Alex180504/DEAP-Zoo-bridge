@@ -22,9 +22,8 @@ import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
-import numpy as np
-
 import neat  # guarded by _require_neat
+import numpy as np
 
 from deap_pettingzoo.baselines._logging_helpers import (
     build_logger,
@@ -68,9 +67,7 @@ class _RecordingReporter(neat.reporting.BaseReporter):
     def start_generation(self, generation: int) -> None:
         self._gen = generation
 
-    def post_evaluate(
-        self, config, population, species_set, best_genome
-    ) -> None:
+    def post_evaluate(self, config, population, species_set, best_genome) -> None:
         if self._gen <= 0:
             return
         try:
@@ -247,7 +244,10 @@ class NEATTrainer(BaselineTrainer):
         # --- Logger + unified champion-rollout recording ---------------------
         log = build_logger(config, algorithm="neat")
         self._recorder = RecordingController(
-            config, log, max_steps=max_steps, seed=seed,
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
         )
 
         # --- Create initial population ---------------------------------------
@@ -290,6 +290,7 @@ class NEATTrainer(BaselineTrainer):
                 replay_registry_snapshot,
             )
             from deap_pettingzoo.utils.parallel import make_executor
+
             from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
             snapshot = get_registry_snapshot()
@@ -337,9 +338,7 @@ class NEATTrainer(BaselineTrainer):
 
             _base_seed = seed if seed is not None else 0
 
-            def _eval_genomes(
-                genomes_and_ids: list, neat_cfg: neat.Config
-            ) -> None:
+            def _eval_genomes(genomes_and_ids: list, neat_cfg: neat.Config) -> None:
                 """neat fitness-function contract: assign .fitness to each genome."""
                 self._generation_num += 1
                 gen_fitnesses: list[float] = []
@@ -352,7 +351,9 @@ class NEATTrainer(BaselineTrainer):
                         )
                         rewards: list[float] = []
                         for ep_i in range(eval_eps):
-                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            ep_seed = (
+                                _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            )
                             observations = env.reset(seed=ep_seed)
                             episode_reward = 0.0
                             done = False
@@ -363,9 +364,13 @@ class NEATTrainer(BaselineTrainer):
                                     actions[agent] = policy.get_action(
                                         observations[agent]
                                     )
-                                observations, step_rewards, dones, truncateds, _infos = (
-                                    env.step(actions)
-                                )
+                                (
+                                    observations,
+                                    step_rewards,
+                                    dones,
+                                    truncateds,
+                                    _infos,
+                                ) = env.step(actions)
                                 episode_reward += float(sum(step_rewards.values()))
                                 done = all(dones.values()) or all(truncateds.values())
                                 _steps += 1
@@ -378,6 +383,7 @@ class NEATTrainer(BaselineTrainer):
                             fitness = float(np.mean(rewards))
                     except Exception:
                         import traceback
+
                         traceback.print_exc()
                         fitness = -1e9
 
@@ -387,9 +393,7 @@ class NEATTrainer(BaselineTrainer):
                 if gen_fitnesses:
                     self._fitness_history.append(float(np.max(gen_fitnesses)))
                 # Per-generation real env steps (serial path).
-                self._env_steps_history.append(
-                    int(self._env_steps_consumed) - _before
-                )
+                self._env_steps_history.append(int(self._env_steps_consumed) - _before)
 
         # --- Add reporters ---------------------------------------------------
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
@@ -432,7 +436,11 @@ class NEATTrainer(BaselineTrainer):
         self._recorder.close()
 
         self._log(
-            config, best_genome, pop_size, elapsed, algorithm="NEAT",
+            config,
+            best_genome,
+            pop_size,
+            elapsed,
+            algorithm="NEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
         if config.recording.enabled:
@@ -492,13 +500,21 @@ class NEATTrainer(BaselineTrainer):
             else:
                 # Parallel path or missing data: apportion evenly.
                 _cumulative = (
-                    int(self._env_steps_consumed) * (i + 1) // max(1, len(self._fitness_history))
-                ) if self._fitness_history else 0
-            _entries.append({
-                "generation": i,
-                "best_fitness": f,
-                "env_steps": _cumulative,
-            })
+                    (
+                        int(self._env_steps_consumed)
+                        * (i + 1)
+                        // max(1, len(self._fitness_history))
+                    )
+                    if self._fitness_history
+                    else 0
+                )
+            _entries.append(
+                {
+                    "generation": i,
+                    "best_fitness": f,
+                    "env_steps": _cumulative,
+                }
+            )
         dump_fitness_history(
             logger,
             _entries,
@@ -509,27 +525,21 @@ class NEATTrainer(BaselineTrainer):
             logger,
             {
                 "algorithm": algorithm,
-                "best_fitness": float(
-                    best_genome.fitness if best_genome else -np.inf
-                ),
+                "best_fitness": float(best_genome.fitness if best_genome else -np.inf),
                 "generations": self._generation_num,
                 "pop_size": pop_size,
                 "elapsed_sec": round(elapsed, 2),
             },
         )
 
-    def _budget_to_generations(
-        self, config: TrainingConfig, pop_size: int
-    ) -> int:
+    def _budget_to_generations(self, config: TrainingConfig, pop_size: int) -> int:
         """Translate ``config.budget_mode`` / ``.budget_value`` to generations.
 
         Uses the shared :func:`~deap_pettingzoo.baselines.base.derive_generations`
         helper so NEAT shares the round-to-nearest + warn-on-collapse behaviour
         of the other population backends.
         """
-        eval_eps = int(
-            config.algorithm_params.get("eval_episodes_per_genome", 1)
-        )
+        eval_eps = int(config.algorithm_params.get("eval_episodes_per_genome", 1))
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
             # Each generation evaluates pop_size genomes × eval_eps episodes.
             return derive_generations(

@@ -37,13 +37,13 @@ from deap_pettingzoo.baselines.base import PolicyProtocol
 from .archive import HallOfFame
 from .samplers import Sampler, uniform_sampler
 
-
-#: A *policy factory* maps a pool's stored item (opaque type) to a class:`PolicyProtocol` instance. 
+#: A *policy factory* maps a pool's stored item (opaque type) to a class:`PolicyProtocol` instance.
 #: Pools hold items (e.g. cloned genomes, snapshots) without knowing how to turn them into executable policies; the factory bridges that gap.
 PolicyFactory = Callable[[Any], PolicyProtocol]
 
 
 # Picklable opponent snapshots
+
 
 @dataclass
 class OpponentSnapshot:
@@ -182,9 +182,7 @@ def rebuild_opponent_policy(
 
         genome = payload["genome"]
         masked = bool(payload.get("masked", False))
-        return FeedforwardNeuralPolicy(
-            genome, action_space=action_space, masked=masked
-        )
+        return FeedforwardNeuralPolicy(genome, action_space=action_space, masked=masked)
 
     if kind == "frozen":
         return payload["policy"]
@@ -204,8 +202,8 @@ def rebuild_opponent_policy(
         return FlaxPolicyAdapter(module, params, action_space=action_space)
 
     if kind == "neat":
-        from deap_pettingzoo.contrib.neat.policy import NeatPolicy
         from deap_pettingzoo.contrib.neat.config import build_neat_config
+        from deap_pettingzoo.contrib.neat.policy import NeatPolicy
 
         genome = payload["genome"]
         input_size = int(payload["config_input_size"])
@@ -215,12 +213,14 @@ def rebuild_opponent_policy(
             output_size=output_size,
         )
         return NeatPolicy(
-            genome, neat_cfg, action_space=action_space,
+            genome,
+            neat_cfg,
+            action_space=action_space,
         )
 
     if kind == "hyperneat":
-        from deap_pettingzoo.contrib.neat.hyperneat import HyperNeatPolicy
         from deap_pettingzoo.contrib.neat.config import build_cppn_config
+        from deap_pettingzoo.contrib.neat.hyperneat import HyperNeatPolicy
         from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
 
         genome = payload["genome"]
@@ -230,13 +230,16 @@ def rebuild_opponent_policy(
         cppn_cfg = build_cppn_config(input_size=5, output_size=1)
         substrate = substrate_for_env(env_obs_size, env_act_size)
         return HyperNeatPolicy(
-            genome, cppn_cfg, substrate, action_space=action_space,
+            genome,
+            cppn_cfg,
+            substrate,
+            action_space=action_space,
             activation=activation,
         )
 
     if kind == "es_hyperneat":
-        from deap_pettingzoo.contrib.neat.hyperneat import ESHyperNeatPolicy
         from deap_pettingzoo.contrib.neat.config import build_cppn_config
+        from deap_pettingzoo.contrib.neat.hyperneat import ESHyperNeatPolicy
         from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
 
         genome = payload["genome"]
@@ -246,7 +249,10 @@ def rebuild_opponent_policy(
         cppn_cfg = build_cppn_config(input_size=5, output_size=1)
         substrate = substrate_for_env(env_obs_size, env_act_size)
         return ESHyperNeatPolicy(
-            genome, cppn_cfg, substrate, action_space=action_space,
+            genome,
+            cppn_cfg,
+            substrate,
+            action_space=action_space,
             es_params=es_params,
         )
 
@@ -448,15 +454,15 @@ class PopulationPool(_BasePool):
         if k < 1:
             raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
         if not self._population:
-            raise ValueError(
-                "PopulationPool.snapshot_opponents: pool is empty."
-            )
+            raise ValueError("PopulationPool.snapshot_opponents: pool is empty.")
         fitnesses = self._fitnesses()
         snaps: List[OpponentSnapshot] = []
         for _ in range(k):
             idx = self._sampler(len(self._population), fitnesses, rng)
             item = self._population[idx]
-            snaps.append(_snapshot_for_item(item, self._snapshot_kind, self._snapshot_metadata))
+            snaps.append(
+                _snapshot_for_item(item, self._snapshot_kind, self._snapshot_metadata)
+            )
         return snaps
 
     def __len__(self) -> int:
@@ -517,14 +523,14 @@ class ArchivePool(_BasePool):
             raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
         size = len(self._archive)
         if size == 0:
-            raise ValueError(
-                "ArchivePool.snapshot_opponents: archive is empty."
-            )
+            raise ValueError("ArchivePool.snapshot_opponents: archive is empty.")
         snaps: List[OpponentSnapshot] = []
         for _ in range(k):
             idx = self._sampler(size, self._archive.fitnesses, rng)
             item = self._archive.items[idx]
-            snaps.append(_snapshot_for_item(item, self._snapshot_kind, self._snapshot_metadata))
+            snaps.append(
+                _snapshot_for_item(item, self._snapshot_kind, self._snapshot_metadata)
+            )
         return snaps
 
     def __len__(self) -> int:
@@ -613,7 +619,7 @@ class FrozenPolicyPool(_BasePool):
                     )
                 )
             else:
-                # Try to ship the policy object directly. 
+                # Try to ship the policy object directly.
                 # Fails fast with a clear PicklingError if the user supplied a non-picklable wrapper.
                 # In this case, switch to the registry path (see ``registry_names=`` ctor kwarg).
                 snaps.append(
@@ -708,6 +714,7 @@ class CompositePool(_BasePool):
 
 # RL pool (degenerate size-1; wraps a live AgileRLPolicyWrapper)
 
+
 class RLPolicyPool(_BasePool):
     """Single-element opponent pool wrapping a live RL policy snapshot.
 
@@ -791,6 +798,7 @@ class RLPolicyPool(_BasePool):
 
         if isinstance(self._policy, AgileRLPolicyWrapper):
             import warnings
+
             try:
                 frozen = self._policy.make_frozen_cpu_snapshot()
             except Exception as exc:
