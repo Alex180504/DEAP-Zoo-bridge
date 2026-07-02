@@ -5,7 +5,7 @@ These tests verify:
 * ``num_workers`` and ``parallel_backend`` are accepted and validated.
 * ``num_workers=1`` (serial) and ``num_workers=2`` (process pool) both
   produce a valid :class:`TrainingResult`.
-* When ``algorithm_params['seed']`` is set, serial and parallel runs
+* When ``TrainingConfig.seed`` is set, serial and parallel runs
   produce **identical final fitness** (deterministic per-individual
   eval seeding).
 """
@@ -28,7 +28,7 @@ def _make_config() -> TrainingConfig:
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
 
 

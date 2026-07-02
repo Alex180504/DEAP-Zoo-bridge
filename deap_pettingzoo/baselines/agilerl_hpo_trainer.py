@@ -201,7 +201,9 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 * ``population_size`` — overrides the constructor default.
                 * ``tournament_size`` — tournament selection size.
                 * ``mutation_probs`` — overrides constructor defaults.
-                * ``seed`` — RNG seed for reproducibility.
+
+                ``config.seed`` (first-class field) seeds the run; see
+                :class:`~deap_pettingzoo.baselines.base.TrainingConfig`.
 
         Returns:
             :class:`TrainingResult` with champion policy and metrics.
@@ -226,7 +228,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
         alg_cls = self._import_algorithm()
         env, obs_spaces, act_spaces, agent_ids = self._build_env(config)
         is_vec = config.algorithm_params.get("num_envs", 1) > 1
-        max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
+        max_steps = (
+            config.max_steps_per_episode
+            if config.max_steps_per_episode is not None
+            else 200
+        )
 
         # ---- HPO hyperparameters ----
         pop_size = config.algorithm_params.get(
@@ -236,7 +242,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             "evo_every_n_steps", self._evo_every_n_steps
         )
         tournament_size = config.algorithm_params.get("tournament_size", 2)
-        seed = config.algorithm_params.get("seed", None)
+        seed = config.seed
         if seed is not None:
             self._seed_everything(int(seed))
 
@@ -802,7 +808,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
         if config.budget_mode == BudgetMode.ENV_STEPS:
             return config.budget_value
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
-            max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
+            max_steps = (
+                config.max_steps_per_episode
+                if config.max_steps_per_episode is not None
+                else 200
+            )
             return config.budget_value * max_steps
         raise ValueError(
             f"EvolveHPOTrainer does not support budget mode {config.budget_mode}"

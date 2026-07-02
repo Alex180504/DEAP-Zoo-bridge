@@ -164,7 +164,12 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         which are honored when the explicit kwargs are ``None``.
         """
         algorithm_params = getattr(config, "algorithm_params", {}) or {}
-        seed = algorithm_params.get("seed")
+        # Fall back to the legacy
+        # ``algorithm_params['seed']`` escape hatch for config-shaped objects
+        # that don't declare the attribute (e.g. NEAT / QDax raw dicts).
+        seed = getattr(config, "seed", None)
+        if seed is None:
+            seed = algorithm_params.get("seed")
         if enable_tensorboard is None:
             enable_tensorboard = bool(algorithm_params.get("logging_tensorboard", False))
         if enable_parquet is None:

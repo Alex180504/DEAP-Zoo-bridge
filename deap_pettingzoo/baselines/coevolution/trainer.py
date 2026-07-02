@@ -402,8 +402,8 @@ class CoEvolutionConfig:
 class CoEvolutionTrainer(BaselineTrainer):
     """Unified co-evolution trainer.
 
-    Consumes a :class:`CoEvolutionConfig` passed in
-    ``TrainingConfig.algorithm_params['coevolution']`` and emits a
+    Consumes a :class:`CoEvolutionConfig` passed via the typed
+    ``TrainingConfig.coevolution_config`` entry point and emits a
     :class:`TrainingResult` whose ``policy`` is the best individual of
     the designated :attr:`CoEvolutionConfig.reporting_side`.
 
@@ -447,12 +447,12 @@ class CoEvolutionTrainer(BaselineTrainer):
             (heterogeneous per-agent rollout); any error is swallowed so it
             cannot interrupt training.
         """
-        coev_cfg = config.algorithm_params.get("coevolution")
+        coev_cfg = config.coevolution_config
         if not isinstance(coev_cfg, CoEvolutionConfig):
             raise ValueError(
                 "CoEvolutionTrainer requires "
-                "config.algorithm_params['coevolution'] to be a "
-                "CoEvolutionConfig instance."
+                "config.coevolution_config to be a CoEvolutionConfig "
+                "instance."
             )
         start = time.time()
         num_generations = self._translate_budget(config, coev_cfg)
@@ -739,8 +739,8 @@ class CoEvolutionTrainer(BaselineTrainer):
         from deap_pettingzoo.baselines.recording import RecordingController
 
         self._recording_log = build_logger(config, algorithm="coevolution")
-        # Use the env's natural episode length, not max_steps_per_episode from
-        # algorithm_params — that's a training knob, not the rollout duration.
+        # Use the env's natural episode length, not
+        # CoEvolutionConfig.max_steps_per_episode.
         _env_cfg = config.env_config or {}
         self._recording_max_steps: int = int(
             config.recording.max_frames_per_episode

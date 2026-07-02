@@ -18,7 +18,7 @@ def _make_config() -> TrainingConfig:
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
 
 
@@ -65,7 +65,7 @@ class TestCMATrainerDaskPool:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=8,
-            algorithm_params={"seed": 0},
+            seed=0,
             num_workers=2,
             parallel_backend="dask",
         )

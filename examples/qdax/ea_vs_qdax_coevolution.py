@@ -103,7 +103,8 @@ def main() -> None:
         env_name=args.env,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=generations * pop,
-        algorithm_params={"coevolution": coev_cfg, "seed": args.seed},
+        seed=args.seed,
+        coevolution_config=coev_cfg,
         output_dir=Path(args.output),
     )
 

@@ -1,6 +1,6 @@
 """Bidirectional EA-vs-MADDPG co-evolution on simple_tag_v3.
 
-Demonstrates the new ``Side(optimizer="rl", ...)`` path:
+Demonstrates the ``Side(optimizer="rl", ...)`` path:
 
 * one EA-evolved side (``adversary_*`` pursuers) exchanging fitness
   signal with...
@@ -80,7 +80,7 @@ def main() -> None:
         env_config={"continuous_actions": True},  # MADDPG needs Box action spaces
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=200,
-        algorithm_params={"coevolution": config},
+        coevolution_config=config,
         output_dir=Path("results/coevolution_ea_vs_maddpg"),
     )
 

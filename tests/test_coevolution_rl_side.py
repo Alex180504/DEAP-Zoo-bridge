@@ -61,7 +61,7 @@ def _tcfg(coev_cfg: CoEvolutionConfig, budget: int = 12) -> TrainingConfig:
         env_config={"continuous_actions": True},  # MADDPG/MATD3 native
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
-        algorithm_params={"coevolution": coev_cfg},
+        coevolution_config=coev_cfg,
     )
 
 

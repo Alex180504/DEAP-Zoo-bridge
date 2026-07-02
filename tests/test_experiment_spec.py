@@ -103,10 +103,11 @@ class TestBuildConfigs:
     def test_hyperparameter_routing(self):
         spec = _spec(hyperparameters={"ea": {"population_size": 12, "max_steps_per_episode": 33}})
         sub = build_configs(spec).sub_runs[0]
-        # population_size -> trainer constructor; max_steps_per_episode -> algorithm_params.
+        # population_size -> trainer constructor; max_steps_per_episode/seed
+        # -> TrainingConfig fields (RUN_CONFIG routing).
         assert sub.trainer_params["population_size"] == 12
-        assert sub.config.algorithm_params["max_steps_per_episode"] == 33
-        assert sub.config.algorithm_params["seed"] == 0
+        assert sub.config.max_steps_per_episode == 33
+        assert sub.config.seed == 0
 
     def test_output_dir_layout(self, tmp_path):
         plan = build_configs(_spec(algorithms=["ea"]), output_root=tmp_path)
@@ -296,7 +297,7 @@ class TestCoevolutionValidation:
         assert len(plan.sub_runs) == 1
         sub = plan.sub_runs[0]
         assert sub.algorithm == "coevolution"
-        coev = sub.config.algorithm_params["coevolution"]
+        coev = sub.config.coevolution_config
         assert [s.optimizer for s in coev.sides] == ["ea", "cma"]
 
 

@@ -38,7 +38,7 @@ class TestEAReproducibility:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=24,
-            algorithm_params={"seed": 42, "max_steps_per_episode": 20},
+            seed=42, max_steps_per_episode=20,
             env_config={"max_cycles": 20},
         )
         result1 = trainer.train(config)
@@ -60,7 +60,7 @@ class TestCMAReproducibility:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=24,
-            algorithm_params={"seed": 42, "max_steps_per_episode": 20},
+            seed=42, max_steps_per_episode=20,
             env_config={"max_cycles": 20},
         )
         result1 = trainer.train(config)
@@ -86,7 +86,7 @@ class TestNumSeedsNotSeed:
                 budget_mode=BudgetMode.EVAL_EPISODES,
                 budget_value=24,
                 num_seeds=ns,
-                algorithm_params={"seed": 42, "max_steps_per_episode": 20},
+                seed=42, max_steps_per_episode=20,
                 env_config={"max_cycles": 20},
             ))
 

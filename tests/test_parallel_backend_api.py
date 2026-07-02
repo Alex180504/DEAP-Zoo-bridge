@@ -60,7 +60,7 @@ class TestTrainingConfigParallelFields:
 @pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs at least 2 CPUs")
 class TestTrainerReadsConfigFields:
     def _make_config(self, **kw):
-        return _cfg(algorithm_params={"seed": 0}, **kw)
+        return _cfg(seed=0, **kw)
 
     def test_ea_reads_config_num_workers(self):
         pytest.importorskip("pettingzoo.mpe")

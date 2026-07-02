@@ -49,7 +49,7 @@ class TestGenerationDerivation:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=1000,
-            algorithm_params={"max_steps_per_episode": 200},
+            max_steps_per_episode=200,
         )
         with pytest.warns(RuntimeWarning, match="clamped to 1 generation"):
             params = trainer._translate_budget(config)
@@ -271,7 +271,7 @@ class TestRealCounterReporting:
             budget_mode=BudgetMode.GENERATIONS,
             budget_value=2,
             env_config={"max_cycles": 25},
-            algorithm_params={"max_steps_per_episode": max_steps, "seed": 0},
+            max_steps_per_episode=max_steps, seed=0,
             num_workers=1,
         )
         result = trainer.train(config)
@@ -289,7 +289,7 @@ def _early_trunc_config(factory_kwargs=None, **overrides):
         budget_mode=BudgetMode.GENERATIONS,
         budget_value=2,
         env_config={"max_cycles": 25},
-        algorithm_params={"max_steps_per_episode": 200, "seed": 0},
+        max_steps_per_episode=200, seed=0,
     )
     base.update(overrides)
     return TrainingConfig(**base)
@@ -341,7 +341,7 @@ class TestConsumedStepBudgeting:
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=budget,
             env_config={"max_cycles": 25},
-            algorithm_params={"max_steps_per_episode": max_steps, "seed": 0},
+            max_steps_per_episode=max_steps, seed=0,
             budget_on_consumed=True,
         )
         result = trainer.train(config)
@@ -372,7 +372,7 @@ class TestConsumedStepBudgetingRejection:
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=3000,
             env_config={"max_cycles": 25},
-            algorithm_params={"max_steps_per_episode": 200, "seed": 0},
+            max_steps_per_episode=200, seed=0,
             budget_on_consumed=True,
         )
 
@@ -407,7 +407,7 @@ class TestConsumedStepBudgetingRejection:
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=budget,
             env_config={"max_cycles": 25},
-            algorithm_params={"coevolution": coev_cfg},
+            coevolution_config=coev_cfg,
             budget_on_consumed=True,
         )
         result = CoEvolutionTrainer().train(config)
@@ -445,7 +445,7 @@ class TestConsumedStepBudgetingRejection:
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=budget,
             env_config={"max_cycles": 25},
-            algorithm_params={"coevolution": coev_cfg},
+            coevolution_config=coev_cfg,
             budget_on_consumed=True,
         )
         result = CoEvolutionTrainer().train(config)
@@ -497,7 +497,7 @@ class TestCoevolutionRealSteps:
             budget_mode=BudgetMode.GENERATIONS,
             budget_value=2,
             env_config={"max_cycles": 25},
-            algorithm_params={"coevolution": coev_cfg},
+            coevolution_config=coev_cfg,
         )
         result = CoEvolutionTrainer().train(config)
         nominal = result.metrics["env_steps_nominal"]
@@ -535,7 +535,7 @@ class TestCoevolutionConsumedBudgetMixed:
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=budget,
             env_config={"max_cycles": 25},
-            algorithm_params={"coevolution": coev_cfg},
+            coevolution_config=coev_cfg,
             budget_on_consumed=True,
         )
         result = CoEvolutionTrainer().train(config)
@@ -586,7 +586,7 @@ class TestRLHPOReporting:
             budget_mode=BudgetMode.GENERATIONS,
             budget_value=2,
             env_config={"max_cycles": 25},
-            algorithm_params={"coevolution": coev_cfg},
+            coevolution_config=coev_cfg,
         )
         CoEvolutionTrainer().train(config)
 

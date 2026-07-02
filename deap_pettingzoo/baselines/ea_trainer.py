@@ -156,8 +156,10 @@ class EATrainer(BaselineTrainer):
         describing every UI-configurable knob of this trainer. The
         :class:`~deap_pettingzoo.catalog.schema.ParamTarget` of each spec tells
         :func:`~deap_pettingzoo.baselines.experiment_spec.build_configs` whether
-        the value is a trainer-constructor argument (``trainer_params``) or a
-        per-run ``algorithm_params`` entry.
+        the value is a trainer-constructor argument (``trainer_params``), a
+        per-run ``algorithm_params`` entry, or a first-class
+        :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attribute
+        (``seed`` / ``max_steps_per_episode``, routed via ``RUN_CONFIG``).
 
         Dict-valued knobs (``selection_params`` / ``crossover_params`` /
         ``mutation_params``) and ``fitness_spec`` are intentionally omitted —
@@ -170,7 +172,7 @@ class EATrainer(BaselineTrainer):
         )
 
         I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
-        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        TR, RC = ParamTarget.TRAINER, ParamTarget.RUN_CONFIG
         return (
             ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
                       group="Architecture",
@@ -228,10 +230,10 @@ class EATrainer(BaselineTrainer):
                       choices=("process", "scoop", "dask"),
                       help="Parallel executor backend."),
             ParamSpec("seed", I, None, minimum=0, step=1,
-                      target=AP, group="Run", nullable=True,
+                      target=RC, group="Run", nullable=True,
                       help="Random seed for this run (None = unseeded)."),
             ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
-                      target=AP, group="Run",
+                      target=RC, group="Run",
                       help="Hard cap on environment steps per rollout."),
         )
 
@@ -454,7 +456,7 @@ class EATrainer(BaselineTrainer):
             setup_deap_creators()
         
         # Seed global RNGs
-        seed = config.algorithm_params.get('seed', None)
+        seed = config.seed
         if seed is not None:
             from deap_pettingzoo.utils.rng import seed_everything
             seed_everything(int(seed))
@@ -519,7 +521,7 @@ class EATrainer(BaselineTrainer):
             hof = tools.HallOfFame(1)
         
         # Setup random number generator
-        rng = np.random.default_rng(config.algorithm_params.get('seed'))
+        rng = np.random.default_rng(seed)
         
         # Track metrics
         fitness_history = []
@@ -528,7 +530,7 @@ class EATrainer(BaselineTrainer):
         env_steps_per_iteration = self.population_size * max_steps_per_episode
         self._recorder = RecordingController(
             config, log, max_steps=max_steps_per_episode,
-            seed=config.algorithm_params.get('seed'),
+            seed=seed,
         )
 
         def _ea_champion():
@@ -637,7 +639,7 @@ class EATrainer(BaselineTrainer):
                     ),
                 )
 
-            base_eval_seed = config.algorithm_params.get("seed")
+            base_eval_seed = seed
             _eval_counter = [0]
 
             def _next_seeds(n: int):
@@ -927,7 +929,11 @@ class EATrainer(BaselineTrainer):
                 ``BudgetMode.ENV_STEPS``, ``BudgetMode.EVAL_EPISODES``, or
                 ``BudgetMode.GENERATIONS``.
         """
-        max_steps_per_episode = config.algorithm_params.get('max_steps_per_episode', 200)
+        max_steps_per_episode = (
+            config.max_steps_per_episode
+            if config.max_steps_per_episode is not None
+            else 200
+        )
 
         if config.budget_mode == BudgetMode.GENERATIONS:
             # Generations are the EA's native unit, so honor the request exactly.

@@ -68,7 +68,7 @@ class PSOTrainer(BaselineTrainer):
         )
 
         I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
-        TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
+        TR, RC = ParamTarget.TRAINER, ParamTarget.RUN_CONFIG
         return (
             ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
                       group="Architecture",
@@ -101,11 +101,11 @@ class PSOTrainer(BaselineTrainer):
                       group="Parallelism", advanced=True,
                       choices=("process", "scoop", "dask"),
                       help="Parallel executor backend."),
-            ParamSpec("seed", I, None, minimum=0, step=1, target=AP,
+            ParamSpec("seed", I, None, minimum=0, step=1, target=RC,
                       group="Run", nullable=True,
                       help="Random seed for this run (None = unseeded)."),
             ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
-                      target=AP, group="Run",
+                      target=RC, group="Run",
                       help="Hard cap on environment steps per rollout."),
         )
 
@@ -176,7 +176,7 @@ class PSOTrainer(BaselineTrainer):
             team_mapping=config.fitness.team_mapping,
         )
 
-        seed = config.algorithm_params.get("seed", None)
+        seed = config.seed
         # Seed global RNGs
         if seed is not None:
             from deap_pettingzoo.utils.rng import seed_everything
@@ -211,7 +211,7 @@ class PSOTrainer(BaselineTrainer):
         env_steps_per_iteration = self.population_size * max_steps
         self._recorder = RecordingController(
             config, log, max_steps=max_steps,
-            seed=config.algorithm_params.get("seed"),
+            seed=seed,
         )
 
         def _pso_champion():
@@ -250,7 +250,7 @@ class PSOTrainer(BaselineTrainer):
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
         ) as executor:
-            base_eval_seed = config.algorithm_params.get("seed")
+            base_eval_seed = seed
             _eval_counter = [0]
             # Aggregates real env-step deltas from parallel workers; stays at
             # 0 on the serial path where the evaluator counter is authoritative.
@@ -425,7 +425,11 @@ class PSOTrainer(BaselineTrainer):
         }
 
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:
-        max_steps = config.algorithm_params.get("max_steps_per_episode", 200)
+        max_steps = (
+            config.max_steps_per_episode
+            if config.max_steps_per_episode is not None
+            else 200
+        )
         if config.budget_mode == BudgetMode.GENERATIONS:
             gens = max(1, int(config.budget_value))
         elif config.budget_mode == BudgetMode.ENV_STEPS:

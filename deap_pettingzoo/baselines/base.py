@@ -346,7 +346,25 @@ class TrainingConfig:
         budget_mode: Primary budget constraint mode.
         budget_value: Budget amount in units specified by budget_mode.
         num_seeds: Number of independent training runs with different seeds.
-        algorithm_params: Algorithm-specific hyperparameters.
+        seed: RNG seed for this run (``None`` = unseeded). First-class
+            replacement for the historical ``algorithm_params['seed']``
+            escape hatch; read directly by the EA / CMA-ES / PSO / AgileRL
+            trainers.
+        max_steps_per_episode: Hard cap on env steps per rollout. ``None``
+            leaves the decision to the trainer (population trainers default
+            to ``200``; AgileRL trainers ignore it and use the env's own
+            truncation). First-class replacement for the historical
+            ``algorithm_params['max_steps_per_episode']`` escape hatch.
+        coevolution_config: Typed entry point for
+            :class:`~deap_pettingzoo.baselines.coevolution.trainer.CoEvolutionConfig`,
+            required by :class:`~deap_pettingzoo.baselines.coevolution.trainer.CoEvolutionTrainer`.
+            Replaces the untyped ``algorithm_params['coevolution']`` escape
+            hatch — passing anything other than a ``CoEvolutionConfig``
+            raises at construction time.
+        algorithm_params: Algorithm-specific hyperparameters. ``seed``,
+            ``max_steps_per_episode``, and co-evolution configuration are
+            first-class fields above; this dict is for genuinely
+            algorithm-specific knobs (e.g. AgileRL's ``batch_size``).
         env_config: Optional kwargs forwarded to the underlying
             ``parallel_env(...)`` constructor (e.g. ``max_cycles`` for
             MPE2, ``max_time_steps``/``prey_count`` for aquarium_v0).
@@ -382,6 +400,9 @@ class TrainingConfig:
     budget_mode: BudgetMode
     budget_value: int
     num_seeds: int = 1
+    seed: Optional[int] = None
+    max_steps_per_episode: Optional[int] = None
+    coevolution_config: Optional[Any] = None
     algorithm_params: Dict[str, Any] = field(default_factory=dict)
     env_config: Dict[str, Any] = field(default_factory=dict)
     continuous: bool = False
@@ -415,6 +436,17 @@ class TrainingConfig:
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
+        if self.coevolution_config is not None:
+            from deap_pettingzoo.baselines.coevolution.trainer import (
+                CoEvolutionConfig,
+            )
+
+            if not isinstance(self.coevolution_config, CoEvolutionConfig):
+                raise TypeError(
+                    "TrainingConfig.coevolution_config must be a "
+                    "CoEvolutionConfig instance, got "
+                    f"{type(self.coevolution_config).__name__}."
+                )
         # Resolve the ``continuous`` shortcut against any explicit ``env_config["continuous_actions"]`` the caller supplied.
         existing = self.env_config.get("continuous_actions")
         if self.continuous:

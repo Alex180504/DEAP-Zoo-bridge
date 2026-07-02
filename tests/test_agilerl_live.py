@@ -124,7 +124,7 @@ class TestIPPOLive:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=500,
-            algorithm_params={"seed": 0, "rollout_steps": 128},
+            seed=0, algorithm_params={"rollout_steps": 128},
         )
         result = IPPOTrainer().train(config)
         assert result.algorithm == "ippo"
@@ -181,7 +181,7 @@ class TestIPPOMultiDiscreteLive:
             env_name=MD_ENV_NAME,
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=128,
-            algorithm_params={"seed": 0, "rollout_steps": 64},
+            seed=0, algorithm_params={"rollout_steps": 64},
         )
 
     def test_trains_and_produces_valid_multidiscrete_actions(self):

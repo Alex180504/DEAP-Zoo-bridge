@@ -65,7 +65,7 @@ def test_ea_trainer_multidiscrete_smoke():
         env_name=MD_ENV_NAME,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
     result = trainer.train(config)
 
@@ -87,7 +87,7 @@ def test_cmaes_trainer_multidiscrete_smoke():
         env_name=MD_ENV_NAME,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
     result = trainer.train(config)
 
@@ -101,7 +101,7 @@ def test_pso_trainer_multidiscrete_smoke():
         env_name=MD_ENV_NAME,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
     result = trainer.train(config)
 

@@ -34,7 +34,7 @@ class TestPSOTrainerSmoke:
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=12,
             num_seeds=1,
-            algorithm_params={"seed": seed, "max_steps_per_episode": 10},
+            seed=seed, max_steps_per_episode=10,
             env_config={"max_cycles": 10},
         )
 
@@ -84,7 +84,7 @@ class TestPSOChampionFitnessNotStale:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.GENERATIONS,
             budget_value=2,
-            algorithm_params={"seed": 42, "max_steps_per_episode": 25},
+            seed=42, max_steps_per_episode=25,
             env_config={"max_cycles": 25},
         )
         result = trainer.train(config)
@@ -115,7 +115,7 @@ class TestPSOChampionFitnessNotStale:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.GENERATIONS,
             budget_value=1,
-            algorithm_params={"seed": 7, "max_steps_per_episode": 15},
+            seed=7, max_steps_per_episode=15,
             env_config={"max_cycles": 15},
         )
         result = trainer.train(config)

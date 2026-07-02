@@ -13,7 +13,7 @@ class TestPSOTrainerParallel:
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=10,
             num_seeds=1,
-            algorithm_params={"seed": seed, "max_steps_per_episode": 10},
+            seed=seed, max_steps_per_episode=10,
             env_config={"max_cycles": 10},
             **kw,
         )

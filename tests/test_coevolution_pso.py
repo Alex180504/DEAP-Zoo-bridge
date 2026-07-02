@@ -21,7 +21,7 @@ def _base_tcfg(cfg: CoEvolutionConfig, budget: int = 40) -> TrainingConfig:
         env_name="simple_tag_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
-        algorithm_params={"coevolution": cfg},
+        coevolution_config=cfg,
     )
 
 
