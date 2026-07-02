@@ -21,9 +21,8 @@ import time
 import warnings
 from typing import Any, Dict, Optional
 
-import numpy as np
-
 import neat  # guarded by _require_neat
+import numpy as np
 
 from deap_pettingzoo.baselines._logging_helpers import build_logger
 from deap_pettingzoo.baselines.base import (
@@ -36,11 +35,11 @@ from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
 
-from .config import build_cppn_config
-from .substrate import substrate_for_env
-from .hyperneat import HyperNeatPolicy, ESHyperNeatPolicy
-from .trainer import _RecordingReporter, NEATTrainer
 from ._pureples.es_hyperneat import ES_HYPERNEAT_PARAMS_DEFAULTS
+from .config import build_cppn_config
+from .hyperneat import ESHyperNeatPolicy, HyperNeatPolicy
+from .substrate import substrate_for_env
+from .trainer import NEATTrainer, _RecordingReporter
 
 
 def _substrate_to_spec(substrate: Any) -> Dict[str, Any]:
@@ -48,9 +47,11 @@ def _substrate_to_spec(substrate: Any) -> Dict[str, Any]:
     return {
         "input_coordinates": [list(c) for c in substrate.input_coordinates],
         "output_coordinates": [list(c) for c in substrate.output_coordinates],
-        "hidden_coordinates": [
-            [list(c) for c in layer] for layer in substrate.hidden_coordinates
-        ] if substrate.hidden_coordinates else None,
+        "hidden_coordinates": (
+            [[list(c) for c in layer] for layer in substrate.hidden_coordinates]
+            if substrate.hidden_coordinates
+            else None
+        ),
     }
 
 
@@ -135,7 +136,10 @@ class HyperNEATTrainer(NEATTrainer):
         # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="hyperneat")
         self._recorder = RecordingController(
-            config, log, max_steps=max_steps, seed=seed,
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
         )
 
         # --- Create population -------------------------------------------
@@ -161,8 +165,10 @@ class HyperNEATTrainer(NEATTrainer):
             def _record_champion(gen: int, best_genome) -> None:
                 self._recorder.observe(
                     ProgressEvent(
-                        unit="generation", current=gen,
-                        total=n_generations, env_steps=gen * max_steps,
+                        unit="generation",
+                        current=gen,
+                        total=n_generations,
+                        env_steps=gen * max_steps,
                     ),
                     lambda: _hn_champion(best_genome),
                 )
@@ -178,8 +184,9 @@ class HyperNEATTrainer(NEATTrainer):
                 replay_registry_snapshot,
             )
             from deap_pettingzoo.utils.parallel import make_executor
-            from .trainer import _action_space_hint
+
             from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
+            from .trainer import _action_space_hint
 
             _act_hint = _action_space_hint(shared_action_space)
             snapshot = get_registry_snapshot()
@@ -221,9 +228,7 @@ class HyperNEATTrainer(NEATTrainer):
         else:
             _base_seed = seed if seed is not None else 0
 
-            def _eval_genomes(
-                genomes_and_ids: list, neat_cfg: neat.Config
-            ) -> None:
+            def _eval_genomes(genomes_and_ids: list, neat_cfg: neat.Config) -> None:
                 self._generation_num += 1
                 gen_fitnesses: list[float] = []
 
@@ -239,7 +244,9 @@ class HyperNEATTrainer(NEATTrainer):
                         )
                         rewards: list[float] = []
                         for ep_i in range(eval_eps):
-                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            ep_seed = (
+                                _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            )
                             observations = env.reset(seed=ep_seed)
                             ep_rew = 0.0
                             done = False
@@ -254,15 +261,14 @@ class HyperNEATTrainer(NEATTrainer):
                                     env.step(actions)
                                 )
                                 ep_rew += float(sum(s_rewards.values()))
-                                done = all(dones.values()) or all(
-                                    truncateds.values()
-                                )
+                                done = all(dones.values()) or all(truncateds.values())
                                 _steps += 1
                                 self._env_steps_consumed += 1
                             rewards.append(ep_rew)
                         genome.fitness = float(np.mean(rewards))
                     except Exception:
                         import traceback
+
                         traceback.print_exc()
                         genome.fitness = -1e9
                     gen_fitnesses.append(genome.fitness)
@@ -287,7 +293,8 @@ class HyperNEATTrainer(NEATTrainer):
 
         self._recorder.finalize(
             lambda: _hn_champion(best_genome),
-            iteration=n_generations, env_steps=n_generations * max_steps,
+            iteration=n_generations,
+            env_steps=n_generations * max_steps,
         )
 
         try:
@@ -297,7 +304,10 @@ class HyperNEATTrainer(NEATTrainer):
         self._recorder.close()
 
         self._log(
-            config, best_genome, pop_size, elapsed,
+            config,
+            best_genome,
+            pop_size,
+            elapsed,
             algorithm="HyperNEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
@@ -361,7 +371,8 @@ class ESHyperNEATTrainer(NEATTrainer):
         substrate = params.get("substrate", None)
         if substrate is None:
             substrate = substrate_for_env(
-                input_size, output_size,
+                input_size,
+                output_size,
                 layout="uniform",
                 hidden_layers=params.get("substrate_hidden_layers", None),
             )
@@ -381,15 +392,16 @@ class ESHyperNEATTrainer(NEATTrainer):
         # --- Logger + unified champion-rollout recording -----------------
         log = build_logger(config, algorithm="es-hyperneat")
         self._recorder = RecordingController(
-            config, log, max_steps=max_steps, seed=seed,
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
         )
 
         pop = neat.Population(neat_config, seed=seed)
 
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
-        es_params = dict(
-            params.get("es_params", ES_HYPERNEAT_PARAMS_DEFAULTS)
-        )
+        es_params = dict(params.get("es_params", ES_HYPERNEAT_PARAMS_DEFAULTS))
 
         # --- Recording reporter ------------------------------------------
         def _esn_champion(best_genome):
@@ -406,15 +418,15 @@ class ESHyperNEATTrainer(NEATTrainer):
             def _record_champion(gen: int, best_genome) -> None:
                 self._recorder.observe(
                     ProgressEvent(
-                        unit="generation", current=gen,
-                        total=n_generations, env_steps=gen * max_steps,
+                        unit="generation",
+                        current=gen,
+                        total=n_generations,
+                        env_steps=gen * max_steps,
                     ),
                     lambda: _esn_champion(best_genome),
                 )
 
-            pop.add_reporter(
-                _RecordingReporter(_record_champion)
-            )
+            pop.add_reporter(_RecordingReporter(_record_champion))
 
         effective_workers, backend = self._resolve_parallelism(config)
 
@@ -425,8 +437,9 @@ class ESHyperNEATTrainer(NEATTrainer):
                 replay_registry_snapshot,
             )
             from deap_pettingzoo.utils.parallel import make_executor
-            from .trainer import _action_space_hint
+
             from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
+            from .trainer import _action_space_hint
 
             _act_hint = _action_space_hint(shared_action_space)
             snapshot = get_registry_snapshot()
@@ -467,9 +480,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         else:
             _base_seed = seed if seed is not None else 0
 
-            def _eval_genomes(
-                genomes_and_ids: list, neat_cfg: neat.Config
-            ) -> None:
+            def _eval_genomes(genomes_and_ids: list, neat_cfg: neat.Config) -> None:
                 self._generation_num += 1
                 gen_fitnesses: list[float] = []
 
@@ -484,7 +495,9 @@ class ESHyperNEATTrainer(NEATTrainer):
                         )
                         rewards: list[float] = []
                         for ep_i in range(eval_eps):
-                            ep_seed = _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            ep_seed = (
+                                _base_seed * 10_000 + self._generation_num * 100 + ep_i
+                            )
                             observations = env.reset(seed=ep_seed)
                             ep_rew = 0.0
                             done = False
@@ -499,15 +512,14 @@ class ESHyperNEATTrainer(NEATTrainer):
                                     env.step(actions)
                                 )
                                 ep_rew += float(sum(s_rewards.values()))
-                                done = all(dones.values()) or all(
-                                    truncateds.values()
-                                )
+                                done = all(dones.values()) or all(truncateds.values())
                                 _steps += 1
                                 self._env_steps_consumed += 1
                             rewards.append(ep_rew)
                         genome.fitness = float(np.mean(rewards))
                     except Exception:
                         import traceback
+
                         traceback.print_exc()
                         genome.fitness = -1e9
                     gen_fitnesses.append(genome.fitness)
@@ -531,7 +543,8 @@ class ESHyperNEATTrainer(NEATTrainer):
 
         self._recorder.finalize(
             lambda: _esn_champion(best_genome),
-            iteration=n_generations, env_steps=n_generations * max_steps,
+            iteration=n_generations,
+            env_steps=n_generations * max_steps,
         )
 
         try:
@@ -541,7 +554,10 @@ class ESHyperNEATTrainer(NEATTrainer):
         self._recorder.close()
 
         self._log(
-            config, best_genome, pop_size, elapsed,
+            config,
+            best_genome,
+            pop_size,
+            elapsed,
             algorithm="ES-HyperNEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )

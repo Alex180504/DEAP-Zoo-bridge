@@ -454,6 +454,7 @@ def clear_cache() -> None:
 
 # Open registration API
 
+
 def _normalize_binding(obj: Union[str, type], *, kind: str) -> str:
     """Normalise a class or dotted string into a ``"module:QualName"`` binding.
 

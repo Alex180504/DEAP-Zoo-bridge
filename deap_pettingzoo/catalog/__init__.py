@@ -190,8 +190,7 @@ def to_json(*, only_available: bool = False) -> Dict[str, Any]:
         "environments": [
             spec.to_dict(available=environments.is_environment_available(spec.name))
             for spec in env_specs
-            if (not only_available)
-            or environments.is_environment_available(spec.name)
+            if (not only_available) or environments.is_environment_available(spec.name)
         ],
         "coevolution": coevolution.get_coevolution_options(),
         "budget_modes": [

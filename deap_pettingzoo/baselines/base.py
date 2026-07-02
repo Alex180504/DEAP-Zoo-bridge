@@ -5,10 +5,11 @@ This module defines the core contracts for training algorithms (EA, MARL, etc.)
 and evaluating their resulting policies under a common interface.
 """
 
+import logging
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-import logging
 from pathlib import Path
 from typing import (
     Any,
@@ -20,7 +21,6 @@ from typing import (
     Protocol,
     Union,
 )
-import warnings
 
 import numpy as np
 
@@ -38,6 +38,7 @@ class BudgetMode(Enum):
       step-based AgileRL trainers reject this mode (see
       :meth:`BaselineTrainer.supports_budget_mode`).
     """
+
     ENV_STEPS = "env_steps"
     EVAL_EPISODES = "eval_episodes"
     GENERATIONS = "generations"
@@ -181,6 +182,7 @@ class RecordingConfig:
             future ``"live_"`` rollout captures sharing the same
             ``frames/`` directory.
     """
+
     enabled: bool = False
     mode: RecordingMode = RecordingMode.COUNT
     every_n_steps: Optional[int] = None
@@ -211,10 +213,7 @@ class RecordingConfig:
                 f"RecordingConfig.fmt must be 'mp4' or 'gif', got {self.fmt!r}"
             )
         self.fmt = fmt
-        if (
-            self.max_frames_per_episode is not None
-            and self.max_frames_per_episode <= 0
-        ):
+        if self.max_frames_per_episode is not None and self.max_frames_per_episode <= 0:
             raise ValueError(
                 "RecordingConfig.max_frames_per_episode must be positive or None, "
                 f"got {self.max_frames_per_episode}"
@@ -256,9 +255,7 @@ class FitnessConfig:
     aggregation_method: str = "sum"
     team_mapping: Optional[Dict[str, str]] = None
 
-    _VALID: ClassVar[frozenset] = frozenset(
-        {"sum", "mean", "min", "max", "team"}
-    )
+    _VALID: ClassVar[frozenset] = frozenset({"sum", "mean", "min", "max", "team"})
 
     def __post_init__(self) -> None:
         if self.aggregation_method not in self._VALID:
@@ -340,7 +337,7 @@ ProgressCallback = Callable[["ProgressEvent"], None]
 @dataclass
 class TrainingConfig:
     """Configuration for training a baseline algorithm.
-    
+
     Attributes:
         env_name: PettingZoo environment name (e.g., 'simple_spread_v3').
         budget_mode: Primary budget constraint mode.
@@ -396,6 +393,7 @@ class TrainingConfig:
             strategies that cannot honor it: EA ``mu_plus_lambda`` /
             ``mu_comma_lambda``, QDax, co-evolution, and NEAT.
     """
+
     env_name: str
     budget_mode: BudgetMode
     budget_value: int
@@ -462,7 +460,7 @@ class TrainingConfig:
 
 class PolicyProtocol(Protocol):
     """Protocol for trained policies that can be evaluated.
-    
+
     Both EA genomes (with FeedforwardNeuralPolicy wrapper) and RL networks
     should satisfy this interface.
     """
@@ -484,7 +482,7 @@ class PolicyProtocol(Protocol):
                 keyword.
         """
         ...
-    
+
     def reset(self) -> None:
         """Reset internal state (for recurrent policies)."""
         ...
@@ -493,7 +491,7 @@ class PolicyProtocol(Protocol):
 @dataclass
 class TrainingResult:
     """Result of training a baseline algorithm.
-    
+
     Attributes:
         algorithm: Name of the algorithm used.
         policy: Trained policy satisfying PolicyProtocol.
@@ -505,6 +503,7 @@ class TrainingResult:
             nondominated individuals from the final population.
             ``None`` for single-objective runs.
     """
+
     algorithm: str
     policy: PolicyProtocol
     metrics: Dict[str, Any]
@@ -522,7 +521,7 @@ class TrainingResult:
 @dataclass
 class EvalResult:
     """Result of evaluating a policy.
-    
+
     Attributes:
         mean_reward: Mean episode reward across evaluation episodes.
         std_reward: Standard deviation of episode rewards.
@@ -536,6 +535,7 @@ class EvalResult:
             a single team scalar (degenerate on zero-sum competitive
             envs); empty for legacy callers that did not record it.
     """
+
     mean_reward: float
     std_reward: float
     min_reward: float
@@ -548,21 +548,21 @@ class EvalResult:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            'mean_reward': float(self.mean_reward),
-            'std_reward': float(self.std_reward),
-            'min_reward': float(self.min_reward),
-            'max_reward': float(self.max_reward),
-            'num_episodes': self.num_episodes,
-            'episode_rewards': [float(r) for r in self.episode_rewards],
-            'episode_lengths': [int(l) for l in self.episode_lengths],
-            'agent_rewards': {str(k): float(v) for k, v in self.agent_rewards.items()},
+            "mean_reward": float(self.mean_reward),
+            "std_reward": float(self.std_reward),
+            "min_reward": float(self.min_reward),
+            "max_reward": float(self.max_reward),
+            "num_episodes": self.num_episodes,
+            "episode_rewards": [float(r) for r in self.episode_rewards],
+            "episode_lengths": [int(l) for l in self.episode_lengths],
+            "agent_rewards": {str(k): float(v) for k, v in self.agent_rewards.items()},
         }
 
 
 @dataclass
 class ComparisonConfig:
     """Configuration for comparing multiple baseline algorithms.
-    
+
     Attributes:
         algorithms: List of algorithm names to compare.
         env_name: PettingZoo environment name.
@@ -582,6 +582,7 @@ class ComparisonConfig:
             flattened and re-routed by catalog target during config building.
         output_dir: Directory for saving results.
     """
+
     algorithms: List[str]
     env_name: str
     budget_mode: Union[BudgetMode, str]
@@ -592,7 +593,7 @@ class ComparisonConfig:
     max_steps_per_episode: int = 500
     algorithm_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     output_dir: Optional[Path] = None
-    
+
     def __post_init__(self):
         """Validate configuration."""
         if not self.algorithms:
@@ -602,7 +603,9 @@ class ComparisonConfig:
         if self.num_seeds <= 0:
             raise ValueError(f"num_seeds must be positive, got {self.num_seeds}")
         if self.eval_episodes <= 0:
-            raise ValueError(f"eval_episodes must be positive, got {self.eval_episodes}")
+            raise ValueError(
+                f"eval_episodes must be positive, got {self.eval_episodes}"
+            )
         if isinstance(self.budget_mode, str):
             self.budget_mode = BudgetMode(self.budget_mode)
         if self.output_dir is not None and not isinstance(self.output_dir, Path):
@@ -611,7 +614,7 @@ class ComparisonConfig:
 
 class BaselineTrainer(ABC):
     """Abstract base class for training baseline algorithms.
-    
+
     Subclasses implement specific training approaches (EA, MARL, etc.)
     while conforming to a unified interface.
     """
@@ -688,23 +691,23 @@ class BaselineTrainer(ABC):
             TrainingResult containing the trained policy and metrics.
         """
         pass
-    
+
     @abstractmethod
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         """Check if this trainer supports the given budget mode.
-        
+
         Args:
             mode: Budget mode to check.
-            
+
         Returns:
             True if supported, False otherwise.
         """
         pass
-    
+
     @abstractmethod
     def get_capabilities(self) -> Dict[str, Any]:
         """Get algorithm capabilities metadata.
-        
+
         Returns:
             Dictionary with keys:
             - 'discrete_action': bool (supports discrete action spaces)
@@ -724,11 +727,11 @@ class BaselineTrainer(ABC):
 
 class BaselineEvaluator(ABC):
     """Abstract base class for evaluating trained policies.
-    
+
     Provides a unified interface for policy evaluation regardless of
     the training algorithm used.
     """
-    
+
     @abstractmethod
     def evaluate(
         self,
@@ -736,17 +739,17 @@ class BaselineEvaluator(ABC):
         env_name: str,
         num_episodes: int,
         seed: Optional[int] = None,
-        render: bool = False
+        render: bool = False,
     ) -> EvalResult:
         """Evaluate a policy on the given environment.
-        
+
         Args:
             policy: Trained policy satisfying PolicyProtocol.
             env_name: PettingZoo environment name.
             num_episodes: Number of episodes to evaluate.
             seed: Random seed for reproducibility.
             render: Whether to render episodes.
-            
+
         Returns:
             EvalResult with reward statistics.
         """

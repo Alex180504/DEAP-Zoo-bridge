@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 def _lazy_pd():
     import pandas as pd  # noqa: WPS433
+
     return pd
 
 
@@ -161,7 +162,7 @@ class RunRecord:
         Resolves ``final_fitness`` -> ``best_fitness`` -> (co-evolution
         ``final_best``). Deliberately **excludes** ``mean_episode_reward``:
         a self-reported RL training reward is not a fitness, and silently
-        coalescing it here mixed incomparable metrics into one column. 
+        coalescing it here mixed incomparable metrics into one column.
         Use :attr:`comparison_score` for the provenance-tagged
         cross-backend comparison metric.
         """
@@ -390,7 +391,6 @@ class Experiment:
 
     def __getitem__(self, idx: int) -> RunRecord:
         return self.runs[idx]
-
 
     def filter(
         self,
@@ -624,9 +624,7 @@ class Experiment:
         elif fmt == "parquet":
             df.to_parquet(path, index=False)
         else:
-            raise ValueError(
-                f"fmt must be 'csv', 'json' or 'parquet', got {fmt!r}"
-            )
+            raise ValueError(f"fmt must be 'csv', 'json' or 'parquet', got {fmt!r}")
         return path
 
     def score_provenances(

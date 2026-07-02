@@ -51,7 +51,7 @@ def iqm(values: Sequence[float]) -> float:
         # samples from each end by count, average the rest.
         arr = np.sort(arr)
         k = int(arr.size * 0.25)
-        trimmed = arr[k: arr.size - k] if arr.size - 2 * k > 0 else arr
+        trimmed = arr[k : arr.size - k] if arr.size - 2 * k > 0 else arr
         return float(np.mean(trimmed))
 
 
@@ -326,12 +326,8 @@ def aggregate_summary(
             # table and the unequal-n check (it can neither trigger nor mask it).
             continue
         counts[algo] = int(arr.size)
-        mean, mlo, mhi = mean_with_ci(
-            arr, n_bootstrap=n_bootstrap, ci=ci, rng=rng
-        )
-        i_pt, ilo, ihi = iqm_with_ci(
-            arr, n_bootstrap=n_bootstrap, ci=ci, rng=rng
-        )
+        mean, mlo, mhi = mean_with_ci(arr, n_bootstrap=n_bootstrap, ci=ci, rng=rng)
+        i_pt, ilo, ihi = iqm_with_ci(arr, n_bootstrap=n_bootstrap, ci=ci, rng=rng)
         rows.append(
             {
                 "algorithm": algo,

@@ -130,8 +130,11 @@ async def start_install(manager: str, action: str, args: List[str]) -> str:
 
     log_fh = open(str(log_path), "wb")
     # Record the command for display (the python exe is noisy — show "pip ...").
-    display = " ".join(["pip" if c == sys.executable else c for c in cmd[2:]]) \
-        if manager == "pip" else " ".join(cmd)
+    display = (
+        " ".join(["pip" if c == sys.executable else c for c in cmd[2:]])
+        if manager == "pip"
+        else " ".join(cmd)
+    )
 
     try:
         proc = await asyncio.create_subprocess_exec(

@@ -23,7 +23,6 @@ from typing import Callable, Optional
 
 import numpy as np
 
-
 Sampler = Callable[[int, Optional[np.ndarray], np.random.Generator], int]
 
 

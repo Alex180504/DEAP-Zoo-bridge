@@ -46,9 +46,7 @@ def create_cppn(
         The CPPN ready for ``.activate(inputs)``.
     """
     # Gather expressed connections.
-    connections = [
-        cg.key for cg in genome.connections.values() if cg.enabled
-    ]
+    connections = [cg.key for cg in genome.connections.values() if cg.enabled]
 
     layers = feed_forward_layers(
         config.genome_config.input_keys,
@@ -66,10 +64,8 @@ def create_cppn(
                     inputs.append((inode, cg.weight))
 
             ng = genome.nodes[node]
-            aggregation_function = (
-                config.genome_config.aggregation_function_defs.get(
-                    ng.aggregation
-                )
+            aggregation_function = config.genome_config.aggregation_function_defs.get(
+                ng.aggregation
             )
             activation_function = config.genome_config.activation_defs.get(
                 ng.activation

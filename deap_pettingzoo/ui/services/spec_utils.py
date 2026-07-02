@@ -107,6 +107,7 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
     raw_config = spec.get("raw_config") or {}
     if isinstance(raw_config, dict) and raw_config:
         import json
+
         form["raw_text"] = json.dumps(raw_config, indent=2)
     else:
         form["raw_text"] = ""
@@ -123,6 +124,7 @@ def extract_loaded_spec(setup_config_json: Optional[str]) -> Optional[Dict[str, 
         return None
     try:
         import json
+
         data = json.loads(setup_config_json)
     except (json.JSONDecodeError, TypeError):
         return None

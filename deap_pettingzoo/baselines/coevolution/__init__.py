@@ -30,6 +30,7 @@ from .pools import (
     PopulationPool,
     RLPolicyPool,
 )
+from .rl_side import SUPPORTED_RL_ALGORITHMS, RLSideState
 from .samplers import (
     Sampler,
     fitness_proportional_sampler,
@@ -47,7 +48,6 @@ from .sides import (
     make_side_state,
     register_side_state,
 )
-from .rl_side import RLSideState, SUPPORTED_RL_ALGORITHMS
 from .trainer import (
     VALID_MODES,
     VALID_SCHEDULES,

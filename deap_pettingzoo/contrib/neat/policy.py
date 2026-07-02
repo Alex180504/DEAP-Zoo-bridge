@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import neat  # guarded by _require_neat in __init__
 import numpy as np
 
 from deap_pettingzoo.baselines.base import PolicyProtocol
@@ -30,8 +31,6 @@ from deap_pettingzoo.policies.action_heads import (
     ActionHead,
     make_head,
 )
-
-import neat  # guarded by _require_neat in __init__
 
 
 class NeatPolicy(PolicyProtocol):
@@ -99,10 +98,7 @@ class NeatPolicy(PolicyProtocol):
         raw_arr = np.asarray(raw, dtype=np.float32)
 
         if self._head is not None:
-            if (
-                action_mask is not None
-                and getattr(self._head, "supports_mask", False)
-            ):
+            if action_mask is not None and getattr(self._head, "supports_mask", False):
                 return self._head.decode(raw_arr, action_mask=action_mask)
             return self._head.decode(raw_arr)
         return raw_arr

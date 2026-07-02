@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 from typing import Optional, Sequence
 
-
 _UI_DIR = Path(__file__).resolve().parent
 _APP_FILE = _UI_DIR / "app.py"
 _DEFAULT_SERVICE_PORT = 8100

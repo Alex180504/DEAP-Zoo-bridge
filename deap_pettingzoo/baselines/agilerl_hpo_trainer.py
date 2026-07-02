@@ -22,8 +22,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 from deap_pettingzoo.baselines.base import (
     BudgetMode,
     ProgressCallback,
@@ -79,9 +79,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
     ) -> None:
         super().__init__(device=device, verbose=verbose)
         if population_size < 2:
-            raise ValueError(
-                f"population_size must be >= 2, got {population_size}"
-            )
+            raise ValueError(f"population_size must be >= 2, got {population_size}")
         self._hpo_population_size = int(population_size)
         self._evo_every_n_steps = int(evo_every_n_steps)
         self._mutation_probs = dict(mutation_probs or {})
@@ -122,40 +120,122 @@ class EvolveHPOTrainer(AgileRLTrainer):
         I, F = ParamType.INT, ParamType.FLOAT
         TR, AP = ParamTarget.TRAINER, ParamTarget.ALGORITHM_PARAMS
         base = [
-            p for p in AgileRLTrainer.describe_hyperparameters()
-            if p.name != "num_envs"
+            p for p in AgileRLTrainer.describe_hyperparameters() if p.name != "num_envs"
         ]
         hpo = (
-            ParamSpec("population_size", I, 6, minimum=2, step=1, target=TR,
-                      group="HPO",
-                      help="Number of AgileRL agents evolved in parallel."),
-            ParamSpec("evo_every_n_steps", I, 50_000, minimum=1, step=1000,
-                      target=TR, group="HPO",
-                      help="Env steps each agent trains between generations."),
-            ParamSpec("tournament_size", I, 2, minimum=1, step=1, target=AP,
-                      group="HPO",
-                      help="Tournament size for survivor selection."),
-            ParamSpec("mutation_sd", F, 0.1, minimum=0.0, step=0.01, target=AP,
-                      group="HPO", advanced=True,
-                      help="Standard deviation of parameter mutations."),
-            ParamSpec("prob_no_mutation", F, 0.4, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of leaving an agent unmutated."),
-            ParamSpec("prob_architecture", F, 0.2, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of an architecture mutation."),
-            ParamSpec("prob_new_layer_prob", F, 0.2, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of adding/removing a layer."),
-            ParamSpec("prob_parameters", F, 0.2, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of a weight-parameter mutation."),
-            ParamSpec("prob_activation", F, 0.0, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of an activation-function mutation."),
-            ParamSpec("prob_rl_hp", F, 0.2, minimum=0.0, maximum=1.0,
-                      step=0.05, target=AP, group=_MUT_GROUP, advanced=True,
-                      help="Relative probability of an RL-hyperparameter mutation."),
+            ParamSpec(
+                "population_size",
+                I,
+                6,
+                minimum=2,
+                step=1,
+                target=TR,
+                group="HPO",
+                help="Number of AgileRL agents evolved in parallel.",
+            ),
+            ParamSpec(
+                "evo_every_n_steps",
+                I,
+                50_000,
+                minimum=1,
+                step=1000,
+                target=TR,
+                group="HPO",
+                help="Env steps each agent trains between generations.",
+            ),
+            ParamSpec(
+                "tournament_size",
+                I,
+                2,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="HPO",
+                help="Tournament size for survivor selection.",
+            ),
+            ParamSpec(
+                "mutation_sd",
+                F,
+                0.1,
+                minimum=0.0,
+                step=0.01,
+                target=AP,
+                group="HPO",
+                advanced=True,
+                help="Standard deviation of parameter mutations.",
+            ),
+            ParamSpec(
+                "prob_no_mutation",
+                F,
+                0.4,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of leaving an agent unmutated.",
+            ),
+            ParamSpec(
+                "prob_architecture",
+                F,
+                0.2,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of an architecture mutation.",
+            ),
+            ParamSpec(
+                "prob_new_layer_prob",
+                F,
+                0.2,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of adding/removing a layer.",
+            ),
+            ParamSpec(
+                "prob_parameters",
+                F,
+                0.2,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of a weight-parameter mutation.",
+            ),
+            ParamSpec(
+                "prob_activation",
+                F,
+                0.0,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of an activation-function mutation.",
+            ),
+            ParamSpec(
+                "prob_rl_hp",
+                F,
+                0.2,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=AP,
+                group=_MUT_GROUP,
+                advanced=True,
+                help="Relative probability of an RL-hyperparameter mutation.",
+            ),
         )
         return tuple(base) + hpo
 
@@ -212,12 +292,12 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
         # Lazy imports — AgileRL is an optional dependency.
         try:
-            from agilerl.hpo.mutation import Mutations
-            from agilerl.hpo.tournament import TournamentSelection
             from agilerl.algorithms.core.registry import (
                 HyperparameterConfig,
                 RLParameter,
             )
+            from agilerl.hpo.mutation import Mutations
+            from agilerl.hpo.tournament import TournamentSelection
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
                 "EvolveHPOTrainer requires the 'rl-baselines' extra. "
@@ -256,17 +336,23 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
         # ---- build population ----
         ctor_kwargs: Dict[str, Any] = {}
-        ctor_kwargs["device"] = config.algorithm_params.get(
-            "device", self.device
-        )
+        ctor_kwargs["device"] = config.algorithm_params.get("device", self.device)
         # memory_size and learning_delay are buffer/rollout params consumed by
         # _train_one_agent; convert them to valid MADDPG/MATD3 constructor args.
         self._hpo_memory_size = int(config.algorithm_params.get("memory_size", 100_000))
         self._hpo_learning_delay = int(config.algorithm_params.get("learning_delay", 0))
         for key in (
-            "batch_size", "learn_step",
-            "lr_actor", "lr_critic", "lr", "gamma", "tau", "policy_freq",
-            "expl_noise", "O_U_noise", "ent_coef",
+            "batch_size",
+            "learn_step",
+            "lr_actor",
+            "lr_critic",
+            "lr",
+            "gamma",
+            "tau",
+            "policy_freq",
+            "expl_noise",
+            "O_U_noise",
+            "ent_coef",
         ):
             if key in config.algorithm_params:
                 ctor_kwargs[key] = config.algorithm_params[key]
@@ -275,8 +361,14 @@ class EvolveHPOTrainer(AgileRLTrainer):
         self._prepare_population_build(obs_spaces, act_spaces, agent_ids)
 
         population = self._build_population(
-            alg_cls, pop_size, obs_spaces, act_spaces, agent_ids,
-            net_config, hp_config, ctor_kwargs,
+            alg_cls,
+            pop_size,
+            obs_spaces,
+            act_spaces,
+            agent_ids,
+            net_config,
+            hp_config,
+            ctor_kwargs,
         )
 
         # ---- HPO machinery ----
@@ -306,7 +398,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
         generation = 0
         fitness_history: List[Dict[str, Any]] = []
 
-        from deap_pettingzoo.baselines._logging_helpers import build_logger, write_summary
+        from deap_pettingzoo.baselines._logging_helpers import (
+            build_logger,
+            write_summary,
+        )
         from deap_pettingzoo.baselines.recording import RecordingController
         from deap_pettingzoo.utils.logging import save_agilerl_agent
 
@@ -321,15 +416,22 @@ class EvolveHPOTrainer(AgileRLTrainer):
             )
             # Champion tracks the live best-agent wrapper (updated each gen).
             _champion_agent: Any = population[0] if population else None
-            _champion_policy: Any = AgileRLPolicyWrapper(
-                _champion_agent, agent_ids, algorithm_name=algo_tag,
-            ) if _champion_agent is not None else None
+            _champion_policy: Any = (
+                AgileRLPolicyWrapper(
+                    _champion_agent,
+                    agent_ids,
+                    algorithm_name=algo_tag,
+                )
+                if _champion_agent is not None
+                else None
+            )
 
             def _champion():
                 return _champion_policy
 
             self._recorder = RecordingController(
-                config, log,
+                config,
+                log,
                 max_steps=_rec_max_steps,
                 seed=seed,
             )
@@ -345,12 +447,22 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 for agent in population:
                     if self.ON_POLICY:
                         gen_steps = self._train_one_agent_on_policy(
-                            agent, env, agent_ids, evo_every, rng,
+                            agent,
+                            env,
+                            agent_ids,
+                            evo_every,
+                            rng,
                         )
                     else:
                         gen_steps = self._train_one_agent(
-                            agent, env, agent_ids, is_vec, max_steps,
-                            evo_every, seed, rng,
+                            agent,
+                            env,
+                            agent_ids,
+                            is_vec,
+                            max_steps,
+                            evo_every,
+                            seed,
+                            rng,
                         )
                     steps_done += gen_steps
                     gen_progress += gen_steps
@@ -361,7 +473,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 if gen_progress == 0:
                     logger.warning(
                         "[%s] generation %d consumed 0 env steps; stopping early",
-                        algo_tag, generation,
+                        algo_tag,
+                        generation,
                     )
                     warnings.warn(
                         f"{algo_tag}: HPO generation made no progress; "
@@ -374,38 +487,50 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 # Evaluate all agents.
                 for agent in population:
                     fit = self._evaluate_agent(
-                        agent, env, agent_ids, max_steps,
-                        seed, rng, num_episodes=3,
+                        agent,
+                        env,
+                        agent_ids,
+                        max_steps,
+                        seed,
+                        rng,
+                        num_episodes=3,
                     )
                     gen_fitnesses.append(fit)
-                    agent.fitness.append(fit)   # append fitness to agent's history for AgileRL's tournament/selection
+                    agent.fitness.append(
+                        fit
+                    )  # append fitness to agent's history for AgileRL's tournament/selection
 
                 # Record stats.
                 best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
                 mean_fit = float(np.mean(gen_fitnesses)) if gen_fitnesses else 0.0
                 std_fit = float(np.std(gen_fitnesses)) if gen_fitnesses else 0.0
                 min_fit = min(gen_fitnesses) if gen_fitnesses else 0.0
-                fitness_history.append({
-                    "generation": generation,
-                    "steps": steps_done,
-                    "mean": mean_fit,
-                    "max": best_fit,
-                    "min": min_fit,
-                    "std": std_fit,
-                })
+                fitness_history.append(
+                    {
+                        "generation": generation,
+                        "steps": steps_done,
+                        "mean": mean_fit,
+                        "max": best_fit,
+                        "min": min_fit,
+                        "std": std_fit,
+                    }
+                )
 
                 elapsed = time.time() - start_time
-                log.row("metrics", {
-                    "iteration": generation,
-                    "env_steps": steps_done,
-                    "nominal_env_steps": steps_done,
-                    "wall_time_s": elapsed,
-                    "mean": mean_fit,
-                    "std": std_fit,
-                    "min": min_fit,
-                    "max": best_fit,
-                    "mean_loss": None,
-                })
+                log.row(
+                    "metrics",
+                    {
+                        "iteration": generation,
+                        "env_steps": steps_done,
+                        "nominal_env_steps": steps_done,
+                        "wall_time_s": elapsed,
+                        "mean": mean_fit,
+                        "std": std_fit,
+                        "min": min_fit,
+                        "max": best_fit,
+                        "mean_loss": None,
+                    },
+                )
 
                 if self.verbose:
                     print(
@@ -422,7 +547,9 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 best_idx_gen = int(np.argmax(gen_fitnesses)) if gen_fitnesses else 0
                 _champion_agent = population[best_idx_gen % len(population)]
                 _champion_policy = AgileRLPolicyWrapper(
-                    _champion_agent, agent_ids, algorithm_name=algo_tag,
+                    _champion_agent,
+                    agent_ids,
+                    algorithm_name=algo_tag,
                 )
                 self._on_progress(
                     progress_callback,
@@ -440,18 +567,24 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
             # Champion = best agent by fitness.
             champ_fits = [
-                self._evaluate_agent(a, env, agent_ids, max_steps, seed, rng, num_episodes=5)
+                self._evaluate_agent(
+                    a, env, agent_ids, max_steps, seed, rng, num_episodes=5
+                )
                 for a in population
             ]
             champ_idx = int(np.argmax(champ_fits))
             champion = population[champ_idx]
 
             policy = AgileRLPolicyWrapper(
-                champion, agent_ids, algorithm_name=algo_tag,
+                champion,
+                agent_ids,
+                algorithm_name=algo_tag,
             )
             training_time = time.time() - start_time
 
-            self._recorder.finalize(_champion, iteration=generation, env_steps=steps_done)
+            self._recorder.finalize(
+                _champion, iteration=generation, env_steps=steps_done
+            )
             self._recorder.close()
 
             save_agilerl_agent(
@@ -535,7 +668,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 grow = float(spec[2]) if len(spec) > 2 else 1.5
                 shrink = float(spec[3]) if len(spec) > 3 else 0.75
                 params[name] = RLParameter(
-                    min=lo, max=hi, grow_factor=grow, shrink_factor=shrink,
+                    min=lo,
+                    max=hi,
+                    grow_factor=grow,
+                    shrink_factor=shrink,
                 )
             else:
                 params[name] = spec  # already an RLParameter
@@ -564,13 +700,15 @@ class EvolveHPOTrainer(AgileRLTrainer):
             kwargs["hp_config"] = hp_config
 
         try:
-            return list(alg_cls.population(
-                size=size,
-                observation_space=obs_spaces,
-                action_space=act_spaces,
-                agent_ids=agent_ids,
-                **kwargs,
-            ))
+            return list(
+                alg_cls.population(
+                    size=size,
+                    observation_space=obs_spaces,
+                    action_space=act_spaces,
+                    agent_ids=agent_ids,
+                    **kwargs,
+                )
+            )
         except TypeError:
             # Older AgileRL — construct manually.
             pop = []
@@ -604,13 +742,19 @@ class EvolveHPOTrainer(AgileRLTrainer):
         steps = 0
         learn_step = max(1, int(getattr(agent, "learn_step", 100)))
         batch_size = int(getattr(agent, "batch_size", 64))
-        learning_delay = int(getattr(self, "_hpo_learning_delay", getattr(agent, "learning_delay", 500)))
+        learning_delay = int(
+            getattr(self, "_hpo_learning_delay", getattr(agent, "learning_delay", 500))
+        )
         total_transitions = int(getattr(agent, "_total_transitions", 0))
         discrete = bool(getattr(agent, "discrete_actions", False))
         num_envs = int(getattr(env, "num_envs", 1))
 
         memory = MultiAgentReplayBuffer(
-            memory_size=int(getattr(self, "_hpo_memory_size", getattr(agent, "memory_size", 100_000))),
+            memory_size=int(
+                getattr(
+                    self, "_hpo_memory_size", getattr(agent, "memory_size", 100_000)
+                )
+            ),
             field_names=["obs", "action", "reward", "next_obs", "done"],
             agent_ids=agent_ids,
             device=self.device,
@@ -669,9 +813,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 if is_vec:
                     full_reward = {
                         a: np.asarray(
-                            rewards.get(
-                                a, np.full(num_envs, np.nan, dtype=np.float32)
-                            ),
+                            rewards.get(a, np.full(num_envs, np.nan, dtype=np.float32)),
                             dtype=np.float32,
                         ).reshape(num_envs)
                         for a in agent_ids
@@ -688,7 +830,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     for a in agent_ids
                 }
                 done_dict = self._build_done_dict(
-                    terms, truncs, agent_ids, is_vec=is_vec, num_envs=num_envs,
+                    terms,
+                    truncs,
+                    agent_ids,
+                    is_vec=is_vec,
+                    num_envs=num_envs,
                 )
 
                 memory.save_to_memory(
@@ -719,7 +865,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     except Exception:  # pragma: no cover - version drift
                         logger.warning(
                             "[%s-hpo] _train_one_agent: agent.learn() failed",
-                            self.ALGORITHM_NAME, exc_info=True,
+                            self.ALGORITHM_NAME,
+                            exc_info=True,
                         )
 
                 if done:
@@ -750,7 +897,12 @@ class EvolveHPOTrainer(AgileRLTrainer):
         )
 
         return train_agent_on_policy(
-            agent, env, agent_ids, target_steps, logger=logger, rng=rng,
+            agent,
+            env,
+            agent_ids,
+            target_steps,
+            logger=logger,
+            rng=rng,
         )
 
     def _prepare_population_build(
@@ -824,6 +976,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             build_parallel_env,
             extract_space_metadata,
         )
+
         env = build_parallel_env(
             config.env_name,
             env_config=config.env_config or None,
@@ -832,6 +985,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         return env, obs_spaces, act_spaces, agent_ids
 
     # Concrete subclasses per algorithm
+
 
 class MADDPGHPOTrainer(EvolveHPOTrainer):
     ALGORITHM_NAME = "maddpg"
@@ -862,16 +1016,31 @@ class IPPOHPOTrainer(EvolveHPOTrainer):
     # are off-policy-only and must be stripped before population creation.
     _IPPO_UNSUPPORTED_KWARGS = frozenset({"lr_critic", "tau"})
 
-    def _build_population(self, alg_cls, size, obs_spaces, act_spaces, agent_ids,
-                          net_config, hp_config, ctor_kwargs):
+    def _build_population(
+        self,
+        alg_cls,
+        size,
+        obs_spaces,
+        act_spaces,
+        agent_ids,
+        net_config,
+        hp_config,
+        ctor_kwargs,
+    ):
         kwargs = dict(ctor_kwargs)
         if "lr_actor" in kwargs:
             kwargs.setdefault("lr", kwargs.pop("lr_actor"))
         for key in self._IPPO_UNSUPPORTED_KWARGS:
             kwargs.pop(key, None)
         return super()._build_population(
-            alg_cls, size, obs_spaces, act_spaces, agent_ids,
-            net_config, hp_config, kwargs,
+            alg_cls,
+            size,
+            obs_spaces,
+            act_spaces,
+            agent_ids,
+            net_config,
+            hp_config,
+            kwargs,
         )
 
 

@@ -47,6 +47,7 @@ def is_available() -> bool:
     """Return ``True`` if ``neat`` is importable."""
     try:
         import neat  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -68,51 +69,61 @@ def __getattr__(name: str):
     if name == "build_neat_config":
         _require_neat()
         from .config import build_neat_config as _fn
+
         return _fn
     if name == "build_cppn_config":
         _require_neat()
         from .config import build_cppn_config as _fn
+
         return _fn
     if name == "Substrate":
         _require_neat()
         from ._pureples.substrate import Substrate as _cls
+
         return _cls
     if name == "NeatPolicy":
         _require_neat()
         from .policy import NeatPolicy as _cls
+
         return _cls
     if name == "HyperNeatPolicy":
         _require_neat()
         from .hyperneat import HyperNeatPolicy as _cls
+
         return _cls
     if name == "ESHyperNeatPolicy":
         _require_neat()
         from .hyperneat import ESHyperNeatPolicy as _cls
+
         return _cls
     if name == "NEATTrainer":
         _require_neat()
         from .trainer import NEATTrainer as _cls
+
         return _cls
     if name == "HyperNEATTrainer":
         _require_neat()
         from .hyperneat_trainer import HyperNEATTrainer as _cls
+
         return _cls
     if name == "ESHyperNEATTrainer":
         _require_neat()
         from .hyperneat_trainer import ESHyperNEATTrainer as _cls
+
         return _cls
     if name == "NeatSideState":
         _require_neat()
         from .coevolution import NeatSideState as _cls
+
         return _cls
     if name == "HyperNeatSideState":
         _require_neat()
         from .hyperneat_coevolution import HyperNeatSideState as _cls
+
         return _cls
     if name == "ESHyperNeatSideState":
         _require_neat()
         from .hyperneat_coevolution import ESHyperNeatSideState as _cls
+
         return _cls
-    raise AttributeError(
-        f"module {__name__!r} has no attribute {name!r}"
-    )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

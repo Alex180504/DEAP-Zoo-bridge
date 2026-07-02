@@ -202,9 +202,7 @@ class FrameRecorder:
                 self.fmt = "gif"
                 path = self._frames_dir / f"{self.episode_prefix}episode_{ep:04d}.gif"
                 try:
-                    imageio.mimsave(
-                        path, self._frames, duration=1.0 / max(self.fps, 1)
-                    )
+                    imageio.mimsave(path, self._frames, duration=1.0 / max(self.fps, 1))
                 except Exception:
                     path = None  # type: ignore[assignment]
             else:

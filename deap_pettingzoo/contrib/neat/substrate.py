@@ -133,6 +133,7 @@ def substrate_for_env(
     if layout == "2d_grid":
         # Estimate a square-ish grid.
         import math
+
         side = int(math.ceil(math.sqrt(env_obs_size)))
         return make_2d_grid_substrate(
             (side, side), env_act_size, hidden_layers=hidden_layers

@@ -15,9 +15,9 @@ The simplest way to launch the UI is via docker-compose::
 Alternatively, the UI service can be started directly via the command line::
 
     streamlit run deap_pettingzoo/ui/app.py
-    
+
     or:
-    
+
     python -m deap_pettingzoo.ui
 
 

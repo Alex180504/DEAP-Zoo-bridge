@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 import streamlit as st
+
 from deap_pettingzoo.analysis import (
     learning_curve_with_ci,
     pairwise_table,
@@ -139,6 +140,7 @@ def _build_compare_experiment(experiment, group_mode: str):
         return experiment
 
     from dataclasses import replace as _dc_replace
+
     from deap_pettingzoo.analysis.loaders import Experiment as _Exp
 
     proxy_runs = []
@@ -159,10 +161,7 @@ def _grouped_summary_table(experiment, group_mode: str):
     raw.insert(
         0,
         "group",
-        [
-            _compare_group_label(run, group_mode, experiment.root)
-            for run in experiment
-        ],
+        [_compare_group_label(run, group_mode, experiment.root) for run in experiment],
     )
     if group_mode == "run":
         return raw
@@ -192,9 +191,7 @@ def _grouped_summary_table(experiment, group_mode: str):
 from deap_pettingzoo.ui.services.data import discover_runs
 
 all_runs = discover_runs(settings.results_root)
-selected_run_dirs = [
-    r.run_dir for r in all_runs if r.run_id in state.selected_run_ids
-]
+selected_run_dirs = [r.run_dir for r in all_runs if r.run_id in state.selected_run_ids]
 if not selected_run_dirs:
     st.warning("Selected runs no longer exist on disk.")
     st.stop()
@@ -245,8 +242,7 @@ _env_steps_degenerate = (
         if r.metrics is not None and "env_steps" in r.metrics.columns
     )
     and any(
-        r.metrics is not None and "env_steps" in r.metrics.columns
-        for r in experiment
+        r.metrics is not None and "env_steps" in r.metrics.columns for r in experiment
     )
 )
 _preferred_x = (
@@ -254,9 +250,7 @@ _preferred_x = (
     if _env_steps_degenerate
     else ["env_steps", "nominal_env_steps", "iteration", "wall_time"]
 )
-_x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or [
-    "env_steps"
-]
+_x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or ["env_steps"]
 
 with st.sidebar:
     st.header("Aggregation")
@@ -277,9 +271,13 @@ with st.sidebar:
         st.caption("No metrics.csv columns detected in the selected runs.")
     x_col = st.selectbox("X column", _x_options)
     state.statistic = st.selectbox(
-        "Statistic", ["mean", "iqm"], index=["mean", "iqm"].index(state.statistic)
-        if state.statistic in {"mean", "iqm"}
-        else 0,
+        "Statistic",
+        ["mean", "iqm"],
+        index=(
+            ["mean", "iqm"].index(state.statistic)
+            if state.statistic in {"mean", "iqm"}
+            else 0
+        ),
     )
     state.ci_level = st.slider("CI", 0.5, 0.99, float(state.ci_level), 0.01)
     state.n_resamples = st.number_input(
@@ -324,7 +322,9 @@ _all_provenances = (
 _comparable_provenances = _all_provenances - {"none"}
 _provenance_mixed = len(_comparable_provenances) > 1
 _resolved_provenance = next(iter(sorted(_comparable_provenances)), "none")
-_resolved_score_label = _PROVENANCE_LABEL.get(_resolved_provenance, _resolved_provenance)
+_resolved_score_label = _PROVENANCE_LABEL.get(
+    _resolved_provenance, _resolved_provenance
+)
 
 
 def _mixed_provenance_message() -> str:
@@ -337,6 +337,7 @@ def _mixed_provenance_message() -> str:
         "carries a held-out eval metric before reading a significance verdict."
     )
 
+
 # Learning curves
 _envs_in_selection = list(experiment.by_env().keys())
 _is_multitask = len(_envs_in_selection) >= 2
@@ -345,9 +346,7 @@ if _is_multitask:
         ["Curves", "Pairwise", "Multi-task", "Summary"]
     )
 else:
-    tab_curves, tab_pairwise, tab_summary = st.tabs(
-        ["Curves", "Pairwise", "Summary"]
-    )
+    tab_curves, tab_pairwise, tab_summary = st.tabs(["Curves", "Pairwise", "Summary"])
     tab_multitask = None
 
 with tab_curves:
@@ -355,6 +354,7 @@ with tab_curves:
     st.caption(f"Grouped by {compare_group_desc}.")
     try:
         import plotly.graph_objects as go
+
         fig = go.Figure()
         any_data = False
         if compare_group_mode == "run":
@@ -493,11 +493,11 @@ if tab_multitask is not None:
                     collect_score_matrices,
                     normalize_score_matrices,
                 )
+                from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
                 from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
                     performance_profile,
                     probability_of_improvement,
                 )
-                from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
 
                 matrices, env_names = collect_score_matrices(
                     compare_experiment, metric="final_fitness"
@@ -536,14 +536,11 @@ if tab_multitask is not None:
                     st.pyplot(fig_env)
 
                     st.markdown("**Probability of improvement (normalised)**")
-                    poi = probability_of_improvement(
-                        score_matrices=normed, reps=1000
-                    )
+                    poi = probability_of_improvement(score_matrices=normed, reps=1000)
                     st.dataframe(poi, use_container_width=True)
             except ImportError as exc:
                 st.error(
-                    "Multi-task analysis requires the `[analysis]` extra "
-                    f"({exc})."
+                    "Multi-task analysis requires the `[analysis]` extra " f"({exc})."
                 )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Multi-task analysis failed: {exc}")

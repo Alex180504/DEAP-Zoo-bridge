@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple
 
-
 # A coordinate is a 2-D point in the range [-1, 1] × [-1, 1].
 Coord = Tuple[float, float]
 

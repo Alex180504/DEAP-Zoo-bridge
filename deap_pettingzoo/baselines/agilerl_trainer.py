@@ -26,6 +26,13 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from deap_pettingzoo.baselines.agilerl_adapter import (
+    build_parallel_env,
+    build_vec_parallel_env,
+    extract_space_metadata,
+    translate_budget_to_env_steps,
+)
+from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
@@ -34,18 +41,12 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
 )
-from deap_pettingzoo.baselines.agilerl_adapter import (
-    build_parallel_env,
-    build_vec_parallel_env,
-    extract_space_metadata,
-    translate_budget_to_env_steps,
-)
-from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
 from deap_pettingzoo.catalog.schema import (
     ParamSpec,
     ParamTarget,
     ParamType,
 )
+
 # Imported as a module (not `from ... import cuda_available`) so the runtime
 # CUDA gating in describe_hyperparameters() reflects the *live* function — a
 # `from` import binds the name at import time and would ignore later
@@ -98,21 +99,28 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
     matches ``vectorize_experiences_by_agent(dim=1)`` used for advantages.
     """
     try:
-        import torch
-        import numpy as _np
         import agilerl.utils.algo_utils as _au
+        import numpy as _np
+        import torch
 
-        tensors = [_au.experience_to_tensors(experiences[aid], space, actions)
-                   for aid in experiences]
+        tensors = [
+            _au.experience_to_tensors(experiences[aid], space, actions)
+            for aid in experiences
+        ]
 
         def _stack_and_flatten(tlist, sp):
             import gymnasium.spaces as _spaces
+
             if isinstance(tlist[0], dict):
-                return {k: _stack_and_flatten([t[k] for t in tlist], sp[k])
-                        for k in tlist[0]}
+                return {
+                    k: _stack_and_flatten([t[k] for t in tlist], sp[k])
+                    for k in tlist[0]
+                }
             if isinstance(tlist[0], tuple):
-                return tuple(_stack_and_flatten([t[i] for t in tlist], sp[i])
-                             for i in range(len(tlist[0])))
+                return tuple(
+                    _stack_and_flatten([t[i] for t in tlist], sp[i])
+                    for i in range(len(tlist[0]))
+                )
             # tlist: A tensors of shape (T, E?, *features)
             # stack dim=1 → (T, A, E?, *features), matching advantage layout.
             stacked = torch.stack(tlist, dim=1)
@@ -136,7 +144,10 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
             stacklevel=2,
         )
         import agilerl.utils.algo_utils as _au
-        return _au._orig_concatenate_experiences_into_batches(experiences, space, actions)
+
+        return _au._orig_concatenate_experiences_into_batches(
+            experiences, space, actions
+        )
 
 
 def _apply_agilerl_grouping_patch() -> None:
@@ -190,6 +201,7 @@ def _apply_agilerl_grouping_patch() -> None:
     # Also patch the name already bound inside the IPPO module.
     try:
         import agilerl.algorithms.ippo as _ippo_mod
+
         _ippo_mod.concatenate_experiences_into_batches = (
             _patched_concatenate_experiences_into_batches
         )
@@ -214,11 +226,11 @@ class AgileRLTrainer(BaselineTrainer):
     - :attr:`ON_POLICY`  - ``True`` for PPO-family algorithms,
       ``False`` for DDPG-family.
     - :meth:`get_capabilities`  - per-algorithm capability flags.
-    
+
     Notes:
         AgileRL training is rollout-based, not generation-based, so the
         default cadence is the largest sensible bucket. Currently we only
-        emit a single end-of-training rollout regardless of cadence. 
+        emit a single end-of-training rollout regardless of cadence.
         The ClassVar value is kept for API parity with other trainers.
     """
 
@@ -267,51 +279,161 @@ class AgileRLTrainer(BaselineTrainer):
             ParamTarget.ALGORITHM_PARAMS,
             ParamTarget.RUN_CONFIG,
         )
-        _device_unavailable = () if device_check.cuda_available() else ("cuda",) # check for CUDA GPU availability at runtime
+        _device_unavailable = (
+            () if device_check.cuda_available() else ("cuda",)
+        )  # check for CUDA GPU availability at runtime
         return (
-            ParamSpec("batch_size", I, 64, minimum=1, step=1, target=AP,
-                      group="Learning",
-                      help="Mini-batch size for gradient updates."),
-            ParamSpec("num_envs", I, 1, minimum=1, step=1, target=AP,
-                      group="Parallelism",
-                      help="Vectorised environments for rollout collection."),
-            ParamSpec("memory_size", I, 10_000, minimum=1, step=1000, target=AP,
-                      group="Learning", advanced=True,
-                      help="Replay-buffer capacity (off-policy only)."),
-            ParamSpec("learning_delay", I, 500, minimum=0, step=1, target=AP,
-                      group="Learning", advanced=True,
-                      help="Env steps before learning begins (off-policy)."),
-            ParamSpec("learn_step", I, 100, minimum=1, step=1, target=AP,
-                      group="Learning", advanced=True,
-                      help="Env steps between learn() calls (off-policy)."),
-            ParamSpec("rollout_steps", I, 256, minimum=1, step=1, target=AP,
-                      group="Learning", advanced=True,
-                      help="Steps collected per update (on-policy / IPPO)."),
-            ParamSpec("lr_actor", F, 1e-3, minimum=0.0, step=1e-4, target=AP,
-                      group="Learning", advanced=True,
-                      help="Actor learning rate (AgileRL default: 1e-3)."),
-            ParamSpec("lr_critic", F, 1e-2, minimum=0.0, step=1e-4, target=AP,
-                      group="Learning", advanced=True,
-                      help="Critic learning rate (AgileRL default: 1e-2)."),
-            ParamSpec("gamma", F, 0.95, minimum=0.0, maximum=1.0, step=0.01, target=AP,
-                      group="Learning", advanced=True,
-                      help="Discount factor (AgileRL default: 0.95)."),
-            ParamSpec("tau", F, 0.01, minimum=0.0, maximum=1.0, step=0.001, target=AP,
-                      group="Learning", advanced=True,
-                      help="Target-network soft-update rate (AgileRL default: 0.01)."),
-            ParamSpec("device", E, "cpu", target=TR, group="Runtime",
-                      choices=("cpu", "cuda"),
-                      unavailable_choices=_device_unavailable,
-                      help="Torch device for training."),
-            ParamSpec("verbose", B, False, target=TR, group="Runtime",
-                      advanced=True,
-                      help="Print per-interval training progress."),
-            ParamSpec("seed", I, None, minimum=0, step=1, target=RC,
-                      group="Run", nullable=True,
-                      help="Random seed for this run (None = unseeded)."),
-            ParamSpec("max_steps_per_episode", I, None, minimum=1, step=1,
-                      target=RC, group="Run", nullable=True,
-                      help="Hard cap on env steps per evaluation episode."),
+            ParamSpec(
+                "batch_size",
+                I,
+                64,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                help="Mini-batch size for gradient updates.",
+            ),
+            ParamSpec(
+                "num_envs",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Parallelism",
+                help="Vectorised environments for rollout collection.",
+            ),
+            ParamSpec(
+                "memory_size",
+                I,
+                10_000,
+                minimum=1,
+                step=1000,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Replay-buffer capacity (off-policy only).",
+            ),
+            ParamSpec(
+                "learning_delay",
+                I,
+                500,
+                minimum=0,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Env steps before learning begins (off-policy).",
+            ),
+            ParamSpec(
+                "learn_step",
+                I,
+                100,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Env steps between learn() calls (off-policy).",
+            ),
+            ParamSpec(
+                "rollout_steps",
+                I,
+                256,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Steps collected per update (on-policy / IPPO).",
+            ),
+            ParamSpec(
+                "lr_actor",
+                F,
+                1e-3,
+                minimum=0.0,
+                step=1e-4,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Actor learning rate (AgileRL default: 1e-3).",
+            ),
+            ParamSpec(
+                "lr_critic",
+                F,
+                1e-2,
+                minimum=0.0,
+                step=1e-4,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Critic learning rate (AgileRL default: 1e-2).",
+            ),
+            ParamSpec(
+                "gamma",
+                F,
+                0.95,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.01,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Discount factor (AgileRL default: 0.95).",
+            ),
+            ParamSpec(
+                "tau",
+                F,
+                0.01,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.001,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Target-network soft-update rate (AgileRL default: 0.01).",
+            ),
+            ParamSpec(
+                "device",
+                E,
+                "cpu",
+                target=TR,
+                group="Runtime",
+                choices=("cpu", "cuda"),
+                unavailable_choices=_device_unavailable,
+                help="Torch device for training.",
+            ),
+            ParamSpec(
+                "verbose",
+                B,
+                False,
+                target=TR,
+                group="Runtime",
+                advanced=True,
+                help="Print per-interval training progress.",
+            ),
+            ParamSpec(
+                "seed",
+                I,
+                None,
+                minimum=0,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Random seed for this run (None = unseeded).",
+            ),
+            ParamSpec(
+                "max_steps_per_episode",
+                I,
+                None,
+                minimum=1,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Hard cap on env steps per evaluation episode.",
+            ),
         )
 
     def __init__(self, device: str = "cpu", verbose: bool = False) -> None:
@@ -350,6 +472,7 @@ class AgileRLTrainer(BaselineTrainer):
         if not self.get_capabilities().get("supports_turn_based", True):
             try:
                 from deap_pettingzoo.environments.registry import get_env_spec
+
                 spec_api = get_env_spec(config.env_name).api
             except Exception:  # pragma: no cover - registry lookup fallback
                 spec_api = None
@@ -398,7 +521,9 @@ class AgileRLTrainer(BaselineTrainer):
             "max_steps_per_episode",
         }
         ctor_kwargs = {k: v for k, v in params.items() if k not in loop_keys}
-        ctor_kwargs["device"] = self.device  # Always use trainer's device, not DEFAULT_PARAMS "cpu"
+        ctor_kwargs["device"] = (
+            self.device
+        )  # Always use trainer's device, not DEFAULT_PARAMS "cpu"
 
         agent = self._build_agent(
             alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs
@@ -423,9 +548,7 @@ class AgileRLTrainer(BaselineTrainer):
         from deap_pettingzoo.baselines.recording import RecordingController
 
         with build_logger(config, algorithm=self.ALGORITHM_NAME) as log:
-            run_dir_str = (
-                str(log.run_dir) if config.output_dir is not None else None
-            )
+            run_dir_str = str(log.run_dir) if config.output_dir is not None else None
 
             # Unified champion-rollout recording. The cadence is decided by
             # the controller from the run's RecordingMode on the shared
@@ -443,7 +566,8 @@ class AgileRLTrainer(BaselineTrainer):
                 or 500
             )
             self._recorder = RecordingController(
-                config, log,
+                config,
+                log,
                 max_steps=_rec_max_steps,
                 seed=seed,
             )
@@ -454,13 +578,23 @@ class AgileRLTrainer(BaselineTrainer):
             start = time.time()
             if self.ON_POLICY:
                 metrics = self._run_on_policy(
-                    env, agent, agent_ids, budget_steps, params, seed,
+                    env,
+                    agent,
+                    agent_ids,
+                    budget_steps,
+                    params,
+                    seed,
                     champion=_champion,
                     progress_callback=progress_callback,
                 )
             else:
                 metrics = self._run_off_policy(
-                    env, agent, agent_ids, budget_steps, params, seed,
+                    env,
+                    agent,
+                    agent_ids,
+                    budget_steps,
+                    params,
+                    seed,
                     champion=_champion,
                     progress_callback=progress_callback,
                 )
@@ -496,6 +630,7 @@ class AgileRLTrainer(BaselineTrainer):
             for entry in metrics.get("metrics_history", []):
                 log.row("metrics", entry)
             from deap_pettingzoo.utils.logging import save_agilerl_agent
+
             save_agilerl_agent(
                 log,
                 agent,
@@ -561,6 +696,7 @@ class AgileRLTrainer(BaselineTrainer):
     @staticmethod
     def _seed_everything(seed: int) -> None:
         from deap_pettingzoo.utils.rng import seed_everything as _se
+
         _se(seed)
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
@@ -740,8 +876,10 @@ class AgileRLTrainer(BaselineTrainer):
             return np.ones(num_envs, dtype=bool)
 
         stacked = np.stack(
-            [np.asarray(done_dict[agent_id], dtype=np.float32).reshape(num_envs)
-             for agent_id in agent_ids],
+            [
+                np.asarray(done_dict[agent_id], dtype=np.float32).reshape(num_envs)
+                for agent_id in agent_ids
+            ],
             axis=0,
         )
         return np.all(np.isnan(stacked) | stacked.astype(bool), axis=0)
@@ -859,8 +997,9 @@ class AgileRLTrainer(BaselineTrainer):
                 }
 
             return {
-                agent_id: float(reward_dict[agent_id])
-                if agent_id in reward_dict else np.nan
+                agent_id: (
+                    float(reward_dict[agent_id]) if agent_id in reward_dict else np.nan
+                )
                 for agent_id in agent_ids
             }
 
@@ -887,7 +1026,9 @@ class AgileRLTrainer(BaselineTrainer):
             prev_steps = steps_done
             action_result = agent.get_action(obs, infos=info)
             actions, raw_actions = (
-                action_result if isinstance(action_result, tuple) else (action_result, action_result)
+                action_result
+                if isinstance(action_result, tuple)
+                else (action_result, action_result)
             )
             env_actions = actions if is_vec else self._unwrap_actions_for_env(actions)
             next_obs, reward, termination, truncation, info = env.step(env_actions)
@@ -935,7 +1076,9 @@ class AgileRLTrainer(BaselineTrainer):
                     except Exception as exc:  # pragma: no cover - version drift
                         logger.warning(
                             "[%s] learn() failed: %s",
-                            self.ALGORITHM_NAME, exc, exc_info=True,
+                            self.ALGORITHM_NAME,
+                            exc,
+                            exc_info=True,
                         )
 
             env_done = self._completed_env_mask(next_done, agent_ids, num_envs)
@@ -978,24 +1121,23 @@ class AgileRLTrainer(BaselineTrainer):
             ):
                 elapsed = time.time() - loop_start
                 _emit_mean = (
-                    float(np.mean(episode_rewards[-10:]))
-                    if episode_rewards else None
+                    float(np.mean(episode_rewards[-10:])) if episode_rewards else None
                 )
-                _emit_best = (
-                    float(max(episode_rewards)) if episode_rewards else None
-                )
+                _emit_best = float(max(episode_rewards)) if episode_rewards else None
                 _window = episode_rewards[-10:] if episode_rewards else []
-                metrics_history.append({
-                    "iteration": len(metrics_history),
-                    "env_steps": int(progress_steps),
-                    "nominal_env_steps": int(progress_steps),
-                    "wall_time_s": elapsed,
-                    "mean": _emit_mean,
-                    "std": float(np.std(_window)) if _window else None,
-                    "min": float(min(_window)) if _window else None,
-                    "max": _emit_best,
-                    "mean_loss": float(losses[-1]) if losses else None,
-                })
+                metrics_history.append(
+                    {
+                        "iteration": len(metrics_history),
+                        "env_steps": int(progress_steps),
+                        "nominal_env_steps": int(progress_steps),
+                        "wall_time_s": elapsed,
+                        "mean": _emit_mean,
+                        "std": float(np.std(_window)) if _window else None,
+                        "min": float(min(_window)) if _window else None,
+                        "max": _emit_best,
+                        "mean_loss": float(losses[-1]) if losses else None,
+                    }
+                )
                 self._on_progress(
                     progress_callback,
                     ProgressEvent(
@@ -1137,17 +1279,15 @@ class AgileRLTrainer(BaselineTrainer):
             collect_n = max(1, (collect_target + step_size - 1) // step_size)
 
             # Per-step rollout buffers (lists of per-agent values).
-            states:       Dict[str, List] = {a: [] for a in agent_ids}
-            actions_buf:  Dict[str, List] = {a: [] for a in agent_ids}
+            states: Dict[str, List] = {a: [] for a in agent_ids}
+            actions_buf: Dict[str, List] = {a: [] for a in agent_ids}
             log_probs_buf: Dict[str, List] = {a: [] for a in agent_ids}
-            rewards_buf:  Dict[str, List] = {a: [] for a in agent_ids}
-            dones_buf:    Dict[str, List] = {a: [] for a in agent_ids}
-            values_buf:   Dict[str, List] = {a: [] for a in agent_ids}
+            rewards_buf: Dict[str, List] = {a: [] for a in agent_ids}
+            dones_buf: Dict[str, List] = {a: [] for a in agent_ids}
+            values_buf: Dict[str, List] = {a: [] for a in agent_ids}
 
             for _ in range(collect_n):
-                action_obs = {
-                    a: _sanitize_obs(obs_a) for a, obs_a in obs.items()
-                }
+                action_obs = {a: _sanitize_obs(obs_a) for a, obs_a in obs.items()}
                 action_result = agent.get_action(action_obs, infos=info)
                 # AgileRL's IPPO/PPO contract is a 4-tuple
                 # ``(action, log_prob, entropy, value)``.  Anything else is
@@ -1162,8 +1302,10 @@ class AgileRLTrainer(BaselineTrainer):
                         f"{len(action_result) if isinstance(action_result, tuple) else 'N/A'}"
                     )
                 action, log_prob, _, value = (
-                    action_result[0], action_result[1],
-                    action_result[2], action_result[3],
+                    action_result[0],
+                    action_result[1],
+                    action_result[2],
+                    action_result[3],
                 )
 
                 if is_vec:
@@ -1175,7 +1317,9 @@ class AgileRLTrainer(BaselineTrainer):
                 else:
                     # Strip leading (1, ...) batch dim for raw parallel envs.
                     env_actions = self._unwrap_actions_for_env(action)
-                    next_obs, reward, termination, truncation, info = env.step(env_actions)
+                    next_obs, reward, termination, truncation, info = env.step(
+                        env_actions
+                    )
 
                 # Per-sub-env reward / done bookkeeping.
                 step_rew = _sum_rewards_per_env(reward)
@@ -1208,24 +1352,31 @@ class AgileRLTrainer(BaselineTrainer):
                     # ``num_envs`` axis from AgileRL's get_action.
                     act_a = action.get(a)
                     actions_buf[a].append(
-                        np.asarray(act_a) if act_a is not None
+                        np.asarray(act_a)
+                        if act_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
                     lp_a = log_prob.get(a)
                     log_probs_buf[a].append(
-                        np.asarray(lp_a) if lp_a is not None
+                        np.asarray(lp_a)
+                        if lp_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
                     v_a = value.get(a)
                     values_buf[a].append(
-                        np.asarray(v_a) if v_a is not None
+                        np.asarray(v_a)
+                        if v_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
 
                     if is_vec:
                         rewards_buf[a].append(
-                            np.asarray(reward.get(a, np.full(num_envs, np.nan, dtype=np.float32)),
-                                       dtype=np.float32).reshape(num_envs)
+                            np.asarray(
+                                reward.get(
+                                    a, np.full(num_envs, np.nan, dtype=np.float32)
+                                ),
+                                dtype=np.float32,
+                            ).reshape(num_envs)
                         )
                     else:
                         rewards_buf[a].append(
@@ -1243,23 +1394,24 @@ class AgileRLTrainer(BaselineTrainer):
                 # the environment plus the carried ``done`` flags.
                 if not is_vec and bool(env_done[0]):
                     obs, info = env.reset()
-                    done = {
-                        a: np.zeros(num_envs, dtype=np.float32)
-                        for a in agent_ids
-                    }
+                    done = {a: np.zeros(num_envs, dtype=np.float32) for a in agent_ids}
 
             # Bootstrap obs for GAE: AgileRL's learn() expects the same
             # ``(num_envs, obs_dim)`` shape as the stored states.
             bootstrap_obs = {
-                a: _batch_obs(_sanitize_obs(obs_a))
-                for a, obs_a in obs.items()
+                a: _batch_obs(_sanitize_obs(obs_a)) for a, obs_a in obs.items()
             }
 
             # Learn from the collected rollout.
             experiences = (
-                states, actions_buf, log_probs_buf,
-                rewards_buf, dones_buf, values_buf,
-                bootstrap_obs, done,
+                states,
+                actions_buf,
+                log_probs_buf,
+                rewards_buf,
+                dones_buf,
+                values_buf,
+                bootstrap_obs,
+                done,
             )
             try:
                 loss = agent.learn(experiences)
@@ -1269,7 +1421,9 @@ class AgileRLTrainer(BaselineTrainer):
             except Exception as exc:
                 logger.warning(
                     "[%s] learn() failed: %s",
-                    self.ALGORITHM_NAME, exc, exc_info=True,
+                    self.ALGORITHM_NAME,
+                    exc,
+                    exc_info=True,
                 )
 
             progress_steps = min(steps_done, budget_steps)
@@ -1287,24 +1441,23 @@ class AgileRLTrainer(BaselineTrainer):
             # (recording must still happen on a headless run). _on_progress
             # no-ops the emit when the callback is None.
             _emit_mean = (
-                float(np.mean(episode_rewards[-10:]))
-                if episode_rewards else None
+                float(np.mean(episode_rewards[-10:])) if episode_rewards else None
             )
-            _emit_best = (
-                float(max(episode_rewards)) if episode_rewards else None
-            )
+            _emit_best = float(max(episode_rewards)) if episode_rewards else None
             _window = episode_rewards[-10:] if episode_rewards else []
-            metrics_history.append({
-                "iteration": len(metrics_history),
-                "env_steps": int(progress_steps),
-                "nominal_env_steps": int(progress_steps),
-                "wall_time_s": elapsed_op,
-                "mean": _emit_mean,
-                "std": float(np.std(_window)) if _window else None,
-                "min": float(min(_window)) if _window else None,
-                "max": _emit_best,
-                "mean_loss": float(losses[-1]) if losses else None,
-            })
+            metrics_history.append(
+                {
+                    "iteration": len(metrics_history),
+                    "env_steps": int(progress_steps),
+                    "nominal_env_steps": int(progress_steps),
+                    "wall_time_s": elapsed_op,
+                    "mean": _emit_mean,
+                    "std": float(np.std(_window)) if _window else None,
+                    "min": float(min(_window)) if _window else None,
+                    "max": _emit_best,
+                    "mean_loss": float(losses[-1]) if losses else None,
+                }
+            )
             self._on_progress(
                 progress_callback,
                 ProgressEvent(
@@ -1341,6 +1494,7 @@ class AgileRLTrainer(BaselineTrainer):
 
 
 # Concrete trainers
+
 
 class MADDPGTrainer(AgileRLTrainer):
     """Multi-Agent DDPG via AgileRL (off-policy, decentralized actors,
@@ -1560,8 +1714,5 @@ class GroupedIPPOTrainer(IPPOTrainer):
             validation_act_spaces,
         )
         return super()._build_agent(
-            alg_cls, obs_spaces, 
-            act_spaces, 
-            agent_ids, 
-            ctor_kwargs
+            alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs
         )

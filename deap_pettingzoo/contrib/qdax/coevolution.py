@@ -74,9 +74,7 @@ def _mask_optional_pyarrow_imports() -> Any:
 
     def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "pyarrow" or name.startswith("pyarrow."):
-            raise ModuleNotFoundError(
-                "pyarrow masked for QDax import compatibility"
-            )
+            raise ModuleNotFoundError("pyarrow masked for QDax import compatibility")
         return original_import(name, globals, locals, fromlist, level)
 
     builtins.__import__ = _guarded_import
@@ -94,9 +92,7 @@ def _compute_qdax_descriptor(
     positions = _stack_consistent_positions(positions_list)
     if positions is not None:
         try:
-            return np.asarray(
-                descriptor_fn({"positions": positions}), dtype=np.float32
-            )
+            return np.asarray(descriptor_fn({"positions": positions}), dtype=np.float32)
         except Exception:
             pass
     mn = np.asarray(descriptor_fn.min_bd, dtype=np.float32)
@@ -136,7 +132,7 @@ class _QDaxGenotypePayload:
 
     env_name: str
     env_config: Optional[Dict[str, Any]]
-    flat_weights: np.ndarray              # shape (n_params,) float32
+    flat_weights: np.ndarray  # shape (n_params,) float32
     layer_sizes: Tuple[int, ...]
     activation: str
     learner_role_prefixes: Tuple[str, ...]
@@ -154,8 +150,8 @@ class _QDaxGenotypeResult:
     """Return value of :func:`_qdax_genotype_rollout`."""
 
     fitness: float
-    descriptor: np.ndarray   # shape (behavior_dim,) float32
-    steps: int = 0           # real env ticks summed across the k episodes
+    descriptor: np.ndarray  # shape (behavior_dim,) float32
+    steps: int = 0  # real env ticks summed across the k episodes
 
 
 def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeResult":
@@ -176,7 +172,8 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
     params = flat_to_pytree(payload.flat_weights, payload.layer_sizes)
 
     learner_agents = [
-        a for a in env.possible_agents
+        a
+        for a in env.possible_agents
         if any(a.startswith(p) for p in payload.learner_role_prefixes)
     ]
     action_space = env.action_space(learner_agents[0])
@@ -184,10 +181,7 @@ def _qdax_genotype_rollout(payload: "_QDaxGenotypePayload") -> "_QDaxGenotypeRes
     learner_set = set(learner_agents)
 
     side_agents: Dict[str, List[str]] = {
-        name: [
-            a for a in env.possible_agents
-            if any(a.startswith(p) for p in prefixes)
-        ]
+        name: [a for a in env.possible_agents if any(a.startswith(p) for p in prefixes)]
         for name, prefixes in payload.side_role_prefixes.items()
     }
 
@@ -375,7 +369,6 @@ class QDaxRepertoirePool(_BasePool):
         probs = probs / probs.sum()
         return int(rng.choice(self._filled_idx, p=probs))
 
-
     def snapshot_opponents(
         self, rng: np.random.Generator, k: int
     ) -> List[OpponentSnapshot]:
@@ -404,8 +397,9 @@ class QDaxRepertoirePool(_BasePool):
         for _ in range(k):
             idx = self._sample_cell(rng)
             params = jax.tree_util.tree_map(
-                lambda leaf, j=idx: np.asarray(leaf[j])
-                if hasattr(leaf, "__getitem__") else leaf,
+                lambda leaf, j=idx: (
+                    np.asarray(leaf[j]) if hasattr(leaf, "__getitem__") else leaf
+                ),
                 self._repertoire.genotypes,
             )
             flat = pytree_to_flat(params, self._layer_sizes)
@@ -420,13 +414,15 @@ class QDaxRepertoirePool(_BasePool):
                 )
             )
         return snaps
+
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
         import jax  # noqa: F401 \u2014 required for device_get below
 
         idx = self._sample_cell(rng)
         params = jax.tree_util.tree_map(
-            lambda leaf: np.asarray(leaf[idx]) if hasattr(leaf, "__getitem__")
-            else leaf,
+            lambda leaf: (
+                np.asarray(leaf[idx]) if hasattr(leaf, "__getitem__") else leaf
+            ),
             self._repertoire.genotypes,
         )
         return self._policy_factory(params)
@@ -548,7 +544,6 @@ class QDaxSideState(SideState):
     ) -> None:
         with _mask_optional_pyarrow_imports():
             import jax
-
             from qdax.core.map_elites import MAPElites
             from qdax.utils.metrics import default_qd_metrics
 
@@ -610,7 +605,9 @@ class QDaxSideState(SideState):
             from qdax.core.emitters.standard_emitters import MixingEmitter
 
             variation_fn = lambda x1, x2, k: isoline_variation(  # noqa: E731
-                x1, x2, k,
+                x1,
+                x2,
+                k,
                 iso_sigma=float(cfg["iso_sigma"]),
                 line_sigma=float(cfg["line_sigma"]),
             )
@@ -658,10 +655,7 @@ class QDaxSideState(SideState):
                 leaf_keys = jax.random.split(k, len(leaves))
                 return jax.tree_util.tree_unflatten(
                     treedef,
-                    [
-                        _perturb_one(lk, leaf)
-                        for lk, leaf in zip(leaf_keys, leaves)
-                    ],
+                    [_perturb_one(lk, leaf) for lk, leaf in zip(leaf_keys, leaves)],
                 )
 
             init_genotypes = jax.vmap(_one)(keys_batch)
@@ -682,9 +676,7 @@ class QDaxSideState(SideState):
         def _factory(params):
             if self._genotype_layout == "flat":
                 params = flat_to_pytree(np.asarray(params), layer_sizes)
-            return FlaxPolicyAdapter(
-                self._module, params, action_space=action_space
-            )
+            return FlaxPolicyAdapter(self._module, params, action_space=action_space)
 
         self._policy_factory = _factory
         self._pool = QDaxRepertoirePool(
@@ -764,9 +756,7 @@ class QDaxSideState(SideState):
         if self._genotype_layout == "flat":
             params = flat_to_pytree(np.asarray(params_or_flat), self._layer_sizes)
         else:
-            params = jax.tree_util.tree_map(
-                lambda x: np.asarray(x), params_or_flat
-            )
+            params = jax.tree_util.tree_map(lambda x: np.asarray(x), params_or_flat)
         policy = FlaxPolicyAdapter(
             self._module,
             params,
@@ -776,9 +766,8 @@ class QDaxSideState(SideState):
         # Trajectory collection: accumulate per-step (N, 2) position arrays
         # if the evaluator exposes a trajectory_hook slot.
         positions_list: List[np.ndarray] = []
-        has_hook = (
-            self._position_extractor is not None
-            and hasattr(self._current_evaluator, "trajectory_hook")
+        has_hook = self._position_extractor is not None and hasattr(
+            self._current_evaluator, "trajectory_hook"
         )
         if has_hook:
             extractor = self._position_extractor
@@ -968,9 +957,7 @@ class QDaxSideState(SideState):
             # Real env ticks this generation when scoring ran against a live
             # env via the _QDaxPolicyEvaluator (serial coev path). The
             # JAX-native scoring path has no Python-side per-tick counter, so it is not used here.
-            env_steps=int(
-                getattr(self._current_evaluator, "env_steps_consumed", 0)
-            ),
+            env_steps=int(getattr(self._current_evaluator, "env_steps_consumed", 0)),
         )
         self.best_fitness = max(self.best_fitness, archive_best)
         self.history.append(stats)

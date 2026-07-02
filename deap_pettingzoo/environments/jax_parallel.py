@@ -37,7 +37,9 @@ class JaxEnvProtocol(Protocol):
     def reset(self, key) -> Tuple[Dict[str, Any], Any]: ...
     def step(
         self, key, state: Any, actions: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], Any, Dict[str, float], Dict[str, bool], Dict[str, Any]]: ...
+    ) -> Tuple[
+        Dict[str, Any], Any, Dict[str, float], Dict[str, bool], Dict[str, Any]
+    ]: ...
 
 
 def _to_numpy_dict(d: Dict[str, Any]) -> Dict[str, np.ndarray]:
@@ -61,7 +63,10 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
             underlying JAX env in most cases.
     """
 
-    metadata: Dict[str, Any] = {"name": "jax_parallel_adapter", "is_parallelizable": True}
+    metadata: Dict[str, Any] = {
+        "name": "jax_parallel_adapter",
+        "is_parallelizable": True,
+    }
 
     def __init__(
         self,

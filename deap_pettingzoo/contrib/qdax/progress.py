@@ -67,14 +67,8 @@ def format_qdax_progress_fields(
         parts.append(f"batch_mean={batch_mean:.3f}")
     parts.append(f"archive_best={archive_best:.3f}")
     parts.append(f"qd={qd_score:.3f}")
-    if (
-        filled_niches is not None
-        and total_niches is not None
-        and total_niches > 0
-    ):
-        parts.append(
-            f"coverage={filled_niches}/{total_niches} ({coverage:.3f}%)"
-        )
+    if filled_niches is not None and total_niches is not None and total_niches > 0:
+        parts.append(f"coverage={filled_niches}/{total_niches} ({coverage:.3f}%)")
     else:
         parts.append(f"coverage={coverage:.3f}%")
     return "  ".join(parts)

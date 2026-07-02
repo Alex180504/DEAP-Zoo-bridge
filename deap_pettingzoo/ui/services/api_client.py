@@ -105,7 +105,9 @@ class ApiClient:
         # <a href> tags resolved by the user's browser, not the server).
         # Defaults to base_url; override with DEAP_BROWSER_API_URL in Docker.
         browser_url = os.environ.get("DEAP_BROWSER_API_URL", "").strip()
-        self._browser_base_url = browser_url.rstrip("/") if browser_url else self.base_url
+        self._browser_base_url = (
+            browser_url.rstrip("/") if browser_url else self.base_url
+        )
 
     @property
     def client(self) -> Any:
@@ -162,12 +164,14 @@ class ApiClient:
                 raw_text = getattr(response, "text", "")[:500]
                 body = {
                     "ok": False,
-                    "issues": [{
-                        "path": "request",
-                        "code": "unparseable_response",
-                        "message": f"Backend returned 422 but the response body is not valid JSON. "
-                                   f"Raw (first 500 chars): {raw_text}",
-                    }],
+                    "issues": [
+                        {
+                            "path": "request",
+                            "code": "unparseable_response",
+                            "message": f"Backend returned 422 but the response body is not valid JSON. "
+                            f"Raw (first 500 chars): {raw_text}",
+                        }
+                    ],
                 }
             # Normalise FastAPI's standard Pydantic validation errors
             # ({"detail": [...]}) and import validation errors
@@ -192,14 +196,20 @@ class ApiClient:
                 body = {"ok": False, "issues": body.get("errors", [])}
             raise ApiValidationError(body)
         if status == 404:
-            body = response.json() if getattr(response, "headers", {}).get("content-type") else {}
+            body = (
+                response.json()
+                if getattr(response, "headers", {}).get("content-type")
+                else {}
+            )
             raise ApiClientError(
-                body.get("detail", f"Not found: {getattr(getattr(response, 'url', None), 'path', '?')}")
+                body.get(
+                    "detail",
+                    f"Not found: {getattr(getattr(response, 'url', None), 'path', '?')}",
+                )
             )
         if isinstance(status, int) and status >= 400:
             raise ApiClientError(
-                f"Backend returned {status}: "
-                f"{getattr(response, 'text', '')[:300]}"
+                f"Backend returned {status}: " f"{getattr(response, 'text', '')[:300]}"
             )
         return response.json() if getattr(response, "text", None) else {}
 
@@ -338,9 +348,7 @@ class ApiClient:
 
         Returns a ``ValidationReport``-shaped dict or raises
         :class:`ApiValidationError` on a 422 backend response."""
-        return self._post(
-            "/experiments/script/validate", json_data={"script": src}
-        )
+        return self._post("/experiments/script/validate", json_data={"script": src})
 
     def submit_script(
         self, src: str, label: str = "", entry: str = "script"
@@ -400,7 +408,9 @@ class ApiClient:
             files = {"file": ("export.zip", zip_bytes, "application/zip")}
             params = {"overwrite_existing": str(overwrite_existing).lower()}
             r = self.client.post(
-                "/experiments/import", files=files, params=params,
+                "/experiments/import",
+                files=files,
+                params=params,
                 timeout=httpx.Timeout(120.0),
             )
         except httpx.ConnectError as exc:
@@ -408,9 +418,7 @@ class ApiClient:
                 f"Cannot reach the backend at {self.base_url}. ({exc})"
             ) from exc
         except httpx.TimeoutException as exc:
-            raise ApiTimeout(
-                f"Import request timed out after 120s"
-            ) from exc
+            raise ApiTimeout(f"Import request timed out after 120s") from exc
         return self._check(r)
 
     def get_experiment_spec(self, exp_id: str) -> Dict[str, Any]:

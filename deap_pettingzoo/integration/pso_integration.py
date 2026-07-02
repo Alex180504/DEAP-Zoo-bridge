@@ -25,7 +25,6 @@ from ..evaluators import BaseEvaluator
 from ..genomes import FixedTopologyGenome
 from .deap_integration import evaluate_individual, setup_deap_creators
 
-
 # ---------------------------------------------------------------------------
 # Creator management
 # ---------------------------------------------------------------------------
@@ -137,8 +136,11 @@ def make_pso_ind_init(
     def _ind_init() -> Any:
         vec = np.random.uniform(low, high, size=dim)
         genome = FixedTopologyGenome(
-            layer_sizes=ls, activation=act,
-            output_activation=out_act, weight_range=wr, random_seed=0,
+            layer_sizes=ls,
+            activation=act,
+            output_activation=out_act,
+            weight_range=wr,
+            random_seed=0,
         )
         genome.set_weights(vec)
         p = creator.PSOParticle(vec.tolist())
@@ -171,12 +173,12 @@ def register_pso_toolbox(
     pop_size = int(pso_state["population_size"])
     toolbox = base.Toolbox()
     toolbox.register("particle", ind_init)
-    toolbox.register("generate", tools.initRepeat, list, toolbox.particle,
-                      n=pop_size)
+    toolbox.register("generate", tools.initRepeat, list, toolbox.particle, n=pop_size)
     gbest_ctx: Dict[str, Any] = {"pos": None, "fitness": None}
     toolbox._pso_gbest_ctx = gbest_ctx  # type: ignore[attr-defined]
-    toolbox.register("update", _pso_update_top_level,
-                     pso_state=pso_state, gbest_ctx=gbest_ctx)
+    toolbox.register(
+        "update", _pso_update_top_level, pso_state=pso_state, gbest_ctx=gbest_ctx
+    )
     toolbox.register("evaluate", evaluate_individual, evaluator=evaluator)
     return toolbox
 

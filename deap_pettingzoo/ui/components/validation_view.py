@@ -64,13 +64,9 @@ def render_validation_report(report: Dict[str, Any]) -> None:
             with st.container(border=True):
                 st.error(f"**{tab}**  ({len(items)} issue(s))")
                 for item in items:
-                    st.caption(
-                        f"`{item.get('path', '?')}` — {item.get('message', '')}"
-                    )
+                    st.caption(f"`{item.get('path', '?')}` — {item.get('message', '')}")
     if warnings:
         with st.container(border=True):
             st.warning(f"{len(warnings)} warning(s)")
             for item in warnings:
-                st.caption(
-                    f"`{item.get('path', '?')}` — {item.get('message', '')}"
-                )
+                st.caption(f"`{item.get('path', '?')}` — {item.get('message', '')}")

@@ -88,6 +88,7 @@ def _load_spec(spec_file: Path) -> Any:
     spec_text = spec_file.read_text(encoding="utf-8")
     spec_data = json.loads(spec_text)
     from deap_pettingzoo.baselines.experiment_spec import ExperimentSpec
+
     return ExperimentSpec.from_dict(spec_data)
 
 
@@ -219,7 +220,9 @@ def _record_held_out_eval(
         # excludes it from comparisons, rather than silently re-admitting it on
         # its incomparable self-reported metric on reload.
         if run_dir:
-            _persist_eval_metrics(Path(run_dir), {"eval_metric_provenance": "eval_failed"})
+            _persist_eval_metrics(
+                Path(run_dir), {"eval_metric_provenance": "eval_failed"}
+            )
         return
 
     eval_metrics = {
@@ -275,6 +278,7 @@ def run_experiment(
 
     # 2. Re-validate (defense in depth)
     from deap_pettingzoo.baselines.experiment_spec import validate_spec
+
     report = validate_spec(spec)
     if not report.ok:
         errors = [
@@ -318,9 +322,7 @@ def run_experiment(
     # produce a per-side policy map rather than a single comparable policy, so
     # they keep their own reported metric and are not re-evaluated here.
     evaluator: Optional[UnifiedEvaluator] = (
-        UnifiedEvaluator(max_steps=_EVAL_MAX_STEPS)
-        if plan.mode == "standard"
-        else None
+        UnifiedEvaluator(max_steps=_EVAL_MAX_STEPS) if plan.mode == "standard" else None
     )
 
     for sub in plan.sub_runs:
@@ -333,6 +335,7 @@ def run_experiment(
         # Wire per-sub-run progress enrichment.
         def _make_cb(sr=sub):
             run_label = f"{sr.algorithm} s{sr.seed}"
+
             def cb(event):
                 e = event.to_dict() if hasattr(event, "to_dict") else dict(event)
                 e.setdefault("run_index", sr.run_index)
@@ -340,6 +343,7 @@ def run_experiment(
                 e.setdefault("algorithm", sr.algorithm)
                 e.setdefault("seed", sr.seed)
                 progress_writer(e)
+
             return cb
 
         try:
@@ -352,7 +356,9 @@ def run_experiment(
                 f"{sub.algorithm} seed={sub.seed} failed: {exc}\n"
                 f"{traceback.format_exc()}"
             )
-            _write_result(experiment_dir, "failed", run_dirs, final_metrics, error=error)
+            _write_result(
+                experiment_dir, "failed", run_dirs, final_metrics, error=error
+            )
             sys.exit(1)
 
         run_dir = result.metadata.get("run_dir")
@@ -406,13 +412,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     # <experiment-dir>/_stdout.log, so the structured log is retrievable per
     # experiment.  Level / format are inherited from the parent via env vars.
     from deap_pettingzoo.service.logging_config import configure_logging
+
     configure_logging(log_file=None)
     run_experiment(args.spec_file, args.experiment_dir)
 
 
 # Eager import (below the functions to avoid circular issues with catalog).
 from deap_pettingzoo.baselines.experiment_spec import build_configs  # noqa: E402
-
 
 if __name__ == "__main__":
     main()

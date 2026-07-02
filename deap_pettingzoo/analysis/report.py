@@ -67,9 +67,7 @@ def build_report(
     # one score provenance. When held-out and self-reported metrics are mixed,
     # suppress those sections rather than publish a wrong comparison.
     provenances = experiment.score_provenances(metric=metric)
-    comparable = (
-        set().union(*provenances.values()) - {"none"} if provenances else set()
-    )
+    comparable = set().union(*provenances.values()) - {"none"} if provenances else set()
     provenance_mixed = len(comparable) > 1
     metric_provenance = (
         "mixed: " + ", ".join(sorted(comparable))
@@ -156,9 +154,7 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
             except (ValueError, KeyError) as exc:
                 # Surface why a curve was skipped instead of silently
                 # dropping it (the figure used to vanish with no trace).
-                logger.warning(
-                    "Skipping learning curve for %r: %s", algo, exc
-                )
+                logger.warning("Skipping learning curve for %r: %s", algo, exc)
                 continue
         if curves:
             fig = plots.plot_learning_curves(
@@ -189,7 +185,9 @@ def _build_multitask_section(
     Returns ``None`` when fewer than two environments yield non-empty
     score columns. Always uses auto min-max normalisation.
     """
-    from deap_pettingzoo.analysis.multi_task import collect_score_matrices  # noqa: WPS433
+    from deap_pettingzoo.analysis.multi_task import (  # noqa: WPS433
+        collect_score_matrices,
+    )
     from deap_pettingzoo.analysis.normalize import (  # noqa: WPS433
         NormalizationSpec,
         normalize_score_matrices,
@@ -207,6 +205,7 @@ def _build_multitask_section(
         from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
             aggregate_metrics_forest,
         )
+
         forest = aggregate_metrics_forest(normed, reps=2000)
     except ImportError:
         forest = None  # rliable not installed → table omitted
@@ -215,6 +214,7 @@ def _build_multitask_section(
     if include_figures:
         try:
             from deap_pettingzoo.analysis import plots  # noqa: WPS433
+
             if forest is not None and len(forest) > 0:
                 fig = plots.plot_aggregate_metrics_forest(
                     forest, title="Aggregate metrics across tasks (95% CI)"

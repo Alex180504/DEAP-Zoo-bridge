@@ -46,6 +46,7 @@ experiment = load_experiment_cached([s.run_dir for s in selected_runs])
 
 # Helpers
 
+
 def _flatten(d: dict, prefix: str = "") -> dict:
     out: dict = {}
     for k, v in d.items():
@@ -79,6 +80,7 @@ def _to_str(v) -> str:
             return str(v)
     return str(v)
 
+
 # Tabs
 
 tab_diff, tab_sweep = st.tabs(["Diff", "Sweep"])
@@ -95,7 +97,8 @@ with tab_diff:
             left_id = st.selectbox("Left run", options, index=0, key="diff_left")
         with col_r:
             right_id = st.selectbox(
-                "Right run", options,
+                "Right run",
+                options,
                 index=min(1, len(options) - 1),
                 key="diff_right",
             )
@@ -124,9 +127,7 @@ with tab_diff:
                 b = {k: v for k, v in right.manifest.items() if k not in skip}
                 rows = _diff(a, b)
                 if not rows:
-                    st.success(
-                        "Manifests are identical (excluding run_id/timestamps)."
-                    )
+                    st.success("Manifests are identical (excluding run_id/timestamps).")
                 else:
                     st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -160,9 +161,7 @@ with tab_sweep:
             with st.expander(
                 "Recorded hyperparams (constant across all selected runs)"
             ):
-                st.json(
-                    {k: next(iter(vs)) for k, vs in sorted(key_values.items())}
-                )
+                st.json({k: next(iter(vs)) for k, vs in sorted(key_values.items())})
         else:
             # Determine y-metric candidates.
             _metric_candidates: list[str] = []
@@ -198,9 +197,11 @@ with tab_sweep:
                     metric = st.selectbox(
                         "Metric",
                         _metric_candidates,
-                        index=_metric_candidates.index(_preferred_metric)
-                        if _preferred_metric in _metric_candidates
-                        else 0,
+                        index=(
+                            _metric_candidates.index(_preferred_metric)
+                            if _preferred_metric in _metric_candidates
+                            else 0
+                        ),
                     )
                 else:
                     metric = st.text_input(

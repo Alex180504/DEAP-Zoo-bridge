@@ -24,7 +24,6 @@ import numpy as np
 from .hyperneat import query_cppn
 from .substrate import Coord, Substrate
 
-
 # ---------------------------------------------------------------------------
 # Helper classes
 # ---------------------------------------------------------------------------
@@ -197,11 +196,9 @@ class ESNetwork:
         self._weight_threshold = float(params.get("weight_threshold", 0.2))
         self.connections: Set[Connection] = set()
         # Number of layers (activations to propagate) = 2^max_depth + 1.
-        self.activations: int = 2 ** self.max_depth + 1
+        self.activations: int = 2**self.max_depth + 1
         activation_functions = neat.activations.ActivationFunctionSet()
-        self.activation = activation_functions.get(
-            params.get("activation", "sigmoid")
-        )
+        self.activation = activation_functions.get(params.get("activation", "sigmoid"))
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,14 +258,10 @@ class ESNetwork:
                     draw_connections.append(c)
                     if idx in nodes:
                         initial = nodes[idx]
-                        initial.append(
-                            (coords_to_id[c.x1, c.y1], c.weight)
-                        )
+                        initial.append((coords_to_id[c.x1, c.y1], c.weight))
                         nodes[idx] = initial
                     else:
-                        nodes[idx] = [
-                            (coords_to_id[c.x1, c.y1], c.weight)
-                        ]
+                        nodes[idx] = [(coords_to_id[c.x1, c.y1], c.weight)]
 
         for idx, links in nodes.items():
             # ── activation selection ──────────────────────────────────
@@ -281,13 +274,9 @@ class ESNetwork:
                 act = _identity_activation
             else:
                 act = self.activation
-            node_evals.append(
-                (idx, act, sum, 0.0, 1.0, links)
-            )
+            node_evals.append((idx, act, sum, 0.0, 1.0, links))
 
-        return neat.nn.RecurrentNetwork(
-            input_nodes, output_nodes, node_evals
-        )
+        return neat.nn.RecurrentNetwork(input_nodes, output_nodes, node_evals)
 
     # ------------------------------------------------------------------
     # Internal algorithm
@@ -299,9 +288,7 @@ class ESNetwork:
         temp: List[float] = []
 
         def loop(pp: Optional[QuadPoint]) -> None:
-            if pp is not None and all(
-                child is not None for child in pp.cs
-            ):
+            if pp is not None and all(child is not None for child in pp.cs):
                 for i in range(4):
                     loop(pp.cs[i])
             else:
@@ -317,9 +304,7 @@ class ESNetwork:
             return 0.0
         return float(np.var(self.get_weights(p)))  # type: ignore[no-any-return]
 
-    def division_initialization(
-        self, coord: Coord, outgoing: bool
-    ) -> QuadPoint:
+    def division_initialization(self, coord: Coord, outgoing: bool) -> QuadPoint:
         """Initialize the quadtree by recursive division.
 
         Divisions happen when the level is below ``initial_depth``, or
@@ -369,8 +354,7 @@ class ESNetwork:
                 )
 
             if (p.lvl < self.initial_depth) or (
-                p.lvl < self.max_depth
-                and self.variance(p) > self.division_threshold
+                p.lvl < self.max_depth and self.variance(p) > self.division_threshold
             ):
                 for child in p.cs:
                     q.append(child)  # type: ignore[arg-type]
@@ -445,20 +429,14 @@ class ESNetwork:
                     > self.band_threshold
                 ):
                     if outgoing:
-                        con = Connection(
-                            coord[0], coord[1], c.x, c.y, c.w
-                        )
+                        con = Connection(coord[0], coord[1], c.x, c.y, c.w)
                     else:
-                        con = Connection(
-                            c.x, c.y, coord[0], coord[1], c.w
-                        )
+                        con = Connection(c.x, c.y, coord[0], coord[1], c.w)
                 if (
                     con is not None
                     and con.weight != 0.0
                     and con.y1 < con.y2  # nodes connect upwards only
-                    and not (
-                        con.x1 == con.x2 and con.y1 == con.y2
-                    )
+                    and not (con.x1 == con.x2 and con.y1 == con.y2)
                 ):
                     self.connections.add(con)
 
@@ -562,10 +540,7 @@ class ESNetwork:
         # Filter connections.
         true_connections: Set[Connection] = set()
         for c in connections:
-            if (
-                (c.x1, c.y1) in true_nodes
-                and (c.x2, c.y2) in true_nodes
-            ):
+            if (c.x1, c.y1) in true_nodes and (c.x2, c.y2) in true_nodes:
                 true_connections.add(c)
 
         # Remove the input/output nodes themselves.

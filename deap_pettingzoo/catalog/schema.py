@@ -264,9 +264,7 @@ class ParamSpec:
                 raise ValueError(f"{self.name!r} expects an integer, got bool")
             if isinstance(value, float):
                 if not value.is_integer():
-                    raise ValueError(
-                        f"{self.name!r} expects an integer, got {value!r}"
-                    )
+                    raise ValueError(f"{self.name!r} expects an integer, got {value!r}")
                 return int(value)
             if isinstance(value, str):
                 return int(value.strip())
@@ -325,9 +323,7 @@ class ParamSpec:
                     f"{self.name!r} expects a list, got {value!r}"
                 ) from exc
             if self.item_type is not None:
-                element = ParamSpec(
-                    name=f"{self.name}[]", type=self.item_type
-                )
+                element = ParamSpec(name=f"{self.name}[]", type=self.item_type)
                 return [element.coerce(v) for v in items]
             return items
 

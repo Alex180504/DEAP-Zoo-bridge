@@ -176,6 +176,7 @@ def translate_budget_to_env_steps(
         "(EA / CMA-ES / PSO / co-evolution / QDax)."
     )
 
+
 __all__ = [
     "build_parallel_env",
     "build_vec_parallel_env",

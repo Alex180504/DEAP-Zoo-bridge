@@ -21,6 +21,7 @@ from deap_pettingzoo.ui.components.param_widgets import (
 
 # Environment tab
 
+
 def build_env_form(
     env_spec: Dict[str, Any],
     ctx: WidgetContext,
@@ -43,8 +44,7 @@ def build_env_form(
     teams = env_spec.get("teams", [])
     if teams:
         team_labels = ", ".join(
-            f"{t['name']} ({', '.join(t.get('agent_prefixes', []))})"
-            for t in teams
+            f"{t['name']} ({', '.join(t.get('agent_prefixes', []))})" for t in teams
         )
         st.caption(f"Teams: {team_labels}")
 
@@ -57,7 +57,9 @@ def build_env_form(
     _render_param_group(params, ctx, group_label=None)
     return coerce_touched(params, ctx.values)
 
+
 # Algorithm tab(s)
+
 
 def build_algo_form(
     algo_spec: Dict[str, Any],

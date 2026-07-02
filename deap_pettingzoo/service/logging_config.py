@@ -81,9 +81,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
-def resolve_level(
-    verbose: Optional[int] = None, explicit: Optional[str] = None
-) -> int:
+def resolve_level(verbose: Optional[int] = None, explicit: Optional[str] = None) -> int:
     """Resolve the effective root log level.
 
     Precedence: ``explicit`` (e.g. ``--log-level``) > ``verbose`` count
@@ -116,9 +114,7 @@ def default_log_dir() -> str:
     return str(Path(results_root) / "_logs")
 
 
-def build_dict_config(
-    level: int, fmt: str, log_file: Optional[str]
-) -> Dict[str, Any]:
+def build_dict_config(level: int, fmt: str, log_file: Optional[str]) -> Dict[str, Any]:
     """Build a :func:`logging.config.dictConfig` dict.
 
     ``disable_existing_loggers`` is ``False`` so module loggers created at

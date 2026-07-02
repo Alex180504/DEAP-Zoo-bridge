@@ -53,13 +53,18 @@ def run(
     os.environ["DEAP_LOG_FORMAT"] = fmt
 
     log_file = str(Path(default_log_dir()) / "service.log")
-    configure_logging(log_level=os.environ["DEAP_LOG_LEVEL"], log_format=fmt,
-                      log_file=log_file)
+    configure_logging(
+        log_level=os.environ["DEAP_LOG_LEVEL"], log_format=fmt, log_file=log_file
+    )
 
     logger = logging.getLogger("deap_pettingzoo.service")
     logger.info(
         "Starting DEAP-bridge service on %s:%s (level=%s, format=%s, log_file=%s)",
-        host, port, os.environ["DEAP_LOG_LEVEL"], fmt, log_file,
+        host,
+        port,
+        os.environ["DEAP_LOG_LEVEL"],
+        fmt,
+        log_file,
     )
 
     # log_config=None keeps our configuration intact (uvicorn would otherwise

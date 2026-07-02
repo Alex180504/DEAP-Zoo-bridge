@@ -49,7 +49,9 @@ def _now() -> float:
 # ---------------------------------------------------------------------------
 
 
-def _connect(path: str = _DEFAULT_DB_PATH, *, read_only: bool = False) -> sqlite3.Connection:
+def _connect(
+    path: str = _DEFAULT_DB_PATH, *, read_only: bool = False
+) -> sqlite3.Connection:
     # Ensure the parent directory exists (Docker volume mounts may
     # create the mount point with root ownership; sqlite3 needs write
     # permission on the directory to create the database file + WAL).
@@ -68,7 +70,8 @@ def _connect(path: str = _DEFAULT_DB_PATH, *, read_only: bool = False) -> sqlite
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
-    conn.executescript("""
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS experiments (
             id            TEXT PRIMARY KEY,
             label         TEXT NOT NULL DEFAULT '',
@@ -96,7 +99,8 @@ def create_tables(conn: sqlite3.Connection) -> None:
             worker_limit  INTEGER NOT NULL DEFAULT 1
         );
         INSERT OR IGNORE INTO queue_state (id, paused, worker_limit) VALUES (1, 0, 1);
-    """)
+    """
+    )
     # Migration: add origin column to existing databases that were created
     # before v0.3.  CREATE TABLE IF NOT EXISTS doesn't add columns.
     try:
@@ -205,7 +209,9 @@ async def list_experiments(
     return await _run_sync(_list)
 
 
-async def get_experiment(exp_id: str, path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+async def get_experiment(
+    exp_id: str, path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     def _get():
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:
@@ -464,9 +470,7 @@ async def set_paused(paused: bool, path: Optional[str] = None) -> None:
     def _set():
         conn = _connect(path or _DEFAULT_DB_PATH)
         try:
-            conn.execute(
-                "UPDATE queue_state SET paused=? WHERE id=1", (int(paused),)
-            )
+            conn.execute("UPDATE queue_state SET paused=? WHERE id=1", (int(paused),))
             conn.commit()
         finally:
             conn.close()
@@ -556,4 +560,5 @@ def _iso(ts: Optional[float]) -> Optional[str]:
     if ts is None:
         return None
     from datetime import datetime, timezone
+
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()

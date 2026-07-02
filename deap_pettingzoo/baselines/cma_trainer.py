@@ -35,6 +35,10 @@ from deap_pettingzoo.baselines.ea_trainer import (
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
+from deap_pettingzoo.environments.registry import (
+    get_registry_snapshot,
+    replay_registry_snapshot,
+)
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.cma_integration import (
     make_cma_ind_init,
@@ -48,10 +52,6 @@ from deap_pettingzoo.integration.deap_integration import (
     evaluate_population_parallel,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.environments.registry import (
-    get_registry_snapshot,
-    replay_registry_snapshot,
-)
 from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
@@ -80,35 +80,96 @@ class CMAESTrainer(BaselineTrainer):
         I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
         TR, RC = ParamTarget.TRAINER, ParamTarget.RUN_CONFIG
         return (
-            ParamSpec("hidden_size", I, 64, minimum=1, step=1, target=TR,
-                      group="Architecture",
-                      help="Hidden layer width of the evolved MLP."),
-            ParamSpec("population_size", I, 50, minimum=2, step=1, target=TR,
-                      group="Population",
-                      help="lambda - samples drawn per generation."),
-            ParamSpec("sigma0", F, 0.3, minimum=1e-6, step=0.05, target=TR,
-                      group="Strategy",
-                      help="Initial step size of the CMA search distribution."),
-            ParamSpec("variant", E, "mu_mu_lambda", target=TR, group="Strategy",
-                      choices=("mu_mu_lambda", "one_plus_lambda"),
-                      help="CMA-ES flavour: rank-mu update or (1+lambda) elitist."),
-            ParamSpec("activation", E, "tanh", target=TR, group="Architecture",
-                      advanced=True,
-                      choices=("tanh", "relu", "sigmoid", "linear"),
-                      help="MLP activation function."),
-            ParamSpec("num_workers", I, 1, minimum=0, step=1, target=TR,
-                      group="Parallelism",
-                      help="Parallel evaluation workers (1 = serial)."),
-            ParamSpec("parallel_backend", E, "process", target=TR,
-                      group="Parallelism", advanced=True,
-                      choices=("process", "scoop", "dask"),
-                      help="Parallel executor backend."),
-            ParamSpec("seed", I, None, minimum=0, step=1, target=RC,
-                      group="Run", nullable=True,
-                      help="Random seed for this run (None = unseeded)."),
-            ParamSpec("max_steps_per_episode", I, 200, minimum=1, step=1,
-                      target=RC, group="Run",
-                      help="Hard cap on environment steps per rollout."),
+            ParamSpec(
+                "hidden_size",
+                I,
+                64,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Architecture",
+                help="Hidden layer width of the evolved MLP.",
+            ),
+            ParamSpec(
+                "population_size",
+                I,
+                50,
+                minimum=2,
+                step=1,
+                target=TR,
+                group="Population",
+                help="lambda - samples drawn per generation.",
+            ),
+            ParamSpec(
+                "sigma0",
+                F,
+                0.3,
+                minimum=1e-6,
+                step=0.05,
+                target=TR,
+                group="Strategy",
+                help="Initial step size of the CMA search distribution.",
+            ),
+            ParamSpec(
+                "variant",
+                E,
+                "mu_mu_lambda",
+                target=TR,
+                group="Strategy",
+                choices=("mu_mu_lambda", "one_plus_lambda"),
+                help="CMA-ES flavour: rank-mu update or (1+lambda) elitist.",
+            ),
+            ParamSpec(
+                "activation",
+                E,
+                "tanh",
+                target=TR,
+                group="Architecture",
+                advanced=True,
+                choices=("tanh", "relu", "sigmoid", "linear"),
+                help="MLP activation function.",
+            ),
+            ParamSpec(
+                "num_workers",
+                I,
+                1,
+                minimum=0,
+                step=1,
+                target=TR,
+                group="Parallelism",
+                help="Parallel evaluation workers (1 = serial).",
+            ),
+            ParamSpec(
+                "parallel_backend",
+                E,
+                "process",
+                target=TR,
+                group="Parallelism",
+                advanced=True,
+                choices=("process", "scoop", "dask"),
+                help="Parallel executor backend.",
+            ),
+            ParamSpec(
+                "seed",
+                I,
+                None,
+                minimum=0,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Random seed for this run (None = unseeded).",
+            ),
+            ParamSpec(
+                "max_steps_per_episode",
+                I,
+                200,
+                minimum=1,
+                step=1,
+                target=RC,
+                group="Run",
+                help="Hard cap on environment steps per rollout.",
+            ),
         )
 
     def __init__(
@@ -232,9 +293,10 @@ class CMAESTrainer(BaselineTrainer):
         seed = config.seed
         if seed is not None:
             from deap_pettingzoo.utils.rng import seed_everything
+
             seed_everything(int(seed))
 
-        is_box = hasattr(action_space, 'low') and hasattr(action_space, 'high')
+        is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
@@ -255,7 +317,9 @@ class CMAESTrainer(BaselineTrainer):
         log = build_logger(config, algorithm="cma-es")
         env_steps_per_iteration = self.population_size * max_steps_per_episode
         self._recorder = RecordingController(
-            config, log, max_steps=max_steps_per_episode,
+            config,
+            log,
+            max_steps=max_steps_per_episode,
             seed=seed,
         )
 
@@ -269,9 +333,7 @@ class CMAESTrainer(BaselineTrainer):
         # Parallel evaluation setup. num_workers / parallel_backend are
         # first-class TrainingConfig fields; the trainer-constructor value is
         # the fallback used only when the config leaves them at their defaults.
-        requested = (
-            config.num_workers if config.num_workers != 1 else self.num_workers
-        )
+        requested = config.num_workers if config.num_workers != 1 else self.num_workers
         effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
@@ -343,9 +405,7 @@ class CMAESTrainer(BaselineTrainer):
                 gen += 1
 
                 record = stats.compile(population)
-                consumed = (
-                    int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
-                )
+                consumed = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 fitness_history.append(
                     {
                         "generation": gen,
@@ -391,7 +451,8 @@ class CMAESTrainer(BaselineTrainer):
         num_generations = gen
         env.close()
         self._recorder.finalize(
-            _cma_champion, iteration=num_generations,
+            _cma_champion,
+            iteration=num_generations,
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
@@ -399,7 +460,9 @@ class CMAESTrainer(BaselineTrainer):
 
         best_individual = hof[0]
         best_genome = best_individual.genome
-        policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
+        policy = GenomePolicyWrapper(
+            best_genome, config.env_name, action_space=action_space
+        )
 
         # Persist results via the logger
         try:
@@ -407,11 +470,17 @@ class CMAESTrainer(BaselineTrainer):
                 dump_fitness_history(
                     log,
                     fitness_history,
-                    env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    env_steps_per_iteration=self.population_size
+                    * max_steps_per_episode,
                     gen_offset=-1,
-                    nominal_env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    nominal_env_steps_per_iteration=self.population_size
+                    * max_steps_per_episode,
                 )
-                from deap_pettingzoo.utils.logging import save_ea_genome, KIND_CMA_GENOME
+                from deap_pettingzoo.utils.logging import (
+                    KIND_CMA_GENOME,
+                    save_ea_genome,
+                )
+
                 save_ea_genome(
                     log,
                     best_genome,
@@ -534,6 +603,7 @@ class CMAESTrainer(BaselineTrainer):
             "num_generations": int(num_generations),
             "max_steps_per_episode": int(max_steps_per_episode),
         }
+
     def _build_strategy(self, genome_config: Dict[str, Any]):
         """Dispatch to the CMA-ES flavour selected by ``self.variant``."""
         if self.variant == "mu_mu_lambda":

@@ -61,7 +61,6 @@ import numpy as np
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
 from deap_pettingzoo.evaluators.base_evaluator import BaseEvaluator
 
-
 LearnerPolicyFactory = Callable[[Any, str, Any], "PolicyLike"]
 EnvFactory = Callable[[], PettingZooWrapper]
 ScriptedPolicyFactory = Callable[[PettingZooWrapper], Dict[str, "PolicyLike"]]
@@ -106,7 +105,9 @@ def _invoke_get_action(
 class PolicyLike:  # structural type; actual classes only need get_action/reset
     """Structural hint matching :class:`PolicyProtocol`."""
 
-    def get_action(self, observation: np.ndarray, deterministic: bool = True) -> Any: ...
+    def get_action(
+        self, observation: np.ndarray, deterministic: bool = True
+    ) -> Any: ...
     def reset(self) -> None: ...
 
 
@@ -226,9 +227,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
                 "or 'env_factory' (factory path)."
             )
         if has_live and has_factory:
-            raise ValueError(
-                "Provide either 'env_wrapper' or 'env_factory', not both."
-            )
+            raise ValueError("Provide either 'env_wrapper' or 'env_factory', not both.")
         if has_factory and scripted_policy_factory is None:
             raise ValueError(
                 "Factory path requires both 'env_factory' and "
@@ -326,9 +325,12 @@ class MixedPolicyEvaluator(BaseEvaluator):
         result = self.run_episode(individual, seed=seed)
         if self.fitness_spec is not None and self.fitness_spec.objectives:
             from deap_pettingzoo.integration.objectives import build_fitness_vector
-            genome = individual.genome if (
-                individual is not None and hasattr(individual, "genome")
-            ) else None
+
+            genome = (
+                individual.genome
+                if (individual is not None and hasattr(individual, "genome"))
+                else None
+            )
             return build_fitness_vector(
                 aggregated_reward=result.fitness,
                 per_episode_rewards=[result.fitness],
@@ -349,8 +351,14 @@ class MixedPolicyEvaluator(BaseEvaluator):
         seed: Optional[int] = None,
     ) -> MixedPolicyEvalResult:
         """Execute one episode with mixed policies and return full stats."""
-        if individual is None or not hasattr(individual, "genome") or individual.genome is None:
-            raise ValueError("MixedPolicyEvaluator requires an individual with a 'genome'.")
+        if (
+            individual is None
+            or not hasattr(individual, "genome")
+            or individual.genome is None
+        ):
+            raise ValueError(
+                "MixedPolicyEvaluator requires an individual with a 'genome'."
+            )
 
         genome = individual.genome
         env, scripted_policies = self._build_episode_context()
@@ -358,9 +366,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
 
         # Build fresh learner policies for this episode.
         learner_policies: Dict[str, PolicyLike] = {
-            agent: self.learner_factory(
-                genome, agent, env.action_space(agent)
-            )
+            agent: self.learner_factory(genome, agent, env.action_space(agent))
             for agent in self.learner_agents
         }
         # Reset all policies (no-op for stateless ones; skip if not implemented).

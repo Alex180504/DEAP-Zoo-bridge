@@ -10,16 +10,16 @@ Modules:
 
 from __future__ import annotations
 
+from deap_pettingzoo.ui.components.forms import (
+    build_algo_form,
+    build_env_form,
+    build_fitness_form,
+)
 from deap_pettingzoo.ui.components.param_widgets import (
     WidgetContext,
     coerce_param,
     coerce_touched,
     render_param,
-)
-from deap_pettingzoo.ui.components.forms import (
-    build_env_form,
-    build_algo_form,
-    build_fitness_form,
 )
 from deap_pettingzoo.ui.components.validation_view import (
     render_validation_report,

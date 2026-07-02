@@ -51,9 +51,9 @@ class UIState:
         if not isinstance(stored, dict):
             stored = {}
         instance = cls(
-            results_root=Path(stored["results_root"])
-            if stored.get("results_root")
-            else None,
+            results_root=(
+                Path(stored["results_root"]) if stored.get("results_root") else None
+            ),
             selected_run_ids=list(stored.get("selected_run_ids") or []),
             metric=str(stored.get("metric", "best_fitness")),
             statistic=str(stored.get("statistic", "iqm")),

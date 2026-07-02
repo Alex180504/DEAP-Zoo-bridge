@@ -21,14 +21,14 @@ import streamlit as st
 
 from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.api_client import ApiClient, ApiUnavailable, get_client
+from deap_pettingzoo.ui.services.queue_helpers import algo_label as _algo_label
+from deap_pettingzoo.ui.services.queue_helpers import env_label as _env_label
+from deap_pettingzoo.ui.services.queue_helpers import format_time as _format_time
 from deap_pettingzoo.ui.services.queue_helpers import (
-    algo_label as _algo_label,
-    env_label as _env_label,
-    format_time as _format_time,
     progress_description,
-    short_id as _short_id,
-    status_badge as _status_badge,
 )
+from deap_pettingzoo.ui.services.queue_helpers import short_id as _short_id
+from deap_pettingzoo.ui.services.queue_helpers import status_badge as _status_badge
 
 st.set_page_config(page_title="Experiment queue", layout="wide")
 st.title("Experiment queue")
@@ -46,13 +46,17 @@ POLL_INTERVAL = 2  # seconds for the auto-refresh fragment
 
 # Auto-refreshing fragment — the body of the page re-runs every 2 s.
 
+
 @st.fragment(run_every=POLL_INTERVAL)
 def _queue_body() -> None:
     # Fetch data
 
     experiments: List[Dict[str, Any]] = []
     queue_state: Dict[str, Any] = {
-        "paused": False, "running_id": None, "queued_ids": [], "worker_limit": 1,
+        "paused": False,
+        "running_id": None,
+        "queued_ids": [],
+        "worker_limit": 1,
     }
 
     try:
@@ -172,7 +176,9 @@ def _queue_body() -> None:
         # Cancel button
         col1, col2 = st.columns([1, 6])
         with col1:
-            if st.button("🛑 Cancel experiment", type="secondary", key=f"cancel_{exp_id}"):
+            if st.button(
+                "🛑 Cancel experiment", type="secondary", key=f"cancel_{exp_id}"
+            ):
                 try:
                     client.cancel_experiment(exp_id)
                     st.toast("Cancellation requested.")

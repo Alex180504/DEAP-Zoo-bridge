@@ -194,19 +194,25 @@ def _compute_centroids(min_bd, max_bd, grid_shape, num_centroids, key):
 
     if num_centroids is not None:
         key, sub = jax.random.split(key)
-        return compute_cvt_centroids(
-            num_descriptors=len(min_bd),
-            num_init_cvt_samples=max(50_000, num_centroids * 50),
-            num_centroids=int(num_centroids),
+        return (
+            compute_cvt_centroids(
+                num_descriptors=len(min_bd),
+                num_init_cvt_samples=max(50_000, num_centroids * 50),
+                num_centroids=int(num_centroids),
+                minval=list(min_bd),
+                maxval=list(max_bd),
+                key=sub,
+            ),
+            key,
+        )
+    return (
+        compute_euclidean_centroids(
+            grid_shape=tuple(int(x) for x in grid_shape),
             minval=list(min_bd),
             maxval=list(max_bd),
-            key=sub,
-        ), key
-    return compute_euclidean_centroids(
-        grid_shape=tuple(int(x) for x in grid_shape),
-        minval=list(min_bd),
-        maxval=list(max_bd),
-    ), key
+        ),
+        key,
+    )
 
 
 def _sample_initial_leaf(leaf, key, *, batch_size: int, mode: str, sigma: float):
@@ -385,17 +391,15 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     import jax
 
     from deap_pettingzoo.contrib.qdax.policy import (
-        make_flax_mlp,
         init_flax_mlp_params,
+        make_flax_mlp,
     )
     from deap_pettingzoo.contrib.qdax.scoring_jax import make_jax_scoring_function
     from deap_pettingzoo.contrib.qdax.scoring_numpy import (
         make_numpy_scoring_function,
     )
 
-    env = PettingZooWrapper(
-        env_name=config.env_name, env_config=config.env_config
-    )
+    env = PettingZooWrapper(env_name=config.env_name, env_config=config.env_config)
     hidden = tuple(params["hidden_sizes"])
     layer_sizes = params["layer_sizes"] or _infer_layer_sizes(env, hidden)
     module = make_flax_mlp(layer_sizes, activation=params["activation"])
@@ -428,19 +432,20 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
         # Filter agent_list to only agents whose obs size matches the policy
         # input (layer_sizes[0]) so the shared network applies cleanly.
         import jax as _jax
+
         _k0 = _jax.random.PRNGKey(0)
         _obs0, _ = raw_jax_env.reset(_k0)
         _all_agents = list(_obs0.keys())
-        _matching = [a for a in _all_agents
-                     if int(_obs0[a].shape[0]) == layer_sizes[0]]
+        _matching = [a for a in _all_agents if int(_obs0[a].shape[0]) == layer_sizes[0]]
         if not _matching:
             # No agent matches — rebuild with the first agent's actual obs size.
             _agent0 = _all_agents[0]
             actual_in_dim = int(_obs0[_agent0].shape[0])
             layer_sizes = (actual_in_dim, *layer_sizes[1:])
             module = make_flax_mlp(layer_sizes, activation=params["activation"])
-            _matching = [a for a in _all_agents
-                         if int(_obs0[a].shape[0]) == actual_in_dim]
+            _matching = [
+                a for a in _all_agents if int(_obs0[a].shape[0]) == actual_in_dim
+            ]
         jax_action_type, _ = _resolve_action_decoding(
             _jax_action_space(raw_jax_env, _matching[0]), config.continuous
         )
@@ -558,9 +563,9 @@ class MAPElitesTrainer(BaselineTrainer):
         reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
-        from qdax.core.map_elites import MAPElites
         from qdax.core.emitters.mutation_operators import isoline_variation
         from qdax.core.emitters.standard_emitters import MixingEmitter
+        from qdax.core.map_elites import MAPElites
         from qdax.utils.metrics import default_qd_metrics
 
         params = {**_DEFAULT_MAP_ELITES_PARAMS, **(config.algorithm_params or {})}
@@ -603,9 +608,7 @@ class MAPElitesTrainer(BaselineTrainer):
             variation_percentage=1.0,
             batch_size=int(params["batch_size"]),
         )
-        metrics_fn = lambda rep: default_qd_metrics(  # noqa: E731
-            rep, qd_offset=0.0
-        )
+        metrics_fn = lambda rep: default_qd_metrics(rep, qd_offset=0.0)  # noqa: E731
 
         map_elites = MAPElites(
             scoring_function=scoring_fn,
@@ -703,15 +706,11 @@ class MAPElitesTrainer(BaselineTrainer):
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
-            "env_steps_nominal": int(
-                _init_env_steps + num_iters * _env_steps_per_iter
-            ),
+            "env_steps_nominal": int(_init_env_steps + num_iters * _env_steps_per_iter),
             # Real int on the numpy/PettingZoo scoring path; None on the
             # JAX-native path, where scoring runs inside jax.jit/vmap with no
             # Python-side per-tick counter (a documented structural limit).
-            "env_steps_consumed": getattr(
-                scoring_fn, "_env_steps_consumed", None
-            ),
+            "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
         _persist_qdax_results(
@@ -723,9 +722,11 @@ class MAPElitesTrainer(BaselineTrainer):
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=_ep_len,
-            repertoire_path=Path(metadata["repertoire_path"])
-            if "repertoire_path" in metadata
-            else None,
+            repertoire_path=(
+                Path(metadata["repertoire_path"])
+                if "repertoire_path" in metadata
+                else None
+            ),
             env_steps_per_iteration=_env_steps_per_iter,
             init_env_steps=_init_env_steps,
             env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
@@ -774,20 +775,20 @@ class CMAMETrainer(BaselineTrainer):
 
         import jax
         import jax.numpy as jnp
-        from qdax.core.map_elites import MAPElites
         from qdax.core.emitters.cma_improvement_emitter import CMAImprovementEmitter
+        from qdax.core.map_elites import MAPElites
         from qdax.utils.metrics import default_qd_metrics
 
         from deap_pettingzoo.contrib.qdax.policy import (
+            FlaxPolicyAdapter,
             flat_count,
             flat_to_pytree,
-            FlaxPolicyAdapter,
         )
 
         params = {**_DEFAULT_CMA_ME_PARAMS, **(config.algorithm_params or {})}
         _apply_universal_keys(config, params)
-        env, module, layer_sizes, descriptor_fn, scoring_fn, _ = (
-            _build_env_and_scoring(config, params)
+        env, module, layer_sizes, descriptor_fn, scoring_fn, _ = _build_env_and_scoring(
+            config, params
         )
 
         genotype_dim = flat_count(layer_sizes)
@@ -891,9 +892,7 @@ class CMAMETrainer(BaselineTrainer):
 
         # Champion extraction: repertoire genotypes are flat arrays here.
         fitnesses = np.asarray(repertoire.fitnesses)
-        best_idx = int(
-            np.argmax(np.where(np.isfinite(fitnesses), fitnesses, -np.inf))
-        )
+        best_idx = int(np.argmax(np.where(np.isfinite(fitnesses), fitnesses, -np.inf)))
         flat_champion = np.asarray(repertoire.genotypes[best_idx])
         champion_params = flat_to_pytree(flat_champion, layer_sizes)
         champion_policy = FlaxPolicyAdapter(
@@ -932,9 +931,7 @@ class CMAMETrainer(BaselineTrainer):
             "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
             # Real int on the numpy/PettingZoo path; None on the JAX-native
             # path (no Python-side per-tick counter, documented).
-            "env_steps_consumed": getattr(
-                scoring_fn, "_env_steps_consumed", None
-            ),
+            "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
         _persist_qdax_results(
@@ -946,9 +943,11 @@ class CMAMETrainer(BaselineTrainer):
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=_ep_len,
-            repertoire_path=Path(metadata["repertoire_path"])
-            if "repertoire_path" in metadata
-            else None,
+            repertoire_path=(
+                Path(metadata["repertoire_path"])
+                if "repertoire_path" in metadata
+                else None
+            ),
             env_steps_per_iteration=_iter_env_steps,
             init_env_steps=_iter_env_steps,
             env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
@@ -996,9 +995,14 @@ def _maybe_record_qdax_champion(
     # the controller is driven via finalize() to capture just the final
     # champion (matched to the last QDax iteration row in the sidecar).
     controller = RecordingController(
-        config, log,
+        config,
+        log,
         max_steps=int(recording_max_steps or 500),
-        seed=config.seed if config.seed is not None else config.algorithm_params.get("seed"),
+        seed=(
+            config.seed
+            if config.seed is not None
+            else config.algorithm_params.get("seed")
+        ),
     )
     controller.finalize(
         lambda: champion_policy,
@@ -1061,7 +1065,11 @@ def _persist_qdax_results(
             _nominal = int(init_env_steps) + i * int(env_steps_per_iteration)
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": int(env_steps_consumed) if env_steps_consumed is not None else _nominal,
+                "env_steps": (
+                    int(env_steps_consumed)
+                    if env_steps_consumed is not None
+                    else _nominal
+                ),
                 "nominal_env_steps": _nominal,
                 "wall_time": 0.0,
             }

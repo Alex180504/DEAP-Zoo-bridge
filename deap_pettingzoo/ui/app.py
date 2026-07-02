@@ -2,9 +2,9 @@
 
 Run with::
 
-    python -m deap_pettingzoo.ui         
-    or:   
-    streamlit run deap_pettingzoo/ui/app.py 
+    python -m deap_pettingzoo.ui
+    or:
+    streamlit run deap_pettingzoo/ui/app.py
 
 Uses :func:`streamlit.navigation` to organise pages into three groups:
 
@@ -74,6 +74,7 @@ with st.sidebar:
     )
     if new_root and new_root != str(settings.results_root):
         from pathlib import Path as _Path
+
         state.results_root = _Path(new_root).expanduser().resolve()
         settings = load_settings(results_root=new_root)
         state.persist()  # write immediately so the current render sees the new root
@@ -107,11 +108,10 @@ else:
         col1, col2, col3 = st.columns(3)
         col1.metric("Algorithms", len(algorithms))
         col2.metric("Environments", len(envs))
-        col3.metric("Total wall time (s)",
-                    f"{sum((r.wall_time_s or 0.0) for r in runs):.1f}")
-        st.markdown(
-            "Use the **Browse** page in the sidebar to filter and select runs."
+        col3.metric(
+            "Total wall time (s)", f"{sum((r.wall_time_s or 0.0) for r in runs):.1f}"
         )
+        st.markdown("Use the **Browse** page in the sidebar to filter and select runs.")
 
 # Run the selected page (if any — home body stays visible when none selected).
 

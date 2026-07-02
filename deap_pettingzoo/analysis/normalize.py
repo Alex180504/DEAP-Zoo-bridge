@@ -104,9 +104,7 @@ class NormalizationSpec:
         reference run (e.g. published EA seeds == 1.0).
         """
         if algorithm not in score_matrices:
-            raise KeyError(
-                f"reference algorithm {algorithm!r} not in score_matrices"
-            )
+            raise KeyError(f"reference algorithm {algorithm!r} not in score_matrices")
         ref = score_matrices[algorithm]
         if ref.shape[1] != len(env_names):
             raise ValueError(

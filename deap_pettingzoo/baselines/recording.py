@@ -129,8 +129,9 @@ class RecordingController:
         """
         if not self.enabled or not self._is_due(event):
             return
-        self._record(champion, iteration=event.current, env_steps=event.env_steps,
-                     extra=extra)
+        self._record(
+            champion, iteration=event.current, env_steps=event.env_steps, extra=extra
+        )
 
     def finalize(
         self,

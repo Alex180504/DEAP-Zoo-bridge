@@ -168,7 +168,10 @@ def make_jax_scoring_function(
         _noop_action = _noop_action_for_agent(noop_agents[0])
         for _noop_agent in noop_agents[1:]:
             _agent_noop = _noop_action_for_agent(_noop_agent)
-            if _agent_noop.shape != _noop_action.shape or _agent_noop.dtype != _noop_action.dtype:
+            if (
+                _agent_noop.shape != _noop_action.shape
+                or _agent_noop.dtype != _noop_action.dtype
+            ):
                 raise ValueError(
                     "Omitted agents must share a compatible action shape/dtype "
                     f"for noop actions; got {_noop_agent!r} with "
@@ -228,9 +231,7 @@ def make_jax_scoring_function(
             new_obs, new_state, rewards, dones, _infos = jax_env.step(
                 sub, state, actions
             )
-            step_reward = jnp.sum(
-                jnp.stack([rewards[a] for a in agent_list])
-            )
+            step_reward = jnp.sum(jnp.stack([rewards[a] for a in agent_list]))
             pos, vel = extract(new_obs, agent_list)
             done_flag = jnp.asarray(dones.get("__all__", False)).astype(jnp.bool_)
             alive_mask = (~acc_done).astype(step_reward.dtype)
@@ -249,7 +250,13 @@ def make_jax_scoring_function(
             return (new_state, new_obs, key, acc_reward, acc_done, pos, vel), (pos, vel)
 
         init_carry = (
-            state, obs, key, jnp.asarray(0.0), jnp.asarray(False), pos0, vel0,
+            state,
+            obs,
+            key,
+            jnp.asarray(0.0),
+            jnp.asarray(False),
+            pos0,
+            vel0,
         )
         (_, _, _, total_reward, _, _, _), (pos_traj, vel_traj) = jax.lax.scan(
             _step_fn, init_carry, xs=None, length=int(episode_length)

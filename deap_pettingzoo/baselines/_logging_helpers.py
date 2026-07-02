@@ -83,7 +83,9 @@ def dump_fitness_history(
         # Nominal ceiling: cumulative — gen + 1 charges the initial population
         # regardless of indexing scheme, gen_offset aligns the origin.
         if nominal_env_steps_per_iteration is not None:
-            nominal = max(1, gen + 1 + gen_offset) * int(nominal_env_steps_per_iteration)
+            nominal = max(1, gen + 1 + gen_offset) * int(
+                nominal_env_steps_per_iteration
+            )
         else:
             nominal = real_env_steps
         row = {

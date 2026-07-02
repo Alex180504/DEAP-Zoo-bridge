@@ -100,25 +100,33 @@ def _import_widget(uploader_key: str, btn_key: str) -> None:
         return
     file_id = f"{uploaded.name}_{uploaded.size}"
     if st.session_state.get("_last_import_id") == file_id:
-        st.info("This file was already imported. Upload a different archive to import again.")
+        st.info(
+            "This file was already imported. Upload a different archive to import again."
+        )
         return
     if st.button("📥 Import", key=btn_key):
         if _run_import(uploaded.getvalue(), file_id):
             # Drop filter widget state so the next render re-initialises
             # with default=<all>, exposing newly-imported algorithms/envs.
-            for _k in ("browse_filter_algos", "browse_filter_envs", "browse_date_range"):
+            for _k in (
+                "browse_filter_algos",
+                "browse_filter_envs",
+                "browse_date_range",
+            ):
                 st.session_state.pop(_k, None)
             _cached_discover.clear()
             st.rerun()
 
 
 if not runs:
-    st.info(f"No runs found under **{root}**. Import a previously exported experiment below.")
+    st.info(
+        f"No runs found under **{root}**. Import a previously exported experiment below."
+    )
     st.markdown("### 📦 Import experiments")
     _import_widget("browse_import_empty_uploader", "browse_import_empty_btn")
     st.stop()
 
-# Sidebar filters & management 
+# Sidebar filters & management
 algos = sorted({r.algorithm for r in runs})
 envs = sorted({r.env_name for r in runs})
 
@@ -127,8 +135,12 @@ run_dates = [r.started_at.date() for r in runs if r.started_at is not None]
 
 with st.sidebar:
     st.header("Filters")
-    sel_algos = st.multiselect("Algorithms", algos, default=algos, key="browse_filter_algos")
-    sel_envs = st.multiselect("Environments", envs, default=envs, key="browse_filter_envs")
+    sel_algos = st.multiselect(
+        "Algorithms", algos, default=algos, key="browse_filter_algos"
+    )
+    sel_envs = st.multiselect(
+        "Environments", envs, default=envs, key="browse_filter_envs"
+    )
 
     # Date range — only shown when there is timestamp data
     date_range: list = []
@@ -158,12 +170,21 @@ with st.sidebar:
         index=0,
         key="browse_sort_col",
     )
-    sort_asc = st.radio("Order", ["↓ Newest / Highest", "↑ Oldest / Lowest"], key="browse_sort_order") == "↑ Oldest / Lowest"
+    sort_asc = (
+        st.radio(
+            "Order",
+            ["↓ Newest / Highest", "↑ Oldest / Lowest"],
+            key="browse_sort_order",
+        )
+        == "↑ Oldest / Lowest"
+    )
 
     st.divider()
     with st.expander("📁 Directory management"):
         st.markdown("**Create folder**")
-        new_folder_name = st.text_input("Folder name", key="browse_new_folder_name", placeholder="e.g. experiment-A")
+        new_folder_name = st.text_input(
+            "Folder name", key="browse_new_folder_name", placeholder="e.g. experiment-A"
+        )
         if st.button("Create", key="browse_create_folder"):
             if new_folder_name:
                 try:
@@ -178,13 +199,16 @@ with st.sidebar:
         # List first-level subdirs that are not run dirs (no manifest.json)
         try:
             subdirs = sorted(
-                p.name for p in root.iterdir()
+                p.name
+                for p in root.iterdir()
                 if p.is_dir() and not (p / "manifest.json").is_file()
             )
         except OSError:
             subdirs = []
         if subdirs:
-            move_target_name = st.selectbox("Target folder", subdirs, key="browse_move_target")
+            move_target_name = st.selectbox(
+                "Target folder", subdirs, key="browse_move_target"
+            )
             if st.button("Move selected here", key="browse_move_btn"):
                 target_dir = root / move_target_name
                 moved, errors = 0, []
@@ -210,17 +234,12 @@ with st.sidebar:
 
 
 # Apply filters & sort
-filtered = [
-    r for r in runs
-    if r.algorithm in sel_algos
-    and r.env_name in sel_envs
-]
+filtered = [r for r in runs if r.algorithm in sel_algos and r.env_name in sel_envs]
 
 if len(date_range) == 2:
     lo, hi = date_range[0], date_range[1]
     filtered = [
-        r for r in filtered
-        if r.started_at is None or (lo <= r.started_at.date() <= hi)
+        r for r in filtered if r.started_at is None or (lo <= r.started_at.date() <= hi)
     ]
 
 # Sort
@@ -239,7 +258,10 @@ _SORT_NONE_LAST = {
     "env_name": lambda r: (False, r.env_name),
     "seed": lambda r: (r.seed is None, r.seed),
 }
-filtered.sort(key=_SORT_NONE_LAST.get(sort_col, _SORT_NONE_LAST["started_at"]), reverse=not sort_asc)
+filtered.sort(
+    key=_SORT_NONE_LAST.get(sort_col, _SORT_NONE_LAST["started_at"]),
+    reverse=not sort_asc,
+)
 
 st.caption(f"{len(filtered)} of {len(runs)} runs match.")
 
@@ -289,9 +311,7 @@ def _on_table_select():
     table_state = st.session_state.get(_table_key, {})
     sel_rows = list(table_state.get("selection", {}).get("rows", []))
     rows_data = st.session_state.get("_browse_rows", [])
-    selected_ids = [
-        rows_data[i]["run_id"] for i in sel_rows if 0 <= i < len(rows_data)
-    ]
+    selected_ids = [rows_data[i]["run_id"] for i in sel_rows if 0 <= i < len(rows_data)]
     # Update session state directly
     st.session_state.setdefault("_deap_ui_state_v1", {})[
         "selected_run_ids"
@@ -316,9 +336,7 @@ event = st.dataframe(
 
 # Read selection directly from widget state (NOT from event.selection, which can be stale during the on_select-triggered rerun).
 _table_state = st.session_state.get(_table_key, {})
-selected_indices = list(
-    _table_state.get("selection", {}).get("rows", [])
-)
+selected_indices = list(_table_state.get("selection", {}).get("rows", []))
 selected_run_ids = [rows[i]["run_id"] for i in selected_indices if 0 <= i < len(rows)]
 selected_run_dirs = {
     rows[i]["run_id"]: Path(rows[i]["run_dir"])
@@ -365,7 +383,9 @@ if st.session_state.get("_browse_confirm_delete"):
             try:
                 result = get_client().delete_runs(run_dirs_to_delete)
                 for err in result.get("errors", []):
-                    errors.append(f"{err.get('path', '?')}: {err.get('error', 'unknown')}")
+                    errors.append(
+                        f"{err.get('path', '?')}: {err.get('error', 'unknown')}"
+                    )
             except Exception as exc:
                 errors.append(str(exc))
         st.session_state["_browse_confirm_delete"] = False
@@ -387,7 +407,9 @@ if st.session_state.get("_browse_confirm_delete"):
 
 # Manage selected runs
 if selected_run_ids:
-    with st.expander(f"⚙️ Manage {len(selected_run_ids)} selected run(s)", expanded=False):
+    with st.expander(
+        f"⚙️ Manage {len(selected_run_ids)} selected run(s)", expanded=False
+    ):
         st.markdown("**Rename** — set a human-readable display name.")
         col_name, col_btn = st.columns([3, 1])
         new_name = col_name.text_input(
@@ -419,20 +441,28 @@ if selected_run_ids:
 
         st.divider()
         st.markdown("**Delete** — permanently remove the run directory from disk.")
-        if st.button(f"🗑 Delete {len(selected_run_ids)} selected run(s)", key="browse_delete_btn", type="secondary"):
+        if st.button(
+            f"🗑 Delete {len(selected_run_ids)} selected run(s)",
+            key="browse_delete_btn",
+            type="secondary",
+        ):
             st.session_state["_browse_confirm_delete"] = True
             st.rerun()
 
         # --- Re-run (UI-origin experiments only) --------------------------
         st.divider()
         st.markdown("**Re-run** — load an experiment's spec into the Setup page.")
-        exp_ids = sorted({
-            r.experiment_id for r in runs
-            if r.run_id in selected_run_ids and r.experiment_id
-        })
+        exp_ids = sorted(
+            {
+                r.experiment_id
+                for r in runs
+                if r.run_id in selected_run_ids and r.experiment_id
+            }
+        )
         if exp_ids:
             selected_exp = st.selectbox(
-                "Experiment", exp_ids,
+                "Experiment",
+                exp_ids,
                 key="browse_rerun_exp",
                 format_func=lambda eid: f"Experiment {eid}",
             )
@@ -443,6 +473,7 @@ if selected_run_ids:
                     spec = result.get("spec", {})
                     if spec and spec.get("environment"):
                         import json
+
                         form_defaults = spec_to_form_defaults(spec)
                         form_defaults["_loaded_spec"] = spec
                         state.setup_config = json.dumps(form_defaults)
@@ -467,9 +498,7 @@ with st.expander("📦 Export selected runs", expanded=bool(state.selected_run_i
     exp_tb = st.checkbox("Include TensorBoard logs", key="browse_exp_tb_main")
     exp_traj = st.checkbox("Include trajectory data", key="browse_exp_traj_main")
     if selected_run_ids:
-        run_dirs_list = [
-            str(r.run_dir) for r in runs if r.run_id in selected_run_ids
-        ]
+        run_dirs_list = [str(r.run_dir) for r in runs if r.run_id in selected_run_ids]
         if run_dirs_list:
             client = get_client()
             url = client.build_run_export_url(

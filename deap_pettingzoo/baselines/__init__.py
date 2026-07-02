@@ -11,84 +11,84 @@ Supported algorithms:
 - IPPO-Grouped (IPPO with AgileRL prefix-based agent grouping)
 """
 
-from deap_pettingzoo.baselines.base import (
-    BaselineTrainer,
-    BaselineEvaluator,
-    BudgetMode,
-    RecordingConfig,
-    RecordingMode,
-    FitnessConfig,
-    ProgressEvent,
-    ProgressCallback,
-    TrainingConfig,
-    TrainingResult,
-    EvalResult,
-    ComparisonConfig,
-    PolicyProtocol,
-)
-from deap_pettingzoo.baselines.ea_trainer import EATrainer
-from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
-from deap_pettingzoo.baselines.pso_trainer import PSOTrainer
-from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
-from deap_pettingzoo.baselines.agilerl_trainer import (
-    AgileRLTrainer,
-    MADDPGTrainer,
-    MATD3Trainer,
-    IPPOTrainer,
-    GroupedIPPOTrainer,
-)
 from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
     EvolveHPOTrainer,
     MADDPGHPOTrainer,
     MATD3HPOTrainer,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
-from deap_pettingzoo.baselines.comparison import (
-    compare_baselines,
-    register_trainer,
-    get_trainer,
+from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.baselines.agilerl_trainer import (
+    AgileRLTrainer,
+    GroupedIPPOTrainer,
+    IPPOTrainer,
+    MADDPGTrainer,
+    MATD3Trainer,
 )
-from deap_pettingzoo.baselines.compatibility import (
-    EnvironmentInfo,
-    CompatibilityResult,
-    inspect_environment,
-    check_compatibility,
-    validate_compatibility,
-    build_compatibility_matrix,
-    get_compatible_algorithms,
-    format_compatibility_matrix,
+from deap_pettingzoo.baselines.base import (
+    BaselineEvaluator,
+    BaselineTrainer,
+    BudgetMode,
+    ComparisonConfig,
+    EvalResult,
+    FitnessConfig,
+    PolicyProtocol,
+    ProgressCallback,
+    ProgressEvent,
+    RecordingConfig,
+    RecordingMode,
+    TrainingConfig,
+    TrainingResult,
 )
+from deap_pettingzoo.baselines.cma_trainer import CMAESTrainer
 from deap_pettingzoo.baselines.coevolution import (
+    ArchivePool,
     CoEvolutionConfig,
     CoEvolutionTrainer,
-    Side,
+    CompositePool,
+    ElitistHallOfFame,
+    FrozenPolicyPool,
+    HallOfFame,
     OpponentPool,
     PopulationPool,
-    ArchivePool,
-    FrozenPolicyPool,
-    CompositePool,
-    HallOfFame,
     RingHallOfFame,
-    ElitistHallOfFame,
-    uniform_sampler,
-    latest_sampler,
+    Side,
     fitness_proportional_sampler,
+    latest_sampler,
     tournament_sampler,
+    uniform_sampler,
 )
+from deap_pettingzoo.baselines.comparison import (
+    compare_baselines,
+    get_trainer,
+    register_trainer,
+)
+from deap_pettingzoo.baselines.compatibility import (
+    CompatibilityResult,
+    EnvironmentInfo,
+    build_compatibility_matrix,
+    check_compatibility,
+    format_compatibility_matrix,
+    get_compatible_algorithms,
+    inspect_environment,
+    validate_compatibility,
+)
+from deap_pettingzoo.baselines.ea_trainer import EATrainer
 from deap_pettingzoo.baselines.experiment_spec import (
-    ExperimentSpec,
     BudgetSpec,
-    FitnessSettings,
-    RecordingSettings,
-    ParallelismSettings,
+    BuiltPlan,
     CoevolutionSettings,
     CoevolutionSideSpec,
+    ExperimentSpec,
+    FitnessSettings,
+    ParallelismSettings,
+    RecordingSettings,
     SubRun,
-    BuiltPlan,
     build_configs,
-    validate_spec,
     deep_merge,
+    validate_spec,
 )
+from deap_pettingzoo.baselines.pso_trainer import PSOTrainer
+from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
 
 __all__ = [
     "BaselineTrainer",

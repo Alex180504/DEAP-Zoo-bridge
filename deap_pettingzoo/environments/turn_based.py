@@ -31,7 +31,6 @@ import numpy as np
 from gymnasium import spaces
 from pettingzoo.utils.env import AECEnv, ParallelEnv
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared by both adapters
 # ---------------------------------------------------------------------------
@@ -49,7 +48,9 @@ def _unwrap_obs_space(raw_space):
     return raw_space
 
 
-def _split_observation(raw_obs, action_space) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+def _split_observation(
+    raw_obs, action_space
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Split a possibly-masked raw observation into ``(obs_array, mask)``.
 
     Args:
@@ -295,8 +296,9 @@ class SequentialTurnAdapter(_TurnBasedAdapterBase):
             candidate = self.aec_env.agent_selection
             if candidate is None:
                 break
-            if (self.aec_env.terminations.get(candidate, False)
-                    or self.aec_env.truncations.get(candidate, False)):
+            if self.aec_env.terminations.get(
+                candidate, False
+            ) or self.aec_env.truncations.get(candidate, False):
                 self.aec_env.step(None)
             else:
                 break
@@ -327,8 +329,12 @@ class SequentialTurnAdapter(_TurnBasedAdapterBase):
         if mask is not None:
             info["action_mask"] = mask
         rewards = {current_pre: float(self.aec_env.rewards.get(current_pre, 0.0))}
-        terminations = {current_pre: bool(self.aec_env.terminations.get(current_pre, False))}
-        truncations = {current_pre: bool(self.aec_env.truncations.get(current_pre, False))}
+        terminations = {
+            current_pre: bool(self.aec_env.terminations.get(current_pre, False))
+        }
+        truncations = {
+            current_pre: bool(self.aec_env.truncations.get(current_pre, False))
+        }
         # Also surface next_agent's bookkeeping so the returned dicts align
         # with the obs dict.
         rewards.setdefault(next_agent, 0.0)

@@ -58,6 +58,7 @@ class BudgetSpecModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import BudgetSpec
+
         return BudgetSpec(
             mode=self.mode,
             value=self.value,
@@ -72,6 +73,7 @@ class FitnessSettingsModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import FitnessSettings
+
         return FitnessSettings(
             aggregation_method=self.aggregation_method,
             team_mapping=self.team_mapping,
@@ -104,6 +106,7 @@ class RecordingSettingsModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import RecordingSettings
+
         return RecordingSettings(
             enabled=self.enabled,
             fps=self.fps,
@@ -121,6 +124,7 @@ class ParallelismSettingsModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import ParallelismSettings
+
         return ParallelismSettings(
             num_workers=self.num_workers,
             parallel_backend=self.parallel_backend,
@@ -135,6 +139,7 @@ class CoevolutionSideSpecModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import CoevolutionSideSpec
+
         return CoevolutionSideSpec(
             name=self.name,
             algorithm=self.algorithm,
@@ -155,6 +160,7 @@ class CoevolutionSettingsModel(BaseModel):
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import CoevolutionSettings
+
         return CoevolutionSettings(
             enabled=self.enabled,
             mode=self.mode,
@@ -201,13 +207,12 @@ class ExperimentSpecModel(BaseModel):
         from deap_pettingzoo.baselines.experiment_spec import (
             ExperimentSpec,
         )
+
         return ExperimentSpec(
             environment=self.environment,
             algorithms=list(self.algorithms),
             env_config=dict(self.env_config),
-            hyperparameters={
-                k: dict(v) for k, v in self.hyperparameters.items()
-            },
+            hyperparameters={k: dict(v) for k, v in self.hyperparameters.items()},
             budget=self.budget.to_dataclass(),
             fitness=self.fitness.to_dataclass(),
             recording=self.recording.to_dataclass(),
@@ -305,8 +310,8 @@ class InstallRequest(BaseModel):
     rejected.
     """
 
-    manager: str = "pip"          # one of: pip, git
-    action: str = "install"       # pip -> install or uninstall; git -> clone
+    manager: str = "pip"  # one of: pip, git
+    action: str = "install"  # pip -> install or uninstall; git -> clone
     args: List[str] = Field(default_factory=list)
 
 
@@ -317,10 +322,10 @@ class InstallStartResponse(BaseModel):
 
 class InstallStatusResponse(BaseModel):
     job_id: str
-    status: str                   # running | completed | failed
+    status: str  # running | completed | failed
     returncode: Optional[int] = None
     command: str = ""
-    text: str = ""                # log tail
+    text: str = ""  # log tail
     next_offset: int = 0
     eof: bool = False
 
@@ -336,7 +341,7 @@ class ScriptSubmitModel(BaseModel):
 
     script: str
     label: str = ""
-    entry: str = "script"         # "script" (run file) — reserved: "module"
+    entry: str = "script"  # "script" (run file) — reserved: "module"
 
     @field_validator("label")
     @classmethod

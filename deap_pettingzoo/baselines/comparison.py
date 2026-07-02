@@ -8,7 +8,8 @@ baseline algorithms under matched budget constraints.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
 from deap_pettingzoo.baselines.base import (
@@ -26,7 +27,7 @@ _TRAINER_REGISTRY: Dict[str, type] = {}
 
 def register_trainer(name: str, trainer_class: type) -> None:
     """Register a trainer class for an algorithm.
-    
+
     Args:
         name: Algorithm name (e.g., 'ea', 'maddpg').
         trainer_class: BaselineTrainer subclass.
@@ -170,13 +171,13 @@ def compare_baselines(
     evaluator = UnifiedEvaluator(max_steps=config.max_steps_per_episode)
 
     results: Dict[str, Any] = {
-        'config': {
-            'env_name': config.env_name,
-            'env_config': dict(config.env_config),
-            'budget_mode': config.budget_mode.value,
-            'budget_value': config.budget_value,
-            'num_seeds': config.num_seeds,
-            'eval_episodes': config.eval_episodes,
+        "config": {
+            "env_name": config.env_name,
+            "env_config": dict(config.env_config),
+            "budget_mode": config.budget_mode.value,
+            "budget_value": config.budget_value,
+            "num_seeds": config.num_seeds,
+            "eval_episodes": config.eval_episodes,
         }
     }
 
@@ -213,12 +214,14 @@ def compare_baselines(
             print(f"Warning: {algorithm} does not support {config.budget_mode.value}")
             logger.warning(
                 "%s does not support budget mode %s; skipping",
-                algorithm, config.budget_mode.value,
+                algorithm,
+                config.budget_mode.value,
             )
             continue
 
         if validate:
             from deap_pettingzoo.baselines.compatibility import validate_compatibility
+
             compat = validate_compatibility(trainer, config.env_name, algorithm)
             if not compat.compatible:
                 print(f"Warning: {algorithm} is incompatible with {config.env_name}:")
@@ -226,9 +229,11 @@ def compare_baselines(
                     print(f"  - {issue}")
                 logger.warning(
                     "%s incompatible with %s: %s",
-                    algorithm, config.env_name, "; ".join(compat.issues),
+                    algorithm,
+                    config.env_name,
+                    "; ".join(compat.issues),
                 )
-                results[algorithm] = {'skipped': True, 'issues': compat.issues}
+                results[algorithm] = {"skipped": True, "issues": compat.issues}
                 continue
             if compat.warnings:
                 for w in compat.warnings:
@@ -251,7 +256,9 @@ def compare_baselines(
             # order-independent per-agent dispatch (robust to a shrinking
             # active-agent set); single-policy backends use the broadcast path.
             _policy = training_result.policy
-            _policy_map = _policy.policy_map() if hasattr(_policy, "policy_map") else None
+            _policy_map = (
+                _policy.policy_map() if hasattr(_policy, "policy_map") else None
+            )
             _eval_kwargs = dict(
                 env_name=sub.config.env_name,
                 num_episodes=config.eval_episodes,
@@ -260,47 +267,57 @@ def compare_baselines(
                 render=False,
             )
             if _policy_map:
-                eval_result = evaluator.evaluate(None, policy_map=_policy_map, **_eval_kwargs)
+                eval_result = evaluator.evaluate(
+                    None, policy_map=_policy_map, **_eval_kwargs
+                )
             else:
                 eval_result = evaluator.evaluate(_policy, **_eval_kwargs)
-            print(f"Evaluation: mean={eval_result.mean_reward:.2f}, "
-                  f"std={eval_result.std_reward:.2f}")
+            print(
+                f"Evaluation: mean={eval_result.mean_reward:.2f}, "
+                f"std={eval_result.std_reward:.2f}"
+            )
 
-            seed_results.append({
-                'seed': sub.seed,
-                'training_time': training_result.training_time,
-                'training_metrics': training_result.metrics,
-                'eval_result': eval_result.to_dict(),
-            })
+            seed_results.append(
+                {
+                    "seed": sub.seed,
+                    "training_time": training_result.training_time,
+                    "training_metrics": training_result.metrics,
+                    "eval_result": eval_result.to_dict(),
+                }
+            )
 
         # Aggregate across seeds
         if seed_results:
-            mean_rewards = [sr['eval_result']['mean_reward'] for sr in seed_results]
+            mean_rewards = [sr["eval_result"]["mean_reward"] for sr in seed_results]
             best_seed_idx = int(np.argmax(mean_rewards))
 
             results[algorithm] = {
-                'seeds': seed_results,
-                'mean_reward': float(np.mean(mean_rewards)),
-                'std_reward': float(np.std(mean_rewards)),
-                'min_reward': float(np.min(mean_rewards)),
-                'max_reward': float(np.max(mean_rewards)),
-                'best_seed': best_seed_idx,
-                'eval_metric_provenance': 'held_out_unified',
-                'capabilities': trainer.get_capabilities(),
+                "seeds": seed_results,
+                "mean_reward": float(np.mean(mean_rewards)),
+                "std_reward": float(np.std(mean_rewards)),
+                "min_reward": float(np.min(mean_rewards)),
+                "max_reward": float(np.max(mean_rewards)),
+                "best_seed": best_seed_idx,
+                "eval_metric_provenance": "held_out_unified",
+                "capabilities": trainer.get_capabilities(),
             }
 
             print(f"\n{algorithm.upper()} Summary:")
-            print(f"  Mean reward: {results[algorithm]['mean_reward']:.2f} "
-                  f"± {results[algorithm]['std_reward']:.2f}")
-            print(f"  Best seed: {best_seed_idx} "
-                  f"(reward: {mean_rewards[best_seed_idx]:.2f})")
+            print(
+                f"  Mean reward: {results[algorithm]['mean_reward']:.2f} "
+                f"± {results[algorithm]['std_reward']:.2f}"
+            )
+            print(
+                f"  Best seed: {best_seed_idx} "
+                f"(reward: {mean_rewards[best_seed_idx]:.2f})"
+            )
 
     # Save results
     if config.output_dir:
         config.output_dir.mkdir(parents=True, exist_ok=True)
-        results_path = config.output_dir / 'comparison_results.json'
+        results_path = config.output_dir / "comparison_results.json"
 
-        with open(results_path, 'w') as f:
+        with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
 
         print(f"\nResults saved to: {results_path}")
@@ -331,7 +348,8 @@ def _register_builtins():
     # is registered explicitly rather than via the catalog binding list.
     try:
         from deap_pettingzoo.baselines.coevolution import CoEvolutionTrainer
-        register_trainer('coevolution', CoEvolutionTrainer)
+
+        register_trainer("coevolution", CoEvolutionTrainer)
     except ImportError:
         pass
 

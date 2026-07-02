@@ -50,8 +50,8 @@ from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "maddpg": ("agilerl.algorithms.maddpg", "MADDPG", False),
-    "matd3":  ("agilerl.algorithms.matd3",  "MATD3",  False),
-    "ippo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "matd3": ("agilerl.algorithms.matd3", "MATD3", False),
+    "ippo": ("agilerl.algorithms.ippo", "IPPO", True),
     "grouped_ippo": ("agilerl.algorithms.ippo", "IPPO", True),
     "ippo-grouped": ("agilerl.algorithms.ippo", "IPPO", True),
 }
@@ -264,18 +264,17 @@ def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
                 rl_next_obs[a] = np.zeros_like(rl_obs[a])
 
         rl_reward = {a: float(rewards.get(a, 0.0)) for a in rl_ids}
-        rl_done = {
-            a: bool(terms.get(a, False) or truncs.get(a, False))
-            for a in rl_ids
-        }
+        rl_done = {a: bool(terms.get(a, False) or truncs.get(a, False)) for a in rl_ids}
 
-        steps_data.append(_RLStepData(
-            obs=rl_obs,
-            actions=squeezed_actions,
-            rewards=rl_reward,
-            next_obs=rl_next_obs,
-            done=rl_done,
-        ))
+        steps_data.append(
+            _RLStepData(
+                obs=rl_obs,
+                actions=squeezed_actions,
+                rewards=rl_reward,
+                next_obs=rl_next_obs,
+                done=rl_done,
+            )
+        )
         ep_reward += sum(rl_reward.values())
         steps += 1
         observations = next_obs
@@ -369,9 +368,7 @@ class RLSideState(SideState):
         self.memory_size = int(cfg.get("memory_size", 10_000))
         self.learning_delay = int(cfg.get("learning_delay", 0))
         self.device: Optional[str] = cfg.get("device")  # None => auto
-        self.agent_ctor_kwargs: Dict[str, Any] = dict(
-            cfg.get("agent_ctor_kwargs", {})
-        )
+        self.agent_ctor_kwargs: Dict[str, Any] = dict(cfg.get("agent_ctor_kwargs", {}))
         self.seed = cfg.get("seed", None)
 
         # Filled in during :meth:`initialise`.
@@ -409,9 +406,7 @@ class RLSideState(SideState):
 
         # Seed.
         if self.seed is None and rng is not None:
-            self.seed = int(
-                rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
-            )
+            self.seed = int(rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64))
         seed = int(self.seed) if self.seed is not None else 0
         np.random.seed(seed)
         try:
@@ -423,8 +418,7 @@ class RLSideState(SideState):
 
         # Restrict to side-controlled env agents.
         side_agents = [
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         ]
         if not side_agents:
             raise ValueError(
@@ -481,9 +475,7 @@ class RLSideState(SideState):
             AgileRLPolicyWrapper,
         )
 
-        self._wrapper = AgileRLPolicyWrapper(
-            self._agent, side_agents, self.algorithm
-        )
+        self._wrapper = AgileRLPolicyWrapper(self._agent, side_agents, self.algorithm)
         self._pool = RLPolicyPool(self._wrapper)
 
     def rebind_evaluator(self, evaluator: Any) -> None:
@@ -516,10 +508,13 @@ class RLSideState(SideState):
         try:
             r = self._collect_episode(self._bootstrap_ctx)
         except (RuntimeError, ValueError, TypeError) as exc:
-            logger.warning("RLSideState(%r): bootstrap rollout failed", self.side.name, exc_info=True)
+            logger.warning(
+                "RLSideState(%r): bootstrap rollout failed",
+                self.side.name,
+                exc_info=True,
+            )
             warnings.warn(
-                f"RLSideState({self.side.name!r}): bootstrap rollout "
-                f"failed: {exc}",
+                f"RLSideState({self.side.name!r}): bootstrap rollout " f"failed: {exc}",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -561,13 +556,19 @@ class RLSideState(SideState):
                 and ctx.env_name is not None
                 and self._wrapper is not None
             ):
-                from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+                from deap_pettingzoo.baselines.agilerl_policy import (
+                    AgileRLPolicyWrapper,
+                )
 
                 if isinstance(self._wrapper, AgileRLPolicyWrapper):
                     try:
                         episode_returns = self._collect_episodes_parallel(ctx)
                     except Exception as exc:
-                        logger.warning("RLSideState(%r): parallel rollout collection failed, falling back to serial", self.side.name, exc_info=True)
+                        logger.warning(
+                            "RLSideState(%r): parallel rollout collection failed, falling back to serial",
+                            self.side.name,
+                            exc_info=True,
+                        )
                         warnings.warn(
                             f"RLSideState({self.side.name!r}): parallel rollout "
                             f"collection failed ({exc}); falling back to serial.",
@@ -597,7 +598,11 @@ class RLSideState(SideState):
                         self._total_learn_calls += 1
                     except (RuntimeError, ValueError, TypeError) as exc:
                         self._total_learn_failures += 1
-                        logger.warning("RLSideState(%r): agent.learn() failed", self.side.name, exc_info=True)
+                        logger.warning(
+                            "RLSideState(%r): agent.learn() failed",
+                            self.side.name,
+                            exc_info=True,
+                        )
                         warnings.warn(
                             f"RLSideState({self.side.name!r}): "
                             f"agent.learn() failed: {exc}",
@@ -635,11 +640,7 @@ class RLSideState(SideState):
         self.history.append(stats)
         return stats
 
-
-
-    def _collect_episodes_parallel(
-        self, ctx: _RLDriverContext
-    ) -> List[float]:
+    def _collect_episodes_parallel(self, ctx: _RLDriverContext) -> List[float]:
         """Dispatch ``rollout_episodes_per_gen`` episodes to worker processes.
 
         Builds picklable :class:`_RLRolloutPayload` objects (one per
@@ -698,7 +699,11 @@ class RLSideState(SideState):
                     )
                     self._total_transitions += 1
                 except (RuntimeError, ValueError, TypeError) as exc:
-                    logger.warning("RLSideState(%r): save_to_memory failed (parallel path)", self.side.name, exc_info=True)
+                    logger.warning(
+                        "RLSideState(%r): save_to_memory failed (parallel path)",
+                        self.side.name,
+                        exc_info=True,
+                    )
                     warnings.warn(
                         f"RLSideState({self.side.name!r}): "
                         f"save_to_memory failed: {exc}",
@@ -861,11 +866,7 @@ class RLSideState(SideState):
             next_obs, rewards, terms, truncs, next_info = env.step(env_actions)
 
             # Push transition (RL-side agents only).
-            rl_next_obs = {
-                a: next_obs[a]
-                for a in rl_ids
-                if a in next_obs
-            }
+            rl_next_obs = {a: next_obs[a] for a in rl_ids if a in next_obs}
             # If any RL agent terminated this step, fill its next_obs
             # with a zero-shaped placeholder of the correct dtype so the buffer accepts the dict.
             for a in rl_ids:
@@ -873,8 +874,7 @@ class RLSideState(SideState):
                     rl_next_obs[a] = np.zeros_like(rl_obs[a])
             rl_reward = {a: float(rewards.get(a, 0.0)) for a in rl_ids}
             rl_term = {
-                a: bool(terms.get(a, False) or truncs.get(a, False))
-                for a in rl_ids
+                a: bool(terms.get(a, False) or truncs.get(a, False)) for a in rl_ids
             }
 
             try:
@@ -883,7 +883,11 @@ class RLSideState(SideState):
                 )
                 self._total_transitions += 1
             except (RuntimeError, ValueError, TypeError) as exc:
-                logger.warning("RLSideState(%r): save_to_memory failed (serial path)", self.side.name, exc_info=True)
+                logger.warning(
+                    "RLSideState(%r): save_to_memory failed (serial path)",
+                    self.side.name,
+                    exc_info=True,
+                )
                 warnings.warn(
                     f"RLSideState({self.side.name!r}): "
                     f"save_to_memory failed: {exc}",
@@ -931,7 +935,11 @@ class RLSideState(SideState):
 
             _apply_agilerl_grouping_patch()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("RLSideState(%r): could not apply grouped-IPPO patch", self.side.name, exc_info=True)
+            logger.warning(
+                "RLSideState(%r): could not apply grouped-IPPO patch",
+                self.side.name,
+                exc_info=True,
+            )
             warnings.warn(
                 f"RLSideState({self.side.name!r}): could not apply the "
                 f"grouped-IPPO patch ({exc}); grouped IPPO may fail to learn.",
@@ -1070,7 +1078,11 @@ class RLSideState(SideState):
                 self._total_learn_calls += 1
             except (RuntimeError, ValueError, TypeError) as exc:
                 self._total_learn_failures += 1
-                logger.warning("RLSideState(%r): on-policy agent.learn() failed", self.side.name, exc_info=True)
+                logger.warning(
+                    "RLSideState(%r): on-policy agent.learn() failed",
+                    self.side.name,
+                    exc_info=True,
+                )
                 warnings.warn(
                     f"RLSideState({self.side.name!r}): on-policy "
                     f"agent.learn() failed: {exc}",
