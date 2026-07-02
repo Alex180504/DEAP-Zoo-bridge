@@ -52,7 +52,11 @@ from deap_pettingzoo.integration.deap_integration import (
     evaluate_population_parallel,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 class CMAESTrainer(BaselineTrainer):
@@ -182,6 +186,7 @@ class CMAESTrainer(BaselineTrainer):
         variant: str = "mu_mu_lambda",
         num_workers: int = 1,
         parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
     ):
         """Initialise the CMA-ES trainer.
 
@@ -203,6 +208,14 @@ class CMAESTrainer(BaselineTrainer):
                 :class:`deap.cma.StrategyOnePlusLambda` — a single-parent
                 elitist variant that is typically more sample-efficient
                 on unimodal objectives.
+            num_workers: Parallel evaluation workers (1 = serial); the
+                ``TrainingConfig`` field wins unless left at its default.
+            parallel_backend: Executor backend (``"process"`` / ``"dask"``);
+                the ``TrainingConfig`` field wins unless left at its default.
+            scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+                scheduler-file path); requires ``parallel_backend='dask'``.
+                The ``TrainingConfig`` field wins unless left at ``None``;
+                the ``DEAP_DASK_SCHEDULER`` env var is the final fallback.
 
         Raises:
             ValueError: If ``variant`` is not ``'mu_mu_lambda'`` or
@@ -210,6 +223,8 @@ class CMAESTrainer(BaselineTrainer):
             ValueError: If ``num_workers`` is negative.
             ValueError: If ``parallel_backend`` is not in
                 :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
+            ValueError: If ``scheduler_address`` is set with a non-Dask
+                ``parallel_backend``.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -234,8 +249,14 @@ class CMAESTrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     def train(
         self,
@@ -330,19 +351,35 @@ class CMAESTrainer(BaselineTrainer):
                 hof[0].genome, config.env_name, action_space=action_space
             )
 
-        # Parallel evaluation setup. num_workers / parallel_backend are
-        # first-class TrainingConfig fields; the trainer-constructor value is
-        # the fallback used only when the config leaves them at their defaults.
+        # Parallel evaluation setup. num_workers / parallel_backend /
+        # scheduler_address are first-class TrainingConfig fields; the
+        # trainer-constructor value is the fallback used only when the config
+        # leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
+        # live elsewhere, so skip the driver CPU cap and force the parallel
+        # dispatch path even for num_workers <= 1 (advisory there).
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address)
+            if backend == "dask"
+            else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
         # the worker spec so Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -352,11 +389,15 @@ class CMAESTrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             base_eval_seed = seed
             _eval_counter = [0]
@@ -384,7 +425,7 @@ class CMAESTrainer(BaselineTrainer):
             while gen < max_iters:
                 population = toolbox.generate()
                 seeds = _next_seeds(len(population))
-                if effective_workers > 1:
+                if use_parallel:
                     fitnesses = evaluate_population_parallel(
                         population,
                         executor=executor,
@@ -446,6 +487,12 @@ class CMAESTrainer(BaselineTrainer):
                         ),
                         champion=_cma_champion,
                     )
+
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted(
+                    {str(w["host"]) for w in executor.worker_info()}
+                )
 
         # Realized generation count (== num_generations on the nominal path).
         num_generations = gen
@@ -535,6 +582,8 @@ class CMAESTrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,

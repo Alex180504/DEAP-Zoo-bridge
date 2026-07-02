@@ -389,6 +389,7 @@ def make_numpy_scoring_function(
     activation: str = "tanh",
     num_workers: int = 1,
     parallel_backend: str = "process",
+    scheduler_address: Optional[str] = None,
     eval_episodes: int = 1,
     worker_imports: Sequence[str] = (),
 ) -> Callable:
@@ -428,6 +429,12 @@ def make_numpy_scoring_function(
             ``try / finally``.
         parallel_backend: One of ``"process"``, ``"dask"``.
             See :mod:`deap_pettingzoo.utils.parallel` for details.
+        scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+            scheduler-file path); requires ``parallel_backend='dask'``.
+            ``None`` auto-builds a local cluster unless the
+            ``DEAP_DASK_SCHEDULER`` env var supplies an address. When a
+            remote scheduler is in play, ``num_workers`` is advisory
+            metadata and rollouts always dispatch through the executor.
         worker_imports: Optional module names imported inside each worker
             before env construction. Use this when the env is registered by
             importing a module for side effects rather than being part of the
@@ -454,9 +461,18 @@ def make_numpy_scoring_function(
     from deap_pettingzoo.utils.parallel import (
         make_executor,
         resolve_num_workers,
+        resolve_scheduler_address,
     )
 
-    effective_workers = resolve_num_workers(num_workers)
+    # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers live
+    # elsewhere, so skip the driver CPU cap and always dispatch through the
+    # executor even for num_workers <= 1 (advisory there).
+    remote = (
+        parallel_backend == "dask"
+        and resolve_scheduler_address(scheduler_address) is not None
+    )
+    effective_workers = resolve_num_workers(num_workers, cap_to_cpu=not remote)
+    use_parallel = effective_workers > 1 or remote
     rollout_spec = _RolloutSpec(
         env_name=env_name,
         env_config=dict(env_config) if env_config else None,
@@ -470,7 +486,7 @@ def make_numpy_scoring_function(
         state_extractor=state_extractor,
         worker_imports=tuple(str(name) for name in worker_imports),
         # Propagate runtime-registered custom envs to workers (no init hook).
-        registry_snapshot=get_registry_snapshot(),
+        registry_snapshot=get_registry_snapshot(target_remote=remote),
     )
 
     # Local (in-process) fallback for the serial path — avoids the
@@ -485,7 +501,11 @@ def make_numpy_scoring_function(
     def _ensure_executor():
         if state["executor"] is not None:
             return state["executor"]
-        ctx = make_executor(effective_workers, backend=parallel_backend)
+        ctx = make_executor(
+            effective_workers,
+            backend=parallel_backend,
+            scheduler_address=scheduler_address,
+        )
         state["ctx"] = ctx
         state["executor"] = ctx.__enter__()
         # Mirror the live ref onto the public attribute so callers
@@ -502,7 +522,7 @@ def make_numpy_scoring_function(
             single_tree = jax.tree_util.tree_map(lambda x, i=i: x[i], genotypes)
             flats.append(pytree_to_flat(single_tree, layer_sizes))
 
-        if effective_workers <= 1:
+        if not use_parallel:
             # Serial: avoid executor overhead entirely.
             results = [_local_rollout(flat, int(s)) for flat, s in zip(flats, seeds)]
         else:

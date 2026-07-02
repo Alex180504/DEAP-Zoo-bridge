@@ -103,6 +103,7 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "scheduler_address": None,
     "worker_imports": (),
     "verbose": True,
     "progress_every": 1,
@@ -124,6 +125,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "scheduler_address": None,
     "worker_imports": (),
     "verbose": True,
     "progress_every": 1,
@@ -408,6 +410,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
+    scheduler_address = params.get("scheduler_address")
     eval_episodes = max(1, int(params.get("eval_episodes", 1)))
 
     spec = get_env_spec(config.env_name)
@@ -479,6 +482,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
+            scheduler_address=scheduler_address,
             eval_episodes=eval_episodes,
             worker_imports=params.get("worker_imports", ()),
         )

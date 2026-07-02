@@ -381,6 +381,15 @@ class TrainingConfig:
         parallel_backend: Executor backend for parallel evaluation — one of
             ``"process"`` / ``"dask"``. The trainer-constructor
             value is used only when this is left at the default ``"process"``.
+        scheduler_address: Remote Dask scheduler for the ``"dask"`` backend —
+            a ``tcp://host:port`` URL or a scheduler-file path. ``None``
+            (default) auto-builds a local cluster, unless the
+            ``DEAP_DASK_SCHEDULER`` environment variable supplies an address.
+            When a remote scheduler is in play, ``num_workers`` is advisory
+            metadata (the cluster decides the real worker count) and the
+            serial fast-path is skipped. Requires
+            ``parallel_backend == "dask"``. The trainer-constructor value is
+            used only when this is left at the default ``None``.
         budget_on_consumed: Opt-in. When ``True`` *and*
             ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers
             (EA ``simple``, CMA-ES, PSO) run until the *real* consumed env-step
@@ -408,6 +417,7 @@ class TrainingConfig:
     render: bool = False
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
     budget_on_consumed: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
@@ -429,6 +439,14 @@ class TrainingConfig:
             raise ValueError(
                 f"Unknown parallel_backend {self.parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
+            )
+        # Empty/whitespace scheduler addresses (e.g. a cleared UI field) mean "unset".
+        if self.scheduler_address is not None:
+            self.scheduler_address = str(self.scheduler_address).strip() or None
+        if self.scheduler_address is not None and self.parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={self.scheduler_address!r} requires "
+                f"parallel_backend='dask', got {self.parallel_backend!r}."
             )
         if isinstance(self.budget_mode, str):
             self.budget_mode = BudgetMode(self.budget_mode)

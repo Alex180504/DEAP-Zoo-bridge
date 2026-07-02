@@ -43,7 +43,11 @@ from deap_pettingzoo.integration.deap_integration import (
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 def _resolve_shared_action_space(env: PettingZooWrapper) -> Any:
@@ -398,6 +402,7 @@ class EATrainer(BaselineTrainer):
         mutation_params: Optional[Dict[str, Any]] = None,
         num_workers: int = 1,
         parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
         # --- multi-objective (Phase 1.3) ---
         fitness_spec: Optional[Any] = None,
     ):
@@ -443,6 +448,14 @@ class EATrainer(BaselineTrainer):
                 config (e.g. ``{'eta': 20.0}`` for SBX).
             mutation_params: Extra kwargs merged into the mutation
                 config.
+            num_workers: Parallel evaluation workers (1 = serial); the
+                ``TrainingConfig`` field wins unless left at its default.
+            parallel_backend: Executor backend (``"process"`` / ``"dask"``);
+                the ``TrainingConfig`` field wins unless left at its default.
+            scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+                scheduler-file path); requires ``parallel_backend='dask'``.
+                The ``TrainingConfig`` field wins unless left at ``None``;
+                the ``DEAP_DASK_SCHEDULER`` env var is the final fallback.
 
         Raises:
             ValueError: If ``strategy`` is not one of the three recognised
@@ -452,6 +465,8 @@ class EATrainer(BaselineTrainer):
             ValueError: If ``num_workers`` is negative.
             ValueError: If ``parallel_backend`` is not in
                 :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
+            ValueError: If ``scheduler_address`` is set with a non-Dask
+                ``parallel_backend``.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -504,8 +519,14 @@ class EATrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     @property
     def _is_multiobjective(self) -> bool:
@@ -736,19 +757,34 @@ class EATrainer(BaselineTrainer):
             if event is not None:
                 self._on_progress(progress_callback, event, champion=_ea_champion)
 
-        # num_workers / parallel_backend are first-class TrainingConfig fields;
-        # the trainer-constructor value is the fallback used only when the
-        # config leaves them at their defaults.
+        # num_workers / parallel_backend / scheduler_address are first-class
+        # TrainingConfig fields; the trainer-constructor value is the fallback
+        # used only when the config leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
+        # live elsewhere, so skip the driver CPU cap and force the parallel
+        # dispatch path even for num_workers <= 1 (advisory there).
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address)
+            if backend == "dask"
+            else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
         # the worker spec so Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -758,11 +794,15 @@ class EATrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             # Aggregates real env-step deltas from parallel workers (whose
             # per-process evaluator counters never cross back). Stays at 0
@@ -771,7 +811,7 @@ class EATrainer(BaselineTrainer):
             _parallel_steps = [0]
 
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
-            if effective_workers > 1:
+            if use_parallel:
                 toolbox.register(
                     "map",
                     make_parallel_evaluate_map(
@@ -793,7 +833,7 @@ class EATrainer(BaselineTrainer):
                 """Serial or parallel evaluation based on workers."""
                 inds = list(inds)
                 seeds = _next_seeds(len(inds))
-                if effective_workers > 1:
+                if use_parallel:
                     return evaluate_population_parallel(
                         inds,
                         executor=executor,
@@ -945,6 +985,12 @@ class EATrainer(BaselineTrainer):
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
 
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted(
+                    {str(w["host"]) for w in executor.worker_info()}
+                )
+
         # Clean up
         env.close()
         self._recorder.close()
@@ -1045,6 +1091,8 @@ class EATrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
