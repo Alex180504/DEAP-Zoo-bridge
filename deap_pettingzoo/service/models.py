@@ -121,6 +121,7 @@ class RecordingSettingsModel(BaseModel):
 class ParallelismSettingsModel(BaseModel):
     num_workers: int = Field(default=1, ge=0)
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import ParallelismSettings
@@ -128,6 +129,7 @@ class ParallelismSettingsModel(BaseModel):
         return ParallelismSettings(
             num_workers=self.num_workers,
             parallel_backend=self.parallel_backend,
+            scheduler_address=self.scheduler_address,
         )
 
 

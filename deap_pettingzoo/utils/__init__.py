@@ -12,17 +12,23 @@ Subpackages:
 """
 
 from deap_pettingzoo.utils.parallel import (
+    DASK_CONNECT_TIMEOUT_ENV_VAR,
+    DASK_SCHEDULER_ENV_VAR,
     SUPPORTED_BACKENDS,
     make_executor,
     parallel_map,
     resolve_num_workers,
+    resolve_scheduler_address,
 )
 from deap_pettingzoo.utils.rng import seed_everything
 
 __all__ = [
+    "DASK_CONNECT_TIMEOUT_ENV_VAR",
+    "DASK_SCHEDULER_ENV_VAR",
     "SUPPORTED_BACKENDS",
     "make_executor",
     "parallel_map",
     "resolve_num_workers",
+    "resolve_scheduler_address",
     "seed_everything",
 ]
