@@ -61,7 +61,6 @@ class TestMakeExecutor:
 
     def test_supported_backends_list(self):
         assert "process" in SUPPORTED_BACKENDS
-        assert "scoop" in SUPPORTED_BACKENDS
         assert "dask" in SUPPORTED_BACKENDS
 
     @pytest.mark.skipif(
@@ -89,37 +88,6 @@ class TestParallelMap:
         with make_executor(2, backend="process") as ex:
             results = parallel_map(_square, list(range(8)), executor=ex)
         assert results == [i * i for i in range(8)]
-
-class TestScoopBackend:
-    def test_scoop_import_error_when_missing(self, monkeypatch):
-        # Ensure scoop is hidden from importers.
-        import sys
-
-        monkeypatch.setitem(sys.modules, "scoop", None)
-        with pytest.raises(ImportError, match="scoop"):
-            make_executor(2, backend="scoop")
-
-    def test_scoop_dispatch_via_stub(self, monkeypatch):
-        """Round-trip map through a stubbed ``scoop.futures``."""
-        import sys
-        import types
-
-        scoop_pkg = types.ModuleType("scoop")
-        futures_mod = types.ModuleType("scoop.futures")
-
-        def _stub_map(fn, *iterables):
-            # SCOOP returns a generator in submission order.
-            return (fn(*args) for args in zip(*iterables))
-
-        futures_mod.map = _stub_map
-        scoop_pkg.futures = futures_mod
-        monkeypatch.setitem(sys.modules, "scoop", scoop_pkg)
-        monkeypatch.setitem(sys.modules, "scoop.futures", futures_mod)
-
-        with make_executor(2, backend="scoop") as ex:
-            results = list(ex.map(_square, [1, 2, 3, 4]))
-
-        assert results == [1, 4, 9, 16]
 
 
 class TestDaskBackend:

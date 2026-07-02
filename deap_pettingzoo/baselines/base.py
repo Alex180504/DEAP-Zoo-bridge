@@ -379,7 +379,7 @@ class TrainingConfig:
             trainer-constructor value is used only when this is left at the
             default of ``1``.
         parallel_backend: Executor backend for parallel evaluation — one of
-            ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
+            ``"process"`` / ``"dask"``. The trainer-constructor
             value is used only when this is left at the default ``"process"``.
         budget_on_consumed: Opt-in. When ``True`` *and*
             ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers

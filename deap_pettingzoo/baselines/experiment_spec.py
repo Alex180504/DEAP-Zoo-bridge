@@ -715,7 +715,7 @@ def _build_coevolution_plan(
 # Validate_spec
 
 _VALID_BUDGET_MODES = ("env_steps", "eval_episodes", "generations")
-_SUPPORTED_BACKENDS = ("process", "scoop", "dask")
+_SUPPORTED_BACKENDS = ("process", "dask")
 
 
 def validate_spec(spec: ExperimentSpec) -> "ValidationReport":
@@ -876,7 +876,6 @@ def _validate_parallelism(spec, report):
         from deap_pettingzoo.catalog.availability import module_available
 
         _backend_requirement = {
-            "scoop": ("scoop", "deap-pettingzoo[scoop]"),
             "dask": ("dask.distributed", "deap-pettingzoo[dask]"),
         }
         req = _backend_requirement.get(par.parallel_backend)

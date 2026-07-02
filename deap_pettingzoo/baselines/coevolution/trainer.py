@@ -502,7 +502,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._resolved_workers = resolved_workers
 
         # One snapshot, reused for the process-pool initializer and shipped on
-        # episode payloads so SCOOP/Dask workers can re-register custom envs too.
+        # episode payloads so Dask workers can re-register custom envs too.
         self._registry_snapshot = get_registry_snapshot()
         with make_executor(
             resolved_workers,

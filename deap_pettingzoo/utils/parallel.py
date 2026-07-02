@@ -7,8 +7,8 @@ This module provides a unified interface over the following execution backends:
   single-path.
 * :class:`concurrent.futures.ProcessPoolExecutor` for real
   multi-process parallelism.
-* optional SCOOP and Dask backends — both are
-  soft-imported; importing this module never pulls them in.
+* an optional Dask backend — soft-imported; importing this module
+  never pulls it in.
 
 All executors implement the same minimal protocol:
 
@@ -26,7 +26,7 @@ Design notes
   (see :func:`deap_pettingzoo.integration.deap_integration._worker_evaluate`
   and
   :func:`deap_pettingzoo.contrib.qdax.scoring_numpy._numpy_rollout`).
-  This is needed because SCOOP does not expose a per-worker
+  This is needed because Dask does not expose a per-worker
   ``initializer`` hook. Using the same pattern for
   ``ProcessPoolExecutor`` costs nothing and keeps the code paths
   unified.
@@ -52,7 +52,7 @@ __all__ = [
 ]
 
 
-SUPPORTED_BACKENDS: Tuple[str, ...] = ("process", "scoop", "dask")
+SUPPORTED_BACKENDS: Tuple[str, ...] = ("process", "dask")
 
 
 def resolve_num_workers(requested: Optional[int]) -> int:
@@ -114,45 +114,6 @@ class _SerialExecutor:
         return None
 
 
-class _ScoopExecutor:
-    """SCOOP-backed executor.
-
-    Worker pool is owned by the ``python -m scoop`` launcher, so
-    ``num_workers`` is advisory. ``__enter__`` / ``__exit__`` are no-ops.
-
-    Raises:
-        ImportError: on construction if ``scoop`` is not installed.
-    """
-
-    def __init__(self, num_workers: int) -> None:
-        try:
-            from scoop import futures as _scoop_futures  # noqa: F401
-        except ImportError as e:  # pragma: no cover - soft import
-            raise ImportError(
-                "parallel_backend='scoop' requires the 'scoop' package. "
-                "Install with: pip install 'deap-pettingzoo[scoop]' "
-                "(or pip install scoop). Launch scripts with "
-                "`python -m scoop your_script.py`."
-            ) from e
-        self._num_workers = num_workers  # advisory only
-
-    def __enter__(self) -> "_ScoopExecutor":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
-
-    def map(
-        self,
-        fn: Callable[..., Any],
-        *iterables: Iterable[Any],
-    ) -> Iterator[Any]:
-        from scoop import futures as _scoop_futures
-
-        # scoop.futures.map is ordered and eager-iterable.
-        return iter(_scoop_futures.map(fn, *iterables))
-
-
 class _DaskExecutor:
     """Dask distributed executor.
 
@@ -182,9 +143,9 @@ class _DaskExecutor:
             # One thread per worker: the project's worker-side caches
             # (``_WORKER_CACHE`` and friends) and the rebuilt envs are not
             # thread-safe — they assume one task at a time per process, like
-            # ``ProcessPoolExecutor`` and SCOOP. Dask's multi-threaded default
-            # would let concurrent tasks corrupt a shared cached env. Inject
-            # your own ``Client`` if you need a different layout.
+            # ``ProcessPoolExecutor``. Dask's multi-threaded default would
+            # let concurrent tasks corrupt a shared cached env. Inject your
+            # own ``Client`` if you need a different layout.
             client = Client(
                 n_workers=max(2, num_workers),
                 threads_per_worker=1,
@@ -229,11 +190,10 @@ def make_executor(
         num_workers: Requested worker count. Normalised via
             :func:`resolve_num_workers`; ``None``/``0``/``1`` yield a
             :class:`_SerialExecutor`.
-        backend: One of ``"process"``, ``"scoop"``, ``"dask"``.
+        backend: One of ``"process"``, ``"dask"``.
         initializer: Optional per-worker init callable
-            (``ProcessPoolExecutor`` only; ignored by SCOOP/Dask,
-            which have no such hook — worker-side code must self-init
-            lazily).
+            (``ProcessPoolExecutor`` only; ignored by Dask, which has
+            no such hook — worker-side code must self-init lazily).
         initargs: Args forwarded to ``initializer``.
         dask_client: Optional pre-built
             ``dask.distributed.Client`` (Dask backend only).
@@ -262,9 +222,6 @@ def make_executor(
             initializer=initializer,
             initargs=initargs,
         )
-
-    if backend == "scoop":
-        return _ScoopExecutor(n)
 
     if backend == "dask":
         return _DaskExecutor(n, client=dask_client)

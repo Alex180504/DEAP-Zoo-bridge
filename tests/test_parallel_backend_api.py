@@ -48,7 +48,7 @@ class TestTrainingConfigParallelFields:
             _cfg(num_workers=-1)
 
     def test_accepts_known_backends(self):
-        for backend in ("process", "scoop", "dask"):
+        for backend in ("process", "dask"):
             assert _cfg(parallel_backend=backend).parallel_backend == backend
 
 
@@ -122,7 +122,7 @@ class TestBackendInstalledWarning:
         import deap_pettingzoo.catalog.availability as avail
 
         monkeypatch.setattr(avail, "module_available", lambda name: False)
-        report = self._validate(_parallel_stub(2, "scoop"))
+        report = self._validate(_parallel_stub(2, "dask"))
 
         # Non-blocking: the report stays OK but carries a warning.
         assert report.ok
@@ -154,5 +154,5 @@ class TestBackendInstalledWarning:
 
         # num_workers <= 1 means the backend is never spun up.
         monkeypatch.setattr(avail, "module_available", lambda name: False)
-        report = self._validate(_parallel_stub(1, "scoop"))
+        report = self._validate(_parallel_stub(1, "dask"))
         assert report.issues == []

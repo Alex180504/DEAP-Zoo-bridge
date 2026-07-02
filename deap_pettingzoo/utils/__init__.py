@@ -2,7 +2,7 @@
 
 Subpackages:
 
-- :mod:`deap_pettingzoo.utils.parallel` — process/SCOOP/Dask backends
+- :mod:`deap_pettingzoo.utils.parallel` — process/Dask backends
   for trainer fitness evaluation (already established).
 - :mod:`deap_pettingzoo.utils.logging` — opt-in result logging layer
   (manifest + CSV/JSON/Parquet/TensorBoard sinks + replay frame

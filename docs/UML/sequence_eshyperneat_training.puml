@@ -43,7 +43,7 @@ Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_worke
 alt effective_workers > 1
     Trainer -> Trainer: get_registry_snapshot()
     Trainer -> Trainer: _NeatWorkerSpec(..., substrate_spec, es_params, max_steps,\n  registry_snapshot=snapshot)
-    Trainer -> Executor: make_executor(effective_workers, backend=backend, ...)\n  note: snapshot rides on the spec; workers replay it\n  (replay_registry_snapshot_once) for SCOOP/Dask custom envs
+    Trainer -> Executor: make_executor(effective_workers, backend=backend, ...)\n  note: snapshot rides on the spec; workers replay it\n  (replay_registry_snapshot_once) for Dask custom envs
 
     loop n_generations
         Trainer -> Pop: run(parallel_eval_function, n=1)

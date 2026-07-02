@@ -588,10 +588,10 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
             ...
 
     .. note::
-        SCOOP and Dask backends do not expose a per-worker
+        The Dask backend does not expose a per-worker
         ``initializer`` hook.  :func:`make_executor` accepts but
-        silently ignores ``initializer``/``initargs`` for those
-        backends.  To propagate custom environments there, the snapshot
+        silently ignores ``initializer``/``initargs`` for that
+        backend.  To propagate custom environments there, the snapshot
         is instead carried on each picklable worker spec/payload and
         replayed lazily in the worker via
         :func:`replay_registry_snapshot_once`.
@@ -696,7 +696,7 @@ def replay_registry_snapshot_once(
 ) -> None:
     """Replay ``snapshot`` at most once per worker process.
 
-    Worker payloads carry a :func:`get_registry_snapshot` result so SCOOP /
+    Worker payloads carry a :func:`get_registry_snapshot` result so
     Dask workers (which have no per-worker ``initializer`` hook) can
     re-register custom environments before building any env. This wrapper
     makes that cheap to call on every task: the first call for a given set of
