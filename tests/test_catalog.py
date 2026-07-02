@@ -262,7 +262,7 @@ class TestAlgorithmCatalog:
         spec = catalog.get_algorithm(name)
         try:
             trainer = get_trainer(name)
-        except Exception:  # pragma: no cover - missing optional extra
+        except (ImportError, ModuleNotFoundError):  # pragma: no cover - missing optional extra
             pytest.skip(f"{name} trainer not instantiable in this environment")
         assert trainer.get_capabilities() == spec.capabilities
 
