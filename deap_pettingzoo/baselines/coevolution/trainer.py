@@ -461,15 +461,23 @@ class CoEvolutionTrainer(BaselineTrainer):
 
             GPU/RL contention: if any RL side resolved CUDA *and* JAX has
             GPU access a ``RuntimeWarning`` is emitted. Parallel
-            co-evolution (``num_workers > 1``) is not supported alongside
-            RL sides (torch state does not pickle across spawn) and falls
-            back to serial automatically.
+            co-evolution (``num_workers > 1`` or a remote Dask scheduler)
+            works alongside RL sides: EA/CMA generations are dispatched
+            population-wide (see :meth:`_make_batch_eval_fn`) with the live
+            RL opponent shipped to workers as a per-generation
+            ``FrozenRLPolicyWrapper`` CPU actor snapshot, and off-policy RL
+            sides collect their rollouts through the same executor. RL
+            *learning* always stays on the driver. The one serial path is
+            on-policy rollout collection (IPPO/GroupedIPPO): the live
+            actor+critic must produce the log_prob/value that an actor-only
+            snapshot cannot. Workers must be able to unpickle the snapshot,
+            i.e. torch + AgileRL installed wherever they run.
 
             Bootstrap: the initial population of every evolving side is
             evaluated against the other sides' initial state so fitnesses
             exist before the first ``step_generation`` call. Evaluator
             construction happens inside the ``make_executor`` context so
-            EA/CMA sides share the worker pool for ``k_opponents`` episode
+            EA/CMA sides share the worker pool for population-batch
             dispatch.
 
             Frame recording is best-effort and handled by the unified
@@ -506,11 +514,12 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._env_name: str = config.env_name
         self._env_config: Optional[Dict[str, Any]] = config.env_config
 
-        # Resolve the executor up front so we can size pools sanely
-        # and emit one warning if num_workers > 1 with k_opponents == 1.
+        # Resolve the executor up front so we can size pools sanely.
         # Remote scheduler (config field or DEAP_DASK_SCHEDULER env var): the
         # workers live elsewhere, so skip the driver CPU cap and force the
         # parallel dispatch path even for num_workers <= 1 (advisory there).
+        # k_opponents does not gate parallelism: the population-level batch
+        # path (_make_batch_eval_fn) fans out N x k episodes even at k=1.
         effective_scheduler = (
             resolve_scheduler_address(coev_cfg.scheduler_address)
             if coev_cfg.parallel_backend == "dask"
@@ -521,14 +530,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             coev_cfg.num_workers, cap_to_cpu=not remote
         )
         use_parallel = resolved_workers > 1 or remote
-        if use_parallel and coev_cfg.k_opponents == 1:
-            warnings.warn(
-                "CoEvolutionConfig: num_workers="
-                f"{coev_cfg.num_workers} but k_opponents=1; "
-                "parallelism is a no-op and the serial path will be used.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
         self._resolved_workers = resolved_workers
         self._use_parallel = use_parallel
 
@@ -626,9 +627,7 @@ class CoEvolutionTrainer(BaselineTrainer):
 
             # Capture at the end of the run so late-joining workers show up.
             if hasattr(executor, "worker_info"):
-                dask_workers = sorted(
-                    {str(w["host"]) for w in executor.worker_info()}
-                )
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
 
         env.close()
         self._recorder.close()
