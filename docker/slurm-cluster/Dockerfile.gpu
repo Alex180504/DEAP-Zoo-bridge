@@ -1,0 +1,22 @@
+# GPU compute node for the Slurm simulation rig: the Slurm node image with
+# its CPU torch swapped for the CUDA build, so RL baseline jobs
+# (--partition=gpu --gres=gpu:1) can train on a real GPU. Opt-in via the
+# compose "gpu" profile -- the CUDA stack adds several GB, and the
+# container only sees a GPU when Docker Desktop passes one through
+# (deploy.resources.reservations.devices in docker-compose.yml).
+#
+# Requires deap-slurm-node:latest (built from docker/slurm-cluster/Dockerfile).
+FROM deap-slurm-node:latest
+
+# The parent image ships AgileRL with the *CPU* torch wheel (2.6.0+cpu).
+# Swap in the CUDA build at the same version: uninstall first because
+# "torch==2.6.0" is already satisfied by 2.6.0+cpu (PEP 440 ignores the
+# local +cpu label), so a plain install would be a no-op. PyPI's Linux
+# wheel is the CUDA build and pulls its nvidia-* library deps with it.
+RUN pip uninstall -y torch \
+    && pip install --no-cache-dir "torch==2.6.0"
+
+# After the pip layer on purpose: gres.conf only matters on this node (the
+# CPU nodes have no gres) and editing it must not invalidate the multi-GB
+# torch layer above.
+COPY docker/slurm-cluster/gres.conf /etc/slurm/gres.conf
