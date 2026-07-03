@@ -1,0 +1,45 @@
+name: HPC validation
+
+# The Slurm simulation rig is too heavy to run on every push (full Slurm
+# cluster in containers, multi-minute image builds), so it runs on demand:
+# Actions tab -> "HPC validation" -> Run workflow. The lighter Dask rig runs
+# on every push as part of ci.yml.
+#
+# The GPU-node test (tests/hpc/test_slurm_rig.py::TestSlurmRigGpuNode)
+# self-skips here: hosted runners have no GPU.
+on:
+  workflow_dispatch:
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  slurm-rig:
+    name: Slurm simulation rig
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEAP_HPC_TESTS: "1"
+      # Skip the fixture's teardown so the failure step below can still
+      # read compose logs; the workflow tears down explicitly instead.
+      DEAP_HPC_KEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: pip install pytest pytest-cov
+
+      - name: Run Slurm rig tests
+        run: python -m pytest --no-cov -q tests/hpc/test_slurm_rig.py
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f docker/slurm-cluster/docker-compose.yml -p deap-hpc-slurm logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker/slurm-cluster/docker-compose.yml -p deap-hpc-slurm down -v
