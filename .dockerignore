@@ -23,6 +23,10 @@ htmlcov/
 .coverage.*
 test_results.txt
 tests/
+# ...except the HPC rig's module-level custom-env factories, which the
+# deap-hpc-base image bakes in so they're importable inside every container.
+!tests/hpc/
+!tests/hpc/**
 
 # Documentation & project notes (not needed at runtime)
 docs/
