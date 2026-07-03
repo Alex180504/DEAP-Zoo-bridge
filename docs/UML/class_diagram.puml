@@ -432,9 +432,10 @@ package "deap_pettingzoo.baselines" {
         + render: bool
         + num_workers: int = 1
         + parallel_backend: str = "process"
+        + scheduler_address: Optional[str] = None
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
-        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|dask);\n   constructor value is the fallback at default --
+        -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
         -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
         -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
         -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
@@ -866,6 +867,16 @@ note bottom of registry
   guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
+
+  make_executor resolves the Dask connection as:
+  dask_client > scheduler_address arg > DEAP_DASK_SCHEDULER
+  env var > auto-built local LocalCluster. A remote target
+  (client/address/env var) skips the num_workers<=1 serial
+  fast-path and the os.cpu_count() cap -- explicit remote
+  intent is never silently downgraded or shrunk. On a
+  remote cluster, any executor.map worker fn (not just env
+  factories) resolving to __main__ raises immediately
+  instead of failing opaquely mid-cluster.
 end note
 
 note bottom of openspiel
@@ -1215,6 +1226,7 @@ package "deap_pettingzoo.baselines.coevolution" {
     +seed: Optional[int]
     +num_workers: int = 1
     +parallel_backend: str = "process"
+    +scheduler_address: Optional[str] = None
   }
 
   class CoEvolutionEvaluator {
