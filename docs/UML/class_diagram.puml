@@ -381,17 +381,19 @@ package "deap_pettingzoo.integration" {
             executor, spec, eval_seeds=None,
             step_sink=None) -> list
         + make_mixed_parallel_evaluate_map(executor,
-            evaluator, *, eval_episodes=1) -> Callable
+            evaluator, *, eval_episodes=1,
+            step_sink=None) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
            qualnames + a registry_snapshot; picklable
            across spawn workers. Workers replay the
            snapshot via replay_registry_snapshot_once
            so Dask (no initializer hook) gets
            custom envs too --
-        -- _worker_evaluate now returns
-           (fitness, steps_delta); make_parallel_evaluate_map /
-           evaluate_population_parallel sum the deltas into the
-           optional step_sink accumulator and return fitness-only --
+        -- _worker_evaluate and
+           _mixed_worker_evaluate_with_steps return
+           (fitness, steps_delta); the pmap factories sum the
+           deltas into the optional step_sink accumulator and
+           return fitness-only --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
