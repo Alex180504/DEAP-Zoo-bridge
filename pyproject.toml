@@ -72,7 +72,7 @@ rl-baselines = [
     #   pip install --no-deps "agilerl>=2.6,<3" && pip install -e ".[service]"
 ]
 aquarium = [
-    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
+    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.12",
 ]
 supersuit = [
     "supersuit>=3.9",
