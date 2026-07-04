@@ -558,7 +558,9 @@ def clear_registry() -> None:
     _REGISTRY.clear()
 
 
-def get_registry_snapshot(*, target_remote: bool = False) -> List[Tuple[str, "EnvSpec"]]:
+def get_registry_snapshot(
+    *, target_remote: bool = False
+) -> List[Tuple[str, "EnvSpec"]]:
     """Return a picklable snapshot of all currently registered environments.
 
     Args:
@@ -656,10 +658,7 @@ def get_registry_snapshot(*, target_remote: bool = False) -> List[Tuple[str, "En
                     stacklevel=2,
                 )
             continue
-        if (
-            target_remote
-            and getattr(spec.factory, "__module__", None) == "__main__"
-        ):
+        if target_remote and getattr(spec.factory, "__module__", None) == "__main__":
             # Pickles fine (by reference) but ``__main__`` names the driver
             # script — a remote worker cannot import it back. The classic
             # non-picklable warning above never fires for these, so surface

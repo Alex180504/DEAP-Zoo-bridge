@@ -99,6 +99,9 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "line_sigma": 0.05,
     "episode_length": 25,
     "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
+    # Optional (obs, agents[, env]) -> (positions, velocities) extractor for
+    # the numpy scoring path; None uses the obs-slicing default.
+    "state_extractor": None,
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -121,6 +124,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "num_emitters": 1,
     "episode_length": 25,
     "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
+    "state_extractor": None,
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -479,6 +483,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             env_config=config.env_config,
             action_type=np_action_type,
             nvec=np_nvec,
+            state_extractor=params.get("state_extractor"),
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
