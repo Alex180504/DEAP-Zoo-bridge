@@ -72,7 +72,7 @@ rl-baselines = [
     #   pip install --no-deps "agilerl>=2.6,<3" && pip install -e ".[service]"
 ]
 aquarium = [
-    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
+    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.12",
 ]
 supersuit = [
     "supersuit>=3.9",
@@ -95,9 +95,6 @@ qdax = [
 ]
 neat = [
     "neat-python>=2.0",
-]
-scoop = [
-    "scoop>=0.7,<1.0",
 ]
 dask = [
     "dask[distributed]>=2024.1",
@@ -129,7 +126,7 @@ ui-full = [
     "deap-pettingzoo[ui,service]",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui,service,ui-full]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,dask,ui,service,ui-full]"
 ]
 
 # Plugin entry-point groups.
@@ -157,7 +154,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "scoop: marks tests that launch a real `python -m scoop` subprocess (needs the scoop extra)",
+    "hpc: marks tests requiring the local Docker HPC rig (opt-in via DEAP_HPC_TESTS=1)",
 ]
 addopts = [
     "--verbose",

@@ -48,7 +48,11 @@ from deap_pettingzoo.integration.pso_integration import (
     setup_pso_swarm,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 class PSOTrainer(BaselineTrainer):
@@ -167,7 +171,7 @@ class PSOTrainer(BaselineTrainer):
                 target=TR,
                 group="Parallelism",
                 advanced=True,
-                choices=("process", "scoop", "dask"),
+                choices=("process", "dask"),
                 help="Parallel executor backend.",
             ),
             ParamSpec(
@@ -206,6 +210,7 @@ class PSOTrainer(BaselineTrainer):
         weight_range: tuple = (-1.0, 1.0),
         num_workers: int = 1,
         parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
     ):
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -226,8 +231,14 @@ class PSOTrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     def train(
         self,
@@ -309,19 +320,32 @@ class PSOTrainer(BaselineTrainer):
                 hof[0].genome, config.env_name, action_space=action_space
             )
 
-        # num_workers / parallel_backend are first-class TrainingConfig fields;
-        # the trainer-constructor value is the fallback used only when the
-        # config leaves them at their defaults.
+        # num_workers / parallel_backend / scheduler_address are first-class
+        # TrainingConfig fields; the trainer-constructor value is the fallback
+        # used only when the config leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
+        # live elsewhere, so skip the driver CPU cap and force the parallel
+        # dispatch path even for num_workers <= 1 (advisory there).
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address) if backend == "dask" else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
-        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        # the worker spec so Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -331,11 +355,15 @@ class PSOTrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             base_eval_seed = seed
             _eval_counter = [0]
@@ -361,7 +389,7 @@ class PSOTrainer(BaselineTrainer):
             gen = 0
             while gen < max_iters:
                 seeds = _next_seeds(len(population))
-                if effective_workers > 1:
+                if use_parallel:
                     fitnesses = evaluate_population_parallel(
                         population,
                         executor=executor,
@@ -427,6 +455,10 @@ class PSOTrainer(BaselineTrainer):
                         ),
                         champion=_pso_champion,
                     )
+
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
 
         # Realized generation count (== num_generations on the nominal path).
         num_generations = gen
@@ -507,6 +539,8 @@ class PSOTrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,

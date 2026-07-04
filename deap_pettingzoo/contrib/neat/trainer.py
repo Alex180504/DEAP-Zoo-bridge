@@ -42,7 +42,10 @@ from deap_pettingzoo.baselines.base import (
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 from .config import build_neat_config
 from .policy import NeatPolicy
@@ -130,7 +133,12 @@ class NEATTrainer(BaselineTrainer):
     leaves them at their defaults (mirrors ``EATrainer``).
     """
 
-    def __init__(self, num_workers: int = 1, parallel_backend: str = "process") -> None:
+    def __init__(
+        self,
+        num_workers: int = 1,
+        parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
+    ) -> None:
         self._fitness_history: List[float] = []
         self._env_steps_history: List[int] = []
         self._generation_num: int = 0
@@ -140,8 +148,14 @@ class NEATTrainer(BaselineTrainer):
         self._env_steps_consumed: int = 0
         if num_workers < 1:
             raise ValueError(f"num_workers must be >= 1, got {num_workers}")
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self._num_workers = int(num_workers)
         self._parallel_backend = str(parallel_backend)
+        self._scheduler_address = scheduler_address
 
     # ------------------------------------------------------------------
     # BaselineTrainer interface
@@ -163,25 +177,43 @@ class NEATTrainer(BaselineTrainer):
             "algorithm": "NEAT",
         }
 
-    def _resolve_parallelism(self, config: TrainingConfig) -> tuple[int, str]:
-        """Resolve ``(effective_workers, backend)``, config-vs-constructor.
+    def _resolve_parallelism(
+        self, config: TrainingConfig
+    ) -> tuple[int, str, Optional[str], bool]:
+        """Resolve ``(effective_workers, backend, scheduler_address, remote)``.
 
-        ``config.num_workers``/``config.parallel_backend`` are primary
-        ``TrainingConfig`` fields; the trainer-constructor value is the
-        fallback used only when the config leaves them at their defaults
-        (mirrors ``EATrainer``). Shared by ``NEATTrainer``/``HyperNEATTrainer``/
-        ``ESHyperNEATTrainer``.
+        ``config.num_workers``/``config.parallel_backend``/
+        ``config.scheduler_address`` are primary ``TrainingConfig`` fields; the
+        trainer-constructor value is the fallback used only when the config
+        leaves them at their defaults (mirrors ``EATrainer``). Shared by
+        ``NEATTrainer``/``HyperNEATTrainer``/``ESHyperNEATTrainer``.
+
+        ``remote`` is ``True`` when a remote Dask scheduler is in play
+        (explicit address or the ``DEAP_DASK_SCHEDULER`` env var): the
+        driver CPU cap is skipped and callers must take the parallel
+        dispatch path even for ``effective_workers <= 1``.
         """
         requested_workers = (
             config.num_workers if config.num_workers != 1 else self._num_workers
         )
-        effective_workers = resolve_num_workers(requested_workers)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self._parallel_backend
         )
-        return effective_workers, backend
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self._scheduler_address
+        )
+        remote = (
+            backend == "dask"
+            and resolve_scheduler_address(scheduler_address) is not None
+        )
+        effective_workers = resolve_num_workers(
+            requested_workers, cap_to_cpu=not remote
+        )
+        return effective_workers, backend, scheduler_address, remote
 
     @staticmethod
     def _resolve_max_steps(config: TrainingConfig, default: int = 500) -> int:
@@ -281,10 +313,12 @@ class NEATTrainer(BaselineTrainer):
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
-        effective_workers, backend = self._resolve_parallelism(config)
+        effective_workers, backend, scheduler_address, remote = (
+            self._resolve_parallelism(config)
+        )
 
         # --- Parallel or sequential eval -------------------------------------
-        if effective_workers > 1:
+        if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -293,7 +327,7 @@ class NEATTrainer(BaselineTrainer):
 
             from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
-            snapshot = get_registry_snapshot()
+            snapshot = get_registry_snapshot(target_remote=remote)
             worker_spec = _NeatWorkerSpec(
                 env_name=config.env_name,
                 env_config=dict(config.env_config),
@@ -311,6 +345,7 @@ class NEATTrainer(BaselineTrainer):
                 backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
+                scheduler_address=scheduler_address,
             )
             _executor_ctx = _executor
             # 1-element sink so worker step-deltas aggregate across generations.

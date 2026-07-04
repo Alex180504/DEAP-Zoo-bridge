@@ -64,6 +64,7 @@ from deap_pettingzoo.utils.parallel import (
     SUPPORTED_BACKENDS,
     make_executor,
     resolve_num_workers,
+    resolve_scheduler_address,
 )
 from deap_pettingzoo.utils.rng import seed_everything
 
@@ -286,6 +287,14 @@ class CoEvolutionConfig:
             Default ``200``.
         seed: Base seed for trainer RNG (controls opponent sampling
             and EA RNGs for reproducibility).
+        num_workers: Parallel evaluation workers (1 = serial).
+        parallel_backend: Executor backend — ``"process"`` / ``"dask"``.
+        scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+            scheduler-file path); requires ``parallel_backend == "dask"``.
+            ``None`` auto-builds a local cluster unless the
+            ``DEAP_DASK_SCHEDULER`` env var supplies an address. When a
+            remote scheduler is in play, ``num_workers`` is advisory
+            metadata and the serial fast-path is skipped.
     """
 
     mode: str
@@ -300,6 +309,7 @@ class CoEvolutionConfig:
     seed: Optional[int] = None
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
     generation_callback: Optional[Callable[[int, Dict[str, Any]], None]] = field(
         default=None, repr=False, compare=False
     )
@@ -409,6 +419,14 @@ class CoEvolutionConfig:
                 f"parallel_backend={self.parallel_backend!r} invalid; "
                 f"must be one of {SUPPORTED_BACKENDS}."
             )
+        # Empty/whitespace scheduler addresses mean "unset".
+        if self.scheduler_address is not None:
+            self.scheduler_address = str(self.scheduler_address).strip() or None
+        if self.scheduler_address is not None and self.parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={self.scheduler_address!r} requires "
+                f"parallel_backend='dask', got {self.parallel_backend!r}."
+            )
 
 
 class CoEvolutionTrainer(BaselineTrainer):
@@ -443,15 +461,23 @@ class CoEvolutionTrainer(BaselineTrainer):
 
             GPU/RL contention: if any RL side resolved CUDA *and* JAX has
             GPU access a ``RuntimeWarning`` is emitted. Parallel
-            co-evolution (``num_workers > 1``) is not supported alongside
-            RL sides (torch state does not pickle across spawn) and falls
-            back to serial automatically.
+            co-evolution (``num_workers > 1`` or a remote Dask scheduler)
+            works alongside RL sides: EA/CMA generations are dispatched
+            population-wide (see :meth:`_make_batch_eval_fn`) with the live
+            RL opponent shipped to workers as a per-generation
+            ``FrozenRLPolicyWrapper`` CPU actor snapshot, and off-policy RL
+            sides collect their rollouts through the same executor. RL
+            *learning* always stays on the driver. The one serial path is
+            on-policy rollout collection (IPPO/GroupedIPPO): the live
+            actor+critic must produce the log_prob/value that an actor-only
+            snapshot cannot. Workers must be able to unpickle the snapshot,
+            i.e. torch + AgileRL installed wherever they run.
 
             Bootstrap: the initial population of every evolving side is
             evaluated against the other sides' initial state so fitnesses
             exist before the first ``step_generation`` call. Evaluator
             construction happens inside the ``make_executor`` context so
-            EA/CMA sides share the worker pool for ``k_opponents`` episode
+            EA/CMA sides share the worker pool for population-batch
             dispatch.
 
             Frame recording is best-effort and handled by the unified
@@ -488,33 +514,41 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._env_name: str = config.env_name
         self._env_config: Optional[Dict[str, Any]] = config.env_config
 
-        # Resolve the executor up front so we can size pools sanely
-        # and emit one warning if num_workers > 1 with k_opponents == 1.
-        resolved_workers = resolve_num_workers(coev_cfg.num_workers)
-        if resolved_workers > 1 and coev_cfg.k_opponents == 1:
-            warnings.warn(
-                "CoEvolutionConfig: num_workers="
-                f"{coev_cfg.num_workers} but k_opponents=1; "
-                "parallelism is a no-op and the serial path will be used.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # Resolve the executor up front so we can size pools sanely.
+        # Remote scheduler (config field or DEAP_DASK_SCHEDULER env var): the
+        # workers live elsewhere, so skip the driver CPU cap and force the
+        # parallel dispatch path even for num_workers <= 1 (advisory there).
+        # k_opponents does not gate parallelism: the population-level batch
+        # path (_make_batch_eval_fn) fans out N x k episodes even at k=1.
+        effective_scheduler = (
+            resolve_scheduler_address(coev_cfg.scheduler_address)
+            if coev_cfg.parallel_backend == "dask"
+            else None
+        )
+        remote = effective_scheduler is not None
+        resolved_workers = resolve_num_workers(
+            coev_cfg.num_workers, cap_to_cpu=not remote
+        )
+        use_parallel = resolved_workers > 1 or remote
         self._resolved_workers = resolved_workers
+        self._use_parallel = use_parallel
 
         # One snapshot, reused for the process-pool initializer and shipped on
-        # episode payloads so SCOOP/Dask workers can re-register custom envs too.
-        self._registry_snapshot = get_registry_snapshot()
+        # episode payloads so Dask workers can re-register custom envs too.
+        self._registry_snapshot = get_registry_snapshot(target_remote=remote)
+        dask_workers: Optional[list] = None
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
             initializer=_prewarm_and_replay,
             initargs=(self._registry_snapshot,),
+            scheduler_address=coev_cfg.scheduler_address,
         ) as executor:
             self._executor = executor
             # Keep side initialisation inside the executor scope. This
             # preserves the last known-good ordering for QDax-backed
             # coevolution on Windows.
-            states = self._initialize_sides(env, coev_cfg, resolved_workers)
+            states = self._initialize_sides(env, coev_cfg)
             print(
                 f"[CoEv] bootstrapping {len(states)} sides "
                 f"({sum(1 for s in states.values() if s.side.optimizer != 'frozen')} active)",
@@ -591,6 +625,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             reporting = states[coev_cfg.reporting_side]
             policy = reporting.best_policy(env)
 
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
+
         env.close()
         self._recorder.close()
         self._rec_env = None
@@ -629,6 +667,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             "reporting_side": coev_cfg.reporting_side,
             "coevolution_num_workers": resolved_workers,
             "coevolution_parallel_backend": coev_cfg.parallel_backend,
+            "coevolution_scheduler_address": effective_scheduler,
+            "coevolution_dask_workers": dask_workers,
             "run_dir": (
                 str(self._recording_log.run_dir)
                 if config.output_dir is not None
@@ -670,7 +710,6 @@ class CoEvolutionTrainer(BaselineTrainer):
         self,
         env: PettingZooWrapper,
         coev_cfg: CoEvolutionConfig,
-        resolved_workers: int,
     ) -> Dict[str, SideState]:
         """Seed RNGs and construct/initialise every side's state.
 
@@ -719,7 +758,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
 
         has_rl_side = any(getattr(s, "is_rl_side", False) for s in states.values())
-        if has_rl_side and resolved_workers > 1:
+        if has_rl_side and self._use_parallel:
             has_onpolicy_rl = any(
                 getattr(s, "is_rl_side", False) and getattr(s, "is_on_policy", False)
                 for s in states.values()
@@ -1271,7 +1310,7 @@ class CoEvolutionTrainer(BaselineTrainer):
     def _make_batch_eval_fn(self, evaluator: Any) -> Optional[Any]:
         """Return a population-level parallel batch-evaluation function.
 
-        When ``self._resolved_workers <= 1`` or the evaluator is not a
+        When the run is serial (``self._use_parallel`` is falsy) or the evaluator is not a
         :class:`CoEvolutionEvaluator`, returns ``None`` so callers fall
         back to the serial ``toolbox.evaluate`` path.
 
@@ -1286,7 +1325,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         """
         from .evaluator import CoEvolutionEvaluator, _episode_rollout, _EpisodePayload
 
-        if self._resolved_workers <= 1:
+        if not self._use_parallel:
             return None
         if not isinstance(evaluator, CoEvolutionEvaluator):
             return None
@@ -1436,9 +1475,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         if learner_state.side.optimizer == "rl":
             # Phase-2: pass executor + env identity so RLSideState can
             # dispatch rollout episodes to worker processes in parallel.
-            # The executor is only handed over when resolved_workers > 1;
-            # for serial runs None keeps the existing _collect_episode path.
-            rl_executor = self._executor if self._resolved_workers > 1 else None
+            # The executor is only handed over on the parallel path (workers
+            # > 1 or a remote Dask scheduler); for serial runs None keeps the
+            # existing _collect_episode path.
+            rl_executor = self._executor if self._use_parallel else None
             return _RLDriverContext(
                 env_wrapper=env,
                 learner_role_prefixes=learner_state.side.role_prefixes,
@@ -1455,12 +1495,13 @@ class CoEvolutionTrainer(BaselineTrainer):
         ), "frozen sides never become learners."
         learner_optimizer = learner_state.side.optimizer
         # Hand the executor to EA/CMA/QDax evaluators whose parallel path is
-        # implemented.  The resolved_workers > 1 guard avoids handing a
-        # _SerialExecutor wrapper when the user set num_workers=1.
+        # implemented.  The _use_parallel guard avoids handing a
+        # _SerialExecutor wrapper on serial runs (workers <= 1, no remote
+        # Dask scheduler).
         executor_for_side = (
             self._executor
             if learner_optimizer in {"ea", "cma", "qdax_map_elites", "qdax_cma_me"}
-            and self._resolved_workers > 1
+            and self._use_parallel
             else None
         )
 

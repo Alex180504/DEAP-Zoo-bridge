@@ -155,11 +155,24 @@ _PARALLELISM_PARAMS: List[Dict[str, Any]] = [
     {
         "name": "parallel_backend",
         "type": "enum",
-        "choices": ["process", "scoop", "dask"],
+        "choices": ["process", "dask"],
         "default": "process",
         "advanced": True,
         "label": "Backend",
         "help": "Parallel executor backend.",
+    },
+    {
+        "name": "scheduler_address",
+        "type": "str",
+        "default": None,
+        "nullable": True,
+        "advanced": True,
+        "label": "Dask scheduler",
+        "help": (
+            "Remote Dask scheduler for the 'dask' backend: a "
+            "'tcp://host:8786' URL or a scheduler-file path. Leave empty "
+            "to auto-build a local cluster."
+        ),
     },
 ]
 

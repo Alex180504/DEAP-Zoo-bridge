@@ -175,10 +175,12 @@ class HyperNEATTrainer(NEATTrainer):
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
-        effective_workers, backend = self._resolve_parallelism(config)
+        effective_workers, backend, scheduler_address, remote = (
+            self._resolve_parallelism(config)
+        )
 
         # --- Parallel or sequential eval -------------------------------------
-        if effective_workers > 1:
+        if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -189,7 +191,7 @@ class HyperNEATTrainer(NEATTrainer):
             from .trainer import _action_space_hint
 
             _act_hint = _action_space_hint(shared_action_space)
-            snapshot = get_registry_snapshot()
+            snapshot = get_registry_snapshot(target_remote=remote)
             worker_spec = _NeatWorkerSpec(
                 env_name=config.env_name,
                 env_config=dict(config.env_config),
@@ -216,6 +218,7 @@ class HyperNEATTrainer(NEATTrainer):
                 backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
+                scheduler_address=scheduler_address,
             ) as executor:
                 _eval_genomes = make_neat_parallel_evaluate(
                     executor,
@@ -428,10 +431,12 @@ class ESHyperNEATTrainer(NEATTrainer):
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
-        effective_workers, backend = self._resolve_parallelism(config)
+        effective_workers, backend, scheduler_address, remote = (
+            self._resolve_parallelism(config)
+        )
 
         # --- Parallel or sequential eval -------------------------------------
-        if effective_workers > 1:
+        if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -442,7 +447,7 @@ class ESHyperNEATTrainer(NEATTrainer):
             from .trainer import _action_space_hint
 
             _act_hint = _action_space_hint(shared_action_space)
-            snapshot = get_registry_snapshot()
+            snapshot = get_registry_snapshot(target_remote=remote)
             worker_spec = _NeatWorkerSpec(
                 env_name=config.env_name,
                 env_config=dict(config.env_config),
@@ -468,6 +473,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
+                scheduler_address=scheduler_address,
             ) as executor:
                 _eval_genomes = make_neat_parallel_evaluate(
                     executor,

@@ -1,7 +1,7 @@
 """Custom-env propagation across the parallel backends.
 
 These tests cover the registry-snapshot-on-worker-spec mechanism that lets
-SCOOP / Dask workers (which have no per-worker ``initializer`` hook) and the
+Dask workers (which have no per-worker ``initializer`` hook) and the
 initializer-less process path re-register **runtime-registered** custom envs
 before building them.
 
@@ -16,8 +16,6 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 import os
 import pickle
-import subprocess
-import sys
 import multiprocessing
 import numpy as np
 import pytest
@@ -45,9 +43,6 @@ from tests.multidiscrete_env import (
     MD_OBS_DIM,
     register_md_env,
 )
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 
 @pytest.fixture
 def md_env():
@@ -226,20 +221,3 @@ class TestDaskSpecPropagation:
             client.close()
         assert len(results) == 2
         assert all(np.isfinite(r[0]) for r in results)
-
-
-@pytest.mark.scoop
-def test_scoop_custom_env_subprocess():
-    """A real ``python -m scoop`` run propagates a runtime-registered env."""
-    pytest.importorskip("scoop")
-    script = os.path.join(os.path.dirname(__file__), "_scoop_custom_env_script.py")
-    proc = subprocess.run(
-        [sys.executable, "-m", "scoop", "-n", "2", script],
-        capture_output=True,
-        text=True,
-        cwd=_REPO_ROOT,
-        timeout=300,
-    )
-    combined = proc.stdout + "\n" + proc.stderr
-    assert proc.returncode == 0, combined
-    assert "SCOOP_CUSTOM_ENV_OK" in proc.stdout, combined
