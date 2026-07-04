@@ -954,14 +954,19 @@ def _resolve_callable(qualname: str) -> Any:
     return getattr(mod, attr)
 
 
-def _mixed_worker_evaluate(
+def _mixed_worker_run(
     payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
-) -> tuple:
-    """Top-level worker for MixedPolicyEvaluator parallel evaluation.
+) -> Tuple[tuple, int]:
+    """Shared body for the MixedPolicyEvaluator parallel workers.
 
     Resolves all factories from their qualified names, builds a fresh
     :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`, and
     evaluates the genome over ``spec.eval_episodes`` episodes.
+
+    Returns:
+        ``((mean_fitness,), env_steps)`` where ``env_steps`` is the real
+        env-tick delta this call consumed on the worker-local evaluator
+        (the counter itself never crosses back from the subprocess).
 
     This function is module-level and therefore picklable on all
     platforms (including Windows spawn).
@@ -1021,11 +1026,34 @@ def _mixed_worker_evaluate(
             self.genome = g
 
     ind = _Ind(genome)
+    # getattr-guarded: tests may inject stub evaluators without the counter.
+    before = int(getattr(evaluator, "env_steps_consumed", 0))
     total = sum(
         evaluator.run_episode(ind, seed=payload.seed).fitness
         for _ in range(spec.eval_episodes)
     )
-    return (total / spec.eval_episodes,)
+    steps = int(getattr(evaluator, "env_steps_consumed", before)) - before
+    return (total / spec.eval_episodes,), steps
+
+
+def _mixed_worker_evaluate(
+    payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
+) -> tuple:
+    """Fitness-only MixedPolicyEvaluator worker (``toolbox.map`` contract)."""
+    fitness, _ = _mixed_worker_run(payload_and_spec)
+    return fitness
+
+
+def _mixed_worker_evaluate_with_steps(
+    payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
+) -> Tuple[tuple, int]:
+    """MixedPolicyEvaluator worker returning ``(fitness_tuple, env_steps)``.
+
+    The step count is the real env-tick delta consumed by this call,
+    enabling consumed-step (``budget_on_consumed``) budgeting in driver
+    loops that dispatch through an executor.
+    """
+    return _mixed_worker_run(payload_and_spec)
 
 
 def make_mixed_parallel_evaluate_map(
@@ -1033,6 +1061,7 @@ def make_mixed_parallel_evaluate_map(
     evaluator: Any,
     *,
     eval_episodes: int = 1,
+    step_sink: Optional[List[int]] = None,
 ) -> Any:
     """Build a ``map``-shaped callable for parallel :class:`MixedPolicyEvaluator` eval.
 
@@ -1066,6 +1095,11 @@ def make_mixed_parallel_evaluate_map(
         evaluator: A :class:`MixedPolicyEvaluator` built with the factory
             path.
         eval_episodes: Episodes averaged per genome per worker call.
+        step_sink: Optional 1-element mutable list. When provided, the
+            real per-task env-step deltas returned by each worker are
+            summed into ``step_sink[0]`` so the driver can aggregate a
+            worker-side counter that never crosses back from the
+            subprocess (consumed-step budgeting).
 
     Returns:
         ``pmap`` callable compatible with ``toolbox.register("map", pmap)``.
@@ -1163,6 +1197,10 @@ def make_mixed_parallel_evaluate_map(
                 registry_snapshot=spec.registry_snapshot,
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
+        if step_sink is not None:
+            results = list(executor.map(_mixed_worker_evaluate_with_steps, payloads))
+            step_sink[0] += sum(int(steps) for _, steps in results)
+            return [fitness for fitness, _ in results]
         return list(executor.map(_mixed_worker_evaluate, payloads))
 
     return _pmap

@@ -191,8 +191,16 @@ def _call_state_extractor(extract, obs, agents, ctx: dict):
     "positions" and "velocities" — catch it immediately instead. Checked
     once per worker context (not every call) to keep the hot rollout loop
     cheap.
+
+    Extractors that expose ``needs_env = True`` are called as
+    ``extract(obs, agents, env)`` with the live worker env so they can read
+    true entity state (e.g. absolute positions the observation vectors do
+    not encode).  Such extractors may return more rows than ``len(agents)``
+    — scripted opponents hidden from the public agent list are a legitimate
+    part of two-team descriptors — so only the 2-D shape is enforced.
     """
-    raw = extract(obs, agents)
+    needs_env = bool(getattr(extract, "needs_env", False))
+    raw = extract(obs, agents, ctx.get("env")) if needs_env else extract(obs, agents)
     if ctx.get("_checked_extractor", False):
         return raw
     if not (isinstance(raw, tuple) and len(raw) == 2):
@@ -209,7 +217,8 @@ def _call_state_extractor(extract, obs, agents, ctx: dict):
     num_agents = len(agents)
     for name, arr in (("positions", positions), ("velocities", velocities)):
         shape = np.asarray(arr).shape
-        if len(shape) != 2 or shape[0] != num_agents:
+        row_count_ok = shape and (shape[0] == num_agents or needs_env)
+        if len(shape) != 2 or not row_count_ok:
             raise ValueError(
                 f"state_extractor must return (positions, velocities) each "
                 f"shaped (num_agents={num_agents}, D); got {name} with shape "

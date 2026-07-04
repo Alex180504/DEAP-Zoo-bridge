@@ -775,9 +775,7 @@ class EATrainer(BaselineTrainer):
         # live elsewhere, so skip the driver CPU cap and force the parallel
         # dispatch path even for num_workers <= 1 (advisory there).
         effective_scheduler = (
-            resolve_scheduler_address(scheduler_address)
-            if backend == "dask"
-            else None
+            resolve_scheduler_address(scheduler_address) if backend == "dask" else None
         )
         remote = effective_scheduler is not None
         effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
@@ -987,9 +985,7 @@ class EATrainer(BaselineTrainer):
 
             # Capture at the end of the run so late-joining workers show up.
             if hasattr(executor, "worker_info"):
-                dask_workers = sorted(
-                    {str(w["host"]) for w in executor.worker_info()}
-                )
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
 
         # Clean up
         env.close()

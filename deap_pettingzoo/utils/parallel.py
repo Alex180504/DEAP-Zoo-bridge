@@ -502,9 +502,7 @@ def make_executor(
         )
 
     if backend == "dask":
-        return _DaskExecutor(
-            n, client=dask_client, scheduler_address=effective_address
-        )
+        return _DaskExecutor(n, client=dask_client, scheduler_address=effective_address)
 
     raise AssertionError("unreachable")  # pragma: no cover
 
