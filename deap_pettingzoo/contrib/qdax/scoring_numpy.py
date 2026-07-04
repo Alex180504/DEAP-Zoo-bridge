@@ -80,15 +80,14 @@ class _RolloutSpec:
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
     #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
     nvec: Optional[tuple] = None
-    #: Registry snapshot replayed in the worker so SCOOP/Dask (and the
+    #: Registry snapshot replayed in the worker so Dask (and the
     #: initializer-less process path here) can resolve runtime-registered envs.
     registry_snapshot: Optional[list] = None
 
 
 # Module-global cache populated lazily on each worker. Same pattern
 # as ``deap_pettingzoo.integration.deap_integration._WORKER_CACHE`` —
-# works uniformly for ProcessPoolExecutor, SCOOP (no init hook), and
-# Dask workers.
+# works uniformly for ProcessPoolExecutor and Dask workers (no init hook).
 _NUMPY_WORKER_CACHE: dict = {}
 
 
@@ -150,7 +149,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
             # `_extract_key` above is `type(...).__qualname__`, which is
             # "function" for ANY plain function — it cannot tell two
             # different module-level extractors apart. A persistent worker
-            # pool (dask/scoop) reused across scoring-function instances
+            # pool (dask) reused across scoring-function instances
             # could therefore swap in a genuinely different extractor on a
             # cache "hit"; re-validate it rather than trusting a stale
             # `_checked_extractor=True` left over from the previous one.
@@ -192,8 +191,16 @@ def _call_state_extractor(extract, obs, agents, ctx: dict):
     "positions" and "velocities" — catch it immediately instead. Checked
     once per worker context (not every call) to keep the hot rollout loop
     cheap.
+
+    Extractors that expose ``needs_env = True`` are called as
+    ``extract(obs, agents, env)`` with the live worker env so they can read
+    true entity state (e.g. absolute positions the observation vectors do
+    not encode).  Such extractors may return more rows than ``len(agents)``
+    — scripted opponents hidden from the public agent list are a legitimate
+    part of two-team descriptors — so only the 2-D shape is enforced.
     """
-    raw = extract(obs, agents)
+    needs_env = bool(getattr(extract, "needs_env", False))
+    raw = extract(obs, agents, ctx.get("env")) if needs_env else extract(obs, agents)
     if ctx.get("_checked_extractor", False):
         return raw
     if not (isinstance(raw, tuple) and len(raw) == 2):
@@ -210,7 +217,8 @@ def _call_state_extractor(extract, obs, agents, ctx: dict):
     num_agents = len(agents)
     for name, arr in (("positions", positions), ("velocities", velocities)):
         shape = np.asarray(arr).shape
-        if len(shape) != 2 or shape[0] != num_agents:
+        row_count_ok = shape and (shape[0] == num_agents or needs_env)
+        if len(shape) != 2 or not row_count_ok:
             raise ValueError(
                 f"state_extractor must return (positions, velocities) each "
                 f"shaped (num_agents={num_agents}, D); got {name} with shape "
@@ -390,6 +398,7 @@ def make_numpy_scoring_function(
     activation: str = "tanh",
     num_workers: int = 1,
     parallel_backend: str = "process",
+    scheduler_address: Optional[str] = None,
     eval_episodes: int = 1,
     worker_imports: Sequence[str] = (),
 ) -> Callable:
@@ -427,8 +436,14 @@ def make_numpy_scoring_function(
             :func:`close_scoring_function` on the returned callable to
             tear down the pool explicitly; trainers do this in a
             ``try / finally``.
-        parallel_backend: One of ``"process"``, ``"scoop"``, ``"dask"``.
+        parallel_backend: One of ``"process"``, ``"dask"``.
             See :mod:`deap_pettingzoo.utils.parallel` for details.
+        scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+            scheduler-file path); requires ``parallel_backend='dask'``.
+            ``None`` auto-builds a local cluster unless the
+            ``DEAP_DASK_SCHEDULER`` env var supplies an address. When a
+            remote scheduler is in play, ``num_workers`` is advisory
+            metadata and rollouts always dispatch through the executor.
         worker_imports: Optional module names imported inside each worker
             before env construction. Use this when the env is registered by
             importing a module for side effects rather than being part of the
@@ -455,9 +470,18 @@ def make_numpy_scoring_function(
     from deap_pettingzoo.utils.parallel import (
         make_executor,
         resolve_num_workers,
+        resolve_scheduler_address,
     )
 
-    effective_workers = resolve_num_workers(num_workers)
+    # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers live
+    # elsewhere, so skip the driver CPU cap and always dispatch through the
+    # executor even for num_workers <= 1 (advisory there).
+    remote = (
+        parallel_backend == "dask"
+        and resolve_scheduler_address(scheduler_address) is not None
+    )
+    effective_workers = resolve_num_workers(num_workers, cap_to_cpu=not remote)
+    use_parallel = effective_workers > 1 or remote
     rollout_spec = _RolloutSpec(
         env_name=env_name,
         env_config=dict(env_config) if env_config else None,
@@ -471,7 +495,7 @@ def make_numpy_scoring_function(
         state_extractor=state_extractor,
         worker_imports=tuple(str(name) for name in worker_imports),
         # Propagate runtime-registered custom envs to workers (no init hook).
-        registry_snapshot=get_registry_snapshot(),
+        registry_snapshot=get_registry_snapshot(target_remote=remote),
     )
 
     # Local (in-process) fallback for the serial path — avoids the
@@ -486,7 +510,11 @@ def make_numpy_scoring_function(
     def _ensure_executor():
         if state["executor"] is not None:
             return state["executor"]
-        ctx = make_executor(effective_workers, backend=parallel_backend)
+        ctx = make_executor(
+            effective_workers,
+            backend=parallel_backend,
+            scheduler_address=scheduler_address,
+        )
         state["ctx"] = ctx
         state["executor"] = ctx.__enter__()
         # Mirror the live ref onto the public attribute so callers
@@ -503,7 +531,7 @@ def make_numpy_scoring_function(
             single_tree = jax.tree_util.tree_map(lambda x, i=i: x[i], genotypes)
             flats.append(pytree_to_flat(single_tree, layer_sizes))
 
-        if effective_workers <= 1:
+        if not use_parallel:
             # Serial: avoid executor overhead entirely.
             results = [_local_rollout(flat, int(s)) for flat, s in zip(flats, seeds)]
         else:

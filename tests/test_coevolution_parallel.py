@@ -245,10 +245,10 @@ class TestTrainerParallelWiring:
                 parallel_backend="not-a-backend",
             )
 
-    def test_k_one_with_workers_warns(self, recwarn):
-        """num_workers > 1 with k_opponents == 1 is a no-op; the
-        trainer must emit a RuntimeWarning so users notice their
-        config is wrong."""
+    def test_k_one_with_workers_runs_parallel_without_warning(self, recwarn):
+        """num_workers > 1 with k_opponents == 1 is a valid parallel config:
+        the population-level batch path fans out N x k episodes even at
+        k=1."""
         cfg = CoEvolutionConfig(
             mode="competitive_2pop",
             sides=[
@@ -260,9 +260,10 @@ class TestTrainerParallelWiring:
             seed=7,
             num_workers=2,
         )
-        CoEvolutionTrainer().train(_base_tcfg(cfg, budget=10))
+        result = CoEvolutionTrainer().train(_base_tcfg(cfg, budget=10))
         msgs = [str(w.message) for w in recwarn.list]
-        assert any("num_workers" in m and "k_opponents=1" in m for m in msgs)
+        assert not any("no-op" in m for m in msgs), f"stale no-op warning fired: {msgs}"
+        assert result.metadata["coevolution_num_workers"] == 2
 
 
 # ---------------------------------------------------------------------------

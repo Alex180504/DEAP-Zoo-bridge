@@ -96,7 +96,7 @@ jobs:
           pip install -c "$C" packaging accelerate dill flatten-dict google-cloud-storage \
             h5py hydra-core minari omegaconf redis tensordict termcolor tqdm wandb
           pip install fastrand pymunk
-          pip install -c "$C" -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,scoop,dask,ui,service]"
+          pip install -c "$C" -e ".[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,neat,dask,ui,service]"
           # JAX/QDax: jaxmarl is dropped (no test imports it) and qdax's
           # brax>=0.10.4 pin is bypassed with --no-deps (it runs on brax 0.10.3);
           # the constraints file keeps the jax/brax stack from being bumped.
@@ -107,6 +107,39 @@ jobs:
 
       - name: Run unit tests
         run: python -m pytest --no-cov -q
+
+  hpc-dask-rig:
+    name: HPC Dask rig
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEAP_HPC_TESTS: "1"
+      # Skip the fixture's teardown so the failure step below can still
+      # read compose logs; the workflow tears down explicitly instead.
+      DEAP_HPC_KEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The rig tests drive everything through docker compose; the host
+      # python only needs pytest (pytest-cov because pyproject's addopts
+      # pass --cov, which the run then disables with --no-cov).
+      - name: Install test runner
+        run: pip install pytest pytest-cov
+
+      - name: Run Dask rig tests
+        run: python -m pytest --no-cov -q tests/hpc/test_dask_rig.py
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f docker/dask-cluster/docker-compose.yml -p deap-hpc-dask logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker/dask-cluster/docker-compose.yml -p deap-hpc-dask down -v
 
   docker-compose:
     name: Docker Compose

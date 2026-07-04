@@ -1,0 +1,61 @@
+@startuml
+title HPC Dask Evaluation Sequence (remote scheduler)
+
+actor Driver as User
+participant "Trainer\n(EATrainer/CMAESTrainer/PSOTrainer)" as T
+participant "make_executor\n(utils.parallel)" as ME
+participant "_DaskExecutor" as DE
+database "Registry" as R
+participant "dask.distributed.Client" as C
+participant "Remote Scheduler" as S
+participant "Remote Worker(s)" as WK
+
+== Resolve connection ==
+User -> T: train(config)
+T -> ME: make_executor(num_workers, backend="dask",\n  dask_client=None, scheduler_address=config.scheduler_address)
+ME -> ME: resolve_scheduler_address(arg)\n  precedence: arg > DEAP_DASK_SCHEDULER env var
+note right: no client/address/env var\n-> falls back to an auto-built\nlocal LocalCluster (unchanged\nsingle-machine default)
+ME -> DE: _DaskExecutor(scheduler_address=effective_address)
+DE -> C: Client(address=...) or Client(scheduler_file=...)
+C -> S: connect
+S --> C: connected
+DE -> C: client.wait_for_workers(1, timeout=DEAP_DASK_CONNECT_TIMEOUT)
+C -> S: poll worker registrations
+S --> C: worker(s) joined
+DE -> C: client.forward_logging()
+note right: worker-side logging records\nnow surface on the driver
+
+== Post-connect checks (warn-only) ==
+DE -> C: client.scheduler_info()
+C --> DE: worker nthreads, addresses
+DE -> DE: warn if any worker nthreads > 1
+DE -> C: client.run(importlib.metadata.version, "deap-pettingzoo")
+C -> WK: run on every worker
+WK --> C: installed version per worker
+DE -> DE: warn on driver/worker version mismatch
+DE --> ME: executor (worker_info() available)
+ME --> T: executor
+
+== Dispatch population ==
+T -> R: get_registry_snapshot(target_remote=True)
+R --> T: snapshot (custom envs; warns + drops\nnon-picklable / __main__ factories)
+T -> T: build _EvalWorkerSpec(..., registry_snapshot)
+T -> DE: executor.map(_worker_evaluate, payloads, retries=2)
+alt worker fn resolves to __main__
+  DE -> DE: raise immediately\n(fn.__module__ == "__main__")
+else fn resolvable
+  DE -> C: client.map(_worker_evaluate, payloads, retries=2)
+  C -> WK: dispatch payload
+  WK -> WK: replay_registry_snapshot_once(snapshot)
+  WK -> WK: rebuild env/policy/evaluator\n(per-process worker cache)
+  WK -> WK: run episode(s) -> (fitness, steps_delta)
+  WK --> C: result
+  note right: idempotent retry on worker death\n(evaluations are pure); deterministic\nfailures surface after 3 attempts with\nthe real remote traceback via client.gather
+  C --> DE: ordered results (map preserves\ninput/output order)
+end
+DE --> T: fitness list + step_sink accumulation
+
+== Result ==
+T -> T: record metadata: num_workers, parallel_backend,\n  scheduler_address, dask_workers (observed hosts)
+T --> User: TrainingResult(policy, metrics, metadata)
+@enduml

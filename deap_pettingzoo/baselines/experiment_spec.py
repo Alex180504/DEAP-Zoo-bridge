@@ -171,23 +171,34 @@ class RecordingSettings:
 
 @dataclass
 class ParallelismSettings:
-    """Parallel-evaluation options (population-based trainers)."""
+    """Parallel-evaluation options (population-based trainers).
+
+    ``scheduler_address`` targets a remote Dask scheduler (a ``tcp://...``
+    URL or a scheduler-file path) and requires ``parallel_backend ==
+    "dask"``. Empty strings are normalised to ``None`` (unset).
+    """
 
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "num_workers": self.num_workers,
             "parallel_backend": self.parallel_backend,
+            "scheduler_address": self.scheduler_address,
         }
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "ParallelismSettings":
         data = data or {}
+        raw_address = data.get("scheduler_address")
         return cls(
             num_workers=int(data.get("num_workers", 1)),
             parallel_backend=str(data.get("parallel_backend", "process")),
+            scheduler_address=(
+                str(raw_address).strip() or None if raw_address is not None else None
+            ),
         )
 
 
@@ -591,9 +602,11 @@ def build_configs(
         if algo_spec.family == "evolutionary":
             cfg_num_workers = spec.parallelism.num_workers
             cfg_parallel_backend = spec.parallelism.parallel_backend
+            cfg_scheduler_address = spec.parallelism.scheduler_address
         else:
             cfg_num_workers = 1
             cfg_parallel_backend = "process"
+            cfg_scheduler_address = None
         for seed_idx in range(num_seeds):
             algo_params = dict(base_algo_params)
             run_config = dict(base_run_config)
@@ -615,6 +628,7 @@ def build_configs(
                 output_dir=out_dir,
                 num_workers=cfg_num_workers,
                 parallel_backend=cfg_parallel_backend,
+                scheduler_address=cfg_scheduler_address,
                 recording=recording_config,
                 fitness=fitness_config,
                 budget_on_consumed=spec.budget.budget_on_consumed,
@@ -681,6 +695,7 @@ def _build_coevolution_plan(
             seed=seed_idx,
             num_workers=spec.parallelism.num_workers,
             parallel_backend=spec.parallelism.parallel_backend,
+            scheduler_address=spec.parallelism.scheduler_address,
         )
         out_dir = (
             output_root / "coevolution" / f"seed_{seed_idx}"
@@ -715,7 +730,7 @@ def _build_coevolution_plan(
 # Validate_spec
 
 _VALID_BUDGET_MODES = ("env_steps", "eval_episodes", "generations")
-_SUPPORTED_BACKENDS = ("process", "scoop", "dask")
+_SUPPORTED_BACKENDS = ("process", "dask")
 
 
 def validate_spec(spec: ExperimentSpec) -> "ValidationReport":
@@ -868,6 +883,15 @@ def _validate_parallelism(spec, report):
             f"of {list(_SUPPORTED_BACKENDS)}.",
         )
         return
+    scheduler_address = getattr(par, "scheduler_address", None)
+    if scheduler_address and par.parallel_backend != "dask":
+        report.add(
+            "parallelism.scheduler_address",
+            "backend_mismatch",
+            f"scheduler_address={scheduler_address!r} requires "
+            "parallel_backend='dask'.",
+        )
+        return
     # Warn (non-blocking) when a real parallel backend is selected but its
     # optional package is not installed — it would otherwise only fail at run
     # time with an ImportError. The service shares the trainer environment, so
@@ -876,7 +900,6 @@ def _validate_parallelism(spec, report):
         from deap_pettingzoo.catalog.availability import module_available
 
         _backend_requirement = {
-            "scoop": ("scoop", "deap-pettingzoo[scoop]"),
             "dask": ("dask.distributed", "deap-pettingzoo[dask]"),
         }
         req = _backend_requirement.get(par.parallel_backend)

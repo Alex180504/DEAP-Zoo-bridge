@@ -158,7 +158,7 @@ package "deap_pettingzoo.environments" {
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
         + {static} replay_registry_snapshot_once(snapshot) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; Dask ships it on the\n   worker spec and calls replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
     }
 
     class builtin <<module>> {
@@ -381,17 +381,19 @@ package "deap_pettingzoo.integration" {
             executor, spec, eval_seeds=None,
             step_sink=None) -> list
         + make_mixed_parallel_evaluate_map(executor,
-            evaluator, *, eval_episodes=1) -> Callable
+            evaluator, *, eval_episodes=1,
+            step_sink=None) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
            qualnames + a registry_snapshot; picklable
            across spawn workers. Workers replay the
            snapshot via replay_registry_snapshot_once
-           so SCOOP/Dask (no initializer hook) get
+           so Dask (no initializer hook) gets
            custom envs too --
-        -- _worker_evaluate now returns
-           (fitness, steps_delta); make_parallel_evaluate_map /
-           evaluate_population_parallel sum the deltas into the
-           optional step_sink accumulator and return fitness-only --
+        -- _worker_evaluate and
+           _mixed_worker_evaluate_with_steps return
+           (fitness, steps_delta); the pmap factories sum the
+           deltas into the optional step_sink accumulator and
+           return fitness-only --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -432,9 +434,10 @@ package "deap_pettingzoo.baselines" {
         + render: bool
         + num_workers: int = 1
         + parallel_backend: str = "process"
+        + scheduler_address: Optional[str] = None
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
-        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
+        -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
         -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
         -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
         -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
@@ -860,12 +863,22 @@ note bottom of registry
   propagate custom envs registered in the main
   process into worker subprocesses. The process pool
   passes them as initializer/initargs to make_executor;
-  SCOOP/Dask have no initializer hook, so trainers also
+  Dask has no initializer hook, so trainers also
   ship the snapshot on each worker spec/payload and the
   worker calls replay_registry_snapshot_once (idempotent,
   guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
+
+  make_executor resolves the Dask connection as:
+  dask_client > scheduler_address arg > DEAP_DASK_SCHEDULER
+  env var > auto-built local LocalCluster. A remote target
+  (client/address/env var) skips the num_workers<=1 serial
+  fast-path and the os.cpu_count() cap -- explicit remote
+  intent is never silently downgraded or shrunk. On a
+  remote cluster, any executor.map worker fn (not just env
+  factories) resolving to __main__ raises immediately
+  instead of failing opaquely mid-cluster.
 end note
 
 note bottom of openspiel
@@ -1215,6 +1228,7 @@ package "deap_pettingzoo.baselines.coevolution" {
     +seed: Optional[int]
     +num_workers: int = 1
     +parallel_backend: str = "process"
+    +scheduler_address: Optional[str] = None
   }
 
   class CoEvolutionEvaluator {
