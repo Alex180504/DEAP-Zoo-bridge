@@ -52,3 +52,67 @@ class TestNeatParallelEval:
         result = trainer.train(cfg)
         assert result.algorithm == "NEAT"
         assert result.policy is not None
+
+    def test_train_honors_config_num_workers(self, tmp_path, monkeypatch):
+        """TrainingConfig.num_workers must actually
+        route through parallel evaluation, even when the trainer was
+        constructed with the (serial) default of 1.
+        """
+        import deap_pettingzoo.contrib.neat.parallel as neat_parallel
+
+        calls = []
+        _orig = neat_parallel.make_neat_parallel_evaluate
+
+        def _spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return _orig(*args, **kwargs)
+
+        monkeypatch.setattr(neat_parallel, "make_neat_parallel_evaluate", _spy)
+
+        n_generations = 2
+        cfg = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=1,  # irrelevant: n_generations below bypasses derivation
+            num_seeds=1,
+            algorithm_params={
+                "pop_size": 4,
+                "eval_episodes_per_genome": 1,
+                "n_generations": n_generations,
+            },
+            env_config={"max_cycles": 10, "continuous_actions": False},
+            seed=0,
+            num_workers=2,
+            output_dir=tmp_path,
+        )
+        trainer = NEATTrainer()  # constructor default: serial
+        assert trainer._num_workers == 1
+        result = trainer.train(cfg)
+        assert result.algorithm == "NEAT"
+        # The parallel factory must actually have been invoked -- proves the
+        # config-supplied num_workers routed to the parallel path, not just
+        # that the (serial-safe) generation bookkeeping happens to match.
+        assert len(calls) == 1
+        assert result.metrics["final_generation"] == n_generations
+
+    def test_train_parallel_updates_fitness_history_and_generation(self, tmp_path):
+        n_generations = 3
+        cfg = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=1,
+            num_seeds=1,
+            algorithm_params={
+                "pop_size": 4,
+                "eval_episodes_per_genome": 1,
+                "n_generations": n_generations,
+            },
+            env_config={"max_cycles": 10, "continuous_actions": False},
+            seed=0,
+            num_workers=2,
+            output_dir=tmp_path,
+        )
+        trainer = NEATTrainer(num_workers=2)
+        result = trainer.train(cfg)
+        assert result.metrics["final_generation"] == n_generations
+        assert len(result.metrics["fitness_history"]) == n_generations

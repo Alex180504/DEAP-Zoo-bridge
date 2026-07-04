@@ -63,6 +63,17 @@ end
 
 T -> SA : best_policy() or frozen=None
 SA -->> T : FeedforwardNeuralPolicy
+note over T
+  Each side threads the evaluator's real per-generation
+  env ticks into GenerationStats.env_steps; train() sums
+  them into metrics["env_steps_consumed"] alongside
+  metrics["env_steps_nominal"].
+  When budget_on_consumed=True (ENV_STEPS): after each
+  completed generation the trainer calls _aggregate_consumed
+  (sum of all sides' env_steps so far) and breaks once
+  the aggregate reaches budget_value. All side types
+  report real ticks; overshoot ≤ one generation's cost.
+end note
 T -->> User : TrainingResult(policy, metrics)
 
 @enduml

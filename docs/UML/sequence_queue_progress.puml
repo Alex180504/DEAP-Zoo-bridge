@@ -1,0 +1,87 @@
+@startuml sequence_queue_progress
+!theme plain
+title Queue Page – Live Progress & Control
+
+participant "Queue Page\n(Streamlit)" as QP
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+participant "Runner\n(subprocess)" as Runner
+participant "_progress.json" as Prog
+
+== Poll loop (every ~2s via st.rerun) ==
+loop Poll interval
+    QP -> Client: GET /queue
+    Client -> API: HTTP GET
+    API -> DB: get_queue_state()
+    DB --> API: {paused, running_id, queued_ids[]}
+    API --> Client: QueueState
+    Client --> QP: render control bar\n(pause/resume buttons)
+
+    alt running experiment
+        QP -> Client: GET /experiments/{id}/progress
+        Client -> API: HTTP GET
+        API -> DB: get_experiment(id) → check status=running
+        DB --> API: experiment record
+        API -> API: read _progress.json from experiment dir
+        API --> Client: ProgressSnapshot
+        Client --> QP: render progress bar\n(run k/N, gen g/G)\nmetric cards (best, mean, wall time)
+
+        QP -> Client: GET /experiments/{id}/stdout?offset=N
+        Client -> API: HTTP GET
+        API -> API: read _stdout.log from byte offset
+        API --> Client: {text, next_offset, eof}
+        Client --> QP: render stdout expander
+        note over QP, API: custom "script" jobs emit no _progress.json —\nthe Queue shows stdout only (script prints its own progress)
+    end
+
+    QP -> Client: GET /experiments?limit=50
+    Client -> API: HTTP GET
+    API --> Client: ExperimentRecord[]
+    Client --> QP: render all-experiments table
+end
+
+== Progress writes (trainer -> file) ==
+Runner -> Trainer: train(config, progress_callback=...)
+activate Trainer
+loop each generation / progress step
+    Trainer -> Runner: progress_callback(ProgressEvent)
+    Runner -> Prog: atomic write\n(tmp + os.replace)
+    note right of Prog: {run_index, total_runs,\nalgo, seed, unit,\ncurrent, total,\nbest_fitness, mean_fitness,\nwall_time_s}
+end
+deactivate Trainer
+
+== Queue controls ==
+QP -> QP: user clicks "Pause"
+QP -> Client: POST /queue/pause
+Client -> API: HTTP POST
+API -> DB: set_paused(True)
+DB --> API: ok
+API --> Client: 200 {paused: true}
+Client --> QP: update button state
+
+QP -> QP: user clicks "Cancel" on running experiment
+QP -> Client: POST /experiments/{id}/cancel
+Client -> API: HTTP POST
+API -> DB: get_experiment(id)
+alt unknown id
+    API --> Client: 404 {detail: "Unknown experiment ..."}
+else already completed/failed/cancelled
+    API --> Client: 409 {detail: "... already ... cannot be cancelled"}
+else queued or running
+    API -> API: dispatcher.cancel(id)
+    note right of API: running + self._running_exp_id == id:\nterminate_group(proc) (taskkill /T on Windows;\nkillpg on POSIX) — kills the whole process tree.\nThe exp_id check guards against a stale/reassigned\nproc handle killing a different, just-started experiment.
+    API -> DB: set_cancelled(id)
+    note right of DB: no-op if the row already reached a terminal\nstatus
+    DB --> API: ok
+    API --> Client: 200 ExperimentRecord{status: "cancelled"}
+end
+Client --> QP: update experiment row
+
+== Crash / restart recovery ==
+note over API, DB: On dispatcher startup (service restart), any row still\nmarked 'running' means the *server* died mid-run, not the\nexperiment.
+API -> DB: requeue_interrupted()
+DB -> DB: running -> queued\n(clear pid / started_at / finished_at / progress_json,\nkeep original enqueue_seq)
+note right of DB: the dispatcher's next poll picks it back up\nand restarts its sub-runs from the beginning\n(no population/optimizer/RNG checkpoint)
+
+@enduml

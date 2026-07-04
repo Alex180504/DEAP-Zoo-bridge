@@ -35,14 +35,15 @@ activate UE
 Trainer -> Pop: neat.Population(cppn_config, seed)
 activate Pop
 
-Trainer -> RR: _RecordingReporter(record_fn, cadence)
+Trainer -> RR: _RecordingReporter(record_fn)
 Trainer -> Pop: add_reporter(recording_reporter)
 
 == Parallel or sequential eval ==
-alt num_workers > 1
+Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_workers if != 1 else self._num_workers)\n  backend = config.parallel_backend if != "process" else self._parallel_backend\n  (config takes precedence over the trainer-constructor default;)
+alt effective_workers > 1
     Trainer -> Trainer: get_registry_snapshot()
-    Trainer -> Trainer: _NeatWorkerSpec(..., substrate_spec, es_params)
-    Trainer -> Executor: make_executor(n_workers, ...)
+    Trainer -> Trainer: _NeatWorkerSpec(..., substrate_spec, es_params, max_steps,\n  registry_snapshot=snapshot)
+    Trainer -> Executor: make_executor(effective_workers, backend=backend, ...)\n  note: snapshot rides on the spec; workers replay it\n  (replay_registry_snapshot_once) for SCOOP/Dask custom envs
 
     loop n_generations
         Trainer -> Pop: run(parallel_eval_function, n=1)
@@ -51,10 +52,12 @@ alt num_workers > 1
             Executor -> Executor: each worker rebuilds:\n  CPPN config + PettingZooWrapper\n  + Substrate + ESNetwork + ESHyperNeatPolicy
             Executor --> Pop: [(genome_id, fitness), ...]
         end
+        Pop -> Trainer: on_generation(best_fitness, gen_steps)\n  (Keeps final_generation/fitness_history\n  advancing on the parallel path)
+        Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)
         Pop -> Pop: reproduce / speciate
     end
     Trainer -> Executor: executor.__exit__()
-else num_workers == 1 (sequential)
+else effective_workers == 1 (sequential)
     loop n_generations
         Trainer -> Pop: run(eval_function, n=1)
 
@@ -108,12 +111,12 @@ else num_workers == 1 (sequential)
     end
 end
 
-== Recording: champion rollout (every N gens, hooks post_evaluate) ==
+== Recording: champion rollout (RecordingController decides per mode) ==
 alt recording enabled
-    loop generation g where g > 0 and g % cadence == 0
+    loop generation g where g > 0
         Pop -> RR: post_evaluate(config, pop, species, best_genome)
-        RR -> RR: _record_fn(g, best_genome)
-        RR -> UE: evaluate(policy=ESHyperNeatPolicy(best_genome, ...),\n  env_name, num_episodes=1, seed, env_config)
+        RR -> RR: _record_fn(g, best_genome) → RecordingController.observe(ProgressEvent(g), champion)
+        RR -> UE: (when due) evaluate(policy=ESHyperNeatPolicy(best_genome, ...),\n  env_name, num_episodes=1, iteration=g, env_steps)
         UE -> FR: start_episode()
         loop rollout steps
             UE -> UE: env.render('rgb_array')

@@ -29,7 +29,7 @@ class TestCMAESTrainerBasics:
         trainer = CMAESTrainer()
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
         assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is True
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
+        assert trainer.supports_budget_mode(BudgetMode.GENERATIONS) is True
 
     def test_budget_translation_env_steps(self):
         trainer = CMAESTrainer(population_size=20)
@@ -37,7 +37,7 @@ class TestCMAESTrainerBasics:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=10000,
-            algorithm_params={"max_steps_per_episode": 200},
+            max_steps_per_episode=200,
         )
         params = trainer._translate_budget(config)
         # 10000 / (20 * 200) = 2.5 -> 2 generations, matches EATrainer math.
@@ -59,7 +59,7 @@ class TestCMAESTrainerBasics:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=100,
-            algorithm_params={"max_steps_per_episode": 200},
+            max_steps_per_episode=200,
         )
         params = trainer._translate_budget(config)
         assert params["num_generations"] == 1
@@ -82,13 +82,16 @@ class TestCMAESTrainerTraining:
             use ``>=`` rather than ``>`` when comparing fitness values because such a small budget 
             may cause the optimiser to plateau naturally without it being a bug.
         """
-        trainer = CMAESTrainer(hidden_size=16, population_size=6, sigma0=0.3)
+        # population_size=8 / budget_value=4000 (rather than 6 / 3000) so the
+        # non-tautological improvement check below is reliably satisfied —
+        # verified stable across seeds 0-9.
+        trainer = CMAESTrainer(hidden_size=16, population_size=8, sigma0=0.3)
 
         config = TrainingConfig(
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
-            budget_value=3000,
-            algorithm_params={"max_steps_per_episode": 100, "seed": 0},
+            budget_value=4000,
+            max_steps_per_episode=100, seed=0,
         )
 
         result = trainer.train(config)
@@ -108,7 +111,8 @@ class TestCMAESTrainerTraining:
         assert len(history) >= 2, (
             "need at least two generations to assess improvement"
         )
-        best_ever_end = max(rec["max"] for rec in history)
+        # Compare gen 0 against the best of *later* generations only.
+        best_ever_end = max(rec["max"] for rec in history[1:])
         assert best_ever_end >= history[0]["max"], (
             f"best-ever fitness regressed: gen0_max={history[0]['max']}, "
             f"best_ever={best_ever_end}"
@@ -121,7 +125,7 @@ class TestCMAESTrainerTraining:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=3000,
-            algorithm_params={"max_steps_per_episode": 100, "seed": 0},
+            max_steps_per_episode=100, seed=0,
         )
         training_result = trainer.train(config)
 

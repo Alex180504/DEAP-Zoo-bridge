@@ -16,6 +16,7 @@ from deap_pettingzoo.baselines import (
     BudgetMode,
     MADDPGTrainer,
     RecordingConfig,
+    RecordingMode,
     TrainingConfig,
 )
 
@@ -33,7 +34,7 @@ def _count_frames(run_root: Path) -> int:
 
 
 def test_agilerl_records_one_rollout_at_end(tmp_path: Path):
-    """AgileRL records exactly one champion rollout at end-of-training."""
+    """mode=FINAL records exactly one champion rollout at end-of-training."""
     config = TrainingConfig(
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
@@ -46,7 +47,10 @@ def test_agilerl_records_one_rollout_at_end(tmp_path: Path):
             "max_steps_per_episode": 25,
         },
         output_dir=tmp_path,
-        recording=RecordingConfig(enabled=True, fps=10, max_frames_per_episode=25),
+        recording=RecordingConfig(
+            enabled=True, mode=RecordingMode.FINAL, fps=10,
+            max_frames_per_episode=25,
+        ),
     )
     MADDPGTrainer().train(config)
     assert _count_frames(tmp_path) == 1
@@ -73,7 +77,10 @@ def test_agilerl_recording_and_metrics_share_run_dir(tmp_path: Path):
             "max_steps_per_episode": 25,
         },
         output_dir=tmp_path,
-        recording=RecordingConfig(enabled=True, fps=10, max_frames_per_episode=25),
+        recording=RecordingConfig(
+            enabled=True, mode=RecordingMode.FINAL, fps=10,
+            max_frames_per_episode=25,
+        ),
     )
     MADDPGTrainer().train(config)
 
@@ -93,18 +100,6 @@ def test_agilerl_recording_and_metrics_share_run_dir(tmp_path: Path):
     assert (run_dir / "summary.json").is_file(), (
         f"summary.json missing under {run_dir} (artefacts split across run_dirs?)"
     )
-
-
-def test_agilerl_default_cadence_is_ten():
-    """``AgileRLTrainer._default_recording_every_n`` is 10."""
-    trainer = MADDPGTrainer()
-    cfg = TrainingConfig(
-        env_name="simple_spread_v3",
-        budget_mode=BudgetMode.ENV_STEPS,
-        budget_value=100,
-        recording=RecordingConfig(enabled=True),
-    )
-    assert trainer._resolve_recording_every_n(cfg) == 10
 
 
 def test_agilerl_records_mid_training_at_every_n_steps(tmp_path: Path):
@@ -131,6 +126,7 @@ def test_agilerl_records_mid_training_at_every_n_steps(tmp_path: Path):
         output_dir=tmp_path,
         recording=RecordingConfig(
             enabled=True,
+            mode=RecordingMode.INTERVAL,
             fps=10,
             max_frames_per_episode=25,
             every_n_steps=200,

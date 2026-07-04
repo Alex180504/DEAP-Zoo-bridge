@@ -28,17 +28,12 @@ functions that need them so that ``import deap_pettingzoo.analysis``
 succeeds with only ``numpy`` available.
 """
 
-from deap_pettingzoo.analysis.loaders import (
-    Experiment,
-    RunRecord,
-    load_experiment,
-    load_run,
-)
 from deap_pettingzoo.analysis.aggregate import (
     bootstrap_ci,
     iqm,
     learning_curve_with_ci,
     mean_with_ci,
+    resolve_y_col,
 )
 from deap_pettingzoo.analysis.compare import (
     cliffs_delta,
@@ -47,10 +42,12 @@ from deap_pettingzoo.analysis.compare import (
     pairwise_table,
     welch_t,
 )
-from deap_pettingzoo.analysis.policies import (
-    CoevolutionPolicyBundle,
-    PolicyReloadUnavailable,
-    load_policy,
+from deap_pettingzoo.analysis.loaders import (
+    Experiment,
+    RunRecord,
+    load_experiment,
+    load_run,
+    per_agent_table,
 )
 from deap_pettingzoo.analysis.multi_task import (
     collect_score_matrices,
@@ -60,6 +57,12 @@ from deap_pettingzoo.analysis.normalize import (
     NormalizationSpec,
     normalize_score_matrices,
 )
+from deap_pettingzoo.analysis.policies import (
+    CoevolutionPolicyBundle,
+    PolicyReloadUnavailable,
+    load_policy,
+)
+from deap_pettingzoo.analysis.report import build_report
 from deap_pettingzoo.analysis.rliable_bridge import (
     aggregate_metrics_forest,
 )
@@ -72,6 +75,7 @@ __all__ = [
     "RunRecord",
     "aggregate_metrics_forest",
     "bootstrap_ci",
+    "build_report",
     "cliffs_delta",
     "cohens_d",
     "collect_score_matrices",
@@ -85,5 +89,7 @@ __all__ = [
     "mean_with_ci",
     "normalize_score_matrices",
     "pairwise_table",
+    "per_agent_table",
+    "resolve_y_col",
     "welch_t",
 ]

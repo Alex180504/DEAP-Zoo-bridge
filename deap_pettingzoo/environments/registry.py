@@ -31,10 +31,12 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
+from deap_pettingzoo.catalog.schema import ParamSpec, TeamSpec
+
 
 class EnvFactory:
     """Factory for constructing PettingZoo environments.
-    
+
     Can be either:
       - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
         ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
@@ -117,6 +119,17 @@ class EnvSpec:
     Default is an empty tuple (no wrapping).
     """
     wrappers: Tuple[Callable[[Any], Any], ...] = ()
+    #: Declarative schema for the environment-constructor kwargs, consumed by
+    #: the catalog / experiment-setup UI to auto-generate a typed config form.
+    #: Empty ⇒ no introspectable params (the env takes no kwargs, or none are
+    #: surfaced). MPE2 factories use ``**kwargs`` passthrough so this metadata
+    #: is hand-authored in :mod:`deap_pettingzoo.environments.builtin`.
+    params: Tuple[ParamSpec, ...] = ()
+    #: Declared agent teams (groups of agent-name prefixes). ``len(teams) >= 2``
+    #: marks the env as multi-team and therefore co-evolution-capable. Empty ⇒
+    #: single-team / cooperative (the UI hides co-evolution for it unless the
+    #: user explicitly opts in).
+    teams: Tuple[TeamSpec, ...] = ()
 
 
 #: Fallback episode length when an :class:`EnvSpec` does not specify one.
@@ -136,6 +149,8 @@ def register_env(
     tags: Optional[set] = None,
     api: EnvApi = "parallel",
     wrappers: Sequence[Callable[[Any], Any]] = (),
+    params: Sequence[ParamSpec] = (),
+    teams: Sequence[TeamSpec] = (),
     overwrite: bool = False,
 ) -> EnvSpec:
     """Register a PettingZoo environment.
@@ -215,6 +230,8 @@ def register_env(
         tags=frozenset(tags or ()),
         api=api,
         wrappers=wrapper_tuple,
+        params=tuple(params),
+        teams=tuple(teams),
     )
     _REGISTRY[name] = spec
     return spec
@@ -337,7 +354,11 @@ def _attach_simultaneity_guard(env, env_name: str):
 
     def _step(actions, *args, **kwargs):
         result = original_step(actions, *args, **kwargs)
-        if state["expected"] is None or not isinstance(result, tuple) or len(result) < 5:
+        if (
+            state["expected"] is None
+            or not isinstance(result, tuple)
+            or len(result) < 5
+        ):
             return result
         observations = result[0] if isinstance(result[0], dict) else {}
         terminations = result[2] if isinstance(result[2], dict) else {}
@@ -491,6 +512,7 @@ def build_env_from_spec(
         from deap_pettingzoo.environments.jax_parallel import (
             JaxEnvToPettingZooAdapter,
         )
+
         env = JaxEnvToPettingZooAdapter(raw, env_name=name, render_mode=render_mode)
     else:
         preferred = "env" if spec.api == "aec" else "parallel_env"
@@ -569,27 +591,63 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
         SCOOP and Dask backends do not expose a per-worker
         ``initializer`` hook.  :func:`make_executor` accepts but
         silently ignores ``initializer``/``initargs`` for those
-        backends.  Custom environments will therefore *not* be
-        available in SCOOP/Dask workers unless the environment package
-        is imported at module level in the worker script.
+        backends.  To propagate custom environments there, the snapshot
+        is instead carried on each picklable worker spec/payload and
+        replayed lazily in the worker via
+        :func:`replay_registry_snapshot_once`.
 
     .. note::
-        Entries whose ``factory`` is not picklable (e.g. built-in envs
-        registered with a bare module object) are silently omitted from
-        the snapshot.  Built-in environments (MPE2, aquarium) are
+        Entries whose ``factory`` is not picklable are omitted from the
+        snapshot.  Built-in environments (MPE2, aquarium) are registered
+        with a bare **module** object (also not picklable) but are
         auto-registered in every worker process at import time via
-        :mod:`deap_pettingzoo.environments.builtin`, so they do not
-        need to be propagated through the snapshot.
+        :mod:`deap_pettingzoo.environments.builtin`, so they do not need
+        to be propagated through the snapshot and their omission is
+        silent.  Any *other* non-picklable factory — a lambda, a closure,
+        or a locally-defined class — is a custom :func:`register_env` that
+        will **not** reach ``num_workers>1`` workers (surfacing later as a
+        cryptic "unregistered env"): each such drop emits a
+        :class:`RuntimeWarning` naming the env so the cause is visible at
+        snapshot time rather than deep inside a worker. Register custom
+        envs with a module-level factory function/class to make them
+        propagate.
     """
+    import inspect
     import pickle
 
     result = []
     for name, spec in _REGISTRY.items():
         try:
             pickle.dumps(spec)
-            result.append((name, spec))
         except Exception:  # noqa: BLE001
-            pass
+            # Module-object factories are re-registered in every worker at import time;
+            # their omission is expected and silent. Warn only for the surprising cases.
+            if not inspect.ismodule(spec.factory):
+                # Pinpoint the source: the factory itself, or something in the
+                # wrapper chain / params / teams (so the message doesn't blame
+                # a factory that actually pickles fine).
+                try:
+                    pickle.dumps(spec.factory)
+                    culprit = (
+                        "non-picklable metadata (a wrapper / param / team — "
+                        "the factory itself pickles fine)"
+                    )
+                except Exception:  # noqa: BLE001
+                    culprit = (
+                        "a non-picklable factory " f"({type(spec.factory).__name__})"
+                    )
+                warnings.warn(
+                    f"Environment {name!r} has {culprit} and will not propagate "
+                    "to parallel workers (num_workers>1); it must be "
+                    "re-registered there. Use a module-level factory function "
+                    "or class (and picklable wrappers) instead of a "
+                    "lambda/closure so it can be pickled into the worker "
+                    "snapshot.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            continue
+        result.append((name, spec))
     return result
 
 
@@ -620,8 +678,45 @@ def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
             tags=set(spec.tags),
             api=spec.api,
             wrappers=spec.wrappers,
+            params=spec.params,
+            teams=spec.teams,
             overwrite=True,
         )
+
+
+# Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
+# of env names a snapshot carries, which is stable across pickled copies (each
+# task ships its own copy of the snapshot), so a worker replays a given snapshot
+# at most once even when it has no evaluator cache to gate on.
+_REPLAYED_SNAPSHOT_KEYS: set = set()
+
+
+def replay_registry_snapshot_once(
+    snapshot: Optional[List[Tuple[str, "EnvSpec"]]],
+) -> None:
+    """Replay ``snapshot`` at most once per worker process.
+
+    Worker payloads carry a :func:`get_registry_snapshot` result so SCOOP /
+    Dask workers (which have no per-worker ``initializer`` hook) can
+    re-register custom environments before building any env. This wrapper
+    makes that cheap to call on every task: the first call for a given set of
+    env names replays the snapshot; later calls are no-ops.
+
+    ``replay_registry_snapshot`` is itself idempotent (``overwrite=True``), so
+    the guard is a performance optimisation rather than a correctness
+    requirement. A ``None`` or empty snapshot is ignored.
+
+    Args:
+        snapshot: A :func:`get_registry_snapshot` result, or ``None`` when the
+            caller ran serially / did not populate one.
+    """
+    if not snapshot:
+        return
+    key = tuple(sorted(name for name, _ in snapshot))
+    if key in _REPLAYED_SNAPSHOT_KEYS:
+        return
+    replay_registry_snapshot(snapshot)
+    _REPLAYED_SNAPSHOT_KEYS.add(key)
 
 
 __all__ = [
@@ -638,4 +733,5 @@ __all__ = [
     "clear_registry",
     "get_registry_snapshot",
     "replay_registry_snapshot",
+    "replay_registry_snapshot_once",
 ]

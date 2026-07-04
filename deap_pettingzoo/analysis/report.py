@@ -11,12 +11,15 @@ can use :mod:`aggregate`, :mod:`compare`, and :mod:`plots` directly.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
 from deap_pettingzoo.analysis.aggregate import aggregate_summary
 from deap_pettingzoo.analysis.compare import pairwise_table
 from deap_pettingzoo.analysis.loaders import Experiment
+
+logger = logging.getLogger(__name__)
 
 
 def build_report(
@@ -58,14 +61,32 @@ def build_report(
     summary = experiment.summary_table()
     score_groups = experiment.final_scores(metric=metric)
     aggregate = aggregate_summary(score_groups)
-    pairwise = pairwise_table(experiment, metric=metric, test="mann_whitney")
+
+    # Provenance gate: cross-algorithm comparisons (pairwise significance,
+    # cross-task normalisation) are only valid when every compared group shares
+    # one score provenance. When held-out and self-reported metrics are mixed,
+    # suppress those sections rather than publish a wrong comparison.
+    provenances = experiment.score_provenances(metric=metric)
+    comparable = set().union(*provenances.values()) - {"none"} if provenances else set()
+    provenance_mixed = len(comparable) > 1
+    metric_provenance = (
+        "mixed: " + ", ".join(sorted(comparable))
+        if provenance_mixed
+        else (next(iter(comparable)) if comparable else "none")
+    )
+
+    pairwise = (
+        None
+        if provenance_mixed
+        else pairwise_table(experiment, metric=metric, test="mann_whitney")
+    )
 
     figures: list = []
     if include_figures and score_groups:
         figures.extend(_render_figures(experiment, score_groups, output_dir))
 
     multitask: Optional[dict] = None
-    if len(experiment.by_env()) >= 2:
+    if not provenance_mixed and len(experiment.by_env()) >= 2:
         multitask = _build_multitask_section(
             experiment,
             output_dir,
@@ -84,6 +105,8 @@ def build_report(
             figures=figures,
             metric=metric,
             multitask=multitask,
+            metric_provenance=metric_provenance,
+            provenance_mixed=provenance_mixed,
         )
     return _write_html(
         output_dir,
@@ -95,6 +118,8 @@ def build_report(
         figures=figures,
         metric=metric,
         multitask=multitask,
+        metric_provenance=metric_provenance,
+        provenance_mixed=provenance_mixed,
     )
 
 
@@ -126,7 +151,10 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
         for algo, runs in experiment.by_algorithm().items():
             try:
                 curves[algo] = learning_curve_with_ci(runs)
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as exc:
+                # Surface why a curve was skipped instead of silently
+                # dropping it (the figure used to vanish with no trace).
+                logger.warning("Skipping learning curve for %r: %s", algo, exc)
                 continue
         if curves:
             fig = plots.plot_learning_curves(
@@ -135,8 +163,13 @@ def _render_figures(experiment: Experiment, score_groups, output_dir: Path) -> l
             path = output_dir / "fig_learning_curves.png"
             fig.savefig(path, dpi=140)
             out.append(("Learning curves", path.name))
+        else:
+            logger.warning(
+                "No learning curves rendered: no run exposed a plottable "
+                "value column (best/mean/max) alongside env_steps."
+            )
     except Exception:  # pragma: no cover
-        pass
+        logger.warning("Learning-curve figure rendering failed", exc_info=True)
     return out
 
 
@@ -152,7 +185,9 @@ def _build_multitask_section(
     Returns ``None`` when fewer than two environments yield non-empty
     score columns. Always uses auto min-max normalisation.
     """
-    from deap_pettingzoo.analysis.multi_task import collect_score_matrices  # noqa: WPS433
+    from deap_pettingzoo.analysis.multi_task import (  # noqa: WPS433
+        collect_score_matrices,
+    )
     from deap_pettingzoo.analysis.normalize import (  # noqa: WPS433
         NormalizationSpec,
         normalize_score_matrices,
@@ -170,6 +205,7 @@ def _build_multitask_section(
         from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
             aggregate_metrics_forest,
         )
+
         forest = aggregate_metrics_forest(normed, reps=2000)
     except ImportError:
         forest = None  # rliable not installed → table omitted
@@ -178,6 +214,7 @@ def _build_multitask_section(
     if include_figures:
         try:
             from deap_pettingzoo.analysis import plots  # noqa: WPS433
+
             if forest is not None and len(forest) > 0:
                 fig = plots.plot_aggregate_metrics_forest(
                     forest, title="Aggregate metrics across tasks (95% CI)"
@@ -215,11 +252,24 @@ def _write_markdown(
     figures,
     metric: str,
     multitask: Optional[dict] = None,
+    metric_provenance: str = "none",
+    provenance_mixed: bool = False,
 ) -> Path:
     lines: list = [f"# {title}", ""]
     lines.append(f"- **Runs analysed:** {n_runs}")
     lines.append(f"- **Score metric:** `{metric}`")
+    lines.append(f"- **Score provenance:** {metric_provenance}")
     lines.append("")
+    if provenance_mixed:
+        lines.append(
+            "> ⚠️ **Mixed metric provenance — cross-algorithm comparison "
+            "suppressed.** The selected runs mix held-out evaluation rewards "
+            "with self-reported training metrics, which are not comparable. "
+            "Re-run the missing backends so every group carries a held-out "
+            "`eval_mean_reward` before reading pairwise significance or "
+            "cross-task aggregates."
+        )
+        lines.append("")
 
     lines.append("## Per-run summary")
     lines.append("")
@@ -233,7 +283,13 @@ def _write_markdown(
 
     lines.append("## Pairwise comparison (Mann-Whitney U + Cliff's delta)")
     lines.append("")
-    lines.append(_df_to_md(pairwise))
+    if provenance_mixed:
+        lines.append(
+            "_Suppressed — metric provenance is mixed across groups "
+            "(see warning above)._"
+        )
+    else:
+        lines.append(_df_to_md(pairwise))
     lines.append("")
 
     if multitask is not None:
@@ -282,12 +338,28 @@ def _write_html(
     figures,
     metric: str,
     multitask: Optional[dict] = None,
+    metric_provenance: str = "none",
+    provenance_mixed: bool = False,
 ) -> Path:
     summary_html = _df_to_html(summary)
     aggregate_html = _df_to_html(
         aggregate.reset_index() if len(aggregate) else aggregate
     )
-    pairwise_html = _df_to_html(pairwise)
+    if provenance_mixed:
+        pairwise_html = (
+            "<p><strong>⚠️ Suppressed</strong> — metric provenance is mixed "
+            "across groups; cross-algorithm comparison is not valid.</p>"
+        )
+        provenance_html = (
+            '<p style="color:#b00;"><strong>⚠️ Mixed metric provenance — '
+            "cross-algorithm comparison suppressed.</strong> Held-out eval "
+            "rewards are mixed with self-reported training metrics; re-run the "
+            "missing backends before reading significance or cross-task "
+            "aggregates.</p>"
+        )
+    else:
+        pairwise_html = _df_to_html(pairwise)
+        provenance_html = ""
     fig_html_parts: list = []
     for label, fname in figures:
         fig_html_parts.append(
@@ -363,7 +435,9 @@ figcaption {{ color: var(--muted); font-size: 0.9rem; margin-top: 0.3rem; }}
 </style></head><body>
 <h1>{title}</h1>
 <p><strong>Runs analysed:</strong> {n_runs} &middot;
-<strong>Score metric:</strong> <code>{metric}</code></p>
+<strong>Score metric:</strong> <code>{metric}</code> &middot;
+<strong>Provenance:</strong> <code>{metric_provenance}</code></p>
+{provenance_html}
 <h2>Per-run summary</h2>
 {summary_html}
 <h2>Aggregate (mean / median / IQM with 95% bootstrap CI)</h2>

@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional, Sequence
 
 from deap_pettingzoo.environments.registry import register_env
 
-
 _INSTALL_HINT = (
     "JaxMARL integration requires the 'jaxmarl' optional extra. "
     "Install with: pip install 'deap-pettingzoo[jaxmarl]' "
@@ -36,6 +35,28 @@ def _load_jaxmarl_make():
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise ImportError(_INSTALL_HINT) from exc
     return make
+
+
+class JaxmarlEnvFactory:
+    """Module-level, picklable factory for a JaxMARL env.
+
+    Captures the JaxMARL ``env_id`` and its constructor kwargs as plain
+    attributes (no closure), so an :class:`~deap_pettingzoo.environments.
+    registry.EnvSpec` built from it survives
+    :func:`~deap_pettingzoo.environments.registry.get_registry_snapshot`
+    and reaches ``num_workers>1`` workers. ``jaxmarl.make`` is (re)imported
+    lazily in :meth:`__call__` so the factory pickles even where the caller
+    resolved it once in the main process.
+    """
+
+    def __init__(self, env_id: str, jaxmarl_kwargs: Optional[dict] = None) -> None:
+        self.env_id = env_id
+        self.jaxmarl_kwargs = dict(jaxmarl_kwargs or {})
+
+    def __call__(self, **cfg: Any):
+        make = _load_jaxmarl_make()
+        merged = {**self.jaxmarl_kwargs, **cfg}
+        return make(self.env_id, **merged)
 
 
 def register_jaxmarl_env(
@@ -79,11 +100,9 @@ def register_jaxmarl_env(
         ...     default_episode_len=25,
         ... )
     """
-    make = _load_jaxmarl_make()
-
-    def _factory(**cfg):
-        merged = {**jaxmarl_kwargs, **cfg}
-        return make(env_id, **merged)
+    # Fail if the extra is missing; the factory re-imports lazily.
+    _load_jaxmarl_make()
+    _factory = JaxmarlEnvFactory(env_id, jaxmarl_kwargs)
 
     merged_tags = set(tags or ()) | {"jaxmarl", "jax", "parallel"}
     suffix = f"JaxMARL env '{env_id}' (numpy-boundary via JaxEnvToPettingZooAdapter)."
@@ -102,4 +121,4 @@ def register_jaxmarl_env(
     )
 
 
-__all__ = ["register_jaxmarl_env"]
+__all__ = ["register_jaxmarl_env", "JaxmarlEnvFactory"]

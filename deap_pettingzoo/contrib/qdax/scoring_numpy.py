@@ -1,10 +1,9 @@
-"""Numpy-boundary scoring function builder for QDax (Goal 2).
+"""Numpy-boundary scoring function builder for QDax.
 
 Lets QDax drive a **PettingZoo** env through the slow per-step
 numpy<->JAX boundary. Positioned as a validation / debugging tool: it
 trades the ~100x speed advantage of JAX-native rollouts for the
-ability to reuse any registered PettingZoo env (MPE2, aquarium,
-pursuit-evasion, OpenSpiel...).
+ability to reuse any registered PettingZoo env (MPE2, OpenSpiel...).
 
 Contract mirrors :func:`make_jax_scoring_function` so QDax trainers
 can dispatch between the two implementations on
@@ -36,13 +35,13 @@ import importlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence
 
-
 __all__ = ["make_numpy_scoring_function", "close_scoring_function"]
 
 
 # --------------------------------------------------------------------------
 # Worker-side helpers (must live at module top level to be picklable).
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class _RolloutSpec:
@@ -56,11 +55,14 @@ class _RolloutSpec:
     * ``layer_sizes`` + ``activation`` — worker rebuilds the Flax MLP
       module on first call.
     * ``descriptor_fn`` — must itself be a module-top-level callable
-      (pickleable). The factories in
-      :mod:`deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion`
-      return such callables (closures over numeric constants only).
-        * ``extract_state_fn`` — same pickle constraint; default is the
-            numpy extractor in this module.
+      (pickleable), i.e. a top-level class instance rather than a
+      lambda/closure, so it survives cross-process transport.
+        * ``state_extractor`` — same pickle constraint; default is the
+            numpy extractor in this module. Distinct from the
+            ``position_extractor`` contract in
+            :mod:`deap_pettingzoo.contrib.qdax.position_extractors` (used by
+            ``QDaxSideState``) — this one returns a ``(positions,
+            velocities)`` 2-tuple, not a single ``(N, 2)`` array.
         * ``worker_imports`` — optional module names imported in the worker
             before env construction so import-time ``register_env(...)`` side
             effects are replayed under ``spawn``.
@@ -74,8 +76,13 @@ class _RolloutSpec:
     descriptor_fn: Callable
     action_type: str
     eval_episodes: int = 1
-    extract_state_fn: Optional[Callable] = None
+    state_extractor: Optional[Callable] = None
     worker_imports: tuple[str, ...] = field(default_factory=tuple)
+    #: Per-sub-action choice counts for ``action_type == "multidiscrete"``.
+    nvec: Optional[tuple] = None
+    #: Registry snapshot replayed in the worker so SCOOP/Dask (and the
+    #: initializer-less process path here) can resolve runtime-registered envs.
+    registry_snapshot: Optional[list] = None
 
 
 # Module-global cache populated lazily on each worker. Same pattern
@@ -106,11 +113,11 @@ def _ensure_worker_context(spec: _RolloutSpec):
     The cache is keyed on stable structural fields that fully identify
     the rollout context: ``env_name``, ``env_config``, ``layer_sizes``,
     ``activation``, ``action_type``, and the *type* of the
-    ``descriptor_fn`` / ``extract_state_fn`` callables. We do not use
-    the object ``id()`` for callable fields because pickling/unpickling
+    ``descriptor_fn`` / ``state_extractor`` callables.
+    The object ``id()`` id not used for callable fields because pickling/unpickling
     across the process boundary produces a new object with a different
     ``id`` on every task — which would invalidate the cache every call.
-    Instead we refresh the callable handles in-place when the signature
+    Instead refresh the callable handles in-place when the signature
     matches, so the cached env + module are reused across tasks while
     the callable references are kept up-to-date.
     """
@@ -118,8 +125,8 @@ def _ensure_worker_context(spec: _RolloutSpec):
     _env_cfg = spec.env_config or {}
     _env_cfg_frozen = tuple(sorted(_env_cfg.items()))
     _extract_key = (
-        type(spec.extract_state_fn).__qualname__
-        if spec.extract_state_fn is not None
+        type(spec.state_extractor).__qualname__
+        if spec.state_extractor is not None
         else None
     )
     _worker_imports = tuple(str(name) for name in (spec.worker_imports or ()))
@@ -130,6 +137,7 @@ def _ensure_worker_context(spec: _RolloutSpec):
         tuple(spec.layer_sizes),
         spec.activation,
         spec.action_type,
+        spec.nvec,
         _extract_key,
         _worker_imports,
     )
@@ -137,17 +145,30 @@ def _ensure_worker_context(spec: _RolloutSpec):
         # Refresh callable handles so the cached ones match the
         # freshly-unpickled spec on each task.
         _NUMPY_WORKER_CACHE["descriptor_fn"] = spec.descriptor_fn
-        if spec.extract_state_fn is not None:
-            _NUMPY_WORKER_CACHE["extract"] = spec.extract_state_fn
+        if spec.state_extractor is not None:
+            _NUMPY_WORKER_CACHE["extract"] = spec.state_extractor
+            # `_extract_key` above is `type(...).__qualname__`, which is
+            # "function" for ANY plain function — it cannot tell two
+            # different module-level extractors apart. A persistent worker
+            # pool (dask/scoop) reused across scoring-function instances
+            # could therefore swap in a genuinely different extractor on a
+            # cache "hit"; re-validate it rather than trusting a stale
+            # `_checked_extractor=True` left over from the previous one.
+            _NUMPY_WORKER_CACHE["_checked_extractor"] = False
         return _NUMPY_WORKER_CACHE
 
     from deap_pettingzoo.contrib.qdax.policy import make_flax_mlp
     from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     _import_worker_modules(_worker_imports)
+    # Re-register runtime-registered custom envs (no initializer hook here).
+    replay_registry_snapshot_once(spec.registry_snapshot)
     module = make_flax_mlp(spec.layer_sizes, activation=spec.activation)
     env = PettingZooWrapper(spec.env_name, env_config=spec.env_config or {})
-    extract = spec.extract_state_fn or _extract_positions_velocities_np
+    extract = spec.state_extractor or _extract_positions_velocities_np
 
     _NUMPY_WORKER_CACHE.clear()
     _NUMPY_WORKER_CACHE.update(
@@ -155,9 +176,48 @@ def _ensure_worker_context(spec: _RolloutSpec):
         module=module,
         env=env,
         extract=extract,
+        _checked_extractor=False,
         descriptor_fn=spec.descriptor_fn,
     )
     return _NUMPY_WORKER_CACHE
+
+
+def _call_state_extractor(extract, obs, agents, ctx: dict):
+    """Call ``extract`` and validate its output shape on the first call.
+
+    A ``position_extractor`` (the :mod:`deap_pettingzoo.contrib.qdax.position_extractors`
+    contract) returns a single ``(N, 2)`` array, not a ``(positions, velocities)``
+    2-tuple. Passing one where a ``state_extractor`` is expected either
+    raises an opaque unpacking error or silently mis-splits rows into
+    "positions" and "velocities" — catch it immediately instead. Checked
+    once per worker context (not every call) to keep the hot rollout loop
+    cheap.
+    """
+    raw = extract(obs, agents)
+    if ctx.get("_checked_extractor", False):
+        return raw
+    if not (isinstance(raw, tuple) and len(raw) == 2):
+        raise ValueError(
+            "state_extractor must return a (positions, velocities) 2-tuple, "
+            f"got {type(raw).__name__}. This looks like a position_extractor "
+            "(a single (N, 2) array) — see "
+            "deap_pettingzoo.contrib.qdax.position_extractors, which is a "
+            "different contract used by QDaxSideState."
+        )
+    positions, velocities = raw
+    import numpy as np
+
+    num_agents = len(agents)
+    for name, arr in (("positions", positions), ("velocities", velocities)):
+        shape = np.asarray(arr).shape
+        if len(shape) != 2 or shape[0] != num_agents:
+            raise ValueError(
+                f"state_extractor must return (positions, velocities) each "
+                f"shaped (num_agents={num_agents}, D); got {name} with shape "
+                f"{shape}."
+            )
+    ctx["_checked_extractor"] = True
+    return raw
 
 
 def _pad_agent_state(positions, velocities, agent_count: int):
@@ -190,7 +250,10 @@ def _rollout_once(
     *,
     ctx: Optional[dict] = None,
 ):
-    """Run one rollout episode and return ``(fitness, descriptor)``.
+    """Run one rollout episode and return ``(fitness, descriptor, steps)``.
+
+    ``steps`` is the real number of env ticks this episode consumed (it
+    truncates below ``episode_length`` whenever the env terminates early).
 
     ``ctx`` is the lazily-built worker context returned by
     :func:`_ensure_worker_context`; passing it lets a caller average multiple
@@ -211,7 +274,7 @@ def _rollout_once(
     params = flat_to_pytree(flat_params, spec.layer_sizes)
     obs = env.reset(seed=int(seed))
     agents = list(env.agents)
-    pos0, vel0 = extract(obs, agents)
+    pos0, vel0 = _call_state_extractor(extract, obs, agents, ctx)
     pos_hist: List[np.ndarray] = [pos0]
     vel_hist: List[np.ndarray] = [vel0]
     total_reward = 0.0
@@ -220,20 +283,37 @@ def _rollout_once(
     episode_length = int(spec.episode_length)
     action_type = spec.action_type
 
+    # Precompute static (start, stop) logit chunk bounds for MultiDiscrete.
+    md_bounds = None
+    if action_type == "multidiscrete":
+        if not spec.nvec:
+            raise ValueError("multidiscrete action_type requires spec.nvec to be set.")
+        md_bounds = []
+        _off = 0
+        for _n in (int(x) for x in spec.nvec):
+            md_bounds.append((_off, _off + _n))
+            _off += _n
+
     while not done and steps < episode_length and env.agents:
         actions = {}
         for a in env.agents:
-            raw = np.asarray(
-                module.apply({"params": params}, jnp.asarray(obs[a]))
-            )
+            raw = np.asarray(module.apply({"params": params}, jnp.asarray(obs[a])))
             if action_type == "discrete":
                 actions[a] = int(np.argmax(raw))
+            elif action_type == "multidiscrete":
+                actions[a] = np.array(
+                    [int(np.argmax(raw[lo:hi])) for lo, hi in md_bounds],
+                    dtype=np.int64,
+                )
             else:
                 actions[a] = np.tanh(raw)
         obs, rewards, terms, truncs, _infos = env.step(actions)
         total_reward += float(sum(rewards.values()))
         if env.agents:
-            p, v = _pad_agent_state(*extract(obs, list(env.agents)), len(agents))
+            p, v = _pad_agent_state(
+                *_call_state_extractor(extract, obs, list(env.agents), ctx),
+                len(agents),
+            )
             pos_hist.append(p)
             vel_hist.append(v)
         done = all(terms.values()) or all(truncs.values())
@@ -248,7 +328,7 @@ def _rollout_once(
         "velocities": jnp.asarray(np.stack(vel_hist[: episode_length + 1])),
     }
     descriptor = np.asarray(descriptor_fn(trajectory))
-    return float(total_reward), descriptor
+    return float(total_reward), descriptor, int(steps)
 
 
 def _numpy_rollout(args):
@@ -260,8 +340,9 @@ def _numpy_rollout(args):
             weight vector; ``seed`` is an int.
 
     Returns:
-        ``(fitness: float, descriptor: np.ndarray)`` averaged over
-        ``spec.eval_episodes`` rollouts.
+        ``(fitness: float, descriptor: np.ndarray, steps: int)`` —
+        fitness/descriptor averaged over ``spec.eval_episodes`` rollouts and
+        the total real env ticks summed across those rollouts.
     """
     import numpy as np
 
@@ -270,10 +351,11 @@ def _numpy_rollout(args):
     eval_episodes = max(1, int(spec.eval_episodes))
     fitnesses = []
     descriptors = []
+    total_steps = 0
     base_seed = int(seed)
 
     for episode_idx in range(eval_episodes):
-        fitness, descriptor = _rollout_once(
+        fitness, descriptor, steps = _rollout_once(
             spec,
             flat_params,
             base_seed + episode_idx,
@@ -281,16 +363,19 @@ def _numpy_rollout(args):
         )
         fitnesses.append(float(fitness))
         descriptors.append(np.asarray(descriptor, dtype=np.float32))
+        total_steps += int(steps)
 
     return (
         float(np.mean(np.asarray(fitnesses, dtype=np.float64))),
         np.mean(np.stack(descriptors, axis=0), axis=0),
+        total_steps,
     )
 
 
 # --------------------------------------------------------------------------
 # Public builder
 # --------------------------------------------------------------------------
+
 
 def make_numpy_scoring_function(
     env_name: str,
@@ -300,7 +385,8 @@ def make_numpy_scoring_function(
     *,
     env_config: Optional[dict] = None,
     action_type: str = "discrete",
-    extract_state_fn: Optional[Callable] = None,
+    nvec: Optional[Sequence[int]] = None,
+    state_extractor: Optional[Callable] = None,
     activation: str = "tanh",
     num_workers: int = 1,
     parallel_backend: str = "process",
@@ -322,13 +408,20 @@ def make_numpy_scoring_function(
             calling. Must be a **top-level** callable (or a closure
             over picklable state) when ``num_workers > 1``.
         env_config: Optional env kwargs.
-        action_type: ``"discrete"`` (argmax) or ``"continuous"`` (tanh).
-        extract_state_fn: Optional observation → (positions, velocities)
-            extractor. Must be picklable when ``num_workers > 1``.
+        action_type: ``"discrete"`` (argmax), ``"multidiscrete"`` (per
+            sub-action argmax over ``sum(nvec)`` logits), or
+            ``"continuous"`` (tanh).
+        nvec: Per-sub-action choice counts; required when
+            ``action_type == "multidiscrete"``.
+        state_extractor: Optional observation -> (positions, velocities)
+            extractor. Must be picklable when ``num_workers > 1``. Distinct
+            from the ``position_extractor`` contract in
+            :mod:`deap_pettingzoo.contrib.qdax.position_extractors` (used by
+            ``QDaxSideState``).
         eval_episodes: Number of rollout episodes to average per genotype.
             Descriptors are averaged elementwise across those rollouts.
         num_workers: Number of worker processes for per-individual
-            rollouts. ``0`` / ``1`` → serial in-process. ``>1`` spawns
+            rollouts. ``0`` / ``1`` -> serial in-process. ``>1`` spawns
             a persistent :class:`ProcessPoolExecutor` on first call
             and reuses it across QD iterations. Call
             :func:`close_scoring_function` on the returned callable to
@@ -358,6 +451,7 @@ def make_numpy_scoring_function(
     import numpy as np
 
     from deap_pettingzoo.contrib.qdax.policy import pytree_to_flat
+    from deap_pettingzoo.environments.registry import get_registry_snapshot
     from deap_pettingzoo.utils.parallel import (
         make_executor,
         resolve_num_workers,
@@ -373,8 +467,11 @@ def make_numpy_scoring_function(
         eval_episodes=max(1, int(eval_episodes)),
         descriptor_fn=descriptor_fn,
         action_type=action_type,
-        extract_state_fn=extract_state_fn,
+        nvec=tuple(int(x) for x in nvec) if nvec is not None else None,
+        state_extractor=state_extractor,
         worker_imports=tuple(str(name) for name in worker_imports),
+        # Propagate runtime-registered custom envs to workers (no init hook).
+        registry_snapshot=get_registry_snapshot(),
     )
 
     # Local (in-process) fallback for the serial path — avoids the
@@ -389,9 +486,7 @@ def make_numpy_scoring_function(
     def _ensure_executor():
         if state["executor"] is not None:
             return state["executor"]
-        ctx = make_executor(
-            effective_workers, backend=parallel_backend
-        )
+        ctx = make_executor(effective_workers, backend=parallel_backend)
         state["ctx"] = ctx
         state["executor"] = ctx.__enter__()
         # Mirror the live ref onto the public attribute so callers
@@ -402,22 +497,15 @@ def make_numpy_scoring_function(
     def scoring_function(genotypes, key):
         leaves = jax.tree_util.tree_leaves(genotypes)
         batch_size = int(leaves[0].shape[0])
-        seeds = np.asarray(
-            jax.random.randint(key, (batch_size,), 0, 2**30)
-        )
+        seeds = np.asarray(jax.random.randint(key, (batch_size,), 0, 2**30))
         flats = []
         for i in range(batch_size):
-            single_tree = jax.tree_util.tree_map(
-                lambda x, i=i: x[i], genotypes
-            )
+            single_tree = jax.tree_util.tree_map(lambda x, i=i: x[i], genotypes)
             flats.append(pytree_to_flat(single_tree, layer_sizes))
 
         if effective_workers <= 1:
             # Serial: avoid executor overhead entirely.
-            results = [
-                _local_rollout(flat, int(s))
-                for flat, s in zip(flats, seeds)
-            ]
+            results = [_local_rollout(flat, int(s)) for flat, s in zip(flats, seeds)]
         else:
             executor = _ensure_executor()
             payloads = [
@@ -430,6 +518,11 @@ def make_numpy_scoring_function(
         descriptors = [r[1] for r in results]
         scoring_function._last_batch_fitness = np.asarray(  # type: ignore[attr-defined]
             fitnesses, dtype=np.float64
+        )
+        # Accumulate real env ticks across iterations. The trainer reads this
+        # back as the run's consumed-steps total on the numpy/PettingZoo path.
+        scoring_function._env_steps_consumed += int(  # type: ignore[attr-defined]
+            sum(int(r[2]) for r in results)
         )
         return (
             jnp.asarray(fitnesses, dtype=jnp.float32),
@@ -451,6 +544,10 @@ def make_numpy_scoring_function(
     scoring_function.close = _close  # type: ignore[attr-defined]
     scoring_function._executor = None  # type: ignore[attr-defined]
     scoring_function._last_batch_fitness = None  # type: ignore[attr-defined]
+    # Cumulative real env ticks across all scoring calls (numpy path only).
+    # The JAX-native scoring function does not define this attribute, so the
+    # trainer reports env_steps_consumed=None there (a documented structural limit).
+    scoring_function._env_steps_consumed = 0  # type: ignore[attr-defined]
     scoring_function._num_workers = effective_workers  # type: ignore[attr-defined]
     scoring_function._num_eval_episodes = rollout_spec.eval_episodes  # type: ignore[attr-defined]
     scoring_function._parallel_backend = parallel_backend  # type: ignore[attr-defined]

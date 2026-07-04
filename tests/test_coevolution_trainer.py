@@ -38,8 +38,48 @@ def _base_tcfg(cfg: CoEvolutionConfig, budget: int = 40) -> TrainingConfig:
         env_name="simple_tag_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
-        algorithm_params={"coevolution": cfg},
+        coevolution_config=cfg,
     )
+
+
+class TestCoevolutionConfigTypedEntryPoint:
+    """Coevolution is configured via the typed
+    ``TrainingConfig.coevolution_config`` entry point, not the untyped
+    ``algorithm_params['coevolution']``."""
+
+    def test_bad_type_fails_at_construction(self):
+        with pytest.raises(TypeError, match="coevolution_config"):
+            TrainingConfig(
+                env_name="simple_tag_v3",
+                budget_mode=BudgetMode.EVAL_EPISODES,
+                budget_value=40,
+                coevolution_config={"not": "a CoEvolutionConfig"},
+            )
+
+    def test_none_coevolution_config_rejected_by_trainer(self):
+        # A TrainingConfig with no coevolution_config at all is a valid
+        # construction (e.g. for a non-coevolution trainer sharing the same
+        # dataclass) but CoEvolutionTrainer.train() must reject it clearly.
+        config = TrainingConfig(
+            env_name="simple_tag_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=40,
+        )
+        with pytest.raises(ValueError, match="coevolution_config"):
+            CoEvolutionTrainer().train(config)
+
+    def test_valid_config_is_accepted_and_used(self):
+        cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side("pred", ("adversary",), "ea", _tiny_ea_cfg(0)),
+                Side("prey", ("agent",), "ea", _tiny_ea_cfg(1)),
+            ],
+        )
+        config = _base_tcfg(cfg, budget=40)
+        assert config.coevolution_config is cfg
+        result = CoEvolutionTrainer().train(config)
+        assert result.algorithm == "coevolution"
 
 
 def test_translate_budget_counts_qdax_batch_size() -> None:
@@ -61,7 +101,7 @@ def test_translate_budget_counts_qdax_batch_size() -> None:
         env_name="simple_tag_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=720,
-        algorithm_params={"coevolution": cfg},
+        coevolution_config=cfg,
     )
 
     assert CoEvolutionTrainer()._translate_budget(train_cfg, cfg) == 3
@@ -94,15 +134,18 @@ class TestCompetitive2Pop:
         # Optimisation actually happened: at least ONE side's best-ever
         # fitness improved end-vs-start. We don't insist both sides
         # improve simultaneously (competitive co-evolution is zero-sum-ish on tiny budgets)
+        improved = []
         for name in ("pursuers", "evaders"):
             hist = result.metrics["per_side_history"][name]
             if len(hist) < 2:
                 continue  # single-gen run, nothing to compare
-            best_ever = max(row["max"] for row in hist)
-            assert best_ever >= hist[0]["max"], (
-                f"{name}: best-ever fitness regressed: "
-                f"gen0_max={hist[0]['max']}, best_ever={best_ever}"
-            )
+            # Exclude gen 0 from the max.
+            best_ever = max(row["max"] for row in hist[1:])
+            improved.append(best_ever >= hist[0]["max"])
+        assert not improved or any(improved), (
+            "neither side's best-ever fitness improved end-vs-start: "
+            f"{result.metrics['per_side_history']}"
+        )
         # Reporting policy is executable.
         env = PettingZooWrapper("simple_tag_v3")
         obs = env.reset(seed=0)

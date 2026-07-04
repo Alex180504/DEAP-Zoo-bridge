@@ -22,14 +22,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import neat  # guarded by _require_neat
 import numpy as np
 
-import neat  # guarded by _require_neat
-
 from deap_pettingzoo.baselines.base import PolicyProtocol
-from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
-from deap_pettingzoo.policies.action_heads import required_output_size
-
 from deap_pettingzoo.baselines.coevolution.pools import (
     OpponentPool,
     OpponentSnapshot,
@@ -40,6 +36,8 @@ from deap_pettingzoo.baselines.coevolution.sides import (
     SideState,
     _resolve_side_action_space,
 )
+from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
+from deap_pettingzoo.policies.action_heads import required_output_size
 
 from .config import build_neat_config
 from .policy import NeatPolicy
@@ -96,13 +94,10 @@ class NeatSideState(SideState):
         elif self.seed is not None:
             self._rng = np.random.default_rng(int(self.seed))
 
-        self._action_space = _resolve_side_action_space(
-            env, self.side.role_prefixes
-        )
+        self._action_space = _resolve_side_action_space(env, self.side.role_prefixes)
 
         agents = [
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         ]
         obs_shape = env.observation_space(agents[0]).shape
         input_size = int(obs_shape[0]) if obs_shape else 1
@@ -153,14 +148,12 @@ class NeatSideState(SideState):
         evaluator = evaluator_factory(self)
         env: PettingZooWrapper = getattr(evaluator, "_env", self._env)
 
-        def _fitness_func(
-            genomes_and_ids: list, neat_cfg: neat.Config
-        ) -> None:
+        self._gen_env_steps = 0
+
+        def _fitness_func(genomes_and_ids: list, neat_cfg: neat.Config) -> None:
             gen_fitnesses: list[float] = []
             for _genome_id, genome in genomes_and_ids:
-                policy = NeatPolicy(
-                    genome, neat_cfg, action_space=self._action_space
-                )
+                policy = NeatPolicy(genome, neat_cfg, action_space=self._action_space)
                 rewards: list[float] = []
                 for _ in range(self.eval_eps):
                     observations = env.reset()
@@ -170,15 +163,14 @@ class NeatSideState(SideState):
                     while not done and _steps < 500:
                         actions = {}
                         for agent in observations:
-                            actions[agent] = policy.get_action(
-                                observations[agent]
-                            )
+                            actions[agent] = policy.get_action(observations[agent])
                         observations, step_rewards, dones, truncateds, _infos = (
                             env.step(actions)
                         )
                         ep_rew += float(sum(step_rewards.values()))
                         done = all(dones.values()) or all(truncateds.values())
                         _steps += 1
+                    self._gen_env_steps += _steps
                     rewards.append(ep_rew)
                 genome.fitness = float(np.mean(rewards))
                 gen_fitnesses.append(genome.fitness)
@@ -187,9 +179,7 @@ class NeatSideState(SideState):
         old_random_state = _save_random_state()
         try:
             for _ in range(self.n_gens_per_step):
-                self._population_obj.run(
-                    _fitness_func, n=1
-                )
+                self._population_obj.run(_fitness_func, n=1)
                 self._n_generations_run += 1
         except neat.CompleteExtinctionException:
             pass  # Population will handle extinction per config
@@ -202,8 +192,7 @@ class NeatSideState(SideState):
 
         # Build stats
         fitnesses = [
-            g.fitness for g in self._genomes_by_id.values()
-            if g.fitness is not None
+            g.fitness for g in self._genomes_by_id.values() if g.fitness is not None
         ]
         if not fitnesses:
             fitnesses = [0.0]
@@ -220,6 +209,7 @@ class NeatSideState(SideState):
             min=float(np.min(fitnesses)),
             max=float(np.max(fitnesses)),
             best_fitness=best_fit,
+            env_steps=int(self._gen_env_steps),
         )
 
     def current_pool(self) -> OpponentPool:
@@ -231,8 +221,7 @@ class NeatSideState(SideState):
         """
         if self._genomes_by_id is None or self._neat_config is None:
             raise RuntimeError(
-                "NeatSideState: initialise() must be called before "
-                "current_pool()."
+                "NeatSideState: initialise() must be called before " "current_pool()."
             )
 
         def _factory(genome: neat.DefaultGenome) -> PolicyProtocol:
@@ -251,8 +240,7 @@ class NeatSideState(SideState):
     def best_policy(self, env: PettingZooWrapper) -> PolicyProtocol:
         if self._best_genome is None or self._neat_config is None:
             raise RuntimeError(
-                "NeatSideState: no best genome available. "
-                "Call initialise() first."
+                "NeatSideState: no best genome available. " "Call initialise() first."
             )
         return NeatPolicy(
             self._best_genome,
@@ -263,9 +251,7 @@ class NeatSideState(SideState):
     def best_snapshot(self) -> Any:
         """Return a picklable representation of the best genome."""
         if self._best_genome is None:
-            raise RuntimeError(
-                "NeatSideState: no best genome available."
-            )
+            raise RuntimeError("NeatSideState: no best genome available.")
         return self._best_genome
 
     # ------------------------------------------------------------------
@@ -292,6 +278,7 @@ class NeatSideState(SideState):
 # ---------------------------------------------------------------------------
 # Internal pool implementation
 # ---------------------------------------------------------------------------
+
 
 class _NeatPopulationPool(OpponentPool):
     """Population-pool adapter for NEAT genomes.
@@ -329,9 +316,7 @@ class _NeatPopulationPool(OpponentPool):
         self, rng: np.random.Generator, k: int
     ) -> List[OpponentSnapshot]:
         if k < 1:
-            raise ValueError(
-                f"snapshot_opponents: k must be >= 1, got {k}"
-            )
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}")
         snapshots: List[OpponentSnapshot] = []
         for _ in range(k):
             idx = rng.integers(0, len(self._genomes))

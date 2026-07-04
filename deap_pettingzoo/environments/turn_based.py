@@ -31,7 +31,6 @@ import numpy as np
 from gymnasium import spaces
 from pettingzoo.utils.env import AECEnv, ParallelEnv
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared by both adapters
 # ---------------------------------------------------------------------------
@@ -49,7 +48,9 @@ def _unwrap_obs_space(raw_space):
     return raw_space
 
 
-def _split_observation(raw_obs, action_space) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+def _split_observation(
+    raw_obs, action_space
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Split a possibly-masked raw observation into ``(obs_array, mask)``.
 
     Args:
@@ -194,12 +195,9 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
             if agent in post_obs_dict:
                 obs_dict[agent] = post_obs_dict[agent]
                 infos[agent] = post_infos.get(agent, {})
-            else:
-                # Keep agents that just terminated/truncated in the return
-                # payload one last time even if the AEC env has already
-                # dropped them from ``.agents``.
-                obs_dict[agent] = np.asarray([])
-                infos[agent] = {}
+            # Just-terminated agents are absent from obs_dict/infos so policies
+            # are never handed an empty or stale observation.  Rewards and
+            # terminations still carry their bookkeeping values above.
         return obs_dict, rewards, terminations, truncations, infos
 
     def _snapshot(self):
@@ -287,6 +285,24 @@ class SequentialTurnAdapter(_TurnBasedAdapterBase):
         action = self._coerce_action(action)
         self.aec_env.step(action)
 
+        # Drain any terminated/truncated agents that the AEC env leaves in
+        # ``agents`` (mirroring PettingZoo's ``aec_to_parallel`` behaviour).
+        # Without this loop a terminated agent could be returned as the next
+        # actor, causing callers to request an action for a dead agent.
+        while True:
+            remaining = list(self.aec_env.agents)
+            if not remaining:
+                break
+            candidate = self.aec_env.agent_selection
+            if candidate is None:
+                break
+            if self.aec_env.terminations.get(
+                candidate, False
+            ) or self.aec_env.truncations.get(candidate, False):
+                self.aec_env.step(None)
+            else:
+                break
+
         # Episode ended?
         remaining = list(self.aec_env.agents)
         if not remaining:
@@ -313,8 +329,12 @@ class SequentialTurnAdapter(_TurnBasedAdapterBase):
         if mask is not None:
             info["action_mask"] = mask
         rewards = {current_pre: float(self.aec_env.rewards.get(current_pre, 0.0))}
-        terminations = {current_pre: bool(self.aec_env.terminations.get(current_pre, False))}
-        truncations = {current_pre: bool(self.aec_env.truncations.get(current_pre, False))}
+        terminations = {
+            current_pre: bool(self.aec_env.terminations.get(current_pre, False))
+        }
+        truncations = {
+            current_pre: bool(self.aec_env.truncations.get(current_pre, False))
+        }
         # Also surface next_agent's bookkeeping so the returned dicts align
         # with the obs dict.
         rewards.setdefault(next_agent, 0.0)

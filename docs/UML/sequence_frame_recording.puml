@@ -1,99 +1,81 @@
 @startuml sequence_frame_recording
-title Frame Recording — Trainer → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
+title Frame Recording — Trainer → RecordingController → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
 
 actor "Researcher" as R
-participant "EATrainer / CMAESTrainer /\nCoEvolutionTrainer / AgileRLTrainer /\nNEATTrainer / HyperNEATTrainer /\nESHyperNEATTrainer" as T
+participant "EATrainer / CMAESTrainer / PSOTrainer /\nCoEvolutionTrainer / AgileRLTrainer /\nNEAT family / QDax" as T
 participant "ExperimentLogger" as EL
+participant "RecordingController" as RC
+participant "UnifiedEvaluator" as UE
 participant "FrameRecorder" as FR
-participant "UnifiedEvaluator\n(or _record_coevolution_rollout)" as UE
 participant "PettingZooWrapper\n(render_mode='rgb_array')" as PZ
 participant "imageio" as IO
 participant "Filesystem\n<run_dir>/frames/" as FS
 
-R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, every_n_generations=None, fps=20,\n  fmt='mp4', max_frames_per_episode=None, max_dim=None, episode_prefix='')
+R -> T: train(config) where\nconfig.recording = RecordingConfig(\n  enabled=True, mode=RecordingMode.COUNT,\n  max_recordings=10, fps=20, fmt='mp4', ...)
 
 == Recording setup (once per train()) ==
-T -> EL: get_frame_recorder(\n  fps=cfg.fps, fmt=cfg.fmt,\n  max_frames_per_episode=cfg.max_frames_per_episode,\n  max_dim=cfg.max_dim,\n  episode_prefix=cfg.episode_prefix or 'train_')
-EL -> FR: FrameRecorder(run_dir/'frames', fps,\n  fmt, max_frames_per_episode,\n  max_dim, episode_prefix='train_')
-FR --> EL: recorder
-EL --> T: recorder
-
-note over T
-  Cadence resolved by
-  ``BaselineTrainer._resolve_recording_every_n``:
-   • EA / CMA / CoEvo / NEAT  default = 1
-   • AgileRL                 default = 10
-  User-supplied value wins.
+T -> RC: RecordingController(config, logger, max_steps, seed)
+RC -> EL: get_frame_recorder(... episode_prefix or 'train_')
+EL -> FR: FrameRecorder(run_dir/'frames', ...)
+FR --> RC: recorder (enabled?)
+RC -> UE: UnifiedEvaluator(max_steps, frame_recorder=recorder)
+note over RC
+  Resolves the cadence schedule from ``RecordingConfig.mode``:
+   • COUNT    → max_recordings evenly-spread fraction checkpoints in [0,1]
+   • EVERY    → record on every observe()
+   • INTERVAL → checkpoints at every_n_steps env-step multiples
+   • FINAL    → no mid-run checkpoints
+  Disabled controller (recording off / NoOpLogger / imageio missing)
+  makes observe()/finalize() cheap no-ops.
 end note
 
-== Champion rollout (every N generations) ==
-loop generation g in 1..G  where g % every_n == 0
-    T -> UE: evaluate(policy=champion,\n  env_name, num_episodes=1,\n  frame_recorder=recorder)
-    UE -> PZ: reset()
-    UE -> FR: start_episode()
-    activate FR
-    loop step
-        UE -> PZ: render() → np.ndarray (H,W,3) uint8
-        PZ --> UE: frame
-        UE -> FR: add_frame(frame)
-        UE -> PZ: step(actions)
+== Per-iteration hook (wherever the trainer reports progress) ==
+loop each generation / iteration
+    T -> T: _on_progress(callback, ProgressEvent(current, total, env_steps, ...), champion)
+    T -> RC: observe(event, champion)
+    alt event crosses the next checkpoint (per mode)
+        RC -> RC: champion()  (lazy — only when due)
+        RC -> UE: evaluate(policy | policy_map,\n  iteration=event.current, env_steps=event.env_steps)
+        UE -> PZ: reset()
+        UE -> FR: start_episode(idx, iteration, env_steps)
+        activate FR
+        loop step
+            UE -> PZ: render() → np.ndarray (H,W,3) uint8
+            UE -> FR: add_frame(frame)
+            UE -> PZ: step(actions)
+        end
+        UE -> FR: end_episode()
+        FR -> IO: imwrite(frames/train_episode_{idx:04d}.mp4, frames, fps)
+        IO -> FS: write artefact
+        FR -> FS: append entry to frames/recordings.json (file, iteration, env_steps)
+        deactivate FR
+    else not due
+        RC --> T: (skip — champion() not called)
     end
-    UE -> FR: end_episode()
-    FR -> IO: imwrite(frames/train_episode_{g:04d}.mp4, frames, fps)
-    IO -> FS: write artefact
-    deactivate FR
-    UE --> T: EvaluationResult (discarded)
 end
 
-== NEAT-family variant (_RecordingReporter) ==
+== End of run ==
+T -> RC: finalize(champion, iteration, env_steps)
+note right of RC
+  Always emits one final rollout unless the final checkpoint
+  was already captured (deduped by (iteration, env_steps)).
+  Covers QDax and the DEAP-internal EA μ±λ strategies whose
+  loops can't be hooked mid-run, and guarantees at least one
+  artefact on tight budgets.
+end note
+
+== Variants ==
 note right of T
-  NEAT / HyperNEAT / ES-HyperNEAT record
-  through a custom ``neat.reporting.BaseReporter``:
-   • ``_RecordingReporter`` is added to the population
-     before ``pop.run()``.
-   • On ``post_evaluate`` it calls the same
-     ``UnifiedEvaluator.evaluate`` champion-rollout
-     codepath as EA/CMA-ES.
-   • Generation 0 is always skipped (no prior eval).
+  • NEAT / HyperNEAT / ES-HyperNEAT: a ``neat.reporting.BaseReporter``
+    (``_RecordingReporter``) forwards each generation's champion to
+    ``RecordingController.observe``.
+  • Co-evolution: the champion provider returns a per-agent
+    ``policy_map`` (each side's best policy by role prefix); the
+    evaluator dispatches per agent rather than broadcasting one policy.
+  • AgileRL: the champion is the live ``AgileRLPolicyWrapper`` (built once,
+    reused — weight updates are visible); cadence runs on the env-step axis.
+  • QDax: records only via ``finalize`` (JAX-vectorised scoring, no live env).
+  The controller reuses the same ``ExperimentLogger`` that writes
+  ``metrics.csv`` / ``summary.json`` so ``frames/`` shares one ``run_dir``.
 end note
-
-== Coevolution variant (heterogeneous policies) ==
-note right of T
-  CoEvolutionTrainer uses a custom
-  ``_record_coevolution_rollout`` helper instead of
-  ``UnifiedEvaluator.evaluate`` because evaluator broadcasts
-  one policy to all agents but per-side obs sizes differ.
-end note
-
-== AgileRL variant (mid-training + final rollout) ==
-note right of T
-  AgileRLTrainer (MADDPG / MATD3 / IPPO /
-  GroupedIPPO) records:
-   • Mid-training champion rollouts at a configurable
-     env-step cadence:
-       - ``RecordingConfig.every_n_steps`` (explicit env steps)
-         takes precedence;
-       - else ``every_n_generations * params['learn_step']``
-         is used as the env-step cadence;
-       - both unset → no mid-training rollouts.
-   • Exactly **one** end-of-training rollout, always emitted
-     when ``recording.enabled`` is set, regardless of cadence.
-  The same ``AgileRLPolicyWrapper`` is built **before**
-  training and reused throughout — it holds a reference to
-  the live agent so weight updates are visible at each
-  recording call without rebuilding the wrapper.
-  The recorder reuses the **same** ``ExperimentLogger``
-  instance that writes ``metrics.csv`` / ``summary.json`` so
-  ``frames/`` and the metric artefacts share a single
-  ``run_dir``.
-end note
-
-== Cleanup ==
-T -> EL: close()
-note right of EL
-  FrameRecorder has **no** close():
-  artefacts are finalised inside
-  each end_episode() call.
-end note
-
 @enduml

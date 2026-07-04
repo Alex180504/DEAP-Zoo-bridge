@@ -56,7 +56,7 @@ def test_coevolution_records_per_generation(tmp_path: Path):
         env_name="simple_tag_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=20,  # ~3 generations with population_size=4 + k=1
-        algorithm_params={"coevolution": cfg, "max_steps_per_episode": 25},
+        coevolution_config=cfg, algorithm_params={"max_steps_per_episode": 25},
         output_dir=tmp_path,
         recording=RecordingConfig(enabled=True, fps=10, max_frames_per_episode=25),
     )
@@ -72,19 +72,8 @@ def test_coevolution_recording_disabled_writes_nothing(tmp_path: Path):
         env_name="simple_tag_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=10,
-        algorithm_params={"coevolution": cfg, "max_steps_per_episode": 25},
+        coevolution_config=cfg, algorithm_params={"max_steps_per_episode": 25},
         output_dir=tmp_path,
     )
     CoEvolutionTrainer().train(config)
     assert _count_frames(tmp_path) == 0
-
-
-def test_coevolution_default_cadence_is_one():
-    trainer = CoEvolutionTrainer()
-    cfg = TrainingConfig(
-        env_name="simple_tag_v3",
-        budget_mode=BudgetMode.ENV_STEPS,
-        budget_value=1000,
-        recording=RecordingConfig(enabled=True),
-    )
-    assert trainer._resolve_recording_every_n(cfg) == 1

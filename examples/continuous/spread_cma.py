@@ -33,7 +33,7 @@ def main() -> None:
         env_name=ENV_NAME,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=40,  # ~5 generations at pop=8
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config=ENV_CONFIG,
         continuous=True,
         output_dir=Path("results/continuous_spread_cma"),

@@ -146,7 +146,9 @@ def test_qdax_kind_raises_unavailable_on_load(tmp_path: Path):
     with _make_logger(tmp_path, algorithm="map_elites") as log:
         register_existing_artifact(log, kind=KIND_QDAX_REPERTOIRE, path=fake)
 
-    rd = next(iter(tmp_path.iterdir()))
+    # tmp_path also holds the fake repertoire.pkl, so pick the run *directory*
+    # explicitly rather than relying on iterdir() ordering (differs by OS).
+    rd = next(p for p in tmp_path.iterdir() if p.is_dir())
     rec = load_run(rd)
     with pytest.raises(PolicyReloadUnavailable):
         load_policy(rec)

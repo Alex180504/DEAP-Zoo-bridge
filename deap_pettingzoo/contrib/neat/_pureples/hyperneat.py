@@ -72,7 +72,11 @@ def create_phenotype_network(
         idx = 0
         for layer in hidden_coordinates:
             im = find_neurons(
-                cppn, oc, layer, hidden_nodes[idx], False,
+                cppn,
+                oc,
+                layer,
+                hidden_nodes[idx],
+                False,
                 weight_threshold=weight_threshold,
             )
             idx += len(layer)
@@ -91,7 +95,11 @@ def create_phenotype_network(
         for i in range(current_layer, len(hidden_coordinates)):
             for hc in layer:
                 im = find_neurons(
-                    cppn, hc, hidden_coordinates[i], hidden_nodes[idx], False,
+                    cppn,
+                    hc,
+                    hidden_coordinates[i],
+                    hidden_nodes[idx],
+                    False,
                     weight_threshold=weight_threshold,
                 )
                 if im:
@@ -107,7 +115,11 @@ def create_phenotype_network(
     for layer in hidden_coordinates:
         for hc in layer:
             im = find_neurons(
-                cppn, hc, input_coordinates, input_nodes[0], False,
+                cppn,
+                hc,
+                input_coordinates,
+                input_nodes[0],
+                False,
                 weight_threshold=weight_threshold,
             )
             if im:

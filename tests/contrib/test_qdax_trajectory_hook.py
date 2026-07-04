@@ -8,6 +8,7 @@ those optional deps).
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
@@ -114,7 +115,9 @@ def test_obs_indices_extractor() -> None:
 
 
 def test_aquarium_extractor_reads_entity_positions() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     extractor = make_aquarium_extractor(arena_width=2000.0, arena_height=3000.0)
@@ -130,7 +133,9 @@ def test_aquarium_extractor_reads_entity_positions() -> None:
 
 
 def test_aquarium_extractor_reads_vector_positions() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithVectorEntities()
     extractor = make_aquarium_extractor(arena_width=2000.0, arena_height=3000.0)
@@ -142,7 +147,9 @@ def test_aquarium_extractor_reads_vector_positions() -> None:
 
 
 def test_aquarium_extractor_can_put_prey_first() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     extractor = make_aquarium_extractor(
@@ -158,7 +165,9 @@ def test_aquarium_extractor_can_put_prey_first() -> None:
 
 
 def test_aquarium_extractor_skips_frames_after_entity_removal() -> None:
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     env = _FakeEnvWithEntities()
     env.possible_agents = ["predator_0", "predator_1", "prey_0"]
@@ -187,6 +196,11 @@ def test_qdax_descriptor_skips_variable_shape_frames() -> None:
     np.testing.assert_allclose(result, [0.2, 0.3])
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="_mask_optional_pyarrow_imports only masks pyarrow on Windows; it is a "
+    "no-op elsewhere, so the ImportError it guards against cannot be raised.",
+)
 def test_mask_optional_pyarrow_imports_blocks_pyarrow_only() -> None:
     from deap_pettingzoo.contrib.qdax.coevolution import _mask_optional_pyarrow_imports
 
@@ -279,7 +293,9 @@ def test_qdax_generation_stats_use_current_batch_not_archive() -> None:
 
 def test_aquarium_extractor_walks_wrapper_chain() -> None:
     """Extractor should find entities through a one-level wrapper."""
-    from deap_pettingzoo.contrib.qdax.position_extractors import make_aquarium_extractor
+    from examples.pursuit_evasion.aquarium.qdax_position_extractor import (
+        make_aquarium_extractor,
+    )
 
     class _Wrapper:
         def __init__(self):

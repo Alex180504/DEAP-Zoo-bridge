@@ -1,14 +1,14 @@
 from .base_evaluator import BaseEvaluator
-from .single_episode import SingleEpisodeEvaluator
+from .mixed_policy import MixedPolicyEvalResult, MixedPolicyEvaluator
 from .multi_episode import MultiEpisodeEvaluator
-from .mixed_policy import MixedPolicyEvaluator, MixedPolicyEvalResult
 from .self_play import SelfPlayEvaluator
+from .single_episode import SingleEpisodeEvaluator
 
 __all__ = [
-    'BaseEvaluator',
-    'SingleEpisodeEvaluator',
-    'MultiEpisodeEvaluator',
-    'MixedPolicyEvaluator',
-    'MixedPolicyEvalResult',
-    'SelfPlayEvaluator',
+    "BaseEvaluator",
+    "SingleEpisodeEvaluator",
+    "MultiEpisodeEvaluator",
+    "MixedPolicyEvaluator",
+    "MixedPolicyEvalResult",
+    "SelfPlayEvaluator",
 ]

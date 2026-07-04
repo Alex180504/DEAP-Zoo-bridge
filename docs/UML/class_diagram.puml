@@ -9,13 +9,16 @@ package "deap_pettingzoo.genomes" {
     class FixedTopologyGenome {
         + layer_sizes: List[int]
         + activation: str
-    + output_activation: str
+        + output_activation: str
         + input_size: int
         + output_size: int
         + hidden_layers: List[int]
         + weight_range: tuple[float, float]
+        .. supported activations ..
+        + SUPPORTED_ACTIVATIONS: {relu, tanh, sigmoid, linear, identity}
+        + _ACTIVATION_ALIASES: {identity -> linear}
         --
-    + __init__(layer_sizes, activation, output_activation, weight_range: tuple[float, float], random_seed)
+        + __init__(layer_sizes, activation, output_activation, weight_range, random_seed)
         + get_weight_count() -> int
         + get_weight_ranges() -> List[tuple]
         + get_weights() -> np.ndarray
@@ -64,9 +67,19 @@ package "deap_pettingzoo.policies" {
         -- mask illegal logits to -inf before argmax --
     }
 
+    class MultiDiscreteHead {
+        + nvec: np.ndarray
+        + decode(raw) -> np.int64[len(nvec)]
+        -- per-sub-action argmax over sum(nvec) logits --
+    }
+
     class BoxHead {
         + low, high: np.ndarray
-        + decode(raw) -> np.ndarray  (tanh → rescale)
+        .. single-squash contract ..
+        + decode(raw) -> np.ndarray
+        .. decode: tanh(raw) → rescale to [low, high] ..
+        .. requires genome.output_activation="linear" so ..
+        .. tanh is applied exactly once (not twice) ..
     }
 
     class "make_head(space, masked=False)" as make_head <<factory>>
@@ -74,13 +87,14 @@ package "deap_pettingzoo.policies" {
 
     DiscreteHead --|> ActionHead
     MaskedDiscreteHead --|> DiscreteHead
+    MultiDiscreteHead --|> ActionHead
     BoxHead --|> ActionHead
     make_head ..> ActionHead : constructs
     FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
     FeedforwardNeuralPolicy --> ActionHead : optional head
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion (APF)" {
+package "examples.pursuit_evasion.simple_tag (APF)" {
     class APFConfig <<dataclass>> {
         + k_pursuer: float
         + k_landmark: float
@@ -143,7 +157,8 @@ package "deap_pettingzoo.environments" {
         + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot / replay_registry_snapshot:\n   propagate custom envs into spawn workers --
+        + {static} replay_registry_snapshot_once(snapshot) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
     }
 
     class builtin <<module>> {
@@ -159,10 +174,14 @@ package "deap_pettingzoo.environments" {
 
     class MaskedSimultaneousAdapter {
         parallel-shaped facade over AEC;\nevery active agent appears each step;\nonly current player's action executes;\ninfos[agent]["action_mask"] threaded.
+        .. termination contract ..
+        terminated agents absent from obs_dict/infos;\nstill present in rewards/terminations.
     }
 
     class SequentialTurnAdapter {
         single-agent-per-step dicts;\npreserves true turn semantics.
+        .. termination contract ..
+        drains terminated agent_selection\nwith step(None) before returning\nnext live agent obs (mirrors aec_to_parallel).
     }
 
     TurnBasedAdapter <|-- MaskedSimultaneousAdapter
@@ -178,6 +197,8 @@ package "deap_pettingzoo.environments" {
 
     class JaxEnvToPettingZooAdapter {
         per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
+        .. termination contract ..
+        dones["__truncated__"] → truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
     }
 
     JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
@@ -207,7 +228,7 @@ package "deap_pettingzoo.contrib.openspiel" {
     openspiel ..> registry : register_env
 }
 
-package "deap_pettingzoo.contrib.pursuit_evasion" {
+package "examples.pursuit_evasion.simple_tag" {
     class PursuitEvasionConfig <<dataclass>> {
         + num_adversaries: int
         + num_good: int
@@ -264,6 +285,7 @@ package "deap_pettingzoo.evaluators" {
     class SingleEpisodeEvaluator {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
+        + env_steps_consumed: int
     BaseEvaluator <|-- SelfPlayEvaluator
     MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
     SingleEpisodeEvaluator --> PettingZooWrapper : uses
@@ -300,7 +322,7 @@ package "deap_pettingzoo.evaluators" {
         - base_seed: int
         --
         + __init__(env_wrapper, genome_config, num_episodes, aggregation, base_seed, ...)
-        + evaluate(individual) -> tuple
+        + evaluate(individual, seed=None) -> tuple
         + evaluate_with_stats(individual) -> tuple[mean, std, min, max]
     }
 
@@ -354,11 +376,22 @@ package "deap_pettingzoo.integration" {
         + mutate_gaussian(individual, mu, sigma, indpb) -> tuple
         + clone_individual(individual) -> Individual
         + make_parallel_evaluate_map(executor,
-            worker_spec) -> Callable
+            worker_spec, *, step_sink=None) -> Callable
+        + evaluate_population_parallel(individuals, *,
+            executor, spec, eval_seeds=None,
+            step_sink=None) -> list
         + make_mixed_parallel_evaluate_map(executor,
             evaluator, *, eval_episodes=1) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
-           qualnames; picklable across spawn workers --
+           qualnames + a registry_snapshot; picklable
+           across spawn workers. Workers replay the
+           snapshot via replay_registry_snapshot_once
+           so SCOOP/Dask (no initializer hook) get
+           custom envs too --
+        -- _worker_evaluate now returns
+           (fitness, steps_delta); make_parallel_evaluate_map /
+           evaluate_population_parallel sum the deltas into the
+           optional step_sink accumulator and return fitness-only --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -377,7 +410,8 @@ package "deap_pettingzoo.baselines" {
     enum BudgetMode {
         ENV_STEPS
         EVAL_EPISODES
-        WALL_CLOCK
+        GENERATIONS
+        -- GENERATIONS: population trainers only;\n   AgileRL rejects it.
     }
 
     interface PolicyProtocol <<Protocol>> {
@@ -390,22 +424,54 @@ package "deap_pettingzoo.baselines" {
         + budget_mode: BudgetMode
         + budget_value: int
         + num_seeds: int
+        + seed: Optional[int] = None
+        + max_steps_per_episode: Optional[int] = None
+        + coevolution_config: Optional[CoEvolutionConfig] = None
         + algorithm_params: dict
         + output_dir: Path
         + render: bool
+        + num_workers: int = 1
+        + parallel_backend: str = "process"
+        + budget_on_consumed: bool = False
         + recording: RecordingConfig
+        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
+        -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
+        -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
     }
 
     class RecordingConfig <<dataclass>> {
         + enabled: bool
-        + every_n_generations: Optional[int]
+        + mode: RecordingMode
         + every_n_steps: Optional[int]
+        + max_recordings: Optional[int]
         + fps: int
         + fmt: str
         + max_frames_per_episode: Optional[int]
         + max_dim: Optional[int]
         + episode_prefix: str
     }
+
+    enum RecordingMode {
+        COUNT
+        EVERY
+        INTERVAL
+        FINAL
+    }
+
+    class RecordingController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        --
+        Algorithm-agnostic cadence: decides per
+        RecordingMode whether a ProgressEvent
+        warrants a champion-rollout recording via
+        UnifiedEvaluator (single or per-agent policy_map).
+    }
+    RecordingConfig *-- RecordingMode : mode
+    RecordingController ..> RecordingConfig : reads
+    RecordingController ..> UnifiedEvaluator : drives
 
     class TrainingResult <<dataclass>> {
         + algorithm: str
@@ -424,6 +490,7 @@ package "deap_pettingzoo.baselines" {
         + num_episodes: int
         + episode_rewards: List[float]
         + episode_lengths: List[int]
+        + agent_rewards: Dict[str, float]
         + to_dict() -> dict
     }
 
@@ -442,6 +509,7 @@ package "deap_pettingzoo.baselines" {
         + {abstract} train(config: TrainingConfig) -> TrainingResult
         + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
         + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
     }
 
     abstract class BaselineEvaluator {
@@ -523,9 +591,11 @@ package "deap_pettingzoo.baselines" {
 
     class _RecordingReporter <<neat.reporting.BaseReporter>> {
         - _record_fn: Callable
-        - _cadence: int
         + start_generation(generation)
         + post_evaluate(config, population, species, best_genome)
+        --
+        Forwards each generation's champion to
+        RecordingController.observe (which decides per mode).
     }
 
     class HyperNEATTrainer {
@@ -542,20 +612,33 @@ package "deap_pettingzoo.baselines" {
     }
 
     class EvolveHPOTrainer {
-        # _hp_config: dict
-        # _population: list
-        -- AgileRL HPO base
-        + train(config) -> TrainingResult
+        # _hpo_population_size: int
+        # _evo_every_n_steps: int
+        # _mutation_probs: dict
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
+        + train(config, *, progress_callback) -> TrainingResult
+        + describe_hyperparameters() : adds HPO + mutation knobs
+        # _train_one_agent(...) : off-policy replay loop
+        # _train_one_agent_on_policy(...) : shared IPPO rollout
+        # _prepare_population_build(...) : grouping hook
         # _build_hp_config(spec) -> HyperparameterConfig
         # _build_population(...) -> list
     }
 
     class MADDPGHPOTrainer {
-        -- MADDPG with evolvable architecture + HPO
+        -- MADDPG HPO (off-policy)
     }
 
     class MATD3HPOTrainer {
-        -- MATD3 with evolvable architecture + HPO
+        -- MATD3 HPO (off-policy)
+    }
+
+    class IPPOHPOTrainer {
+        -- IPPO HPO (on-policy)
+    }
+
+    class GroupedIPPOHPOTrainer {
+        -- Prefix-grouped IPPO HPO (on-policy).\nValidates grouping + applies patch.
     }
 
     NEATTrainer --|> BaselineTrainer
@@ -564,6 +647,8 @@ package "deap_pettingzoo.baselines" {
     EvolveHPOTrainer --|> AgileRLTrainer
     MADDPGHPOTrainer --|> EvolveHPOTrainer
     MATD3HPOTrainer --|> EvolveHPOTrainer
+    IPPOHPOTrainer --|> EvolveHPOTrainer
+    GroupedIPPOHPOTrainer --|> IPPOHPOTrainer
 
     abstract class AgileRLTrainer {
         # ALGORITHM_NAME: str
@@ -576,8 +661,9 @@ package "deap_pettingzoo.baselines" {
         + {abstract} get_capabilities() -> dict
         # _import_algorithm() -> type
         # _build_agent(obs_spaces, act_spaces, agent_ids, kwargs)
-        # _run_off_policy(env, agent, ...) -> dict
-        # _run_on_policy(env, agent, ...) -> dict
+        # _run_off_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per emit interval)
+        # _run_on_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per rollout cycle)
+        -- Both loops: logger.warning(exc_info=True)\n   on learn() failure + warnings.warn()
     }
 
     class MADDPGTrainer {
@@ -608,7 +694,7 @@ package "deap_pettingzoo.baselines" {
         --
         + get_action(obs) -> Any
         + reset() -> None
-        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper
+        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper\n   (rebuilds actors via init_dict + state_dict,\n    not copy.deepcopy -> works for IPPO\n    StochasticActor; carries grouped actor map)
     }
 
     class FrozenRLPolicyWrapper {
@@ -617,11 +703,14 @@ package "deap_pettingzoo.baselines" {
         - _full_roster: list[str]
         - _algorithm_name: str
         - _is_discrete: bool
+        - _md_nvecs: list | None
+        - _actor_idx_map: list[int] | None
         - _call_index: int
         - _obs_cache: dict
         --
         + get_action(obs, **kwargs) -> Any
         + reset() -> None
+        + __getstate__/__setstate__ : state_dict serialization\n   (no cloudpickle for AgileRL actors)
         + agent_ids: list[str]
         + algorithm_name: str
         + is_discrete: bool
@@ -630,18 +719,34 @@ package "deap_pettingzoo.baselines" {
     class UnifiedEvaluator {
         - max_steps: int
         - env_cache: dict
+        - aggregation: str
+        - score_agents: Optional[set[str]]
         --
-        + __init__(max_steps)
+        + __init__(max_steps, *, aggregation="sum", score_agents=None)
         + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
-        - _run_episode(policy, env, seed) -> tuple
+        - _aggregate_reward(agent_rewards) -> float
+        - _run_episode(policy, env, seed) -> (agent_rewards, length)
         + close()
     }
+    note bottom of UnifiedEvaluator
+      aggregation ("sum"|"mean") + score_agents are
+      an OPT-IN team/per-side scalar for zero-sum
+      competitive envs; the default
+      comparison path still scores team-sum, callers
+      opt in. Per-agent rewards are always surfaced
+      on EvalResult.agent_rewards.
+    end note
 
     class "comparison (module)" as comparison_mod <<module>> {
         - _TRAINER_REGISTRY: dict[str, type]
         --
         + register_trainer(name, trainer_class) -> None
         + get_trainer(name, **kwargs) -> BaselineTrainer
+        ' Self-healing cache over the catalog: on a miss get_trainer calls
+        ' _sync_from_catalog() (registers any iter_trainer_bindings() entry not
+        ' yet present) then retries — so a third-party register_algorithm(...)
+        ' resolves with no second call.
+        - _sync_from_catalog() -> None
         + compare_baselines(config: ComparisonConfig) -> dict
         - _register_builtins() -> None
     }
@@ -702,6 +807,20 @@ note bottom of CMAESTrainer
   contract.
 end note
 
+note bottom of EATrainer
+  Uniform env-step metric contract — every
+  population trainer (EA, CMA-ES, PSO,
+  co-evolution, NEAT/HyperNEAT) emits
+  TrainingResult.metrics["env_steps_nominal"]
+  and ["env_steps_consumed"]. Consumed is the
+  real tick count (aggregated across workers on
+  the parallel path); below nominal when episodes
+  truncate early. QDax reports it on the numpy
+  scoring path, None on the JAX-native path.
+  budget_on_consumed=True makes EA simple / CMA-ES /
+  PSO run until the real ENV_STEPS budget is spent.
+end note
+
 note bottom of GenomePolicyWrapper
   Shared adapter used by both EATrainer
   and CMAESTrainer to expose a trained
@@ -739,10 +858,12 @@ note bottom of registry
 
   get_registry_snapshot() + replay_registry_snapshot()
   propagate custom envs registered in the main
-  process into spawned worker subprocesses:
-  trainers pass them as initializer/initargs
-  to make_executor so every worker re-registers
-  all custom envs before executing any tasks.
+  process into worker subprocesses. The process pool
+  passes them as initializer/initargs to make_executor;
+  SCOOP/Dask have no initializer hook, so trainers also
+  ship the snapshot on each worker spec/payload and the
+  worker calls replay_registry_snapshot_once (idempotent,
+  guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
 end note
@@ -827,13 +948,12 @@ package "deap_pettingzoo.contrib.qdax" {
     }
 
     class "descriptors <<module>>" as qdax_descriptors {
-        + formation_spread_and_mean_distance(num_pursuers, num_evaders)
-        + with_capture_efficiency(num_pursuers, num_evaders, capture_radius)
-        -- each returns a callable with\n   output_shape / min_bd / max_bd --
+        + DescriptorProtocol
+        -- generic contract only: a callable\n   (trajectory) -> array with\n   output_shape / min_bd / max_bd.\n   Concrete descriptors are caller-supplied\n   (e.g. examples/qdax/descriptors.py). --
     }
 
     class "scoring <<module>>" as qdax_scoring {
-        + make_jax_scoring_function(jax_env, module, *, episode_length,\n         descriptor_fn, action_type, agents=None,\n         extract_state_fn=None) -> Callable
+        + make_jax_scoring_function(jax_env, module, *, episode_length,\n         descriptor_fn, action_type, agents=None,\n         state_extractor=None) -> Callable
         + make_numpy_scoring_function(env_name, *, layer_sizes,\n         episode_length, descriptor_fn, env_config=None,\n         action_type="discrete", activation="tanh",\n         num_workers=1, parallel_backend="process") -> Callable
         -- both return QDax contract:\n   (genotypes, key) -> (fitness, descriptor, extra_scores) --
     }
@@ -855,8 +975,8 @@ package "deap_pettingzoo.contrib.qdax" {
     CMAMETrainer     --|> BaselineTrainer
     MAPElitesTrainer ..> qdax_scoring : uses
     CMAMETrainer     ..> qdax_scoring : uses
-    MAPElitesTrainer ..> qdax_descriptors : resolves by name
-    CMAMETrainer     ..> qdax_descriptors : resolves by name
+    MAPElitesTrainer ..> qdax_descriptors : injected descriptor_fn
+    CMAMETrainer     ..> qdax_descriptors : injected descriptor_fn
     MAPElitesTrainer ..> FlaxPolicyAdapter : produces best
     CMAMETrainer     ..> FlaxPolicyAdapter : produces best
 }
@@ -950,12 +1070,28 @@ package "deap_pettingzoo.baselines.coevolution" {
 
   abstract class SideState {
     +side: Side
+    +is_rl_side: bool = False
+    +resolved_device: str = "cpu"
     +{abstract} initialise(env, evaluator, rng)
     +{abstract} step_generation(evaluator, rng)
     +{abstract} current_pool(): OpponentPool
     +{abstract} best_policy(): PolicyProtocol
     +snapshot_best()
+    ' Trainer detectors use getattr(s, "is_rl_side", False) instead of
+    ' isinstance(RLSideState) so rl_hpo sides trigger the same guards.
   }
+
+  class "sides <<module>>" as CoevSidesModule {
+    ' Open side-state registry: token -> zero-arg loader -> SideState
+    ' subclass. Each loader owns any lazy optional-extra import + friendly error.
+    - _SIDE_STATE_FACTORIES: dict[str, () -> type[SideState]]
+    + make_side_state(side) -> SideState  ' one-line _SIDE_STATE_FACTORIES lookup
+    + register_side_state(token, loader_or_class, *, overwrite=False)
+    ' Side.__post_init__ validates optimizer against set(_SIDE_STATE_FACTORIES),
+    ' so a registered token is automatically a valid Side.optimizer.
+  }
+  CoevSidesModule ..> SideState : builds
+  CoevSidesModule ..> Side : validates optimizer
 
   class EASideState
   class CMAESSideState
@@ -965,6 +1101,10 @@ package "deap_pettingzoo.baselines.coevolution" {
   class RLEvolveHPOSideState {
       -- AgileRL HPO champion-as-opponent
       optimizer = "rl_hpo"
+      +is_rl_side: bool = True
+      + current_pool(): RLPolicyPool
+      ' current_pool() returns RLPolicyPool(champion_wrapper) — single policy,
+      ' not a list.  No-champion branch returns FrozenPolicyPool([]).
   }
   class NeatSideState {
       -- optimizer = "neat"
@@ -1024,14 +1164,16 @@ package "deap_pettingzoo.baselines.coevolution" {
   }
 
   class RLSideState {
-    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learning_steps_per_gen learn() calls.\n   v1: MADDPG / MATD3 only.
+    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learn step(s).\n   off-policy (MADDPG/MATD3): replay buffer +\n   learning_steps_per_gen learn() calls.\n   on-policy (IPPO/GroupedIPPO): no replay\n   buffer; serial rollout -> 1 PPO learn().
     +algorithm: str
+    +is_rl_side: bool = True
     +is_on_policy: bool
     +rollout_episodes_per_gen: int
     +learning_steps_per_gen: int
     +resolved_device: str
     + current_pool(): RLPolicyPool
     + best_policy(): AgileRLPolicyWrapper
+    - _collect_onpolicy_rollout(ctx): list[float]
   }
 
   RLPolicyPool ..|> OpponentPool
@@ -1125,7 +1267,7 @@ package "deap_pettingzoo.baselines.coevolution" {
   CompositePool o-- "*" OpponentPool
 
   CoEvolutionConfig *-- "1..*" Side
-  CoEvolutionTrainer ..> CoEvolutionConfig : consumes
+  CoEvolutionTrainer ..> CoEvolutionConfig : "consumes via config.coevolution_config"
   CoEvolutionTrainer ..> SideState : "builds per side"
   CoEvolutionTrainer ..> CoEvolutionEvaluator : uses
   CoEvolutionEvaluator ..> OpponentPool : "samples one per side"
@@ -1150,6 +1292,9 @@ note bottom of CoEvolutionTrainer
   -> _run_synchronous_loop | _run_alternating_loop
   -> persist. _step_one_side is the shared per-side
   body for both schedules (review S1).
+  Honors budget_on_consumed=True (ENV_STEPS): stops when
+  the summed per-side real env ticks reach budget_value
+  (shared aggregate pool; finish-generation-then-stop).
 end note
 
 ' ---------------- experiment logging ----------------
@@ -1270,7 +1415,18 @@ package "deap_pettingzoo.analysis" {
     +run_id: str
     +wall_time_s: Optional[float]
     +final_fitness: Optional[float]
+    +eval_mean_reward: Optional[float]
+    +comparison_score: Optional[float]
+    +score_provenance: str
   }
+  note bottom of RunRecord
+    final_fitness = genuine optimiser objective
+    (final_fitness/best_fitness/coevolution),
+    no longer coalesces mean_episode_reward.
+    comparison_score prefers held-out
+    eval_mean_reward; score_provenance tags it
+    held_out | training_fitness | training_reward.
+  end note
 
   class Experiment {
     +root: Path
@@ -1280,11 +1436,25 @@ package "deap_pettingzoo.analysis" {
     +by_env(): dict[str, list[RunRecord]]
     +summary_table(): pd.DataFrame
     +final_scores(metric): dict[str, ndarray]
+    +score_provenances(metric): dict[str, set]
+    +per_agent_table(): pd.DataFrame
+    +to_frame(metric, *, include_config): pd.DataFrame
+    +export(path, *, fmt, metric, include_config): Path
   }
+  note bottom of Experiment
+    final_scores(metric="final_fitness") resolves
+    via comparison_score (held-out preferred);
+    score_provenances() exposes per-group
+    provenance so a mixed comparison is blocked.
+    per_agent_table() decomposes trajectories;
+    to_frame/export emit per-(algo,env,seed) rows
+    with score+seed+budget+git_sha+hyperparams.
+  end note
 
   class loaders <<module>> {
     +load_run(run_dir): RunRecord
     +load_experiment(root, pattern): Experiment
+    +per_agent_table(runs): pd.DataFrame
   }
 
   class aggregate <<module>> {
@@ -1292,8 +1462,9 @@ package "deap_pettingzoo.analysis" {
     +bootstrap_ci(scores, *, statistic, n_resamples, ci, seed)
     +mean_with_ci(scores, **kw)
     +iqm_with_ci(scores, **kw)
-    +learning_curve_with_ci(runs, *, x_col, y_col, statistic)
-    +aggregate_summary(score_groups): pd.DataFrame
+    +resolve_y_col(runs, *, x_col, candidates): Optional[str]
+    +learning_curve_with_ci(runs, *, x_col, y_col=auto, statistic)
+    +aggregate_summary(score_groups, *, require_equal_n): pd.DataFrame
   }
 
   class compare <<module>> {
@@ -1305,10 +1476,10 @@ package "deap_pettingzoo.analysis" {
   }
 
   class rliable_bridge <<module>> {
-    +aggregate_metrics_table(score_groups, *, reps)
+    +aggregate_metrics_table(score_groups, *, reps, include_optimality_gap=auto)
     +performance_profile(score_groups, *, taus, reps)
     +probability_of_improvement(score_groups, *, reps)
-    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col, x_grid, reps)
+    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col=auto, x_grid, reps)
   }
 
   class plots <<module>> {
@@ -1339,8 +1510,11 @@ RunRecord ..> RunManifest : "loads manifest.json"
 note bottom of rliable_bridge
   Lazy-imports rliable; raises
   ImportError("install with .[analysis]")
-  if missing. iqm() in aggregate matches
-  rliable.metrics.aggregate_iqm to 1e-9.
+  if missing. iqm() count-trims 25% per end
+  (scipy.stats.trim_mean), matching
+  rliable.metrics.aggregate_iqm even on ties.
+  optimality_gap dropped from the raw
+  single-task table (meaningless un-normalised).
 end note
 
 note bottom of report
@@ -1450,6 +1624,346 @@ package "deap_pettingzoo.ui" {
         + load_settings(*, results_root=None) -> UISettings
     }
 }
+
+package "deap_pettingzoo.catalog (v0.2+)" #F0F8FF {
+    class ParamSpec <<dataclass>> {
+        + name: str
+        + type: ParamType (int|float|bool|str|enum|list)
+        + default: Any
+        + min: float | None
+        + max: float | None
+        + step: float | None
+        + choices: list | None
+        + unavailable_choices: tuple  ' (e.g. cuda w/o CUDA)
+        + group: str
+        + label: str
+        + help: str
+        + advanced: bool
+        --
+        + available_choices: tuple  ' choices minus unavailable_choices
+        + coerce(value) -> Any  ' rejects a value in unavailable_choices
+        + validate(value) -> list[str]
+        + to_dict() -> dict
+    }
+
+    class AlgorithmSpec <<dataclass>> {
+        + name: str
+        + aliases: list[str]
+        + family: str
+        + hyperparameters: list[ParamSpec]
+        + capabilities: dict
+        + coevolution_optimizer: bool
+        + required_extras: list[str]
+        + supported_budget_modes: list[str]
+        + supported_aggregations: list[str]
+        --
+        + {static} canonical_name(name) -> str
+    }
+
+    class EnvironmentSpec <<dataclass>> {
+        + name: str
+        + env_config: list[ParamSpec]
+        + teams: list[TeamSpec]
+        + api: str
+        + continuous_default: bool
+        + tags: set[str]
+        + required_extras: list[str]
+    }
+
+    class TeamSpec <<dataclass>> {
+        + name: str
+        + agent_prefixes: list[str]
+    }
+
+    class ValidationReport <<dataclass>> {
+        + ok: bool
+        + errors: list[ValidationIssue]
+        + warnings: list[ValidationIssue]
+    }
+
+    class Catalog <<facade>> {
+        + list_algorithms() -> list[AlgorithmSpec]
+        + get_algorithm(name) -> AlgorithmSpec
+        + register_algorithm(name, *, trainer, side_state=None, ...) -> None
+        + list_environments() -> list[EnvironmentSpec]
+        + get_environment(name) -> EnvironmentSpec
+        + get_coevolution_options() -> dict
+        + compatible_algorithms(env, algos) -> dict
+        + to_json() -> dict
+    }
+
+    class "_AlgorithmDefinition <<dataclass, frozen>>" as AlgorithmDefinition {
+        + name / label / family: str
+        + trainer_module / trainer_class: str  ' dotted "module:QualName"
+        + capabilities: dict
+        + aliases / required_modules / required_extras: tuple
+        + coevolution_optimizer: str | None
+        + side_state: str | None  ' dotted SideState binding
+    }
+
+    class "algorithms <<module>>" as AlgorithmsModule {
+        ' Open, mutable algorithm table (insertion-ordered), seeded from the
+        ' built-ins then extended by register_algorithm / entry-point plugins.
+        - _REGISTRY: dict[str, _AlgorithmDefinition]
+        + register_algorithm(name, *, label, family, trainer, capabilities,\n            aliases=(), coevolution_optimizer=None, side_state=None, ...) -> None
+        + iter_trainer_bindings() -> list[(name, module, class)]
+        - _discover_entry_point_plugins()  ' groups: deap_pettingzoo.algorithms /\n            .coevolution_sides; broken plugin -> RuntimeWarning
+        - _register_builtins()  ' seed + discover (load-once)
+    }
+    AlgorithmsModule *-- AlgorithmDefinition
+    AlgorithmsModule ..> CoevSidesModule : register_algorithm(side_state=)\n forwards register_side_state
+
+    class availability <<module>> {
+        + module_available(extra_name) -> bool
+    }
+}
+
+package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
+    class ExperimentSpecModel <<pydantic>> {
+        + env_name: str
+        + algorithms: list[str]
+        + hyperparameters: dict
+        + budget: BudgetSpecModel
+        + fitness: FitnessSettingsModel
+        + recording: RecordingSettingsModel
+        + coevolution: CoevolutionSettingsModel | None
+        + parallelism: ParallelismSettingsModel
+        + raw_config: str | None
+        + num_seeds: int
+        + label: str
+        --
+        + to_dataclass() -> ExperimentSpec
+    }
+
+    class SubmitResponse <<pydantic>> {
+        + id: str
+        + status: str
+        + position: int
+    }
+
+    class ExperimentRecord <<pydantic>> {
+        + id: str
+        + label: str
+        + status: str
+        + created_at: float
+        + started_at: float | None
+        + finished_at: float | None
+        + run_dirs: list[str] | None
+        + error: str | None
+        + origin: str = "ui"
+    }
+
+    class ProgressSnapshot <<pydantic>> {
+        + run_index: int
+        + total_runs: int
+        + algo: str
+        + seed: int
+        + unit: str
+        + current: int
+        + total: int
+        + best_fitness: float | None
+        + mean_fitness: float | None
+        + wall_time_s: float
+    }
+
+    class InstallRequest <<pydantic>> {
+        + manager: str  ' pip | git
+        + action: str   ' install | uninstall | clone
+        + args: list[str]
+    }
+
+    class ScriptSubmitModel <<pydantic>> {
+        + script: str
+        + label: str
+        + entry: str = "script"
+    }
+
+    class install_jobs <<module>> {
+        + build_command(manager, action, args) -> argv  ' allowlist + reject metachars
+        + start_install(manager, action, args) -> job_id  ' detached subprocess
+        + get_status(job_id, offset, limit, lines) -> dict  ' read_tail(install.log)
+        + InstallValidationError
+    }
+
+    class script_validate <<module>> {
+        + validate_script_source(src) -> {ok, issues}  ' ast.parse + structure
+    }
+
+    class advanced <<module>> {
+        + advanced_enabled() -> bool  ' DEAP_ENABLE_ADVANCED (default True)
+    }
+
+    class Dispatcher {
+        - _running_proc: subprocess.Process | None
+        - _running_exp_id: str | None
+        - _worker_limit: int = 1
+        --
+        + start()  ' crash recovery: db.requeue_interrupted(), not set-failed
+        + cancel(experiment_id)  ' DB decides eligibility; only\n  ' kills if _running_exp_id == experiment_id (proc-identity check —\n  ' _running_proc/_running_exp_id are set together by _run_one and never\n  ' written by cancel(), closing a kill-the-wrong-process race)
+        + shutdown()
+        .. _run_one branches on spec "kind" ..
+        ' kind=="script": Popen([python, user_script.py], cwd=exp_dir)
+        '   then synthesise _result.json (rglob manifest.json)
+        ' spawn kwargs: start_new_session=True (POSIX) /
+        '   CREATE_NEW_PROCESS_GROUP (Windows);
+        ' proc.wait() wrapped in asyncio.wait_for(timeout);
+        '   _compute_timeout_seconds(spec) derives the timeout from budget,
+        '   clamped to DEAP_EXPERIMENT_TIMEOUT_{FLOOR,CEILING,PER_UNIT}_S
+        '   (env values parsed defensively via _env_float — bad/blank knobs
+        '   fall back to the default instead of failing every experiment)
+        ' _terminate_group(proc) / _wait_or_kill(proc) — kill the whole tree
+        '   (taskkill /T on Windows, os.killpg on POSIX), used by cancel/
+        '   timeout/shutdown alike
+    }
+
+    class Runner <<subprocess>> {
+        + run_experiment(spec_file, experiment_dir) -> int
+        + ProgressWriter (callback -> _progress.json)
+    }
+
+    class FastAPIApp <<FastAPI>> {
+        + GET /health  ' incl. advanced_enabled
+        + GET /catalog
+        + POST /experiments
+        + POST /experiments/validate
+        + POST /env/install  ' gated
+        + GET /env/install/{job_id}  ' gated
+        + POST /experiments/script  ' gated, kind="script"
+        + POST /experiments/script/validate  ' gated
+        + GET /experiments/{id}
+        + GET /experiments/{id}/progress
+        + GET /experiments/{id}/stdout
+        + GET /logs
+        + GET /experiments/{id}/export
+        + GET /experiments/{id}/spec
+        + DELETE /experiments/{id}
+        ' 404 unknown id; 409 if status=="running" (cancel first)
+        + POST /experiments/{id}/cancel
+        ' 404 unknown id; 409 if already terminal
+        + POST /experiments/import
+        .. one exception_handler(Exception) -> {"detail": "..."} ..
+        ' A single JSON error envelope for every unhandled 500
+        + GET /runs/export
+        + GET /queue
+        + POST /queue/pause
+        + POST /queue/resume
+    }
+
+    class db <<module>> {
+        + create_tables()
+        + insert_experiment(spec)
+        + list_experiments(status, limit, offset)
+        + dequeue_next() -> experiment | None
+        ' One UPDATE ... RETURNING atomically claims
+        '   queued -> running (+started_at); no separate set_running step
+        + set_pid(id, pid)  ' attaches the pid once the subprocess is spawned
+        + set_running / set_completed / set_failed / set_cancelled
+        ' set_completed/set_failed/set_cancelled all gate on
+        '   "status NOT IN (completed,failed,cancelled)" — once a row is
+        '   terminal, none of them can overwrite it.
+        + requeue_interrupted()
+        ' Crash recovery re-queues a stale 'running'
+        '   row instead of failing it;
+        + restore_timestamps(id, created_at, started_at, finished_at)
+        ' Import restore overwrites timestamps with archived values
+        + update_progress(id, progress_json)
+        + get_queue_state()
+    }
+
+    class logging_config <<module>> {
+        + configure_logging(verbose, log_level, log_format, log_file) -> dict
+        + build_dict_config(level, fmt, log_file) -> dict
+        + resolve_level / resolve_format / default_log_dir
+        + JsonFormatter
+        .. env: DEAP_LOG_LEVEL / DEAP_LOG_FORMAT / DEAP_LOG_DIR ..
+        ' WARNING (default) -> INFO (--verbose) -> DEBUG (-vv)
+        ' captureWarnings(True): warnings.warn -> py.warnings logger
+    }
+
+    class export_import <<module>> {
+        + build_export_manifest() -> dict
+        + create_run_export_zip(run_dir, flags) -> bytes
+        + create_experiment_export_zip_generator(...) -> Generator
+        + validate_import_zip(zip, root) -> ImportValidationResult
+        + extract_import_zip(zip, root) -> list
+        + restore_experiment_to_db(json, dirs, db) -> str
+        ' Restores the archived status (completed/failed/cancelled)
+        '   + timestamps/error, not always 'completed'; queued/running ->
+        '   failed (the original process no longer exists)
+    }
+}
+
+package "deap_pettingzoo.ui (components v0.2+)" #F5FFF5 {
+    class ApiClient {
+        - _client: httpx.Client
+        - _base_url: str
+        --
+        + get_catalog() -> dict
+        + get_algorithms() -> list
+        + get_environment(name) -> dict
+        + get_compatibility(env, algos) -> dict
+        + validate(spec) -> ValidationReportModel
+        + submit(spec) -> SubmitResponse
+        + list_experiments() -> list[ExperimentRecord]
+        + get_experiment(id) -> ExperimentRecord
+        + get_progress(id) -> ProgressSnapshot
+        + get_stdout(id, offset, limit) -> dict
+        + get_experiment_spec(id) -> dict
+        + build_experiment_export_url(id, flags) -> str
+        + build_run_export_url(dirs, flags) -> str
+        + import_experiments(zip, overwrite) -> dict
+        + get_queue() -> QueueState
+        + pause_queue() / resume_queue()
+        + cancel_experiment(id) / delete_experiment(id)
+        + get_health() -> dict  ' advanced_enabled
+        + start_install(manager, action, args) / get_install(job_id)
+        + validate_script(src) / submit_script(src, label)
+    }
+
+    class param_widgets <<module>> {
+        + coerce_param(value, spec) -> Any
+        + render_param(spec, key) -> value  (thin Streamlit wrapper)
+    }
+
+    class forms <<module>> {
+        + build_env_form(catalog) -> (values, touched)
+        + build_algo_form(catalog, env) -> (values, touched)
+        + build_fitness_form(env_spec) -> (values, touched)
+    }
+
+    class validation_view <<module>> {
+        + group_issues_by_tab(report) -> dict
+        + render_validation_report(report)
+    }
+
+    class spec_utils <<module>> {
+        + spec_to_form_defaults(spec) -> dict
+        + extract_loaded_spec(setup_config) -> dict | None
+    }
+}
+
+' Cross-package relationships (v0.2+)
+Catalog --> AlgorithmSpec : contains
+Catalog --> EnvironmentSpec : contains
+ExperimentSpecModel ..> ExperimentSpec : to_dataclass()
+FastAPIApp --> Catalog : serves as JSON
+FastAPIApp --> Dispatcher : lifespan manages
+FastAPIApp --> db : async I/O
+Dispatcher --> Runner : Popen subprocess
+Runner --> "baselines.Trainer" : train(progress_callback)
+FastAPIApp ..> logging_config : configure_logging() + GET /logs tails service.log
+Runner ..> logging_config : configure_logging() (console only)
+FastAPIApp ..> advanced : _require_advanced() gate (403)
+FastAPIApp ..> install_jobs : POST /env/install -> start_install
+FastAPIApp ..> script_validate : POST /experiments/script[/validate]
+Dispatcher ..> ScriptSubmitModel : runs kind=="script" spec as python user_script.py
+ApiClient --> FastAPIApp : HTTP (FASTAPI_URL)
+"Setup Page" ..> ApiClient : uses
+"Queue Page" ..> ApiClient : uses
+"Browse Page" ..> ApiClient : uses (export/import/re-run)
+"Setup Page" ..> spec_utils : uses (re-run pre-populate)
+AlgorithmSpec --> ParamSpec : hyperparameters
+EnvironmentSpec --> TeamSpec : teams
 
 policies ..> RunRecord : "reads .manifest"
 policies ..> PolicyCheckpointEntry : parses

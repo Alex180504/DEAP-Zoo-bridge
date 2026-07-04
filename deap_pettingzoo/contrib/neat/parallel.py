@@ -17,7 +17,7 @@ Driver:  genome ──pickle──→ Worker: rebuild genome via pickle
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -61,6 +61,9 @@ class _NeatWorkerSpec:
     weight_threshold:
         Minimum absolute CPPN output below which phenotype connection
         weights are zeroed.  Default 0.1 (HyperNEAT / ES-HyperNEAT).
+    max_steps:
+        Hard cap on env steps per rollout episode, mirrors
+        ``TrainingConfig.max_steps_per_episode`` on the driver.
     """
 
     env_name: str
@@ -75,6 +78,10 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    max_steps: int = 500
+    #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
+    #: any worker missing a runtime registration) can resolve ``env_name``.
+    registry_snapshot: Optional[List] = None
 
 
 def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
@@ -84,14 +91,17 @@ def _rebuild_action_space(spec: _NeatWorkerSpec) -> Any:
     if spec.action_space_type == "discrete":
         n = int(spec.action_space_args.get("n", spec.output_size))
         return spaces.Discrete(n)
+    if spec.action_space_type == "multidiscrete":
+        nvec = spec.action_space_args.get("nvec")
+        if nvec is None:
+            raise ValueError("MultiDiscrete action_space_args must include 'nvec'.")
+        return spaces.MultiDiscrete(np.asarray(nvec, dtype=np.int64))
     if spec.action_space_type == "continuous":
         shape = tuple(spec.action_space_args.get("shape", (spec.output_size,)))
         low = np.asarray(spec.action_space_args.get("low", -1.0), dtype=np.float32)
         high = np.asarray(spec.action_space_args.get("high", 1.0), dtype=np.float32)
         return spaces.Box(low=low, high=high, shape=shape, dtype=np.float32)
-    raise ValueError(
-        f"Unknown action_space_type {spec.action_space_type!r}"
-    )
+    raise ValueError(f"Unknown action_space_type {spec.action_space_type!r}")
 
 
 def _rebuild_substrate(spec: _NeatWorkerSpec) -> Any:
@@ -106,7 +116,7 @@ def _rebuild_substrate(spec: _NeatWorkerSpec) -> Any:
     return Substrate(inputs, outputs, hidden)
 
 
-def _neat_worker_evaluate(payload: tuple) -> float:
+def _neat_worker_evaluate(payload: tuple) -> tuple:
     """Worker-side genome evaluator for ``executor.map``.
 
     Parameters
@@ -116,15 +126,24 @@ def _neat_worker_evaluate(payload: tuple) -> float:
 
     Returns
     -------
-    float
-        Mean episode reward across ``spec.eval_episodes_per_genome``
-        episodes.
+    tuple
+        ``(mean_reward, steps)`` — the mean episode reward across
+        ``spec.eval_episodes_per_genome`` episodes and the total real env
+        ticks this genome consumed (summed across those episodes). The
+        driver discards order-free; ``executor.map`` preserves order.
     """
-    from deap_pettingzoo.contrib.neat.config import build_neat_config, build_cppn_config
+    from deap_pettingzoo.contrib.neat.config import build_cppn_config, build_neat_config
     from deap_pettingzoo.contrib.neat.policy import NeatPolicy
     from deap_pettingzoo.environments import PettingZooWrapper
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
 
     genome, spec = payload
+
+    # Re-register custom envs so SCOOP/Dask workers can resolve env_name; no-op
+    # on repeat calls and for built-in-only snapshots.
+    replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,
     # standard config for plain NEAT.
@@ -147,20 +166,24 @@ def _neat_worker_evaluate(payload: tuple) -> float:
     # HyperNEAT / ES-HyperNEAT logic.
     if spec.substrate_spec is not None:
         from deap_pettingzoo.contrib.neat.hyperneat import (
-            HyperNeatPolicy,
             ESHyperNeatPolicy,
+            HyperNeatPolicy,
         )
 
         substrate = _rebuild_substrate(spec)
         if spec.es_params is not None:
             policy = ESHyperNeatPolicy(
-                genome, neat_cfg, substrate,
+                genome,
+                neat_cfg,
+                substrate,
                 action_space=action_space,
                 es_params=dict(spec.es_params),
             )
         else:
             policy = HyperNeatPolicy(
-                genome, neat_cfg, substrate,
+                genome,
+                neat_cfg,
+                substrate,
                 action_space=action_space,
                 activation=spec.phenotype_activation,
                 weight_threshold=spec.weight_threshold,
@@ -175,25 +198,27 @@ def _neat_worker_evaluate(payload: tuple) -> float:
     )
     try:
         rewards: list[float] = []
+        total_steps = 0
         for ep_i in range(spec.eval_episodes_per_genome):
             ep_seed = spec.seed * 10_000 + ep_i
             observations = env.reset(seed=ep_seed)
             ep_rew = 0.0
             done = False
             _steps = 0
-            while not done and _steps < 500:
+            while not done and _steps < spec.max_steps:
                 actions = {}
                 for agent in observations:
                     actions[agent] = policy.get_action(observations[agent])
-                observations, step_rewards, dones, truncateds, _infos = (
-                    env.step(actions)
+                observations, step_rewards, dones, truncateds, _infos = env.step(
+                    actions
                 )
                 ep_rew += float(sum(step_rewards.values()))
                 done = all(dones.values()) or all(truncateds.values())
                 _steps += 1
             rewards.append(ep_rew)
+            total_steps += _steps
 
-        return float(np.mean(rewards))
+        return float(np.mean(rewards)), total_steps
     finally:
         try:
             env.close()
@@ -204,6 +229,9 @@ def _neat_worker_evaluate(payload: tuple) -> float:
 def make_neat_parallel_evaluate(
     executor: Any,
     worker_spec: _NeatWorkerSpec,
+    *,
+    step_sink: Optional[List[int]] = None,
+    on_generation: Optional[Callable[[float, int], None]] = None,
 ) -> "Any":
     """Return a callable suitable as a neat fitness function.
 
@@ -219,6 +247,17 @@ def make_neat_parallel_evaluate(
         A context-managed executor from :func:`~deap_pettingzoo.utils.parallel.make_executor`.
     worker_spec:
         Shared spec describing the env, action space, and eval budget.
+    step_sink:
+        Optional 1-element mutable list. When provided, the real per-genome
+        env-step counts returned by the workers are summed into
+        ``step_sink[0]`` across every generation, so the driver can report a
+        real consumed-steps total for the parallel path.
+    on_generation:
+        Optional ``(best_fitness, env_steps) -> None`` callback invoked once
+        per generation with this generation's best genome fitness and total
+        real env steps. Lets the driver append to a per-generation
+        ``fitness_history``/``generation`` counter on the parallel path,
+        which the fitness-only assignment below does not otherwise expose.
 
     Returns
     -------
@@ -227,17 +266,23 @@ def make_neat_parallel_evaluate(
     """
 
     def _parallel_fitness(
-        genomes_and_ids: list, _neat_cfg: Any,
+        genomes_and_ids: list,
+        _neat_cfg: Any,
     ) -> None:
         """neat fitness-function contract — parallelised."""
         # Build payloads: one (genome, spec) per genome.
         payloads = [(genome, worker_spec) for _genome_id, genome in genomes_and_ids]
 
         # Evaluate in parallel.  executor.map preserves order.
-        fitnesses: list = list(executor.map(_neat_worker_evaluate, payloads))
+        results: list = list(executor.map(_neat_worker_evaluate, payloads))
 
-        # Assign fitnesses back to genomes.
-        for (_genome_id, genome), fitness in zip(genomes_and_ids, fitnesses):
+        # Assign fitnesses back to genomes; aggregate real steps if requested.
+        for (_genome_id, genome), (fitness, _steps) in zip(genomes_and_ids, results):
             genome.fitness = float(fitness)
+        gen_steps = sum(int(steps) for _fitness, steps in results)
+        if step_sink is not None:
+            step_sink[0] += gen_steps
+        if on_generation is not None and results:
+            on_generation(max(float(fitness) for fitness, _steps in results), gen_steps)
 
     return _parallel_fitness

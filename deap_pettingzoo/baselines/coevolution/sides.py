@@ -23,6 +23,8 @@ the :class:`CoEvolutionTrainer` consumes.
 
 from __future__ import annotations
 
+import importlib
+import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -56,7 +58,6 @@ from .pools import (
     PopulationPool,
 )
 from .samplers import Sampler, uniform_sampler
-
 
 # Side declaration
 
@@ -106,29 +107,18 @@ class Side:
     frozen_policies: Optional[Sequence[PolicyProtocol]] = None
 
     def __post_init__(self) -> None:
-        if self.optimizer not in {
-            "ea",
-            "cma",
-            "frozen",
-            "qdax_map_elites",
-            "qdax_cma_me",
-            "rl",
-            "pso",
-            "rl_hpo",
-            "neat",
-            "hyperneat",
-            "es_hyperneat",
-        }:
+        # The valid optimizer tokens are exactly the keys of the open
+        # ``_SIDE_STATE_FACTORIES`` registry, so a ``register_side_state`` (or
+        # ``register_algorithm(..., side_state=...)`` call makes a new token a
+        # valid ``Side.optimizer`` automatically.
+        valid = set(_SIDE_STATE_FACTORIES)
+        if self.optimizer not in valid:
             raise ValueError(
-                f"Side {self.name!r}: optimizer must be 'ea', 'cma', "
-                "'frozen', 'qdax_map_elites', 'qdax_cma_me', 'rl', "
-                f"'pso', 'rl_hpo', 'neat', 'hyperneat', or "
-                f"'es_hyperneat'; got {self.optimizer!r}."
+                f"Side {self.name!r}: optimizer must be one of "
+                f"{sorted(valid)}; got {self.optimizer!r}."
             )
         if not self.role_prefixes:
-            raise ValueError(
-                f"Side {self.name!r}: role_prefixes must be non-empty."
-            )
+            raise ValueError(f"Side {self.name!r}: role_prefixes must be non-empty.")
         self.role_prefixes = tuple(self.role_prefixes)
         if not (0.0 <= self.archive_mix <= 1.0):
             raise ValueError(
@@ -161,6 +151,14 @@ class GenerationStats:
     archive_best_fitness: Optional[float] = None
     filled_niches: Optional[int] = None
     total_niches: Optional[int] = None
+    #: Real env interactions this side performed *during* this generation
+    #: (per-generation, not cumulative). Populated by evolving sides from
+    #: their evaluator's ``env_steps_consumed`` counter; left at 0 for sides
+    #: that cannot report real ticks. The trainer sums these across sides and
+    #: generations for the top-level ``env_steps_consumed`` metric.
+    env_steps: int = 0
+    #: Wall-clock seconds this ``step_generation`` call took.
+    wall_time_s: float = 0.0
 
 
 class SideState:
@@ -168,7 +166,7 @@ class SideState:
 
     Subclasses must implement :meth:`initialise`, :meth:`step_generation`,
     :meth:`current_pool`, and :meth:`best_policy`.
-    
+
     Notes:
         Subclasses that use ``np.random.*`` operators set this after
         seeding in :meth:`initialise` (via the trainer). When set,
@@ -183,6 +181,11 @@ class SideState:
         self.history: List[GenerationStats] = []
 
         self._np_state: Optional[Any] = None
+        self._py_state: Optional[Any] = None
+        # True for RL sides; read by trainer GPU-contention and worker-fallback detectors.
+        self.is_rl_side: bool = False
+        # Torch device string; overwritten in initialise() by RL subclasses.
+        self.resolved_device: str = "cpu"
 
     # Lifecycle hooks — subclasses override
 
@@ -240,9 +243,7 @@ def _make_feedforward_policy_factory(
                 "Feedforward policy factory expected FixedTopologyGenome "
                 f"(or item.genome of that type); got {type(genome)}."
             )
-        return FeedforwardNeuralPolicy(
-            genome, action_space=action_space, masked=masked
-        )
+        return FeedforwardNeuralPolicy(genome, action_space=action_space, masked=masked)
 
     return _factory
 
@@ -257,13 +258,9 @@ def _resolve_side_action_space(
     already enforced by :func:`_resolve_shared_action_space` in the
     plain :class:`EATrainer`.
     """
-    side_agents = [
-        a for a in env.possible_agents if a.startswith(role_prefixes)
-    ]
+    side_agents = [a for a in env.possible_agents if a.startswith(role_prefixes)]
     if not side_agents:
-        raise ValueError(
-            f"No env agents match role_prefixes={role_prefixes!r}."
-        )
+        raise ValueError(f"No env agents match role_prefixes={role_prefixes!r}.")
     reference = env.action_space(side_agents[0])
     divergent = [a for a in side_agents[1:] if env.action_space(a) != reference]
     if divergent:
@@ -359,9 +356,13 @@ class EASideState(SideState):
         output_size = required_output_size(self._action_space)
 
         setup_deap_creators()
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
             "random_seed": self.seed,
         }
@@ -446,25 +447,37 @@ class EASideState(SideState):
             del ind.fitness.values
 
         # Simple (mu, lambda)=(N, N) generational loop with full replacement - matches EATrainer's "simple" strategy.
-        global_state_before: Optional[Any] = None
-        if self._np_state is not None:
-            global_state_before = np.random.get_state()
-            np.random.set_state(self._np_state)
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
 
-        offspring = [self.toolbox.clone(ind) for ind in self.population]
-        for i in range(1, len(offspring), 2):
-            if self._rng.random() < self.crossover_rate:
-                self.toolbox.mate(offspring[i - 1], offspring[i])
-                del offspring[i - 1].fitness.values
-                del offspring[i].fitness.values
-        for ind in offspring:
-            if self._rng.random() < self.mutation_rate:
-                self.toolbox.mutate(ind)
-                del ind.fitness.values
+            offspring = [self.toolbox.clone(ind) for ind in self.population]
+            for i in range(1, len(offspring), 2):
+                if self._rng.random() < self.crossover_rate:
+                    self.toolbox.mate(offspring[i - 1], offspring[i])
+                    del offspring[i - 1].fitness.values
+                    del offspring[i].fitness.values
+            for ind in offspring:
+                if self._rng.random() < self.mutation_rate:
+                    self.toolbox.mutate(ind)
+                    del ind.fitness.values
 
-        if global_state_before is not None:
-            self._np_state = np.random.get_state()
-            np.random.set_state(global_state_before)
+            # (mu, lambda) selection: choose next generation from offspring only
+            self.population = self.toolbox.select(offspring, self.population_size)
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
 
         # Evaluate invalid individuals.
         invalid = [ind for ind in offspring if not ind.fitness.valid]
@@ -476,13 +489,6 @@ class EASideState(SideState):
             for ind in invalid:
                 ind.fitness.values = self.toolbox.evaluate(ind)
 
-        # (mu, lambda) selection: choose next generation from offspring ONLY.
-        # In competitive coevolution, (mu+lambda) elitism is harmful because
-        # parent fitness values were earned against *previous* opponents; stale
-        # high-scoring parents will dominate tournament selection over offspring
-        # that are correctly evaluated against today's (harder) opponents,
-        # causing the population to freeze at a local optimum forever.
-        self.population = self.toolbox.select(offspring, self.population_size)
         self.hof.update(self.population)
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
@@ -499,6 +505,10 @@ class EASideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,  # current-gen best, not stale HoF value
+            # Real env ticks this side consumed this generation. The trainer
+            # builds a fresh evaluator per side per generation, so the
+            # evaluator's cumulative counter equals this generation's total.
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats
@@ -552,7 +562,7 @@ def _evaluate_with(individual: Any, evaluator: Any) -> Tuple[float, ...]:
     return evaluator.evaluate(individual)
 
 
-# 
+#
 # CMA-ES side
 
 
@@ -610,9 +620,13 @@ class CMAESSideState(SideState):
         elif self.seed is not None:
             np.random.seed(int(self.seed))
 
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
         }
 
@@ -640,7 +654,9 @@ class CMAESSideState(SideState):
             def evaluate(self, individual, **_kwargs):  # pragma: no cover
                 return (0.0,)
 
-        self.toolbox = register_cma_toolbox(self.strategy, self._ind_init, _NoopEvaluator())
+        self.toolbox = register_cma_toolbox(
+            self.strategy, self._ind_init, _NoopEvaluator()
+        )
         # Seed the population — needed so other sides can sample from
         # this side before first step_generation is completed.
         self.population = self.toolbox.generate()
@@ -696,17 +712,26 @@ class CMAESSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
-        global_state_before: Optional[Any] = None
-        if self._np_state is not None:
-            global_state_before = np.random.get_state()
-            np.random.set_state(self._np_state)
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
 
-        self.toolbox.update(self.population)
-        next_population = self.toolbox.generate()
-
-        if global_state_before is not None:
-            self._np_state = np.random.get_state()
-            np.random.set_state(global_state_before)
+            self.toolbox.update(self.population)
+            next_population = self.toolbox.generate()
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
 
         # Collect stats from the *evaluated* population before swapping.
         self.hof.update(self.population)
@@ -729,6 +754,8 @@ class CMAESSideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,  # current-gen best, not stale HoF value
+            # Real env ticks consumed this generation (fresh evaluator/gen).
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats
@@ -802,12 +829,13 @@ class PSOSideState(SideState):
         self._ind_init = None
 
     def initialise(
-        self, env: PettingZooWrapper, rng: Optional[np.random.Generator] = None,
+        self,
+        env: PettingZooWrapper,
+        rng: Optional[np.random.Generator] = None,
     ) -> None:
         sample_obs = env.reset(seed=0)
         learner_agent = next(
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         )
         input_size = len(sample_obs[learner_agent])
         self._action_space = _resolve_side_action_space(env, self.side.role_prefixes)
@@ -820,21 +848,29 @@ class PSOSideState(SideState):
         else:
             pso_seed = None
 
+        _is_box = hasattr(self._action_space, "low") and hasattr(
+            self._action_space, "high"
+        )
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
             "activation": self.activation,
+            "output_activation": "linear" if _is_box else self.activation,
             "weight_range": self.weight_range,
         }
         from deap_pettingzoo.integration.pso_integration import (
-            setup_pso_swarm,
             make_pso_ind_init,
             register_pso_toolbox,
+            setup_pso_swarm,
         )
+
         self.pso_state, _ = setup_pso_swarm(
             genome_config=genome_config,
             population_size=self.population_size,
-            phi1=self.phi1, phi2=self.phi2, weight=self.weight,
-            smin=self.smin, smax=self.smax,
+            phi1=self.phi1,
+            phi2=self.phi2,
+            weight=self.weight,
+            smin=self.smin,
+            smax=self.smax,
             seed=pso_seed,
         )
         self._ind_init = make_pso_ind_init(genome_config, self.pso_state)
@@ -844,11 +880,14 @@ class PSOSideState(SideState):
                 return (0.0,)
 
         self.toolbox = register_pso_toolbox(
-            self.pso_state, self._ind_init, _NoopEvaluator(),
+            self.pso_state,
+            self._ind_init,
+            _NoopEvaluator(),
         )
         self.population = self.toolbox.generate()
         self._policy_factory = _make_feedforward_policy_factory(
-            self._action_space, masked=self.masked,
+            self._action_space,
+            masked=self.masked,
         )
 
     def rebind_evaluator(self, evaluator: Any) -> None:
@@ -893,8 +932,28 @@ class PSOSideState(SideState):
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
 
-        self.toolbox.update(self.population)
         self.hof.update(self.population)
+
+        # RNG isolation: save/restore both Python random and NumPy global state so each side advances its own stream independently
+        py_before: Optional[Any] = None
+        np_before: Optional[Any] = None
+        try:
+            if self._py_state is not None:
+                py_before = _random.getstate()
+                _random.setstate(self._py_state)
+            if self._np_state is not None:
+                np_before = np.random.get_state()
+                np.random.set_state(self._np_state)
+
+            self.toolbox.update(self.population)
+        finally:
+            if py_before is not None:
+                self._py_state = _random.getstate()
+                _random.setstate(py_before)
+            if np_before is not None:
+                self._np_state = np.random.get_state()
+                np.random.set_state(np_before)
+
         fitnesses = [ind.fitness.values[0] for ind in self.population]
         best = float(max(fitnesses))
         self.best_fitness = max(self.best_fitness, best)
@@ -907,6 +966,8 @@ class PSOSideState(SideState):
             min=float(np.min(fitnesses)),
             max=best,
             best_fitness=best,
+            # Real env ticks consumed this generation (fresh evaluator/gen).
+            env_steps=int(getattr(evaluator, "env_steps_consumed", 0)),
         )
         self.history.append(stats)
         return stats
@@ -914,14 +975,16 @@ class PSOSideState(SideState):
     def current_pool(self) -> OpponentPool:
         assert self._policy_factory is not None
         pop_pool: OpponentPool = PopulationPool(
-            self.population, self._policy_factory,
+            self.population,
+            self._policy_factory,
             sampler=self.side.opponent_sampler,
         )
         if self.side.use_archive_in_opponent_pool and self.side.hof is not None:
             if len(self.side.hof) == 0:
                 return pop_pool
             archive_pool = ArchivePool(
-                self.side.hof, self._policy_factory,
+                self.side.hof,
+                self._policy_factory,
                 sampler=self.side.archive_sampler,
             )
             weights = (1.0 - self.side.archive_mix, self.side.archive_mix)
@@ -957,12 +1020,9 @@ class FrozenSideState(SideState):
         policies = list(side.frozen_policies or [])
         if not policies:
             raise ValueError(
-                f"FrozenSideState({side.name!r}): frozen_policies must be "
-                "non-empty."
+                f"FrozenSideState({side.name!r}): frozen_policies must be " "non-empty."
             )
-        self._pool = FrozenPolicyPool(
-            policies, sampler=side.opponent_sampler
-        )
+        self._pool = FrozenPolicyPool(policies, sampler=side.opponent_sampler)
         self._policies = policies
 
     def initialise(
@@ -981,7 +1041,11 @@ class FrozenSideState(SideState):
         stats = GenerationStats(
             generation=self.generation,
             side_name=self.side.name,
-            mean=0.0, std=0.0, min=0.0, max=0.0, best_fitness=0.0,
+            mean=0.0,
+            std=0.0,
+            min=0.0,
+            max=0.0,
+            best_fitness=0.0,
         )
         self.history.append(stats)
         return stats
@@ -997,73 +1061,191 @@ class FrozenSideState(SideState):
         return self._policies[0]
 
 
-# Factory
+# Open side-state factory registry
+
+
+def _load_qdax_side_state() -> type:
+    """Loader for the QDax co-evolution side (needs the ``qdax`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.qdax.coevolution import QDaxSideState
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'qdax_map_elites'/'qdax_cma_me' requires "
+            "the QDax extra. Install with `pip install deap-pettingzoo[qdax]`."
+        ) from exc
+    return QDaxSideState
+
+
+def _load_rl_side_state() -> type:
+    """Loader for the AgileRL co-evolution side."""
+    from .rl_side import RLSideState
+
+    return RLSideState
+
+
+def _load_rl_hpo_side_state() -> type:
+    """Loader for the AgileRL evolutionary-HPO co-evolution side."""
+    from .rl_hpo_side import RLEvolveHPOSideState
+
+    return RLEvolveHPOSideState
+
+
+def _load_neat_side_state() -> type:
+    """Loader for the NEAT co-evolution side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.coevolution import NeatSideState
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'neat' requires the neat extra. Install "
+            "with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return NeatSideState
+
+
+def _load_hyperneat_side_state() -> type:
+    """Loader for the HyperNEAT co-evolution side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+            HyperNeatSideState,
+        )
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'hyperneat' requires the neat extra. "
+            "Install with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return HyperNeatSideState
+
+
+def _load_es_hyperneat_side_state() -> type:
+    """Loader for the ES-HyperNEAT side (needs the ``neat`` extra)."""
+    try:
+        from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
+            ESHyperNeatSideState,
+        )
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            "Co-evolution optimizer 'es_hyperneat' requires the neat extra. "
+            "Install with `pip install deap-pettingzoo[neat]`."
+        ) from exc
+    return ESHyperNeatSideState
+
+
+#: Open registry mapping a ``Side.optimizer`` token to a zero-arg **loader**
+#: returning the matching :class:`SideState` subclass. Each loader owns any
+#: lazy import + the friendly "install the X extra" :class:`ImportError`, so
+#: :func:`make_side_state` stays a one-line lookup and third parties can add a
+#: side without editing this module (see :func:`register_side_state`). This is
+#: the authoritative source for :meth:`Side.__post_init__` validation too.
+_SIDE_STATE_FACTORIES: Dict[str, Callable[[], type]] = {
+    "ea": lambda: EASideState,
+    "cma": lambda: CMAESSideState,
+    "frozen": lambda: FrozenSideState,
+    "pso": lambda: PSOSideState,
+    "rl": _load_rl_side_state,
+    "rl_hpo": _load_rl_hpo_side_state,
+    "qdax_map_elites": _load_qdax_side_state,
+    "qdax_cma_me": _load_qdax_side_state,
+    "neat": _load_neat_side_state,
+    "hyperneat": _load_hyperneat_side_state,
+    "es_hyperneat": _load_es_hyperneat_side_state,
+}
+
+
+def _resolve_side_loader(loader_or_class: Any) -> Callable[[], type]:
+    """Normalise ``register_side_state`` input into a zero-arg class loader.
+
+    Accepts a :class:`SideState` subclass (used directly), a dotted
+    ``"module:QualName"`` string (imported lazily — worker-safe), or an
+    existing zero-arg loader callable (returned as-is).
+    """
+    if isinstance(loader_or_class, type):
+        cls = loader_or_class
+        return lambda: cls
+    if isinstance(loader_or_class, str):
+        dotted = loader_or_class
+
+        def _loader() -> type:
+            return _import_dotted(dotted)
+
+        return _loader
+    if callable(loader_or_class):
+        return loader_or_class
+    raise TypeError(
+        "register_side_state expects a SideState subclass, a dotted "
+        f"'module:QualName' string, or a zero-arg loader; got "
+        f"{loader_or_class!r}."
+    )
+
+
+def _import_dotted(dotted: str) -> type:
+    """Import and return the object named by a dotted ``module:QualName`` path.
+
+    Also allows the ``module.QualName`` form (splits on the last dot).
+    """
+    module_path, sep, qualname = dotted.partition(":")
+    if not sep:
+        module_path, _, qualname = dotted.rpartition(".")
+    if not module_path or not qualname:
+        raise ValueError(
+            f"Invalid dotted side-state binding {dotted!r}; expected "
+            "'module:QualName'."
+        )
+    obj: Any = importlib.import_module(module_path)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def register_side_state(
+    token: str,
+    loader_or_class: Any,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Register a :class:`SideState` factory for a co-evolution optimizer token.
+
+    Once registered, ``token`` is a valid :attr:`Side.optimizer` (validated
+    against this registry) and :func:`make_side_state` builds it.
+
+    Args:
+        token: The ``Side.optimizer`` string this side answers to.
+        loader_or_class: A :class:`SideState` subclass, a dotted
+            ``"module:QualName"`` string (imported lazily on first use — the
+            worker-safe form), or a zero-arg loader returning the subclass
+            (which may own a lazy import + friendly ``ImportError``).
+        overwrite: If ``False`` (default), re-registering an existing token
+            raises :class:`ValueError`; set ``True`` to replace.
+
+    Raises:
+        ValueError: If ``token`` is already registered and ``overwrite`` is
+            ``False``.
+        TypeError: If ``loader_or_class`` is not a class, dotted string, or
+            callable.
+    """
+    if not overwrite and token in _SIDE_STATE_FACTORIES:
+        raise ValueError(
+            f"Co-evolution side optimizer {token!r} is already registered. "
+            "Pass overwrite=True to replace."
+        )
+    _SIDE_STATE_FACTORIES[token] = _resolve_side_loader(loader_or_class)
 
 
 def make_side_state(side: Side) -> SideState:
-    """Construct the appropriate :class:`SideState` subclass for ``side``."""
-    if side.optimizer == "ea":
-        return EASideState(side)
-    if side.optimizer == "cma":
-        return CMAESSideState(side)
-    if side.optimizer == "frozen":
-        return FrozenSideState(side)
-    if side.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
-        try:
-            from deap_pettingzoo.contrib.qdax.coevolution import QDaxSideState
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer={side.optimizer!r} requires "
-                "the QDax extra. Install with `pip install "
-                "deap-pettingzoo[qdax]`."
-            ) from exc
-        return QDaxSideState(side)
-    if side.optimizer == "rl":
-        from .rl_side import RLSideState
+    """Construct the appropriate :class:`SideState` subclass for ``side``.
 
-        return RLSideState(side)
-    if side.optimizer == "pso":
-        return PSOSideState(side)
-    if side.optimizer == "rl_hpo":
-        from .rl_hpo_side import RLEvolveHPOSideState
-        return RLEvolveHPOSideState(side)
-    if side.optimizer == "neat":
-        try:
-            from deap_pettingzoo.contrib.neat.coevolution import NeatSideState
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='neat' requires the "
-                "neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return NeatSideState(side)
-    if side.optimizer == "hyperneat":
-        try:
-            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
-                HyperNeatSideState,
-            )
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='hyperneat' requires the "
-                "neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return HyperNeatSideState(side)
-    if side.optimizer == "es_hyperneat":
-        try:
-            from deap_pettingzoo.contrib.neat.hyperneat_coevolution import (
-                ESHyperNeatSideState,
-            )
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                f"Side {side.name!r}: optimizer='es_hyperneat' requires "
-                "the neat extra. Install with `pip install "
-                "deap-pettingzoo[neat]`."
-            ) from exc
-        return ESHyperNeatSideState(side)
-    raise ValueError(  # pragma: no cover — guarded by Side.__post_init__
-        f"Unknown optimizer {side.optimizer!r}"
-    )
+    Looks ``side.optimizer`` up in the open :data:`_SIDE_STATE_FACTORIES`
+    registry, resolves the concrete class through its loader (triggering any
+    lazy optional-extra import), and instantiates ``cls(side)``.
+    """
+    try:
+        loader = _SIDE_STATE_FACTORIES[side.optimizer]
+    except KeyError:  # pragma: no cover — guarded by Side.__post_init__
+        raise ValueError(
+            f"Unknown optimizer {side.optimizer!r}. Known: "
+            f"{sorted(_SIDE_STATE_FACTORIES)}"
+        ) from None
+    cls = loader()
+    return cls(side)
 
 
 __all__ = [
@@ -1075,4 +1257,5 @@ __all__ = [
     "PSOSideState",
     "GenerationStats",
     "make_side_state",
+    "register_side_state",
 ]

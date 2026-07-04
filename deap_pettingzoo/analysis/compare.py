@@ -87,6 +87,7 @@ def mann_whitney(
         }
     try:
         from scipy import stats  # noqa: WPS433
+
         res = stats.mannwhitneyu(a, b, alternative=alternative)
         stat = float(res.statistic)
         p = float(res.pvalue)
@@ -179,6 +180,7 @@ def welch_t(x: Sequence[float], y: Sequence[float]) -> Dict[str, float]:
     )
     try:
         from scipy import stats  # noqa: WPS433
+
         p = float(2.0 * stats.t.sf(abs(t), df))
     except ImportError:  # pragma: no cover
         p = math.erfc(abs(t) / math.sqrt(2.0))

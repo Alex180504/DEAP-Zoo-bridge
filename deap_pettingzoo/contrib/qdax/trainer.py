@@ -12,10 +12,16 @@ fast JAX-native scoring path is used
 
 Hyperparameters are consumed from :attr:`TrainingConfig.algorithm_params`.
 See each trainer's ``_DEFAULT_PARAMS`` for the keys and defaults.
+``TrainingConfig.seed`` and ``TrainingConfig.max_steps_per_episode`` are
+primary fields honored via :func:`_apply_universal_keys` — ``seed``
+always overrides ``algorithm_params['seed']``; ``max_steps_per_episode``
+fills ``algorithm_params['episode_length']`` only when the caller has not
+set it explicitly.
 """
 
 from __future__ import annotations
 
+import logging
 import pickle
 import time
 import warnings
@@ -29,6 +35,8 @@ from deap_pettingzoo.baselines.base import (
     BudgetMode,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import (
@@ -38,6 +46,8 @@ from deap_pettingzoo.contrib.qdax.progress import (
 )
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.environments.registry import get_env_spec
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level flag so we only emit the "frame recording is unsupported
@@ -88,8 +98,7 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "iso_sigma": 0.005,
     "line_sigma": 0.05,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -110,8 +119,7 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "sigma_g": 0.1,
     "num_emitters": 1,
     "episode_length": 25,
-    "descriptor": "pursuit_evasion_2d",
-    "descriptor_kwargs": {},
+    "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
@@ -122,51 +130,48 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
 }
 
 
-def _resolve_descriptor(name: str, env: PettingZooWrapper, kwargs: Dict[str, Any]):
-    """Instantiate a descriptor factory by short name."""
-    from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe_desc
+def _apply_universal_keys(config: TrainingConfig, params: Dict[str, Any]) -> None:
+    """Thread ``TrainingConfig``'s first-class ``seed``/``max_steps_per_episode``
+    into the QDax ``algorithm_params`` dict, in place.
 
-    agents = list(env.possible_agents)
-    pursuers = [a for a in agents if a.startswith("adversary")]
-    evaders = [a for a in agents if not a.startswith("adversary")]
+    QDax's algorithm-specific defaults (``_DEFAULT_MAP_ELITES_PARAMS`` /
+    ``_DEFAULT_CMA_ME_PARAMS``) already carry a ``seed`` and an
+    ``episode_length`` (the JAX-scan rollout length, QDax's analogue of
+    ``max_steps_per_episode``). ``config.seed``, when set, always takes precendence.
+    ``config.max_steps_per_episode``
+    only fills ``episode_length`` when the caller has not explicitly set it
+    in ``algorithm_params`` — an explicit ``episode_length`` still precedes.
+    """
+    if config.seed is not None:
+        params["seed"] = int(config.seed)
+    explicit = config.algorithm_params or {}
+    if config.max_steps_per_episode is not None and "episode_length" not in explicit:
+        params["episode_length"] = int(config.max_steps_per_episode)
 
-    if pursuers and evaders:
-        default_kwargs = {
-            "num_pursuers": len(pursuers),
-            "num_evaders": len(evaders),
-        }
-    else:
-        default_kwargs = {}
-        if "num_pursuers" not in kwargs or "num_evaders" not in kwargs:
-            raise ValueError(
-                "Could not infer a consistent pursuit/evasion agent partition "
-                f"from env.possible_agents={agents!r}. Automatic inference only "
-                "works for tag-style envs with agent names prefixed by "
-                "'adversary'. Please pass explicit descriptor_kwargs with both "
-                "'num_pursuers' and 'num_evaders'."
-            )
 
-    merged = {**default_kwargs, **kwargs}
-    num_pursuers = int(merged["num_pursuers"])
-    num_evaders = int(merged["num_evaders"])
-    if num_pursuers + num_evaders != len(agents):
+def _require_descriptor_fn(params: Dict[str, Any]):
+    """Return the injected ``descriptor_fn`` callable, validating its contract.
+
+    The qdax trainers are environment-agnostic: the caller must supply a
+    behavioural-descriptor callable in ``algorithm_params['descriptor_fn']``.
+    Concrete descriptors live outside the library (e.g.
+    ``examples/qdax/descriptors.py``).
+    """
+    descriptor_fn = params.get("descriptor_fn")
+    if descriptor_fn is None:
         raise ValueError(
-            "Descriptor agent counts must sum to the number of possible "
-            f"agents: num_pursuers={num_pursuers}, num_evaders={num_evaders}, "
-            f"len(env.possible_agents)={len(agents)}."
+            "algorithm_params['descriptor_fn'] is required. Pass a callable "
+            "(trajectory) -> array exposing 'min_bd'/'max_bd'/'output_shape' "
+            "(e.g. from examples.qdax.descriptors)."
         )
-    merged["num_pursuers"] = num_pursuers
-    merged["num_evaders"] = num_evaders
-
-    if name == "pursuit_evasion_2d":
-        return pe_desc.formation_spread_and_mean_distance(**merged)
-    if name == "pursuit_evasion_3d":
-        return pe_desc.with_capture_efficiency(**merged)
-    raise ValueError(
-        f"Unknown descriptor {name!r}. Supported: "
-        "'pursuit_evasion_2d', 'pursuit_evasion_3d'. Pass a callable "
-        "directly via algorithm_params['descriptor_fn'] to use a custom one."
-    )
+    if not callable(descriptor_fn) or not (
+        hasattr(descriptor_fn, "min_bd") and hasattr(descriptor_fn, "max_bd")
+    ):
+        raise ValueError(
+            "descriptor_fn must be callable and expose 'min_bd' and 'max_bd' "
+            f"tuples; got {descriptor_fn!r}."
+        )
+    return descriptor_fn
 
 
 def _infer_layer_sizes(env: PettingZooWrapper, hidden: tuple) -> tuple:
@@ -189,19 +194,25 @@ def _compute_centroids(min_bd, max_bd, grid_shape, num_centroids, key):
 
     if num_centroids is not None:
         key, sub = jax.random.split(key)
-        return compute_cvt_centroids(
-            num_descriptors=len(min_bd),
-            num_init_cvt_samples=max(50_000, num_centroids * 50),
-            num_centroids=int(num_centroids),
+        return (
+            compute_cvt_centroids(
+                num_descriptors=len(min_bd),
+                num_init_cvt_samples=max(50_000, num_centroids * 50),
+                num_centroids=int(num_centroids),
+                minval=list(min_bd),
+                maxval=list(max_bd),
+                key=sub,
+            ),
+            key,
+        )
+    return (
+        compute_euclidean_centroids(
+            grid_shape=tuple(int(x) for x in grid_shape),
             minval=list(min_bd),
             maxval=list(max_bd),
-            key=sub,
-        ), key
-    return compute_euclidean_centroids(
-        grid_shape=tuple(int(x) for x in grid_shape),
-        minval=list(min_bd),
-        maxval=list(max_bd),
-    ), key
+        ),
+        key,
+    )
 
 
 def _sample_initial_leaf(leaf, key, *, batch_size: int, mode: str, sigma: float):
@@ -251,17 +262,40 @@ def _build_initial_genotypes(
 
 
 def _budget_to_iterations(config: TrainingConfig, params: Dict[str, Any]) -> int:
-    """Translate ``config.budget_value`` into a QDax iteration count."""
+    """Translate ``config.budget_value`` into a QDax iteration count.
+
+    The initial repertoire (``init_batch_size`` genotypes, defaulting to the
+    per-iteration ``batch_size`` for CMA-ME) is a realevaluation, so its
+    env-step / episode cost is deducted from the budget *before* deriving
+    iterations — otherwise an ENV_STEPS-matched QDax run overspends the budget
+    by the (often larger) init population.
+    """
     batch = int(params["batch_size"])
     ep_len = int(params["episode_length"])
     eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+    init_batch = int(params.get("init_batch_size", batch))
+    if config.budget_mode == BudgetMode.GENERATIONS:
+        return max(1, int(config.budget_value))
     if config.budget_mode == BudgetMode.ENV_STEPS:
-        return max(1, config.budget_value // (batch * ep_len * eval_episodes))
+        init_cost = init_batch * ep_len * eval_episodes
+        return derive_generations(
+            config.budget_value - init_cost,
+            batch * eval_episodes,
+            ep_len,
+            label="QDax",
+        )
     if config.budget_mode == BudgetMode.EVAL_EPISODES:
-        return max(1, config.budget_value // (batch * eval_episodes))
+        init_cost = init_batch * eval_episodes
+        return derive_generations(
+            config.budget_value - init_cost,
+            batch * eval_episodes,
+            1,
+            label="QDax",
+            unit="eval episodes",
+        )
     raise ValueError(
-        f"QDax trainers support BudgetMode.ENV_STEPS and "
-        f"BudgetMode.EVAL_EPISODES; got {config.budget_mode}."
+        f"QDax trainers support BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES, "
+        f"and BudgetMode.GENERATIONS; got {config.budget_mode}."
     )
 
 
@@ -275,12 +309,13 @@ def _print_qdax_plan(
     num_iters: int,
     num_workers: int,
 ) -> None:
-    print(
+    msg = (
         f"[{label}] init_batch={init_batch_size}  batch={batch_size}  "
         f"eval_eps={eval_episodes}  ep_len={episode_length}  "
-        f"iters={num_iters}  workers={num_workers}",
-        flush=True,
+        f"iters={num_iters}  workers={num_workers}"
     )
+    print(msg, flush=True)
+    logger.info("%s", msg)
 
 
 def _validate_jax_parallel_settings(num_workers: int, eval_episodes: int) -> None:
@@ -323,10 +358,30 @@ def _print_qdax_metrics(
         batch_best=batch_best,
         batch_mean=batch_mean,
     )
-    print(
-        f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)",
-        flush=True,
-    )
+    msg = f"[{label}] {stage}  {summary}  ({elapsed:.1f}s)"
+    print(msg, flush=True)
+    logger.info("%s", msg)
+
+
+def _resolve_action_decoding(action_space, continuous: bool):
+    """Return ``(action_type, nvec)`` for a shared (homogeneous) action space.
+
+    ``nvec`` is a list of per-sub-action choice counts when the space is
+    MultiDiscrete, else ``None``.
+    """
+    if continuous:
+        return "continuous", None
+    if action_space is not None and hasattr(action_space, "nvec"):
+        return "multidiscrete", [int(x) for x in action_space.nvec]
+    return "discrete", None
+
+
+def _jax_action_space(jax_env, agent):
+    """Best-effort action-space lookup for a JAX-native env."""
+    if hasattr(jax_env, "action_space"):
+        return jax_env.action_space(agent)
+    action_spaces = getattr(jax_env, "action_spaces", None)
+    return action_spaces[agent] if action_spaces is not None else None
 
 
 def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
@@ -336,24 +391,20 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     import jax
 
     from deap_pettingzoo.contrib.qdax.policy import (
-        make_flax_mlp,
         init_flax_mlp_params,
+        make_flax_mlp,
     )
     from deap_pettingzoo.contrib.qdax.scoring_jax import make_jax_scoring_function
     from deap_pettingzoo.contrib.qdax.scoring_numpy import (
         make_numpy_scoring_function,
     )
 
-    env = PettingZooWrapper(
-        env_name=config.env_name, env_config=config.env_config
-    )
+    env = PettingZooWrapper(env_name=config.env_name, env_config=config.env_config)
     hidden = tuple(params["hidden_sizes"])
     layer_sizes = params["layer_sizes"] or _infer_layer_sizes(env, hidden)
     module = make_flax_mlp(layer_sizes, activation=params["activation"])
 
-    descriptor_fn = params.get("descriptor_fn") or _resolve_descriptor(
-        params["descriptor"], env, params.get("descriptor_kwargs", {})
-    )
+    descriptor_fn = _require_descriptor_fn(params)
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
@@ -381,25 +432,29 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
         # Filter agent_list to only agents whose obs size matches the policy
         # input (layer_sizes[0]) so the shared network applies cleanly.
         import jax as _jax
+
         _k0 = _jax.random.PRNGKey(0)
         _obs0, _ = raw_jax_env.reset(_k0)
         _all_agents = list(_obs0.keys())
-        _matching = [a for a in _all_agents
-                     if int(_obs0[a].shape[0]) == layer_sizes[0]]
+        _matching = [a for a in _all_agents if int(_obs0[a].shape[0]) == layer_sizes[0]]
         if not _matching:
             # No agent matches — rebuild with the first agent's actual obs size.
             _agent0 = _all_agents[0]
             actual_in_dim = int(_obs0[_agent0].shape[0])
             layer_sizes = (actual_in_dim, *layer_sizes[1:])
             module = make_flax_mlp(layer_sizes, activation=params["activation"])
-            _matching = [a for a in _all_agents
-                         if int(_obs0[a].shape[0]) == actual_in_dim]
+            _matching = [
+                a for a in _all_agents if int(_obs0[a].shape[0]) == actual_in_dim
+            ]
+        jax_action_type, _ = _resolve_action_decoding(
+            _jax_action_space(raw_jax_env, _matching[0]), config.continuous
+        )
         scoring_fn = make_jax_scoring_function(
             raw_jax_env,
             module,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=jax_action_type,
             agents=_matching,
         )
     else:
@@ -410,13 +465,17 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             UserWarning,
             stacklevel=2,
         )
+        np_action_type, np_nvec = _resolve_action_decoding(
+            env.action_space(env.possible_agents[0]), config.continuous
+        )
         scoring_fn = make_numpy_scoring_function(
             config.env_name,
             layer_sizes=layer_sizes,
             episode_length=int(params["episode_length"]),
             descriptor_fn=descriptor_fn,
             env_config=config.env_config,
-            action_type="discrete" if not config.continuous else "continuous",
+            action_type=np_action_type,
+            nvec=np_nvec,
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
@@ -477,19 +536,22 @@ def _extract_champion(repertoire, module, *, action_space=None):
 class MAPElitesTrainer(BaselineTrainer):
     """MAP-Elites trainer over a Flax MLP policy.
 
-    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``.
-    ``WALL_CLOCK`` is intentionally not supported: the QDax loop is
-    unpredictable in wall time because the first iteration incurs the
-    ``jit`` compile cost.
+    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``,
+    ``GENERATIONS`` (iterations are the native unit).
     """
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
+        return mode in (
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        )
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,
@@ -498,14 +560,16 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
-        from qdax.core.map_elites import MAPElites
         from qdax.core.emitters.mutation_operators import isoline_variation
         from qdax.core.emitters.standard_emitters import MixingEmitter
+        from qdax.core.map_elites import MAPElites
         from qdax.utils.metrics import default_qd_metrics
 
         params = {**_DEFAULT_MAP_ELITES_PARAMS, **(config.algorithm_params or {})}
+        _apply_universal_keys(config, params)
         env, module, layer_sizes, descriptor_fn, scoring_fn, init_params = (
             _build_env_and_scoring(config, params)
         )
@@ -544,9 +608,7 @@ class MAPElitesTrainer(BaselineTrainer):
             variation_percentage=1.0,
             batch_size=int(params["batch_size"]),
         )
-        metrics_fn = lambda rep: default_qd_metrics(  # noqa: E731
-            rep, qd_offset=0.0
-        )
+        metrics_fn = lambda rep: default_qd_metrics(rep, qd_offset=0.0)  # noqa: E731
 
         map_elites = MAPElites(
             scoring_function=scoring_fn,
@@ -617,7 +679,7 @@ class MAPElitesTrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -634,12 +696,21 @@ class MAPElitesTrainer(BaselineTrainer):
 
         # Summary metrics: take the last entry of each QDax metric
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        _env_steps_per_iter = int(params["batch_size"]) * _ep_len * _eval_episodes
+        _init_env_steps = int(params["init_batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": champion_fitness,
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            "env_steps_nominal": int(_init_env_steps + num_iters * _env_steps_per_iter),
+            # Real int on the numpy/PettingZoo scoring path; None on the
+            # JAX-native path, where scoring runs inside jax.jit/vmap with no
+            # Python-side per-tick counter (a documented structural limit).
+            "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
         _persist_qdax_results(
@@ -648,12 +719,17 @@ class MAPElitesTrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
-            recording_max_steps=int(params["episode_length"]),
-            repertoire_path=Path(metadata["repertoire_path"])
-            if "repertoire_path" in metadata
-            else None,
+            recording_max_steps=_ep_len,
+            repertoire_path=(
+                Path(metadata["repertoire_path"])
+                if "repertoire_path" in metadata
+                else None
+            ),
+            env_steps_per_iteration=_env_steps_per_iter,
+            init_env_steps=_init_env_steps,
+            env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
         )
 
         return TrainingResult(
@@ -676,12 +752,17 @@ class CMAMETrainer(BaselineTrainer):
     """
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
+        return mode in (
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        )
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
             "continuous_action": True,
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": False,
@@ -690,22 +771,24 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
+        reject_consumed_budgeting(config, "CMAMETrainer")
 
         import jax
         import jax.numpy as jnp
-        from qdax.core.map_elites import MAPElites
         from qdax.core.emitters.cma_improvement_emitter import CMAImprovementEmitter
+        from qdax.core.map_elites import MAPElites
         from qdax.utils.metrics import default_qd_metrics
 
         from deap_pettingzoo.contrib.qdax.policy import (
+            FlaxPolicyAdapter,
             flat_count,
             flat_to_pytree,
-            FlaxPolicyAdapter,
         )
 
         params = {**_DEFAULT_CMA_ME_PARAMS, **(config.algorithm_params or {})}
-        env, module, layer_sizes, descriptor_fn, scoring_fn, _ = (
-            _build_env_and_scoring(config, params)
+        _apply_universal_keys(config, params)
+        env, module, layer_sizes, descriptor_fn, scoring_fn, _ = _build_env_and_scoring(
+            config, params
         )
 
         genotype_dim = flat_count(layer_sizes)
@@ -809,9 +892,7 @@ class CMAMETrainer(BaselineTrainer):
 
         # Champion extraction: repertoire genotypes are flat arrays here.
         fitnesses = np.asarray(repertoire.fitnesses)
-        best_idx = int(
-            np.argmax(np.where(np.isfinite(fitnesses), fitnesses, -np.inf))
-        )
+        best_idx = int(np.argmax(np.where(np.isfinite(fitnesses), fitnesses, -np.inf)))
         flat_champion = np.asarray(repertoire.genotypes[best_idx])
         champion_params = flat_to_pytree(flat_champion, layer_sizes)
         champion_policy = FlaxPolicyAdapter(
@@ -821,7 +902,7 @@ class CMAMETrainer(BaselineTrainer):
         )
 
         metadata: Dict[str, Any] = {
-            "descriptor": params["descriptor"],
+            "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
             "num_iterations": num_iters,
             "layer_sizes": tuple(layer_sizes),
@@ -835,12 +916,22 @@ class CMAMETrainer(BaselineTrainer):
             metadata["repertoire_path"] = str(path)
 
         last = history[-1]
+        _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
+        _ep_len = int(params["episode_length"])
+        # CMA-ME builds its initial repertoire from a single batch, so the
+        # init charge equals one iteration's env steps.
+        _iter_env_steps = int(params["batch_size"]) * _ep_len * _eval_episodes
         metrics_out = {
             "best_fitness": float(fitnesses[best_idx]),
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
             "num_iterations": num_iters,
+            # init batch + one batch per iteration.
+            "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
+            # Real int on the numpy/PettingZoo path; None on the JAX-native
+            # path (no Python-side per-tick counter, documented).
+            "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
         _persist_qdax_results(
@@ -849,12 +940,17 @@ class CMAMETrainer(BaselineTrainer):
             history=history,
             summary=metrics_out,
             training_time=elapsed,
-            extra_summary={"descriptor": params["descriptor"]},
+            extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
-            recording_max_steps=int(params["episode_length"]),
-            repertoire_path=Path(metadata["repertoire_path"])
-            if "repertoire_path" in metadata
-            else None,
+            recording_max_steps=_ep_len,
+            repertoire_path=(
+                Path(metadata["repertoire_path"])
+                if "repertoire_path" in metadata
+                else None
+            ),
+            env_steps_per_iteration=_iter_env_steps,
+            init_env_steps=_iter_env_steps,
+            env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
         )
 
         return TrainingResult(
@@ -881,42 +977,39 @@ def _maybe_record_qdax_champion(
     *,
     champion_policy,
     recording_max_steps: Optional[int],
+    iteration: Optional[int] = None,
 ) -> None:
-    """Record one final champion rollout when recording is enabled."""
+    """Record one final champion rollout when recording is enabled.
+
+    ``iteration`` is the QDax iteration the recorded champion corresponds
+    to (typically the final iteration). It is written to the recorder's
+    ``frames/recordings.json`` sidecar so the UI can associate the artefact
+    with its metrics row (carrying ``qd_score``, ``coverage``, etc.).
+    """
     if champion_policy is None:
         return
 
-    recording_cfg = config.recording
-    if not recording_cfg.enabled:
-        return
+    from deap_pettingzoo.baselines.recording import RecordingController
 
-    from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
-
-    recorder = log.get_frame_recorder(
-        fps=recording_cfg.fps,
-        fmt=recording_cfg.fmt,
-        max_frames_per_episode=recording_cfg.max_frames_per_episode,
-        max_dim=recording_cfg.max_dim,
-        episode_prefix=recording_cfg.episode_prefix or "train_",
-    )
-    if not recorder.enabled:
-        return
-
-    evaluator = UnifiedEvaluator(
+    # QDax's scoring loop is JAX-vectorised and can't be hooked mid-run, so
+    # the controller is driven via finalize() to capture just the final
+    # champion (matched to the last QDax iteration row in the sidecar).
+    controller = RecordingController(
+        config,
+        log,
         max_steps=int(recording_max_steps or 500),
-        frame_recorder=recorder,
+        seed=(
+            config.seed
+            if config.seed is not None
+            else config.algorithm_params.get("seed")
+        ),
     )
-    try:
-        rollout_seed = config.algorithm_params.get("seed")
-        evaluator.evaluate(
-            policy=champion_policy,
-            env_name=config.env_name,
-            num_episodes=1,
-            seed=int(rollout_seed) if rollout_seed is not None else None,
-            env_config=dict(config.env_config) if config.env_config else None,
-        )
-    except Exception:
-        pass
+    controller.finalize(
+        lambda: champion_policy,
+        iteration=int(iteration) if iteration is not None else 0,
+        env_steps=0,
+    )
+    controller.close()
 
 
 def _persist_qdax_results(
@@ -930,6 +1023,9 @@ def _persist_qdax_results(
     champion_policy=None,
     recording_max_steps: Optional[int] = None,
     repertoire_path: Optional[Path] = None,
+    env_steps_per_iteration: int = 0,
+    init_env_steps: int = 0,
+    env_steps_consumed: Optional[int] = None,
 ) -> None:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
 
@@ -938,9 +1034,20 @@ def _persist_qdax_results(
     ``mean_fitness``). Numeric scalars are coerced to float; non-numeric
     fields are skipped. No-op when ``config.output_dir`` is ``None``.
 
+    The cumulative ``env_steps`` axis charges the initial repertoire build
+    (``history[0]``) at ``init_env_steps`` and every subsequent iteration at
+    ``env_steps_per_iteration`, so the QDax env-step axis includes the
+    uncharged initial population. Both default to ``0`` for callers
+    that do not supply them.
+
+    ``env_steps_consumed``, when not ``None``, is the real env-step counter
+    from the numpy/PettingZoo scoring path; on the JAX-native scoring path
+    (no Python-side per-tick counter) it is ``None`` and ``env_steps`` falls
+    back to the nominal computation.
+
     If ``repertoire_path`` points to an existing file, it is registered
     in ``manifest.artifacts['policy']`` so the analysis loader can
-    rebuild a policy for the UI's Live Rollout page.
+    rebuild a policy.
     """
     from deap_pettingzoo.baselines._logging_helpers import (
         build_logger,
@@ -953,9 +1060,17 @@ def _persist_qdax_results(
 
     with build_logger(config, algorithm=algorithm) as log:
         for i, entry in enumerate(history):
+            # history[0] is the initial repertoire (init_env_steps); each
+            # later iteration adds env_steps_per_iteration.
+            _nominal = int(init_env_steps) + i * int(env_steps_per_iteration)
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": 0,
+                "env_steps": (
+                    int(env_steps_consumed)
+                    if env_steps_consumed is not None
+                    else _nominal
+                ),
+                "nominal_env_steps": _nominal,
                 "wall_time": 0.0,
             }
             try:
@@ -969,11 +1084,16 @@ def _persist_qdax_results(
                     continue
             log.row("metrics", row)
 
+        try:
+            n_iters = len(history)
+        except TypeError:
+            n_iters = 0
         _maybe_record_qdax_champion(
             log,
             config,
             champion_policy=champion_policy,
             recording_max_steps=recording_max_steps,
+            iteration=(n_iters - 1) if n_iters else None,
         )
 
         full_summary = {"algorithm": algorithm, **summary}

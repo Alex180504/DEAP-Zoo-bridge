@@ -108,7 +108,7 @@ def test_third_party_env_with_feedforward_policy(tiny_env_name):
     from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 
     wrapper = PettingZooWrapper(tiny_env_name)
-    genome = FixedTopologyGenome([3, 8, 2], activation="tanh")
+    genome = FixedTopologyGenome([3, 8, 2], activation="tanh", output_activation="linear")
     policies = {
         agent: FeedforwardNeuralPolicy(
             genome, action_space=wrapper.env.action_space(agent)

@@ -100,7 +100,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
             env_name: Registered PettingZoo env name.
             seed: Master seed (recorded in the manifest).
             env_config: Env config dict.
-            budget_mode: ``"env_steps" | "eval_episodes" | "wall_clock"``.
+            budget_mode: ``"env_steps" | "eval_episodes" | "generations"``.
             budget_value: Budget amount in matching units.
             hyperparams: Trainer-specific hyperparameters.
             notes: Free-form notes.
@@ -164,9 +164,16 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         which are honored when the explicit kwargs are ``None``.
         """
         algorithm_params = getattr(config, "algorithm_params", {}) or {}
-        seed = algorithm_params.get("seed")
+        # Fall back to the legacy
+        # ``algorithm_params['seed']`` escape hatch for config-shaped objects
+        # that don't declare the attribute (e.g. NEAT / QDax raw dicts).
+        seed = getattr(config, "seed", None)
+        if seed is None:
+            seed = algorithm_params.get("seed")
         if enable_tensorboard is None:
-            enable_tensorboard = bool(algorithm_params.get("logging_tensorboard", False))
+            enable_tensorboard = bool(
+                algorithm_params.get("logging_tensorboard", False)
+            )
         if enable_parquet is None:
             enable_parquet = bool(algorithm_params.get("logging_parquet", False))
         budget_mode = getattr(config, "budget_mode", None)
@@ -223,9 +230,11 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         if self._closed:
             return
         self._sink.log_artifact(name, path)
-        self.manifest.artifacts[name] = str(Path(path).relative_to(self.run_dir)) \
-            if Path(path).is_absolute() and Path(path).is_relative_to(self.run_dir) \
+        self.manifest.artifacts[name] = (
+            str(Path(path).relative_to(self.run_dir))
+            if Path(path).is_absolute() and Path(path).is_relative_to(self.run_dir)
             else str(path)
+        )
 
     def summary(self, summary: Mapping[str, Any]) -> None:
         """Persist the final summary block to ``summary.json``."""

@@ -89,9 +89,7 @@ class SelfPlayEvaluator(BaseEvaluator):
                     "team_mapping dict."
                 )
             if team is None:
-                raise ValueError(
-                    "aggregation='team_mapping' requires a team= kwarg."
-                )
+                raise ValueError("aggregation='team_mapping' requires a team= kwarg.")
         self.env_wrapper = env_wrapper
         self.max_steps = int(max_steps)
         self.aggregation = aggregation
@@ -100,6 +98,8 @@ class SelfPlayEvaluator(BaseEvaluator):
         self.masked = bool(masked)
         self.flatten_obs = bool(flatten_obs)
         self.fitness_spec = fitness_spec
+        #: Cumulative real environment steps across every :meth:`evaluate` call.
+        self.env_steps_consumed = 0
         if fitness_spec is not None:
             fitness_spec.validate()
 
@@ -151,7 +151,9 @@ class SelfPlayEvaluator(BaseEvaluator):
                 actions[agent] = policies[agent].get_action(
                     flat, deterministic=True, action_mask=mask
                 )
-            observations, rewards, terms, truncs, step_infos = self.env_wrapper.step(actions)
+            observations, rewards, terms, truncs, step_infos = self.env_wrapper.step(
+                actions
+            )
             for agent, reward in rewards.items():
                 cumulative[agent] = cumulative.get(agent, 0.0) + float(reward)
             # Accumulate reward components using post-step infos.
@@ -161,16 +163,17 @@ class SelfPlayEvaluator(BaseEvaluator):
                     step_rc = rc_fn(step_infos or {}, rewards)
                     for k, v in step_rc.items():
                         reward_components[k] = reward_components.get(k, 0.0) + float(v)
-            done = (
-                (terms and all(terms.get(a, False) for a in terms))
-                or (truncs and all(truncs.get(a, False) for a in truncs))
+            done = (terms and all(terms.get(a, False) for a in terms)) or (
+                truncs and all(truncs.get(a, False) for a in truncs)
             )
             steps += 1
+            self.env_steps_consumed += 1
 
         aggregated = self._aggregate(cumulative)
 
         if self.fitness_spec is not None and self.fitness_spec.objectives:
             from deap_pettingzoo.integration.objectives import build_fitness_vector
+
             return build_fitness_vector(
                 aggregated_reward=aggregated,
                 per_episode_rewards=[aggregated],

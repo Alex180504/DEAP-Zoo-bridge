@@ -1,52 +1,65 @@
 @startuml sequence_logging_pipeline
-title Logging Pipeline – Trainer → Sinks → Disk
+!theme plain
+title Diagnostic Logging Pipeline – configure_logging → handlers → retrieval
 
-actor "Researcher" as R
-participant "EATrainer\n(or any baseline trainer)" as T
-participant "build_logger\n(_logging_helpers)" as BL
-participant "ExperimentLogger" as EL
-participant "MultiSink" as MS
-participant "JsonManifestSink" as JMS
-participant "CsvScalarSink" as CSV
-participant "RunManifest" as RM
-participant "Filesystem\n<run_dir>/" as FS
+' NOTE: This is backend *diagnostic* logging (exceptions, warnings, lifecycle,
+' component activation).  For the *experiment-results* pipeline (metrics /
+' checkpoints / manifests) see sequence_experiment_logging.puml.
 
-R -> T: train(config)
-activate T
-T -> BL: build_logger(config, algorithm)
-BL -> EL: ExperimentLogger.from_config(...)
-alt config.output_dir is None
-    EL --> BL: NoOpLogger()
-    BL --> T: noop
-else output_dir set
-    EL -> RM: RunManifest(\n  run_id, algorithm, env_name,\n  seed, hyperparams, ...,\n  environment=capture_environment_metadata())
-    EL -> MS: open(run_dir)
-    MS -> JMS: open(run_dir)
-    MS -> CSV: open(run_dir)
-    EL --> BL: logger
-    BL --> T: logger
+actor Operator as Op
+participant "service.run()\n(app process)" as Run
+participant "runner.main()\n(subprocess)" as Runner
+participant "logging_config\n.configure_logging" as Cfg
+participant "root logger\n(+ uvicorn.*, py.warnings)" as Root
+participant "StreamHandler\n(stdout)" as Console
+participant "RotatingFileHandler\nservice.log" as FileH
+participant "FastAPI\n/app.py" as API
+participant "Filesystem /\nDocker" as FS
+
+== App process startup ==
+Op -> Run: python -m deap_pettingzoo.service [--verbose|--log-level|--log-format]
+Run -> Run: resolve_level / resolve_format\nexport DEAP_LOG_LEVEL + DEAP_LOG_FORMAT (env)
+note right of Run: env is inherited by the\nrunner subprocess later
+Run -> Cfg: configure_logging(log_file=<DEAP_LOG_DIR>/service.log)
+Cfg -> Root: dictConfig(level, formatter=plain|json)
+Cfg -> Console: attach (stdout)
+Cfg -> FileH: attach (rotating, on results volume)
+Cfg -> Cfg: logging.captureWarnings(True)
+Run -> API: uvicorn.run(..., log_config=None)
+note right of API: log_config=None so uvicorn\ndoes not clobber our handlers
+
+== Emission (both processes) ==
+API -> Root: logger.info / warning / exception(...)
+Runner -> Cfg: configure_logging(log_file=None)  // console only
+Runner -> Root: build_configs INFO (components active),\nsub-run progress, logger.exception on failure
+group warnings.warn(...)  (parallel / device / coevolution / catalog / rl_side / rl_hpo_side / agilerl_hpo_trainer)
+    Root -> Root: routed to py.warnings @ WARNING\n(no stack trace)
 end
-
-loop per iteration
-    T -> EL: row("metrics", {iteration, env_steps, wall_time, best, ...})
-    EL -> MS: log_row("metrics", row)
-    MS -> JMS: log_row("metrics", row)
-    note right of JMS: ignored\n(table not in whitelist)
-    MS -> CSV: log_row("metrics", row)
-    CSV -> FS: append metrics.csv
+group Dual-emit pattern (exception sites in RL training code)
+    note over Root
+      At every except...as exc: block that calls warnings.warn(),
+      RL code (rl_side.py, rl_hpo_side.py, agilerl_hpo_trainer.py)
+      also calls logger.warning(..., exc_info=True) FIRST so the
+      full stack trace lands in service.log, then warnings.warn()
+      for the user-visible console message.
+      Reference implementation: recording.py:88, agilerl_trainer.py:926.
+    end note
 end
+Root -> Console: format + write
+Root -> FileH: format + write (app process only)
 
-T -> EL: row("summary", final_summary)
-EL -> MS: log_row("summary", row)
-MS -> JMS: log_row("summary", row)
-JMS -> FS: write summary.json (atomic .tmp → replace)
+note over Console,FileH
+  Level gate (the --verbose switch):
+    WARNING  (default) = warnings + exceptions only
+    INFO     (-v)      = + lifecycle + components active
+    DEBUG    (-vv)     = + hyperparameters / requests
+end note
 
-T -> EL: close()
-EL -> RM: write(<run_dir>/manifest.json)
-RM -> FS: manifest.json
-EL -> MS: close()
-MS -> CSV: close()
-MS -> JMS: close()
-deactivate T
+== Retrieval ==
+Console -> FS: app stdout  -> docker compose logs service
+FileH   -> FS: service.log -> docker exec/cp, volume
+Runner  -> FS: runner stdout -> <exp_dir>/_stdout.log
+Op -> API: GET /logs?lines=N           -> tail service.log
+Op -> API: GET /experiments/{id}/stdout -> tail _stdout.log
 
 @enduml

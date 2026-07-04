@@ -30,7 +30,6 @@ from deap_pettingzoo.evaluators.mixed_policy import _invoke_get_action
 
 from .pools import OpponentPool, OpponentSnapshot, rebuild_opponent_policy
 
-
 #: Map ``(genome, agent_id, action_space) -> PolicyProtocol``. Matches the
 #: learner factory signature used by :class:`MixedPolicyEvaluator` so the
 #: same factory works in both evaluators.
@@ -56,7 +55,9 @@ def _hashable_env_config(env_config: Optional[Dict[str, Any]]) -> Tuple[Any, ...
 
 
 def _resolve_worker_env(
-    env_name: str, env_config: Optional[Dict[str, Any]]
+    env_name: str,
+    env_config: Optional[Dict[str, Any]],
+    registry_snapshot: Optional[list] = None,
 ) -> PettingZooWrapper:
     """Return a process-local :class:`PettingZooWrapper`, cached by key.
 
@@ -66,7 +67,16 @@ def _resolve_worker_env(
         lazily on first use and reuse it for the rest of the worker's
         lifetime.  Mirrors the ``_NUMPY_WORKER_CACHE`` pattern in
         ``contrib/qdax/scoring_numpy.py``.
+
+        ``registry_snapshot`` is replayed once per worker before the env
+        is built so SCOOP/Dask workers (no initializer hook) can resolve
+        runtime-registered custom envs.
     """
+    from deap_pettingzoo.environments.registry import (
+        replay_registry_snapshot_once,
+    )
+
+    replay_registry_snapshot_once(registry_snapshot)
     key: Tuple[Any, ...] = (env_name, _hashable_env_config(env_config))
     cached = _COEV_WORKER_ENV_CACHE.get(key)
     if cached is not None:
@@ -98,6 +108,8 @@ class _EpisodePayload:
     side_role_prefixes: Dict[str, Tuple[str, ...]]
     episode_seed: Optional[int]
     max_steps: int
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 @dataclass
@@ -126,13 +138,14 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
     """
     from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 
-    env = _resolve_worker_env(payload.env_name, payload.env_config)
+    env = _resolve_worker_env(
+        payload.env_name, payload.env_config, payload.registry_snapshot
+    )
     agents = list(env.possible_agents)
 
     # Partition agents by role prefix (re-derived per episode; cheap).
     learner_agents: List[str] = [
-        a for a in agents
-        if any(a.startswith(p) for p in payload.learner_role_prefixes)
+        a for a in agents if any(a.startswith(p) for p in payload.learner_role_prefixes)
     ]
     side_agents: Dict[str, List[str]] = {
         name: [a for a in agents if any(a.startswith(p) for p in prefixes)]
@@ -207,9 +220,7 @@ def _run_episode(
                     learner_policies[agent], obs, mask, deterministic=True
                 )
             elif agent in opponent_policies:
-                actions[agent] = _invoke_get_action(
-                    opponent_policies[agent], obs, mask
-                )
+                actions[agent] = _invoke_get_action(opponent_policies[agent], obs, mask)
 
         observations, rewards, terms, truncs, _ = env.step(actions)
 
@@ -296,6 +307,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         env_name: Optional[str] = None,
         env_config: Optional[Dict[str, Any]] = None,
         learner_masked: bool = False,
+        registry_snapshot: Optional[list] = None,
     ) -> None:
         """Build a co-evolution evaluator.
 
@@ -338,8 +350,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self.learner_role_prefixes: Tuple[str, ...] = tuple(learner_role_prefixes)
         self.learner_factory = learner_factory
         self.opponent_sides: List[Tuple[str, Tuple[str, ...], OpponentPool]] = [
-            (name, tuple(prefixes), pool)
-            for name, prefixes, pool in opponent_sides
+            (name, tuple(prefixes), pool) for name, prefixes, pool in opponent_sides
         ]
         self.k_opponents = int(k_opponents)
         self.aggregation = aggregation
@@ -348,14 +359,20 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._env_name = env_name
         self._env_config = env_config
         self._learner_masked = bool(learner_masked)
+        self._registry_snapshot = registry_snapshot
 
         self._partition_agents()
         #: Populated after each :meth:`run` call for trainer logging.
         self.last_details: Optional[CoEvolutionEvalResult] = None
+        #: Cumulative real env ticks across every :meth:`run` call made on
+        #: this evaluator instance. Both the serial and the evaluator-side
+        #: parallel paths funnel through :meth:`_finalise`, which advances
+        #: this counter. The trainer builds one fresh evaluator per side per
+        #: generation, so reading it after a population pass produces that
+        #: side's real per-generation env-step count.
+        self.env_steps_consumed: int = 0
 
-    # ------------------------------------------------------------------
     # Agent partitioning
-    # ------------------------------------------------------------------
 
     def _partition_agents(self) -> None:
         """Validate that every env agent belongs to exactly one side."""
@@ -439,8 +456,14 @@ class CoEvolutionEvaluator(BaseEvaluator):
             **and** ``k_opponents > 1``.  Single-episode evaluations skip
             the executor overhead entirely.
         """
-        if individual is None or not hasattr(individual, "genome") or individual.genome is None:
-            raise ValueError("CoEvolutionEvaluator requires an individual with a 'genome'.")
+        if (
+            individual is None
+            or not hasattr(individual, "genome")
+            or individual.genome is None
+        ):
+            raise ValueError(
+                "CoEvolutionEvaluator requires an individual with a 'genome'."
+            )
 
         if rng is None:
             rng = np.random.default_rng(seed)
@@ -507,7 +530,9 @@ class CoEvolutionEvaluator(BaseEvaluator):
         per_side_snapshots: Dict[str, List[OpponentSnapshot]] = {}
         side_role_prefixes: Dict[str, Tuple[str, ...]] = {}
         for side_name, prefixes, pool in self.opponent_sides:
-            per_side_snapshots[side_name] = pool.snapshot_opponents(rng, self.k_opponents)
+            per_side_snapshots[side_name] = pool.snapshot_opponents(
+                rng, self.k_opponents
+            )
             side_role_prefixes[side_name] = prefixes
 
         payloads: List[_EpisodePayload] = []
@@ -527,6 +552,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
                     side_role_prefixes=side_role_prefixes,
                     episode_seed=episode_seed,
                     max_steps=self.max_steps,
+                    registry_snapshot=self._registry_snapshot,
                 )
             )
 
@@ -561,6 +587,10 @@ class CoEvolutionEvaluator(BaseEvaluator):
             num_samples=self.k_opponents,
         )
         self.last_details = details
+        # Accumulate real env ticks so the trainer can surface a per-side,
+        # per-generation consumed-steps figure (serial + evaluator-parallel
+        # both reach here).
+        self.env_steps_consumed += int(total_steps)
         return details
 
     def _aggregate(self, rewards: List[float]) -> float:

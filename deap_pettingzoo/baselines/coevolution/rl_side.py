@@ -3,9 +3,9 @@
 Adds a fourth runtime-state class to the
 :mod:`deap_pettingzoo.baselines.coevolution.sides` family: an
 :class:`RLSideState` that wraps an AgileRL multi-agent algorithm
-(MADDPG / MATD3 in this release) and trains it generation-by-generation
-against opponents drawn from the *other* sides' current
-:class:`OpponentPool`s.
+(off-policy MADDPG / MATD3 or on-policy IPPO / GroupedIPPO) and trains it
+generation-by-generation against opponents drawn from the *other* sides'
+current :class:`OpponentPool`s.
 
 The difference from EA / CMA / QDax sides:
 
@@ -22,21 +22,24 @@ The difference from EA / CMA / QDax sides:
   :class:`~deap_pettingzoo.baselines.agilerl_policy.FrozenRLPolicyWrapper`
   CPU snapshots via
   :meth:`~deap_pettingzoo.baselines.agilerl_policy.AgileRLPolicyWrapper.make_frozen_cpu_snapshot`;
-* the RL learner's own rollout collection is still serial in this
-  release; parallel dispatch is planned for Phase 2.
-
-#TODO: implement opponent-aware adapters for on-policy algorithms (IPPO and variants) so the RL side can also use those.
-#TODO (Phase 2): add executor-based parallel rollout collection for RLSideState.step_generation.
+* off-policy rollout collection runs in parallel (frozen-snapshot
+  workers) or serially; on-policy collection is always serial because
+  the live actor+critic must produce the ``log_prob``/``value`` the
+  actor-only frozen snapshot cannot.
 """
 
 from __future__ import annotations
 
 import importlib
+import logging
+import time
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
@@ -47,8 +50,8 @@ from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
     "maddpg": ("agilerl.algorithms.maddpg", "MADDPG", False),
-    "matd3":  ("agilerl.algorithms.matd3",  "MATD3",  False),
-    "ippo":   ("agilerl.algorithms.ippo",   "IPPO",   True),
+    "matd3": ("agilerl.algorithms.matd3", "MATD3", False),
+    "ippo": ("agilerl.algorithms.ippo", "IPPO", True),
     "grouped_ippo": ("agilerl.algorithms.ippo", "IPPO", True),
     "ippo-grouped": ("agilerl.algorithms.ippo", "IPPO", True),
 }
@@ -90,6 +93,8 @@ class _RLDriverContext:
     env_name: Optional[str] = None
     #: Env kwargs forwarded to :class:`PettingZooWrapper`.
     env_config: Optional[Dict[str, Any]] = None
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +150,8 @@ class _RLRolloutPayload:
     opponent_snapshots: Dict[str, Any]  # Dict[str, OpponentSnapshot]
     #: Maps opponent side name → role_prefixes.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
+    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    registry_snapshot: Optional[list] = None
 
 
 def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
@@ -169,7 +176,9 @@ def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
     from deap_pettingzoo.baselines.coevolution.pools import rebuild_opponent_policy
     from deap_pettingzoo.evaluators.mixed_policy import _invoke_get_action
 
-    env = _resolve_worker_env(payload.env_name, payload.env_config)
+    env = _resolve_worker_env(
+        payload.env_name, payload.env_config, payload.registry_snapshot
+    )
     possible_agents = list(env.possible_agents)
 
     # RL-side agent IDs come directly from the payload (set at build time
@@ -255,18 +264,17 @@ def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
                 rl_next_obs[a] = np.zeros_like(rl_obs[a])
 
         rl_reward = {a: float(rewards.get(a, 0.0)) for a in rl_ids}
-        rl_done = {
-            a: bool(terms.get(a, False) or truncs.get(a, False))
-            for a in rl_ids
-        }
+        rl_done = {a: bool(terms.get(a, False) or truncs.get(a, False)) for a in rl_ids}
 
-        steps_data.append(_RLStepData(
-            obs=rl_obs,
-            actions=squeezed_actions,
-            rewards=rl_reward,
-            next_obs=rl_next_obs,
-            done=rl_done,
-        ))
+        steps_data.append(
+            _RLStepData(
+                obs=rl_obs,
+                actions=squeezed_actions,
+                rewards=rl_reward,
+                next_obs=rl_next_obs,
+                done=rl_done,
+            )
+        )
         ep_reward += sum(rl_reward.values())
         steps += 1
         observations = next_obs
@@ -360,9 +368,7 @@ class RLSideState(SideState):
         self.memory_size = int(cfg.get("memory_size", 10_000))
         self.learning_delay = int(cfg.get("learning_delay", 0))
         self.device: Optional[str] = cfg.get("device")  # None => auto
-        self.agent_ctor_kwargs: Dict[str, Any] = dict(
-            cfg.get("agent_ctor_kwargs", {})
-        )
+        self.agent_ctor_kwargs: Dict[str, Any] = dict(cfg.get("agent_ctor_kwargs", {}))
         self.seed = cfg.get("seed", None)
 
         # Filled in during :meth:`initialise`.
@@ -371,9 +377,8 @@ class RLSideState(SideState):
         self._memory: Any = None
         self._wrapper: Optional[PolicyProtocol] = None
         self._pool: Optional[RLPolicyPool] = None
-        #: Effective torch device after :meth:`initialise`. 
-        #: Read by :func:`deap_pettingzoo.utils.device_check.warn_on_gpu_contention`.
-        self.resolved_device: str = "cpu"
+        self.is_rl_side: bool = True
+        # resolved_device default ("cpu") is set by SideState.__init__; overwritten in initialise().
         self._last_returns: List[float] = []
         self._bootstrap_ctx: Optional[_RLDriverContext] = None
         self._total_transitions: int = 0
@@ -392,33 +397,16 @@ class RLSideState(SideState):
         env: PettingZooWrapper,
         rng: Optional[np.random.Generator] = None,
     ) -> None:
-        if self.is_on_policy:
-            raise NotImplementedError(
-                f"RLSideState({self.side.name!r}): on-policy algorithms "
-                f"({self.algorithm!r}) are not yet supported in "
-                "bidirectional EA-RL co-evolution. Use 'maddpg' or "
-                "'matd3', or wrap a pre-trained on-policy agent in "
-                "FrozenSideState (one-directional opponent only)."
-            )
+        # Resolve device (auto-detect when unset; fall back to CPU when a CUDA
+        # device is requested but unavailable — e.g. CPU-only torch in the
+        # service container — instead of crashing inside AgileRL).
+        from deap_pettingzoo.utils.device_check import resolve_device
 
-        # Resolve device.
-        if self.device is not None:
-            self.resolved_device = str(self.device)
-        else:
-            try:
-                import torch  # type: ignore
-
-                self.resolved_device = (
-                    "cuda" if torch.cuda.is_available() else "cpu"
-                )
-            except ImportError:
-                self.resolved_device = "cpu"
+        self.resolved_device = resolve_device(self.device)
 
         # Seed.
         if self.seed is None and rng is not None:
-            self.seed = int(
-                rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
-            )
+            self.seed = int(rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64))
         seed = int(self.seed) if self.seed is not None else 0
         np.random.seed(seed)
         try:
@@ -430,8 +418,7 @@ class RLSideState(SideState):
 
         # Restrict to side-controlled env agents.
         side_agents = [
-            a for a in env.possible_agents
-            if a.startswith(self.side.role_prefixes)
+            a for a in env.possible_agents if a.startswith(self.side.role_prefixes)
         ]
         if not side_agents:
             raise ValueError(
@@ -464,26 +451,31 @@ class RLSideState(SideState):
             **ctor_kwargs,
         )
 
-        # Off-policy replay buffer.
-        from agilerl.components.multi_agent_replay_buffer import (
-            MultiAgentReplayBuffer,
-        )
+        if self.is_on_policy:
+            # On-policy (IPPO/GroupedIPPO) keeps no replay buffer — each PPO
+            # update consumes a freshly collected rollout. AgileRL shares one
+            # actor across same-role agents (the coevolution norm), which
+            # triggers the grouped-advantage flattening bug; apply the fix.
+            self._maybe_apply_grouping_patch()
+        else:
+            # Off-policy replay buffer.
+            from agilerl.components.multi_agent_replay_buffer import (
+                MultiAgentReplayBuffer,
+            )
 
-        self._memory = MultiAgentReplayBuffer(
-            memory_size=self.memory_size,
-            field_names=["obs", "action", "reward", "next_obs", "done"],
-            agent_ids=side_agents,
-            device=self.resolved_device,
-        )
+            self._memory = MultiAgentReplayBuffer(
+                memory_size=self.memory_size,
+                field_names=["obs", "action", "reward", "next_obs", "done"],
+                agent_ids=side_agents,
+                device=self.resolved_device,
+            )
 
         # Build wrapper + degenerate pool.
         from deap_pettingzoo.baselines.agilerl_policy import (
             AgileRLPolicyWrapper,
         )
 
-        self._wrapper = AgileRLPolicyWrapper(
-            self._agent, side_agents, self.algorithm
-        )
+        self._wrapper = AgileRLPolicyWrapper(self._agent, side_agents, self.algorithm)
         self._pool = RLPolicyPool(self._wrapper)
 
     def rebind_evaluator(self, evaluator: Any) -> None:
@@ -509,12 +501,20 @@ class RLSideState(SideState):
         """
         if self._bootstrap_ctx is None:
             return
+        if self.is_on_policy:
+            # On-policy keeps no replay buffer to warm up; the first
+            # step_generation collects a fresh rollout and learns directly.
+            return
         try:
             r = self._collect_episode(self._bootstrap_ctx)
         except (RuntimeError, ValueError, TypeError) as exc:
+            logger.warning(
+                "RLSideState(%r): bootstrap rollout failed",
+                self.side.name,
+                exc_info=True,
+            )
             warnings.warn(
-                f"RLSideState({self.side.name!r}): bootstrap rollout "
-                f"failed: {exc}",
+                f"RLSideState({self.side.name!r}): bootstrap rollout " f"failed: {exc}",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -536,57 +536,80 @@ class RLSideState(SideState):
                 f"{type(ctx).__name__}."
             )
         self.generation += 1
+        _gen_t0 = time.time()
+        # Snapshot the cumulative transition counter so we can report the
+        # per-generation delta (GenerationStats.env_steps is per-generation,
+        # consistent with the EA/CMA/PSO sides and the trainer's top-level sum).
+        _transitions_before = self._total_transitions
 
         episode_returns: List[float] = []
 
-        # --- Phase-2 parallel rollout path ---
-        if (
-            ctx.executor is not None
-            and ctx.env_name is not None
-            and self._wrapper is not None
-        ):
-            from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+        if self.is_on_policy:
+            # On-policy: collect freshly with the live actor+critic (serial —
+            # log_prob/value come from the live policy, not the actor-only
+            # frozen snapshot) and run one PPO update over the rollout.
+            episode_returns = self._collect_onpolicy_rollout(ctx)
+        else:
+            # --- Off-policy collection (Phase-2 parallel path) ---
+            if (
+                ctx.executor is not None
+                and ctx.env_name is not None
+                and self._wrapper is not None
+            ):
+                from deap_pettingzoo.baselines.agilerl_policy import (
+                    AgileRLPolicyWrapper,
+                )
 
-            if isinstance(self._wrapper, AgileRLPolicyWrapper):
-                try:
-                    episode_returns = self._collect_episodes_parallel(ctx)
-                except Exception as exc:
-                    warnings.warn(
-                        f"RLSideState({self.side.name!r}): parallel rollout "
-                        f"collection failed ({exc}); falling back to serial.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    episode_returns = []
+                if isinstance(self._wrapper, AgileRLPolicyWrapper):
+                    try:
+                        episode_returns = self._collect_episodes_parallel(ctx)
+                    except Exception as exc:
+                        logger.warning(
+                            "RLSideState(%r): parallel rollout collection failed, falling back to serial",
+                            self.side.name,
+                            exc_info=True,
+                        )
+                        warnings.warn(
+                            f"RLSideState({self.side.name!r}): parallel rollout "
+                            f"collection failed ({exc}); falling back to serial.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        episode_returns = []
+                        for _ in range(self.rollout_episodes_per_gen):
+                            episode_returns.append(self._collect_episode(ctx))
+                else:
                     for _ in range(self.rollout_episodes_per_gen):
                         episode_returns.append(self._collect_episode(ctx))
             else:
+                # --- Serial rollout path (default) ---
                 for _ in range(self.rollout_episodes_per_gen):
                     episode_returns.append(self._collect_episode(ctx))
-        else:
-            # --- Serial rollout path (default) ---
-            for _ in range(self.rollout_episodes_per_gen):
-                episode_returns.append(self._collect_episode(ctx))
 
-        # Off-policy learn step(s).
-        for _ in range(self.learning_steps_per_gen):
-            if (
-                self._total_transitions >= self.learning_delay
-                and len(self._memory) >= self.batch_size
-            ):
-                experiences = self._memory.sample(self.batch_size)
-                try:
-                    self._agent.learn(experiences)
-                    self._total_learn_calls += 1
-                except (RuntimeError, ValueError, TypeError) as exc:
-                    self._total_learn_failures += 1
-                    warnings.warn(
-                        f"RLSideState({self.side.name!r}): "
-                        f"agent.learn() failed: {exc}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    break
+            # Off-policy learn step(s).
+            for _ in range(self.learning_steps_per_gen):
+                if (
+                    self._total_transitions >= self.learning_delay
+                    and len(self._memory) >= self.batch_size
+                ):
+                    experiences = self._memory.sample(self.batch_size)
+                    try:
+                        self._agent.learn(experiences)
+                        self._total_learn_calls += 1
+                    except (RuntimeError, ValueError, TypeError) as exc:
+                        self._total_learn_failures += 1
+                        logger.warning(
+                            "RLSideState(%r): agent.learn() failed",
+                            self.side.name,
+                            exc_info=True,
+                        )
+                        warnings.warn(
+                            f"RLSideState({self.side.name!r}): "
+                            f"agent.learn() failed: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        break
 
         # Refresh wrapper + pool — other sides next gen face the new RL policy.
         from deap_pettingzoo.baselines.agilerl_policy import (
@@ -611,15 +634,13 @@ class RLSideState(SideState):
             min=float(arr.min()),
             max=best,
             best_fitness=best,
+            env_steps=int(self._total_transitions - _transitions_before),
+            wall_time_s=time.time() - _gen_t0,
         )
         self.history.append(stats)
         return stats
 
-    # --- Phase-2 helpers ---
-
-    def _collect_episodes_parallel(
-        self, ctx: _RLDriverContext
-    ) -> List[float]:
+    def _collect_episodes_parallel(self, ctx: _RLDriverContext) -> List[float]:
         """Dispatch ``rollout_episodes_per_gen`` episodes to worker processes.
 
         Builds picklable :class:`_RLRolloutPayload` objects (one per
@@ -655,6 +676,7 @@ class RLSideState(SideState):
                 rl_role_prefixes=self.side.role_prefixes,
                 opponent_snapshots=opp_snapshots,
                 side_role_prefixes=side_role_prefixes,
+                registry_snapshot=ctx.registry_snapshot,
             )
             for _ in range(self.rollout_episodes_per_gen)
         ]
@@ -677,6 +699,11 @@ class RLSideState(SideState):
                     )
                     self._total_transitions += 1
                 except (RuntimeError, ValueError, TypeError) as exc:
+                    logger.warning(
+                        "RLSideState(%r): save_to_memory failed (parallel path)",
+                        self.side.name,
+                        exc_info=True,
+                    )
                     warnings.warn(
                         f"RLSideState({self.side.name!r}): "
                         f"save_to_memory failed: {exc}",
@@ -839,11 +866,7 @@ class RLSideState(SideState):
             next_obs, rewards, terms, truncs, next_info = env.step(env_actions)
 
             # Push transition (RL-side agents only).
-            rl_next_obs = {
-                a: next_obs[a]
-                for a in rl_ids
-                if a in next_obs
-            }
+            rl_next_obs = {a: next_obs[a] for a in rl_ids if a in next_obs}
             # If any RL agent terminated this step, fill its next_obs
             # with a zero-shaped placeholder of the correct dtype so the buffer accepts the dict.
             for a in rl_ids:
@@ -851,8 +874,7 @@ class RLSideState(SideState):
                     rl_next_obs[a] = np.zeros_like(rl_obs[a])
             rl_reward = {a: float(rewards.get(a, 0.0)) for a in rl_ids}
             rl_term = {
-                a: bool(terms.get(a, False) or truncs.get(a, False))
-                for a in rl_ids
+                a: bool(terms.get(a, False) or truncs.get(a, False)) for a in rl_ids
             }
 
             try:
@@ -861,6 +883,11 @@ class RLSideState(SideState):
                 )
                 self._total_transitions += 1
             except (RuntimeError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "RLSideState(%r): save_to_memory failed (serial path)",
+                    self.side.name,
+                    exc_info=True,
+                )
                 warnings.warn(
                     f"RLSideState({self.side.name!r}): "
                     f"save_to_memory failed: {exc}",
@@ -879,6 +906,191 @@ class RLSideState(SideState):
                 break
 
         return ep_reward
+
+    # On-policy rollout (IPPO / GroupedIPPO)
+
+    def _maybe_apply_grouping_patch(self) -> None:
+        """Install AgileRL's grouped-IPPO advantage/state flattening fix.
+
+        AgileRL shares one actor/critic across same-role agents (the
+        coevolution norm, e.g. all predators), which triggers a flattening
+        misalignment bug in ``IPPO._learn_individual`` that makes grouped IPPO
+        silently fail to learn.  Reuses the version-guarded, idempotent patch
+        from :mod:`~deap_pettingzoo.baselines.agilerl_trainer`.  No-op unless
+        the agent actually groups agents.
+        """
+        grouped = self.algorithm in ("grouped_ippo", "ippo-grouped")
+        if not grouped:
+            has = getattr(self._agent, "has_grouped_agents", None)
+            try:
+                grouped = bool(has()) if callable(has) else False
+            except Exception:
+                grouped = False
+        if not grouped:
+            return
+        try:
+            from deap_pettingzoo.baselines.agilerl_trainer import (
+                _apply_agilerl_grouping_patch,
+            )
+
+            _apply_agilerl_grouping_patch()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RLSideState(%r): could not apply grouped-IPPO patch",
+                self.side.name,
+                exc_info=True,
+            )
+            warnings.warn(
+                f"RLSideState({self.side.name!r}): could not apply the "
+                f"grouped-IPPO patch ({exc}); grouped IPPO may fail to learn.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _collect_onpolicy_rollout(self, ctx: _RLDriverContext) -> List[float]:
+        """Collect on-policy rollouts and run one PPO update.
+
+        On-policy algorithms cannot use a replay buffer: every update must
+        consume freshly collected ``(obs, action, log_prob, value, reward,
+        done)`` tuples from the *current* policy.  We collect
+        ``rollout_episodes_per_gen`` episodes serially against sampled
+        opponents — the live actor+critic produce the ``log_prob``/``value``
+        the actor-only frozen snapshot cannot — accumulate them in an
+        :class:`~deap_pettingzoo.baselines.agilerl_onpolicy.OnPolicyRolloutBuffer`,
+        and call ``agent.learn`` once on the assembled 8-tuple (AgileRL
+        computes GAE internally).
+
+        Returns per-episode cumulative RL-side rewards.
+        """
+        from deap_pettingzoo.baselines.agilerl_onpolicy import OnPolicyRolloutBuffer
+
+        env = ctx.env_wrapper
+        rl_ids = self._side_agent_ids
+        buf = OnPolicyRolloutBuffer(rl_ids)
+
+        episode_returns: List[float] = []
+        # Pre-step done flag per agent (CleanRL convention: 1.0 marks the first
+        # step of a new episode so GAE does not bootstrap across boundaries).
+        prev_done: Dict[str, np.ndarray] = {
+            a: np.zeros(1, dtype=np.float32) for a in rl_ids
+        }
+        bootstrap_obs: Dict[str, np.ndarray] = {}
+
+        for _ in range(self.rollout_episodes_per_gen):
+            # Sample one opponent policy per opponent side (shared across that
+            # side's agents — the same contract the EA evaluator uses).
+            opp_policies: Dict[str, PolicyProtocol] = {}
+            for _name, prefixes, pool in ctx.opponent_sides:
+                policy = pool.sample_opponent(ctx.rng)
+                for a in env.possible_agents:
+                    if a.startswith(prefixes):
+                        opp_policies[a] = policy
+
+            episode_seed = int(ctx.rng.integers(0, 2**31 - 1))
+            observations = env.reset(seed=episode_seed)
+            info = getattr(env, "last_infos", {}) or {}
+            for p in opp_policies.values():
+                if hasattr(p, "reset"):
+                    p.reset()
+
+            ep_reward = 0.0
+            steps = 0
+            while steps < ctx.max_steps and observations:
+                active_obs = {a: observations[a] for a in rl_ids if a in observations}
+                if not active_obs:
+                    break
+                rl_info = {a: info.get(a, {}) for a in rl_ids if a in observations}
+
+                # Zero-fill terminated RL agents so the full roster is present
+                # for the shared-actor get_action pass.
+                rl_obs = dict(active_obs)
+                if len(rl_obs) < len(rl_ids):
+                    _ref_obs = next(iter(rl_obs.values()))
+                    for a in rl_ids:
+                        if a not in rl_obs:
+                            rl_obs[a] = np.zeros_like(_ref_obs)
+                            rl_info[a] = {}
+
+                # On-policy action + log_prob + value from the LIVE agent.
+                action_result = self._agent.get_action(rl_obs, infos=rl_info)
+                if not (isinstance(action_result, tuple) and len(action_result) >= 4):
+                    raise RuntimeError(
+                        f"RLSideState({self.side.name!r}): expected on-policy "
+                        "get_action to return (action, log_prob, entropy, "
+                        f"value); got {type(action_result).__name__}."
+                    )
+                action, log_prob, _entropy, value = action_result[:4]
+
+                # Env actions for active RL agents (squeeze the (1,) batch dim).
+                env_actions: Dict[str, Any] = {}
+                for aid in active_obs:
+                    act = action.get(aid)
+                    if act is not None:
+                        arr = np.asarray(act)
+                        if arr.ndim > 0 and arr.shape[0] == 1:
+                            arr = arr[0]
+                        env_actions[aid] = arr.item() if arr.shape == () else arr
+
+                # Opponent actions via PolicyProtocol.
+                for agent, obs in observations.items():
+                    if agent in env_actions:
+                        continue
+                    if agent in opp_policies:
+                        mask = info.get(agent, {}).get("action_mask")
+                        env_actions[agent] = _invoke_get_action(
+                            opp_policies[agent], obs, mask
+                        )
+
+                next_obs, rewards, terms, truncs, next_info = env.step(env_actions)
+
+                rl_reward = {a: float(rewards.get(a, 0.0)) for a in rl_ids}
+                cur_done = {
+                    a: np.array(
+                        [1.0 if (terms.get(a, False) or truncs.get(a, False)) else 0.0],
+                        dtype=np.float32,
+                    )
+                    for a in rl_ids
+                }
+
+                buf.add(rl_obs, action, log_prob, value, rl_reward, prev_done)
+                prev_done = cur_done
+                for a in rl_ids:
+                    bootstrap_obs[a] = (
+                        next_obs[a] if a in next_obs else np.zeros_like(rl_obs[a])
+                    )
+
+                ep_reward += sum(rl_reward.values())
+                steps += 1
+                observations = next_obs
+                info = next_info or {}
+
+                if (terms and all(terms.values())) or (truncs and all(truncs.values())):
+                    break
+
+            episode_returns.append(ep_reward)
+            self._total_transitions += steps
+
+        # One PPO update over the freshly collected rollout.
+        if len(buf) > 0:
+            experiences = buf.experiences(bootstrap_obs, prev_done)
+            try:
+                self._agent.learn(experiences)
+                self._total_learn_calls += 1
+            except (RuntimeError, ValueError, TypeError) as exc:
+                self._total_learn_failures += 1
+                logger.warning(
+                    "RLSideState(%r): on-policy agent.learn() failed",
+                    self.side.name,
+                    exc_info=True,
+                )
+                warnings.warn(
+                    f"RLSideState({self.side.name!r}): on-policy "
+                    f"agent.learn() failed: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        return episode_returns
 
 
 __all__ = [

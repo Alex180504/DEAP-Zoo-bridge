@@ -76,7 +76,7 @@ def test_ea_vs_frozen_runs_and_reports_ea_policy():
             env_name="simple_tag_v3",
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=32,
-            algorithm_params={"coevolution": cfg},
+            coevolution_config=cfg,
         )
     )
     # Frozen side reports None fitness (no evolution); EA side has a concrete float.
@@ -116,7 +116,7 @@ def test_cma_vs_frozen():
             env_name="simple_tag_v3",
             budget_mode=BudgetMode.EVAL_EPISODES,
             budget_value=32,
-            algorithm_params={"coevolution": cfg},
+            coevolution_config=cfg,
         )
     )
     assert result.metadata["sides"][0]["optimizer"] == "cma"

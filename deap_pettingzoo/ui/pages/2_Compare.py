@@ -1,4 +1,4 @@
-"""Compare — aggregate curves and pairwise tests across selected runs."""
+"""Compare page: aggregate curves and pairwise tests across the selected runs."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 import streamlit as st
+
 from deap_pettingzoo.analysis import (
     learning_curve_with_ci,
     pairwise_table,
@@ -75,6 +76,17 @@ _COMPARE_GROUP_OPTIONS = {
     "Individual runs": "run",
 }
 
+# Human-readable labels for the comparison-score provenance tags exposed by
+# ``RunRecord.score_provenance`` (see analysis/loaders.py). Pairwise / Multi-task
+# compare on the held-out-preferred score; when the selected groups don't share
+# one provenance the verdict is invalid and is blocked rather than rendered.
+_PROVENANCE_LABEL = {
+    "held_out": "held-out eval reward",
+    "training_fitness": "self-reported training fitness",
+    "training_reward": "self-reported training reward",
+    "none": "no score",
+}
+
 
 def _display_name(run) -> str | None:
     label = str(run.manifest.get("display_name") or "").strip()
@@ -128,6 +140,7 @@ def _build_compare_experiment(experiment, group_mode: str):
         return experiment
 
     from dataclasses import replace as _dc_replace
+
     from deap_pettingzoo.analysis.loaders import Experiment as _Exp
 
     proxy_runs = []
@@ -148,10 +161,7 @@ def _grouped_summary_table(experiment, group_mode: str):
     raw.insert(
         0,
         "group",
-        [
-            _compare_group_label(run, group_mode, experiment.root)
-            for run in experiment
-        ],
+        [_compare_group_label(run, group_mode, experiment.root) for run in experiment],
     )
     if group_mode == "run":
         return raw
@@ -177,13 +187,11 @@ def _grouped_summary_table(experiment, group_mode: str):
     return pd.DataFrame(rows)
 
 
-# Resolve selected run_ids → run_dirs by re-discovering (cheap, cached above).
+# Resolve selected run_ids -> run_dirs by re-discovering (cheap, cached above).
 from deap_pettingzoo.ui.services.data import discover_runs
 
 all_runs = discover_runs(settings.results_root)
-selected_run_dirs = [
-    r.run_dir for r in all_runs if r.run_id in state.selected_run_ids
-]
+selected_run_dirs = [r.run_dir for r in all_runs if r.run_id in state.selected_run_ids]
 if not selected_run_dirs:
     st.warning("Selected runs no longer exist on disk.")
     st.stop()
@@ -192,9 +200,8 @@ experiment = _cached_experiment(tuple(str(p) for p in selected_run_dirs))
 
 # Controls
 
-# Discover columns actually present across the selected runs' metrics.csv so
-# the user can't pick a non-existent y/x column (which would surface as
-# "No runs contained both '<x>' and '<y>'").
+# Discover columns actually present across the selected run's metrics.csv so that
+# the user can't pick a non-existent y/x column (which would surface as "No runs contained both '<x>' and '<y>'").
 _y_candidates: list[str] = []
 _x_candidates: list[str] = []
 _seen_y: set[str] = set()
@@ -203,8 +210,7 @@ for _r in experiment:
     if _r.metrics is None:
         continue
     for _c in _r.metrics.columns:
-        # numeric-only for y; everything for x (env_steps/iteration/wall_time
-        # are all numeric in practice anyway).
+        # Numeric-only for y; everything for x (env_steps/iteration/wall_time are all numeric in practice anyway).
         if _c in _seen_y:
             continue
         try:
@@ -217,7 +223,7 @@ for _r in experiment:
             _x_candidates.append(_c)
             _seen_x.add(_c)
 
-# Sensible defaults: prefer best_fitness/best/mean/max for y; env_steps for x.
+# Defaults: prefer best_fitness/best/mean/max for y; env_steps for x.
 _preferred_y = ["best_fitness", "best", "mean", "max", "reward"]
 _default_y = next(
     (c for c in _preferred_y if c in _seen_y),
@@ -236,18 +242,15 @@ _env_steps_degenerate = (
         if r.metrics is not None and "env_steps" in r.metrics.columns
     )
     and any(
-        r.metrics is not None and "env_steps" in r.metrics.columns
-        for r in experiment
+        r.metrics is not None and "env_steps" in r.metrics.columns for r in experiment
     )
 )
 _preferred_x = (
-    ["iteration", "env_steps", "wall_time"]
+    ["iteration", "env_steps", "nominal_env_steps", "wall_time"]
     if _env_steps_degenerate
-    else ["env_steps", "iteration", "wall_time"]
+    else ["env_steps", "nominal_env_steps", "iteration", "wall_time"]
 )
-_x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or [
-    "env_steps"
-]
+_x_options = [c for c in _preferred_x if c in _seen_x] or _x_candidates or ["env_steps"]
 
 with st.sidebar:
     st.header("Aggregation")
@@ -268,9 +271,13 @@ with st.sidebar:
         st.caption("No metrics.csv columns detected in the selected runs.")
     x_col = st.selectbox("X column", _x_options)
     state.statistic = st.selectbox(
-        "Statistic", ["mean", "iqm"], index=["mean", "iqm"].index(state.statistic)
-        if state.statistic in {"mean", "iqm"}
-        else 0,
+        "Statistic",
+        ["mean", "iqm"],
+        index=(
+            ["mean", "iqm"].index(state.statistic)
+            if state.statistic in {"mean", "iqm"}
+            else 0
+        ),
     )
     state.ci_level = st.slider("CI", 0.5, 0.99, float(state.ci_level), 0.01)
     state.n_resamples = st.number_input(
@@ -303,6 +310,34 @@ compare_group_desc = {
     "run": "run",
 }[compare_group_mode]
 
+# Provenance gating for the final-score comparisons (Pairwise / Multi-task):
+# these resolve through the held-out-preferred comparison score, so when the
+# selected groups don't share a single provenance the significance verdict
+# would silently mix held-out vs self-reported metrics. Detect that here and
+# block both tabs instead of rendering a wrong result.
+_score_provenances = compare_experiment.score_provenances(metric="final_fitness")
+_all_provenances = (
+    set().union(*_score_provenances.values()) if _score_provenances else set()
+)
+_comparable_provenances = _all_provenances - {"none"}
+_provenance_mixed = len(_comparable_provenances) > 1
+_resolved_provenance = next(iter(sorted(_comparable_provenances)), "none")
+_resolved_score_label = _PROVENANCE_LABEL.get(
+    _resolved_provenance, _resolved_provenance
+)
+
+
+def _mixed_provenance_message() -> str:
+    parts = ", ".join(
+        _PROVENANCE_LABEL.get(p, p) for p in sorted(_comparable_provenances)
+    )
+    return (
+        "⛔ Cannot report a comparison: the selected groups mix metric "
+        f"provenances ({parts}). Re-run the missing backends so every group "
+        "carries a held-out eval metric before reading a significance verdict."
+    )
+
+
 # Learning curves
 _envs_in_selection = list(experiment.by_env().keys())
 _is_multitask = len(_envs_in_selection) >= 2
@@ -311,9 +346,7 @@ if _is_multitask:
         ["Curves", "Pairwise", "Multi-task", "Summary"]
     )
 else:
-    tab_curves, tab_pairwise, tab_summary = st.tabs(
-        ["Curves", "Pairwise", "Summary"]
-    )
+    tab_curves, tab_pairwise, tab_summary = st.tabs(["Curves", "Pairwise", "Summary"])
     tab_multitask = None
 
 with tab_curves:
@@ -321,6 +354,7 @@ with tab_curves:
     st.caption(f"Grouped by {compare_group_desc}.")
     try:
         import plotly.graph_objects as go
+
         fig = go.Figure()
         any_data = False
         if compare_group_mode == "run":
@@ -392,12 +426,23 @@ with tab_curves:
         st.error(f"Curve aggregation failed: {exc}")
 
 with tab_pairwise:
-    st.subheader("Pairwise tests on final-fitness")
+    st.subheader(f"Pairwise tests on {_resolved_score_label}")
+    st.caption(
+        "Compared on the resolved comparison score "
+        f"(`{_resolved_provenance}`); held-out eval reward is preferred when "
+        "available."
+    )
     try:
         if len(compare_groups) < 2:
             st.info(
                 "Select runs spanning at least two comparison groups, or "
                 "switch the grouping mode to `Individual runs`."
+            )
+        elif _provenance_mixed:
+            st.error(_mixed_provenance_message())
+            st.caption(
+                "Pairwise significance is hidden to avoid a "
+                "confident-but-wrong verdict across incomparable metrics."
             )
         else:
             tbl = pairwise_table(
@@ -420,77 +465,85 @@ if tab_multitask is not None:
             f"{len(_envs_in_selection)} environments: "
             + ", ".join(f"`{e}`" for e in _envs_in_selection)
         )
-        algos_in_selection = sorted(compare_groups.keys())
-        norm_mode = st.radio(
-            "Normalisation",
-            ["auto min-max", "reference algorithm", "off"],
-            horizontal=True,
-        )
-        ref_algo = None
-        if norm_mode == "reference algorithm":
-            ref_algo = st.selectbox("Reference algorithm", algos_in_selection)
+        if _provenance_mixed:
+            st.error(_mixed_provenance_message())
+            st.caption(
+                "Cross-task aggregation is hidden to avoid normalising across "
+                "incomparable metrics."
+            )
+        else:
+            st.caption(
+                "Aggregated on the resolved comparison score "
+                f"(`{_resolved_provenance}`)."
+            )
+            algos_in_selection = sorted(compare_groups.keys())
+            norm_mode = st.radio(
+                "Normalisation",
+                ["auto min-max", "reference algorithm", "off"],
+                horizontal=True,
+            )
+            ref_algo = None
+            if norm_mode == "reference algorithm":
+                ref_algo = st.selectbox("Reference algorithm", algos_in_selection)
 
-        try:
-            from deap_pettingzoo.analysis import (  # noqa: WPS433
-                NormalizationSpec,
-                aggregate_metrics_forest,
-                collect_score_matrices,
-                normalize_score_matrices,
-            )
-            from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
-                performance_profile,
-                probability_of_improvement,
-            )
-            from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
+            try:
+                from deap_pettingzoo.analysis import (  # noqa: WPS433
+                    NormalizationSpec,
+                    aggregate_metrics_forest,
+                    collect_score_matrices,
+                    normalize_score_matrices,
+                )
+                from deap_pettingzoo.analysis import plots as _plots  # noqa: WPS433
+                from deap_pettingzoo.analysis.rliable_bridge import (  # noqa: WPS433
+                    performance_profile,
+                    probability_of_improvement,
+                )
 
-            matrices, env_names = collect_score_matrices(
-                compare_experiment, metric="final_fitness"
-            )
-            if not matrices or len(env_names) < 2:
-                st.info("No multi-task scores available across the selection.")
-            else:
-                if norm_mode == "auto min-max":
-                    spec = NormalizationSpec.from_minmax(matrices, env_names)
-                    normed = normalize_score_matrices(matrices, env_names, spec)
-                elif norm_mode == "reference algorithm" and ref_algo:
-                    spec = NormalizationSpec.from_reference_algorithm(
-                        matrices, env_names, ref_algo
-                    )
-                    normed = normalize_score_matrices(matrices, env_names, spec)
+                matrices, env_names = collect_score_matrices(
+                    compare_experiment, metric="final_fitness"
+                )
+                if not matrices or len(env_names) < 2:
+                    st.info("No multi-task scores available across the selection.")
                 else:
-                    normed = matrices
+                    if norm_mode == "auto min-max":
+                        spec = NormalizationSpec.from_minmax(matrices, env_names)
+                        normed = normalize_score_matrices(matrices, env_names, spec)
+                    elif norm_mode == "reference algorithm" and ref_algo:
+                        spec = NormalizationSpec.from_reference_algorithm(
+                            matrices, env_names, ref_algo
+                        )
+                        normed = normalize_score_matrices(matrices, env_names, spec)
+                    else:
+                        normed = matrices
 
-                st.markdown("**Aggregate metrics (95% bootstrap CI)**")
-                forest = aggregate_metrics_forest(normed, reps=2000)
-                st.dataframe(forest, use_container_width=True)
-                fig_forest = _plots.plot_aggregate_metrics_forest(forest)
-                st.pyplot(fig_forest)
+                    st.markdown("**Aggregate metrics (95% bootstrap CI)**")
+                    forest = aggregate_metrics_forest(normed, reps=2000)
+                    st.dataframe(forest, use_container_width=True)
+                    fig_forest = _plots.plot_aggregate_metrics_forest(forest)
+                    st.pyplot(fig_forest)
 
-                st.markdown("**Performance profile (normalised)**")
-                taus, point, intervals = performance_profile(
-                    score_matrices=normed, reps=1000, n_tau=40
+                    st.markdown("**Performance profile (normalised)**")
+                    taus, point, intervals = performance_profile(
+                        score_matrices=normed, reps=1000, n_tau=40
+                    )
+                    fig_pp = _plots.plot_normalized_performance_profile(
+                        taus, point, intervals
+                    )
+                    st.pyplot(fig_pp)
+
+                    st.markdown("**Per-env score distributions (raw)**")
+                    fig_env = _plots.plot_per_env_eval(matrices, env_names)
+                    st.pyplot(fig_env)
+
+                    st.markdown("**Probability of improvement (normalised)**")
+                    poi = probability_of_improvement(score_matrices=normed, reps=1000)
+                    st.dataframe(poi, use_container_width=True)
+            except ImportError as exc:
+                st.error(
+                    "Multi-task analysis requires the `[analysis]` extra " f"({exc})."
                 )
-                fig_pp = _plots.plot_normalized_performance_profile(
-                    taus, point, intervals
-                )
-                st.pyplot(fig_pp)
-
-                st.markdown("**Per-env score distributions (raw)**")
-                fig_env = _plots.plot_per_env_eval(matrices, env_names)
-                st.pyplot(fig_env)
-
-                st.markdown("**Probability of improvement (normalised)**")
-                poi = probability_of_improvement(
-                    score_matrices=normed, reps=1000
-                )
-                st.dataframe(poi, use_container_width=True)
-        except ImportError as exc:
-            st.error(
-                "Multi-task analysis requires the `[analysis]` extra "
-                f"({exc})."
-            )
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Multi-task analysis failed: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Multi-task analysis failed: {exc}")
 
 with tab_summary:
     try:

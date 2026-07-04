@@ -30,17 +30,21 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-
 _ACTIVATION_MAP = {
     "tanh": "tanh",
     "relu": "relu",
     "sigmoid": "sigmoid",
     "linear": "linear",
+    "identity": "linear",
 }
 
 
 def _resolve_activation(name: str):
-    """Return the Flax activation callable for ``name``."""
+    """Return the Flax activation callable for ``name``.
+
+    ``'identity'`` is accepted as an alias for ``'linear'``, matching
+    :class:`~deap_pettingzoo.genomes.FixedTopologyGenome`'s alias table.
+    """
     import jax.numpy as jnp
     from flax import linen as nn
 
@@ -51,11 +55,10 @@ def _resolve_activation(name: str):
         return nn.relu
     if name == "sigmoid":
         return nn.sigmoid
-    if name == "linear":
+    if name in ("linear", "identity"):
         return lambda x: x
     raise ValueError(
-        f"Unsupported activation {name!r}; expected one of "
-        f"{list(_ACTIVATION_MAP)}."
+        f"Unsupported activation {name!r}; expected one of " f"{list(_ACTIVATION_MAP)}."
     )
 
 
@@ -65,7 +68,8 @@ def make_flax_mlp(layer_sizes: Sequence[int], activation: str = "tanh"):
     Args:
         layer_sizes: ``[input, hidden..., output]``. Must have at least
             two entries.
-        activation: One of ``{'tanh', 'relu', 'sigmoid', 'linear'}``.
+        activation: One of ``{'tanh', 'relu', 'sigmoid', 'linear', 'identity'}``.
+            ``'identity'`` is an alias for ``'linear'``.
             Applied between hidden layers; the output layer is linear.
 
     Returns:
@@ -74,9 +78,7 @@ def make_flax_mlp(layer_sizes: Sequence[int], activation: str = "tanh"):
     from flax import linen as nn
 
     if len(layer_sizes) < 2:
-        raise ValueError(
-            f"layer_sizes must have >=2 entries, got {list(layer_sizes)}."
-        )
+        raise ValueError(f"layer_sizes must have >=2 entries, got {list(layer_sizes)}.")
 
     activation_fn = _resolve_activation(activation)
     sizes = tuple(int(s) for s in layer_sizes)

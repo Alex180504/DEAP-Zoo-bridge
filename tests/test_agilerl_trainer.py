@@ -62,7 +62,8 @@ class TestCapabilities:
         trainer = MADDPGTrainer()
         assert trainer.supports_budget_mode(BudgetMode.ENV_STEPS) is True
         assert trainer.supports_budget_mode(BudgetMode.EVAL_EPISODES) is True
-        assert trainer.supports_budget_mode(BudgetMode.WALL_CLOCK) is False
+        # GENERATIONS is a population-trainer-only unit; AgileRL rejects it.
+        assert trainer.supports_budget_mode(BudgetMode.GENERATIONS) is False
 
 
 class TestRegistry:
@@ -115,7 +116,7 @@ class TestAdapter:
             env_name="simple_spread_v3",
             budget_mode=BudgetMode.ENV_STEPS,
             budget_value=4,
-            algorithm_params={"seed": 0, "num_envs": 2},
+            seed=0, algorithm_params={"num_envs": 2},
         )
 
         captured = {}
@@ -165,19 +166,17 @@ class TestAdapter:
         # Default MPE episode length is 25.
         assert translate_budget_to_env_steps(config) == 250
 
-    def test_translate_budget_wallclock_rejected(self):
+    def test_translate_budget_generations_rejected(self):
         config = TrainingConfig(
             env_name="simple_spread_v3",
-            budget_mode=BudgetMode.WALL_CLOCK,
+            budget_mode=BudgetMode.GENERATIONS,
             budget_value=60,
         )
-        with pytest.raises(ValueError, match="wall-clock"):
+        with pytest.raises(ValueError, match="GENERATIONS"):
             translate_budget_to_env_steps(config)
 
 
-# ---------------------------------------------------------------------------
 # Policy wrapper
-# ---------------------------------------------------------------------------
 
 
 class TestAgileRLPolicyWrapper:

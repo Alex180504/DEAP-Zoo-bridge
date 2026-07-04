@@ -26,8 +26,10 @@ __all__ = [
 
 
 def _run_score(run: RunRecord, metric: str) -> Optional[float]:
-    if metric == "final_fitness":
-        value: Any = run.final_fitness
+    if metric in ("final_fitness", "comparison_score"):
+        value: Any = run.comparison_score
+    elif metric == "eval_mean_reward":
+        value = run.eval_mean_reward
     else:
         value = run.summary.get(metric)
     if value is None:
@@ -55,8 +57,10 @@ def collect_score_matrices(
         The hydrated experiment to mine.
     metric:
         Scalar key to extract from each :class:`RunRecord`. Defaults to
-        ``"final_fitness"`` (uses :meth:`RunRecord.final_fitness`); any
-        other value is fetched from :attr:`RunRecord.summary`.
+        ``"final_fitness"`` which resolves through
+        :attr:`RunRecord.comparison_score` (held-out ``eval_mean_reward``
+        preferred); any other value is fetched from
+        :attr:`RunRecord.summary`.
     algorithms, envs:
         Optional explicit ordering / filter. When ``None`` the natural
         iteration order from :meth:`Experiment.by_algorithm` /
@@ -186,4 +190,6 @@ def final_score_table(
                 "score": score,
             }
         )
-    return pd.DataFrame(rows, columns=["algorithm", "env_name", "seed", "run_id", "score"])
+    return pd.DataFrame(
+        rows, columns=["algorithm", "env_name", "seed", "run_id", "score"]
+    )

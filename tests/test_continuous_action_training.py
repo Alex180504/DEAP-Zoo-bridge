@@ -53,9 +53,9 @@ class TestRequiredOutputSize:
         # Flattens: shape (2, 3) -> 6 outputs.
         assert required_output_size(spaces.Box(low=-1.0, high=1.0, shape=(2, 3))) == 6
 
-    def test_multi_discrete_raises(self):
-        with pytest.raises(NotImplementedError, match="MultiDiscrete"):
-            required_output_size(spaces.MultiDiscrete([3, 4]))
+    def test_multi_discrete_sum_of_nvec(self):
+        # MultiDiscrete is now supported: sum(nvec) = 3 + 4 = 7 outputs.
+        assert required_output_size(spaces.MultiDiscrete([3, 4])) == 7
 
     def test_tuple_raises(self):
         with pytest.raises(NotImplementedError, match="Tuple"):
@@ -88,6 +88,7 @@ def _make_individual(env: PettingZooWrapper, hidden: int = 8):
     genome = FixedTopologyGenome(
         layer_sizes=[input_size, hidden, output_size],
         activation="tanh",
+        output_activation="linear",
         random_seed=0,
     )
     ind = creator.Individual()
@@ -177,7 +178,7 @@ def test_ea_trainer_continuous_smoke(env_name):
         env_name=env_name,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,  # ~2 generations at pop=4
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config={"continuous_actions": True},
     )
     result = trainer.train(config)
@@ -209,7 +210,7 @@ def test_cmaes_trainer_continuous_smoke(env_name):
         env_name=env_name,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=12,  # ~2 generations at pop=6
-        algorithm_params={"seed": 0},
+        seed=0,
         env_config={"continuous_actions": True},
     )
     result = trainer.train(config)
@@ -259,6 +260,73 @@ def test_resolve_shared_action_space_returns_reference_when_homogeneous():
 # ---------------------------------------------------------------------------
 # TrainingConfig.continuous shortcut
 # ---------------------------------------------------------------------------
+
+
+class TestIdentityActivationAlias:
+    """'identity' is an accepted alias for 'linear' in FixedTopologyGenome."""
+
+    def test_identity_constructs_without_error(self):
+        g = FixedTopologyGenome([3, 4, 2], output_activation="identity", random_seed=0)
+        assert g is not None
+
+    def test_identity_behaves_like_linear(self):
+        g_id = FixedTopologyGenome(
+            [3, 4, 2], activation="tanh", output_activation="identity", random_seed=42
+        )
+        g_lin = FixedTopologyGenome(
+            [3, 4, 2], activation="tanh", output_activation="linear", random_seed=42
+        )
+        obs = np.array([0.5, -0.3, 1.2])
+        p_id = FeedforwardNeuralPolicy(g_id)
+        p_lin = FeedforwardNeuralPolicy(g_lin)
+        np.testing.assert_array_almost_equal(p_id.forward(obs), p_lin.forward(obs))
+
+    def test_identity_as_hidden_activation_behaves_like_linear(self):
+        g = FixedTopologyGenome([3, 4, 2], activation="identity", random_seed=0)
+        g_ref = FixedTopologyGenome([3, 4, 2], activation="linear", random_seed=0)
+        obs = np.array([1.0, -1.0, 0.5])
+        p = FeedforwardNeuralPolicy(g)
+        p_ref = FeedforwardNeuralPolicy(g_ref)
+        np.testing.assert_array_almost_equal(p.forward(obs), p_ref.forward(obs))
+
+
+def test_ea_trainer_box_genome_uses_linear_output():
+    """EATrainer sets output_activation='linear' in genome_config for Box spaces.
+    """
+    trainer = EATrainer(hidden_size=4, population_size=2)
+    config = TrainingConfig(
+        env_name="simple_spread_v3",
+        budget_mode=BudgetMode.EVAL_EPISODES,
+        budget_value=2,
+        seed=0,
+        env_config={"continuous_actions": True},
+    )
+    result = trainer.train(config)
+    genome_cfg = result.metadata["genome_config"]
+    assert genome_cfg.get("output_activation") == "linear", (
+        "EATrainer should set output_activation='linear' for Box action spaces; "
+        f"got {genome_cfg.get('output_activation')!r}"
+    )
+    # Behavioural check: extreme weights should saturate toward the declared bounds.
+    genome = result.policy._policy.genome
+    genome.set_weights(np.ones(genome.get_weight_count()) * 20.0)
+    env = PettingZooWrapper("simple_spread_v3", env_config={"continuous_actions": True})
+    try:
+        obs = env.reset(seed=0)
+        agent = env.possible_agents[0]
+        action = result.policy.get_action(obs[agent])
+        high = env.action_space(agent).high
+        low = env.action_space(agent).low
+        mid = (high + low) / 2.0
+        half_range = (high - low) / 2.0
+        # Single tanh in BoxHead.decode with extreme input → normalized deviation near 1.
+        # Double-tanh would cap it at tanh(1) ≈ 0.762.
+        normalized_dev = np.abs(action - mid) / half_range
+        assert np.all(normalized_dev > 0.9), (
+            f"Expected action near bounds (norm-dev > 0.9 per dim), got {normalized_dev}"
+        )
+    finally:
+        env.close()
 
 
 class TestTrainingConfigContinuousShortcut:

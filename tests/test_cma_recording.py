@@ -33,7 +33,7 @@ def test_cma_records_per_generation(tmp_path: Path):
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=4 * 4 * 50,  # population * generations * steps
-        algorithm_params={"max_steps_per_episode": 50, "seed": 0},
+        max_steps_per_episode=50, seed=0,
         output_dir=tmp_path,
         recording=RecordingConfig(enabled=True, fps=10, max_frames_per_episode=50),
     )
@@ -48,19 +48,8 @@ def test_cma_recording_disabled_writes_nothing(tmp_path: Path):
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=4 * 2 * 25,
-        algorithm_params={"max_steps_per_episode": 25, "seed": 0},
+        max_steps_per_episode=25, seed=0,
         output_dir=tmp_path,
     )
     trainer.train(config)
     assert _count_frames(tmp_path) == 0
-
-
-def test_cma_default_cadence_is_one():
-    trainer = CMAESTrainer()
-    cfg = TrainingConfig(
-        env_name="simple_spread_v3",
-        budget_mode=BudgetMode.ENV_STEPS,
-        budget_value=1000,
-        recording=RecordingConfig(enabled=True),
-    )
-    assert trainer._resolve_recording_every_n(cfg) == 1

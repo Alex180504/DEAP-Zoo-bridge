@@ -1,0 +1,106 @@
+@startuml sequence_experiment_submit
+!theme plain
+title Experiment Submit – Setup -> Queue
+
+actor User
+participant "Setup Page\n(Streamlit)" as Setup
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+participant "Dispatcher\n(asyncio loop)" as Disp
+participant "Runner\n(subprocess)" as Runner
+participant "Trainer\n(baselines)" as Trainer
+participant "UnifiedEvaluator\n(baselines)" as Evaluator
+
+== Form fill & validate ==
+User -> Setup: fill tabs (env, algos, params, budget, ...)
+Setup -> Setup: coerce values\n(bound checks, type casts)
+User -> Setup: click "Validate"
+Setup -> Client: POST /experiments/validate\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec)\n(table-driven: env, algo, params, budget, ...)
+API --> Client: 200 {ok, errors[], warnings[]}
+Client --> Setup: ValidationReport
+Setup --> User: render errors/warnings by tab
+
+== Submit ==
+User -> Setup: click "Submit"
+Setup -> Client: POST /experiments\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec) (defense in depth)
+note right of API: 422 if invalid
+API -> DB: insert_experiment(spec, status="queued")
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+Client --> Setup: SubmitResponse
+Setup --> User: success toast + navigate to Queue
+
+== Submit (custom script — Setup → Advanced) ==
+note over Setup, API: gated by DEAP_ENABLE_ADVANCED (else 403)
+User -> Setup: Advanced tab → paste script → "Submit to queue"
+Setup -> Client: POST /experiments/script {script, label}
+Client -> API: HTTP POST
+API -> API: validate_script_source(script)\n(ast.parse + structural checks)
+note right of API: 422 {ok:false, issues} if syntax error
+API -> DB: insert_experiment(\n  {kind:"script", environment:"(custom script)", script}, queued)
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+
+== Dispatch ==
+note over Disp: _loop body wrapped in try/except —\na single hung/erroring experiment can never wedge\nthe queue (F-2.10-01); logs and continues on the next tick.
+Disp -> Disp: _loop: poll every 1s
+Disp -> DB: dequeue_next()\n(One atomic UPDATE...RETURNING,\nqueued -> running + started_at, gated on\nnot-paused + no other 'running' row)
+DB --> Disp: experiment (spec_json, id) — already 'running' in DB
+Disp -> Disp: parse spec_json → kind ("spec" | "script")\nderive per-experiment timeout from budget\n(_compute_timeout_seconds)
+note right of Disp: mkdir / write spec / open _stdout.log\nall inside the same try/except as the spawn below\n — a filesystem error marks failed,\nit cannot kill the dispatcher task
+
+alt kind == "script"
+    Disp -> Disp: write user_script.py
+    Disp -> Runner: Popen([python, user_script.py],\n  cwd=<experiment-dir>, env=PYTHONPATH+=DEAP_PROJECT_ROOT,\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
+else kind == "spec" (default)
+    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
+end
+Disp -> DB: set_pid(id, pid)\n(claim already set status/started_at; this only attaches the pid)
+note right of Disp: logger.info "Experiment {id} running (pid, log, timeout)"\n(diagnostic log — see sequence_logging_pipeline.puml)\n Own process group/session so a timeout/cancel\ncan kill the whole tree, not just the immediate process
+
+== Training ==
+Runner -> Runner: configure_logging()\n(console only; level inherited via DEAP_LOG_LEVEL env)
+Runner -> Runner: load spec → re-validate
+Runner -> Runner: build_configs(spec) → [SubRun, ...]
+note right of Runner: logger.info component activation\n(env, algorithms, budget, parallelism, coevolution)
+note over Runner, Evaluator: standard mode only — one shared UnifiedEvaluator\nfor the whole comparison (co-evolution sub-runs are not re-evaluated)
+loop for each SubRun (algo × seed)
+    Runner -> Runner: print + logger.info "Starting [i/N] {algo} seed"
+    Runner -> Trainer: trainer.train(config, progress_callback=writer.cb)
+    activate Trainer
+    Trainer -> Runner: progress_callback(ProgressEvent)
+    Runner -> Runner: atomic write _progress.json\n(tmp + os.replace)
+    Trainer --> Runner: TrainingResult(policy, metrics, run_dir)
+    deactivate Trainer
+    == Held-out re-eval (B2) ==
+    Runner -> Evaluator: evaluate(result.policy, env_name, env_config,\n  seed=_EVAL_SEED_BASE+seed, num_episodes=_EVAL_EPISODES)
+    activate Evaluator
+    Evaluator --> Runner: EvalResult(mean_reward, std_reward)
+    deactivate Evaluator
+    Runner -> Runner: record eval_mean_reward / eval_std_reward\n+ provenance="held_out_unified" into _result.json final_metrics
+    Runner -> Runner: _persist_eval_metrics → merge eval keys into\nmanifest.json final_summary + summary.json
+end
+note right of Runner: on failure: logger.exception(...) before _result.json
+Runner -> Runner: write _result.json\n{status, run_dirs[], final_metrics{eval_mean_reward, ...}, error?}
+Runner --> Disp: exit 0 (success) or 1 (failure)
+
+== Completion ==
+Disp -> Runner: asyncio.wait_for(proc.wait(), timeout)
+alt timeout expires
+    Disp -> Runner: terminate_group(proc)\n(taskkill /T on Windows; killpg on POSIX)\nthen force-kill after a grace period
+    Disp -> DB: set_failed(id, "...timed out...")
+    note right of Disp: logger.error; the next queued experiment\nis picked up on the dispatcher's very next tick
+else proc exits in time
+    note right of Disp: kind=="script": synthesise _result.json from exit code\n+ run_dirs discovered via rglob("manifest.json")
+    Disp -> Disp: read _result.json
+    Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
+    note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
+end
+Disp --> DB: done
+
+@enduml

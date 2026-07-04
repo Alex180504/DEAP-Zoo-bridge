@@ -200,7 +200,7 @@ class TestPayloadPickleability:
         pytest.importorskip("flax")
         import pickle
 
-        from deap_pettingzoo.contrib.qdax.descriptors.pursuit_evasion import (
+        from examples.qdax.descriptors import (
             _FormationSpreadAndMeanDistance,
             formation_spread_and_mean_distance,
         )
@@ -220,7 +220,7 @@ class TestPayloadPickleability:
             eval_episodes=1,
             descriptor_fn=descriptor,
             action_type="discrete",
-            extract_state_fn=None,
+            state_extractor=None,
         )
         spec2 = pickle.loads(pickle.dumps(spec))
         assert spec2.env_name == "simple_tag_v3"

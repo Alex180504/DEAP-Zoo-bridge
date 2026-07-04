@@ -1,4 +1,4 @@
-"""Report — render the analysis package's HTML report inline."""
+"""Report: render the analysis package's HTML report inline."""
 
 from __future__ import annotations
 
@@ -8,6 +8,16 @@ import streamlit as st
 
 from deap_pettingzoo.ui.services import UIState, load_settings
 from deap_pettingzoo.ui.services.data import discover_runs, load_experiment_cached
+
+try:
+    from deap_pettingzoo.analysis.report import build_report
+except ImportError as exc:
+    st.error(
+        "The report builder needs the `analysis` extra. Install with "
+        "`pip install deap-pettingzoo[analysis]`. "
+        f"(Underlying error: {exc})"
+    )
+    st.stop()
 
 st.set_page_config(page_title="Report", layout="wide")
 st.title("Render report")
@@ -29,15 +39,45 @@ if not selected:
 
 experiment = load_experiment_cached([s.run_dir for s in selected])
 
-try:
-    from deap_pettingzoo.analysis.report import build_report
-except ImportError as exc:
-    st.error(
-        "The report builder needs the `analysis` extra. Install with "
-        "`pip install deap-pettingzoo[analysis]`. "
-        f"(Underlying error: {exc})"
-    )
-    st.stop()
+# Per-generation metrics download (CSV) experiment.runs are coevolution-expanded (one RunRecord per side),
+# so that each download is a single, flat per-iteration metrics table.
+st.subheader("Per-generation metrics (CSV)")
+runs_with_metrics = [
+    r for r in experiment.runs if r.metrics is not None and len(r.metrics) > 0
+]
+if not runs_with_metrics:
+    st.caption("No per-iteration metrics found for the selected runs.")
+else:
+    import pandas as pd
+
+    combined_parts = []
+    cols = st.columns(min(3, len(runs_with_metrics)))
+    for i, rec in enumerate(runs_with_metrics):
+        safe_id = rec.run_id.replace("/", "_")
+        cols[i % len(cols)].download_button(
+            f"⬇ {rec.run_id}",
+            data=rec.metrics.to_csv(index=False),
+            file_name=f"{safe_id}_metrics.csv",
+            mime="text/csv",
+            key=f"dl_{safe_id}",
+            use_container_width=True,
+        )
+        part = rec.metrics.copy()
+        part.insert(0, "algorithm", rec.algorithm)
+        part.insert(0, "run_id", rec.run_id)
+        combined_parts.append(part)
+
+    if len(combined_parts) > 1:
+        combined = pd.concat(combined_parts, ignore_index=True)
+        st.download_button(
+            "⬇ Combined (all selected runs)",
+            data=combined.to_csv(index=False),
+            file_name="combined_metrics.csv",
+            mime="text/csv",
+            key="dl_combined",
+        )
+
+st.divider()
 
 out_dir = Path(st.text_input("Output directory", value=".report-out"))
 fmt = st.selectbox("Format", ["html", "md"], index=0)
@@ -45,9 +85,7 @@ metric = st.text_input("Metric", value="final_fitness")
 
 if st.button("Render"):
     try:
-        out_path = build_report(
-            experiment, out_dir, fmt=fmt, metric=metric
-        )
+        out_path = build_report(experiment, out_dir, fmt=fmt, metric=metric)
     except Exception as exc:  # noqa: BLE001 - surface any rendering error
         st.error(f"Report rendering failed: {exc}")
         st.stop()
@@ -58,8 +96,7 @@ if st.button("Render"):
         except OSError:
             st.caption("Open the file directly to inspect the report.")
         else:
-            # Inline relative image references as base64 data URIs so the
-            # iframe (which has no filesystem access) can render the figures.
+            # Inline relative image references as base64 data URIs so the iframe (which has no filesystem access) can render the figures.
             import base64
             import mimetypes
             import re

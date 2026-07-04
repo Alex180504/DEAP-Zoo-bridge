@@ -37,7 +37,9 @@ class JaxEnvProtocol(Protocol):
     def reset(self, key) -> Tuple[Dict[str, Any], Any]: ...
     def step(
         self, key, state: Any, actions: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], Any, Dict[str, float], Dict[str, bool], Dict[str, Any]]: ...
+    ) -> Tuple[
+        Dict[str, Any], Any, Dict[str, float], Dict[str, bool], Dict[str, Any]
+    ]: ...
 
 
 def _to_numpy_dict(d: Dict[str, Any]) -> Dict[str, np.ndarray]:
@@ -61,7 +63,10 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
             underlying JAX env in most cases.
     """
 
-    metadata: Dict[str, Any] = {"name": "jax_parallel_adapter", "is_parallelizable": True}
+    metadata: Dict[str, Any] = {
+        "name": "jax_parallel_adapter",
+        "is_parallelizable": True,
+    }
 
     def __init__(
         self,
@@ -137,20 +142,31 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
             k: float(np.asarray(v)) for k, v in rewards.items()
         }
         # JaxMARL collapses per-agent done into a ``__all__`` key + per-agent
-        # flags.  Strip the global key from the parallel-API dicts.
+        # flags.  ``__truncated__`` signals a time-limit truncation rather than
+        # a natural termination (some JaxMARL envs set this in ``dones``).
         global_done = bool(np.asarray(dones.get("__all__", False)))
+        global_truncated = bool(np.asarray(dones.get("__truncated__", False)))
         terminations: Dict[str, bool] = {}
         truncations: Dict[str, bool] = {}
         for agent in self.agents:
-            terminations[agent] = bool(np.asarray(dones.get(agent, global_done)))
-            truncations[agent] = False
+            agent_done = bool(np.asarray(dones.get(agent, global_done)))
+            # When the episode ends via time limit, classify as truncation.
+            truncations[agent] = agent_done and global_truncated
+            terminations[agent] = agent_done and not global_truncated
         infos_np: Dict[str, Dict[str, Any]] = {
             agent: dict(infos.get(agent, {})) for agent in self.agents
         }
-        if global_done or all(terminations.values()):
-            # Match PettingZoo contract: after termination, ``agents`` empties,
-            # so observations/infos should also be empty.
-            self.agents = []
+        # Prune agents that are individually done from obs/infos (PettingZoo
+        # parallel contract: done agents must not appear in the observation
+        # dict even when the global episode is still running).
+        # Snapshot required: self.agents is mutated inside the loop.
+        active_snapshot = self.agents[:]
+        for agent in active_snapshot:
+            if terminations[agent] or truncations[agent]:
+                self.agents.remove(agent)
+                obs_np.pop(agent, None)
+                infos_np.pop(agent, None)
+        if not self.agents:
             return {}, rewards_np, terminations, truncations, {}
         return obs_np, rewards_np, terminations, truncations, infos_np
 

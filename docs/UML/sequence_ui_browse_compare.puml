@@ -65,9 +65,16 @@ PL --> C: Figure
 C --> U: render
 
 == Tab: Pairwise ==
-C -> CMP: pairwise_table(exp, metric, test)
-CMP --> C: DataFrame
-C --> U: styled table (effect-size colours)
+C -> EX: score_provenances(metric="final_fitness")
+EX --> C: dict[group -> {provenance}]
+alt mixed provenance across groups (held-out vs training metric)
+    C --> U: blocking banner — Pairwise/Multi-task greyed out (F-7.1-01)
+else single provenance
+    C -> CMP: pairwise_table(exp, metric="final_fitness", test)
+    note right of CMP: resolves via comparison_score\n(held-out eval_mean_reward preferred)
+    CMP --> C: DataFrame
+    C --> U: styled table + resolved-provenance caption
+end
 
 == Tab: Profile / PI (optional) ==
 alt rliable available

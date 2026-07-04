@@ -8,24 +8,25 @@ or any required column changes. The analysis layer
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 #: Required columns on every row written to ``metrics.csv``.
 #: Trainers may add arbitrary extra columns; loaders treat unknown
 #: columns as ``object`` dtype.
 METRICS_REQUIRED_COLUMNS: tuple[str, ...] = (
     "iteration",  # generation/epoch/iteration index (int, 0-based)
-    "env_steps",  # cumulative env steps consumed so far (int)
+    "env_steps",  # cumulative env steps *actually* consumed so far (int)
+    "nominal_env_steps",  # nominal ceiling (gen × pop × max_steps); may equal env_steps
     "wall_time",  # seconds since run start (float)
 )
 
 #: Required columns on every row written to ``episodes.csv``.
 EPISODES_COLUMNS: tuple[str, ...] = (
     "episode_idx",  # int
-    "seed",         # int or empty
-    "reward",       # float (team/aggregate reward)
-    "length",       # int
-    "success",      # 0/1, env-defined; -1 if unknown
+    "seed",  # int or empty
+    "reward",  # float (team/aggregate reward)
+    "length",  # int
+    "success",  # 0/1, env-defined; -1 if unknown
 )
 
 #: Required columns on every row of ``trajectories.parquet``.

@@ -7,7 +7,8 @@ unified BaselineTrainer interface.
 
 import time
 from pathlib import Path
-from typing import Dict, Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, List, Optional
+
 import numpy as np
 from deap import algorithms, tools
 
@@ -19,12 +20,19 @@ from deap_pettingzoo.baselines._logging_helpers import (
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    PolicyProtocol,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
-    PolicyProtocol,
+    derive_generations,
 )
-from deap_pettingzoo.baselines.unified_evaluator import UnifiedEvaluator
+from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
+from deap_pettingzoo.environments.registry import (
+    get_registry_snapshot,
+    replay_registry_snapshot,
+)
 from deap_pettingzoo.evaluators import SingleEpisodeEvaluator
 from deap_pettingzoo.integration.deap_integration import (
     _EvalWorkerSpec,
@@ -35,10 +43,6 @@ from deap_pettingzoo.integration.deap_integration import (
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.environments.registry import (
-    get_registry_snapshot,
-    replay_registry_snapshot,
-)
 from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
 
 
@@ -109,7 +113,7 @@ class GenomePolicyWrapper:
 
         # Create single policy for all agents (homogeneous)
         self._policy = FeedforwardNeuralPolicy(genome, action_space=action_space)
-    
+
     def get_action(
         self,
         observation: np.ndarray,
@@ -128,10 +132,10 @@ class GenomePolicyWrapper:
             Action for the given observation.
         """
         return self._policy.get_action(observation, action_mask=action_mask)
-    
+
     def reset(self) -> None:
         """Reset policy state (no-op for stateless feedforward policies)."""
-    
+
     @property
     def genome(self):
         """Access underlying genome."""
@@ -140,15 +144,238 @@ class GenomePolicyWrapper:
 
 class EATrainer(BaselineTrainer):
     """Evolutionary Algorithm trainer using DEAP.
-    
+
     Wraps the existing DEAP integration to provide a unified
     training interface compatible with BaselineTrainer.
     """
 
-    #: Per-generation cadence is the natural fit for EA — every
-    #: generation produces one champion-rollout artefact when
-    #: ``TrainingConfig.recording.enabled`` is set.
-    _default_recording_every_n: ClassVar[int] = 1
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        Returns the :class:`~deap_pettingzoo.catalog.schema.ParamSpec` tuple
+        describing every UI-configurable knob of this trainer. The
+        :class:`~deap_pettingzoo.catalog.schema.ParamTarget` of each spec tells
+        :func:`~deap_pettingzoo.baselines.experiment_spec.build_configs` whether
+        the value is a trainer-constructor argument (``trainer_params``), a
+        per-run ``algorithm_params`` entry, or a first-class
+        :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attribute
+        (``seed`` / ``max_steps_per_episode``, routed via ``RUN_CONFIG``).
+
+        Dict-valued knobs (``selection_params`` / ``crossover_params`` /
+        ``mutation_params``) and ``fitness_spec`` are intentionally omitted —
+        they are raw-config / Python-API territory (see the UI-overhaul spec).
+        """
+        from deap_pettingzoo.catalog.schema import (
+            ParamSpec,
+            ParamTarget,
+            ParamType,
+        )
+
+        I, F, E = ParamType.INT, ParamType.FLOAT, ParamType.ENUM
+        TR, RC = ParamTarget.TRAINER, ParamTarget.RUN_CONFIG
+        return (
+            ParamSpec(
+                "hidden_size",
+                I,
+                64,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Architecture",
+                help="Hidden layer width of the evolved MLP.",
+            ),
+            ParamSpec(
+                "population_size",
+                I,
+                50,
+                minimum=2,
+                step=1,
+                target=TR,
+                group="Population",
+                help="Number of individuals evaluated per generation.",
+            ),
+            ParamSpec(
+                "strategy",
+                E,
+                "simple",
+                target=TR,
+                group="Strategy",
+                choices=("simple", "mu_plus_lambda", "mu_comma_lambda"),
+                help="Evolutionary driver / generational loop.",
+            ),
+            ParamSpec(
+                "mu",
+                I,
+                None,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Strategy",
+                advanced=True,
+                nullable=True,
+                help="Parents kept between generations "
+                "(mu_*_lambda strategies). Defaults to population.",
+            ),
+            ParamSpec(
+                "lambda_",
+                I,
+                None,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Strategy",
+                advanced=True,
+                nullable=True,
+                help="Offspring per generation (mu_*_lambda strategies).",
+            ),
+            ParamSpec(
+                "selection_method",
+                E,
+                "tournament",
+                target=TR,
+                group="Selection",
+                advanced=True,
+                choices=("tournament", "roulette", "best", "random", "nsga2", "spea2"),
+                help="Parent-selection operator.",
+            ),
+            ParamSpec(
+                "tournament_size",
+                I,
+                3,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Selection",
+                advanced=True,
+                help="Tournament size (tournament selection only).",
+            ),
+            ParamSpec(
+                "crossover_method",
+                E,
+                "blend",
+                target=TR,
+                group="Operators",
+                advanced=True,
+                choices=(
+                    "blend",
+                    "one_point",
+                    "two_point",
+                    "uniform",
+                    "sbx",
+                    "es_blend",
+                ),
+                help="Crossover operator.",
+            ),
+            ParamSpec(
+                "crossover_rate",
+                F,
+                0.7,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=TR,
+                group="Operators",
+                help="Probability of applying crossover.",
+            ),
+            ParamSpec(
+                "crossover_alpha",
+                F,
+                0.5,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=TR,
+                group="Operators",
+                advanced=True,
+                help="Blend-crossover alpha (blend / es_blend only).",
+            ),
+            ParamSpec(
+                "mutation_method",
+                E,
+                "gaussian",
+                target=TR,
+                group="Operators",
+                advanced=True,
+                choices=("gaussian", "polynomial_bounded"),
+                help="Mutation operator.",
+            ),
+            ParamSpec(
+                "mutation_rate",
+                F,
+                0.3,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=TR,
+                group="Operators",
+                help="Probability of mutating a child.",
+            ),
+            ParamSpec(
+                "mutation_sigma",
+                F,
+                0.2,
+                minimum=0.0,
+                step=0.05,
+                target=TR,
+                group="Operators",
+                advanced=True,
+                help="Gaussian mutation standard deviation.",
+            ),
+            ParamSpec(
+                "mutation_indpb",
+                F,
+                0.1,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                target=TR,
+                group="Operators",
+                advanced=True,
+                help="Per-weight independent mutation probability.",
+            ),
+            ParamSpec(
+                "num_workers",
+                I,
+                1,
+                minimum=0,
+                step=1,
+                target=TR,
+                group="Parallelism",
+                help="Parallel evaluation workers (1 = serial).",
+            ),
+            ParamSpec(
+                "parallel_backend",
+                E,
+                "process",
+                target=TR,
+                group="Parallelism",
+                advanced=True,
+                choices=("process", "scoop", "dask"),
+                help="Parallel executor backend.",
+            ),
+            ParamSpec(
+                "seed",
+                I,
+                None,
+                minimum=0,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Random seed for this run (None = unseeded).",
+            ),
+            ParamSpec(
+                "max_steps_per_episode",
+                I,
+                200,
+                minimum=1,
+                step=1,
+                target=RC,
+                group="Run",
+                help="Hard cap on environment steps per rollout.",
+            ),
+        )
 
     def __init__(
         self,
@@ -298,12 +525,20 @@ class EATrainer(BaselineTrainer):
                 raise RuntimeError("ParetoFront is empty")
             return max(pareto_or_hof.items, key=lambda ind: ind.fitness.values[0])
         return pareto_or_hof[0]
-    
-    def train(self, config: TrainingConfig) -> TrainingResult:
+
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train EA with the given configuration.
 
         Args:
             config: Training configuration.
+            progress_callback: Optional per-generation progress hook (fires for
+                the ``"simple"`` strategy live; for ``mu_*_lambda`` strategies
+                the events are emitted after DEAP's hidden loop returns).
 
         Returns:
             TrainingResult with best genome wrapped as policy.
@@ -316,12 +551,27 @@ class EATrainer(BaselineTrainer):
                 :func:`_resolve_shared_action_space`).
         """
         start_time = time.time()
-        
+
         # Translate budget to EA parameters
         ea_params = self._translate_budget(config)
-        num_generations = ea_params['num_generations']
-        max_steps_per_episode = ea_params['max_steps_per_episode']
-        
+        num_generations = ea_params["num_generations"]
+        max_steps_per_episode = ea_params["max_steps_per_episode"]
+
+        # Opt-in consumed-step budgeting: run until the real env-step budget
+        # is exhausted instead of a precomputed generation count. Only the
+        # ``simple`` loop can honor it — the DEAP built-ins
+        # (mu_plus_lambda / mu_comma_lambda) run a fixed ``ngen``.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            if self.strategy != "simple":
+                raise ValueError(
+                    "budget_on_consumed=True is only supported by the EA "
+                    f"'simple' strategy; strategy={self.strategy!r} runs a "
+                    "DEAP built-in with a fixed generation count. Use "
+                    "budget_on_consumed=False or BudgetMode.GENERATIONS."
+                )
+            consumed_budget = int(config.budget_value)
+
         # Setup environment and evaluator
         env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
         sample_obs = env.reset(seed=0)
@@ -330,29 +580,39 @@ class EATrainer(BaselineTrainer):
         input_size = len(sample_obs[agent_id])
         action_space = _resolve_shared_action_space(env)
         output_size = required_output_size(action_space)
-        
+
         evaluator = SingleEpisodeEvaluator(
             env_wrapper=env,
             max_steps=max_steps_per_episode,
-            aggregation_method='sum',
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
             fitness_spec=self.fitness_spec,
         )
-        
+
         # Setup DEAP — with multi-objective weights when appropriate.
         if self._is_multiobjective and self.fitness_spec is not None:
             setup_deap_creators(weights=self.fitness_spec.weights)
         else:
             setup_deap_creators()
-        
-        # Create genome configuration
-        seed = config.algorithm_params.get('seed', None)
+
+        # Seed global RNGs
+        seed = config.seed
+        if seed is not None:
+            from deap_pettingzoo.utils.rng import seed_everything
+
+            seed_everything(int(seed))
+
+        # Create genome configuration.
+        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
+        is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
-            'layer_sizes': [input_size, self.hidden_size, output_size],
-            'activation': 'tanh',
-            'weight_range': (-1.0, 1.0),
-            'random_seed': seed if seed is not None else (config.num_seeds if config.num_seeds == 1 else None),
+            "layer_sizes": [input_size, self.hidden_size, output_size],
+            "activation": "tanh",
+            "output_activation": "linear" if is_box else "tanh",
+            "weight_range": (-1.0, 1.0),
+            "random_seed": seed,
         }
-        
+
         # Build operator configs (method + per-method params).
         selection_config: Dict[str, Any] = {
             "method": self.selection_method,
@@ -381,105 +641,145 @@ class EATrainer(BaselineTrainer):
             crossover_config=crossover_config,
             mutation_config=mutation_config,
         )
-        
+
         # Override clone to use our clone_individual
         from deap_pettingzoo.integration.deap_integration import clone_individual
+
         toolbox.register("clone", clone_individual)
-        
+
         # Create initial population
         population = toolbox.population(n=self.population_size)
-        
+
         # Setup statistics
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", np.mean)
         stats.register("std", np.std)
         stats.register("min", np.min)
         stats.register("max", np.max)
-        
+
         if self._is_multiobjective:
             hof = tools.ParetoFront()
         else:
             hof = tools.HallOfFame(1)
-        
+
         # Setup random number generator
-        rng = np.random.default_rng(config.algorithm_params.get('seed'))
-        
+        rng = np.random.default_rng(seed)
+
         # Track metrics
         fitness_history = []
 
         log = build_logger(config, algorithm="ea")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        recording_evaluator: Optional[UnifiedEvaluator] = None
-        if recording_cfg.enabled:
-            recorder = log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                recording_evaluator = UnifiedEvaluator(
-                    max_steps=max_steps_per_episode,
-                    frame_recorder=recorder,
-                )
-
-        def _record_champion_if_due(gen: int) -> None:
-            """Record one champion-rollout episode when cadence hits.
-
-            Best-effort: any failure is swallowed so recording can't
-            break a long training run.
-            """
-            if recording_evaluator is None:
-                return
-            if not hof.items if isinstance(hof, tools.ParetoFront) else (not hof):
-                return
-            if gen % recording_cadence != 0:
-                return
-            try:
-                best = self._mo_champion(hof)
-                champ_policy = GenomePolicyWrapper(
-                    best.genome, config.env_name, action_space=action_space
-                )
-                rollout_seed = config.algorithm_params.get('seed')
-                recording_evaluator.evaluate(
-                    policy=champ_policy,
-                    env_name=config.env_name,
-                    num_episodes=1,
-                    seed=int(rollout_seed) if rollout_seed is not None else None,
-                    env_config=dict(config.env_config) if config.env_config else None,
-                )
-            except Exception:
-                pass
-
-        requested = config.algorithm_params.get("num_workers", self.num_workers)
-        effective_workers = resolve_num_workers(requested)
-        backend = config.algorithm_params.get(
-            "parallel_backend", self.parallel_backend
+        env_steps_per_iteration = self.population_size * max_steps_per_episode
+        self._recorder = RecordingController(
+            config,
+            log,
+            max_steps=max_steps_per_episode,
+            seed=seed,
         )
+
+        def _ea_champion():
+            """Lazy champion provider for the recording controller."""
+            items = hof.items if isinstance(hof, tools.ParetoFront) else hof
+            if not items:
+                return None
+            return GenomePolicyWrapper(
+                self._mo_champion(hof).genome,
+                config.env_name,
+                action_space=action_space,
+            )
+
+        def _make_event(gen: int) -> Optional[ProgressEvent]:
+            if not fitness_history:
+                return None
+            entry = fitness_history[-1]
+            if consumed_budget is not None:
+                # Consumed-step budgeting: the generation count is not known up
+                # front, so report progress against the real env-step budget.
+                consumed = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                return ProgressEvent(
+                    unit="env_step",
+                    current=consumed,
+                    total=consumed_budget,
+                    env_steps=consumed,
+                    best_fitness=entry.get("max"),
+                    mean_fitness=entry.get("mean"),
+                    wall_time_s=time.time() - start_time,
+                )
+            return ProgressEvent(
+                unit="generation",
+                current=gen,
+                total=num_generations,
+                env_steps=gen * env_steps_per_iteration,
+                best_fitness=entry.get("max"),
+                mean_fitness=entry.get("mean"),
+                wall_time_s=time.time() - start_time,
+            )
+
+        def _emit_gen_progress(gen: int) -> None:
+            """Emit progress only (no recording) — used at gen 0 and for the
+            DEAP-internal μ±λ strategies whose hof is only final."""
+            event = _make_event(gen)
+            if event is not None:
+                self._emit_progress(progress_callback, event)
+
+        def _on_generation(gen: int) -> None:
+            """Per-generation hook: emit progress **and** maybe record."""
+            # Inject real consumed steps into the just-appended history row
+            # so dump_fitness_history writes the honest counter. Only used by
+            # _run_simple; μ±λ strategies lack a per-gen hook so they fall
+            # back to the nominal formula in dump_fitness_history.
+            if fitness_history:
+                fitness_history[-1]["env_steps"] = int(
+                    evaluator.env_steps_consumed
+                ) + int(_parallel_steps[0])
+            event = _make_event(gen)
+            if event is not None:
+                self._on_progress(progress_callback, event, champion=_ea_champion)
+
+        # num_workers / parallel_backend are first-class TrainingConfig fields;
+        # the trainer-constructor value is the fallback used only when the
+        # config leaves them at their defaults.
+        requested = config.num_workers if config.num_workers != 1 else self.num_workers
+        effective_workers = resolve_num_workers(requested)
+        backend = (
+            config.parallel_backend
+            if config.parallel_backend != "process"
+            else self.parallel_backend
+        )
+        # One snapshot, reused for the process-pool initializer and shipped on
+        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot()
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
             max_steps=max_steps_per_episode,
-            aggregation_method="sum",
-            team_mapping=None,
+            aggregation_method=config.fitness.aggregation_method,
+            team_mapping=config.fitness.team_mapping,
+            registry_snapshot=registry_snapshot,
         )
 
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
-            initargs=(get_registry_snapshot(),),
+            initargs=(registry_snapshot,),
         ) as executor:
+            # Aggregates real env-step deltas from parallel workers (whose
+            # per-process evaluator counters never cross back). Stays at 0
+            # on the serial path, where the main-process evaluator counter
+            # is authoritative instead.
+            _parallel_steps = [0]
+
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
             if effective_workers > 1:
                 toolbox.register(
                     "map",
-                    make_parallel_evaluate_map(executor, worker_spec),
+                    make_parallel_evaluate_map(
+                        executor, worker_spec, step_sink=_parallel_steps
+                    ),
                 )
-                
-            base_eval_seed = config.algorithm_params.get("seed")
+
+            base_eval_seed = seed
             _eval_counter = [0]
 
             def _next_seeds(n: int):
@@ -499,11 +799,9 @@ class EATrainer(BaselineTrainer):
                         executor=executor,
                         spec=worker_spec,
                         eval_seeds=seeds,
+                        step_sink=_parallel_steps,
                     )
-                return [
-                    evaluator.evaluate(ind, seed=s)
-                    for ind, s in zip(inds, seeds)
-                ]
+                return [evaluator.evaluate(ind, seed=s) for ind, s in zip(inds, seeds)]
 
             # Evaluate initial population
             fitnesses = _eval_population(population)
@@ -512,95 +810,175 @@ class EATrainer(BaselineTrainer):
 
             hof.update(population)
             record = stats.compile(population)
-            fitness_history.append({
-                'generation': 0,
-                'mean': record['avg'],
-                'std': record['std'],
-                'min': record['min'],
-                'max': record['max'],
-            })
+            fitness_history.append(
+                {
+                    "generation": 0,
+                    "mean": record["avg"],
+                    "std": record["std"],
+                    "min": record["min"],
+                    "max": record["max"],
+                    "env_steps": (
+                        int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+                    ),
+                }
+            )
+            _emit_gen_progress(0)
 
-            # Evolution loop — strategy-dependent.
+            # Evolution loop — strategy-dependent. Defaults to the nominal
+            # generation count; the consumed-budgeting ``simple`` path below
+            # overrides it with the realized count once the loop stops.
+            realized_generations = num_generations
             if self.strategy == "simple":
-                self._run_simple(
-                    population, toolbox, stats, hof, fitness_history,
-                    num_generations, rng,
-                    eval_population=_eval_population,
-                    on_generation=_record_champion_if_due,
+                if consumed_budget is not None:
+                    # Drive to a generous safety cap and stop once the real
+                    # consumed budget is exhausted. The cap is a rigorous upper
+                    # bound: each generation consumes >= 1 tick per (re)evaluated
+                    # individual, and episodes run at most ``max_steps`` ticks,
+                    # so no more than ``nominal_gens * max_steps`` generations
+                    # are ever needed to exhaust the budget.
+                    safety_cap = num_generations * max(1, max_steps_per_episode) + 10
+
+                    def _consumed_reached() -> bool:
+                        consumed = int(evaluator.env_steps_consumed) + int(
+                            _parallel_steps[0]
+                        )
+                        return consumed >= consumed_budget
+
+                    realized_generations = self._run_simple(
+                        population,
+                        toolbox,
+                        stats,
+                        hof,
+                        fitness_history,
+                        safety_cap,
+                        rng,
+                        eval_population=_eval_population,
+                        on_generation=_on_generation,
+                        stop_predicate=_consumed_reached,
+                    )
+                else:
+                    self._run_simple(
+                        population,
+                        toolbox,
+                        stats,
+                        hof,
+                        fitness_history,
+                        num_generations,
+                        rng,
+                        eval_population=_eval_population,
+                        on_generation=_on_generation,
+                    )
+                    realized_generations = num_generations
+                # Safety net: guarantee a final capture even if the last
+                # per-gen hook didn't land exactly on fraction 1.0 (dedups).
+                self._recorder.finalize(
+                    _ea_champion,
+                    iteration=realized_generations,
+                    env_steps=realized_generations * env_steps_per_iteration,
                 )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
-                    population, toolbox,
-                    mu=self.mu, lambda_=self.lambda_,
-                    cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                    population,
+                    toolbox,
+                    mu=self.mu,
+                    lambda_=self.lambda_,
+                    cxpb=self.crossover_rate,
+                    mutpb=self.mutation_rate,
                     ngen=num_generations,
-                    stats=stats, halloffame=hof, verbose=False,
+                    stats=stats,
+                    halloffame=hof,
+                    verbose=False,
                 )
                 for record in logbook:
-                    gen = record['gen']
+                    gen = record["gen"]
                     if gen == 0:
                         continue  # already recorded from initial evaluation
-                    fitness_history.append({
-                        'generation': gen,
-                        'mean': record['avg'],
-                        'std': record['std'],
-                        'min': record['min'],
-                        'max': record['max'],
-                    })
-                # eaMu*Lambda doesn't expose a per-gen hook; record once against the final hall-of-fame champion.
-                _record_champion_if_due(num_generations)
+                    fitness_history.append(
+                        {
+                            "generation": gen,
+                            "mean": record["avg"],
+                            "std": record["std"],
+                            "min": record["min"],
+                            "max": record["max"],
+                        }
+                    )
+                    _emit_gen_progress(gen)
+                # eaMu*Lambda doesn't expose a per-gen hook and hof holds only
+                # the final champion; record once at the end.
+                self._recorder.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_comma_lambda":
                 _, logbook = algorithms.eaMuCommaLambda(
-                    population, toolbox,
-                    mu=self.mu, lambda_=self.lambda_,
-                    cxpb=self.crossover_rate, mutpb=self.mutation_rate,
+                    population,
+                    toolbox,
+                    mu=self.mu,
+                    lambda_=self.lambda_,
+                    cxpb=self.crossover_rate,
+                    mutpb=self.mutation_rate,
                     ngen=num_generations,
-                    stats=stats, halloffame=hof, verbose=False,
+                    stats=stats,
+                    halloffame=hof,
+                    verbose=False,
                 )
                 for record in logbook:
-                    gen = record['gen']
+                    gen = record["gen"]
                     if gen == 0:
                         continue  # already recorded from initial evaluation
-                    fitness_history.append({
-                        'generation': gen,
-                        'mean': record['avg'],
-                        'std': record['std'],
-                        'min': record['min'],
-                        'max': record['max'],
-                    })
-                _record_champion_if_due(num_generations)
+                    fitness_history.append(
+                        {
+                            "generation": gen,
+                            "mean": record["avg"],
+                            "std": record["std"],
+                            "min": record["min"],
+                            "max": record["max"],
+                        }
+                    )
+                    _emit_gen_progress(gen)
+                self._recorder.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
 
         # Clean up
         env.close()
-        if recording_evaluator is not None:
-            recording_evaluator.close()
-        
+        self._recorder.close()
+
         training_time = time.time() - start_time
-        
+
         # Get best individual (MO: champion from Pareto front).
         best_individual = self._mo_champion(hof)
         best_genome = best_individual.genome
-        
+
         # Wrap genome as policy
-        policy = GenomePolicyWrapper(best_genome, config.env_name, action_space=action_space)
+        policy = GenomePolicyWrapper(
+            best_genome, config.env_name, action_space=action_space
+        )
 
         # For multi-objective runs, record the full Pareto front.
         pareto_front: Optional[List[Any]] = None
         if isinstance(hof, tools.ParetoFront):
             pareto_front = list(hof.items)
 
-        # Persist results via the logger 
+        # Persist results via the logger
         # No-op when ``config.output_dir is None`` (NoOpLogger) so the backend stays usable without the analysis stack.
         try:
             with log:
                 dump_fitness_history(
                     log,
                     fitness_history,
-                    env_steps_per_iteration=self.population_size * max_steps_per_episode,
+                    env_steps_per_iteration=self.population_size
+                    * max_steps_per_episode,
+                    nominal_env_steps_per_iteration=self.population_size
+                    * max_steps_per_episode,
                 )
-                from deap_pettingzoo.utils.logging import save_ea_genome, KIND_EA_GENOME
+                from deap_pettingzoo.utils.logging import KIND_EA_GENOME, save_ea_genome
+
                 save_ea_genome(
                     log,
                     best_genome,
@@ -615,7 +993,7 @@ class EATrainer(BaselineTrainer):
                     {
                         "algorithm": "ea",
                         "final_fitness": float(best_individual.fitness.values[0]),
-                        "num_generations": num_generations,
+                        "num_generations": realized_generations,
                         "population_size": self.population_size,
                         "strategy": self.strategy,
                     },
@@ -625,66 +1003,84 @@ class EATrainer(BaselineTrainer):
             # Defensive: never fail training because of logging cleanup.
             pass
 
+        # Nominal ceiling tracks the realized generation count (equal to the
+        # requested count on the nominal path; the consumed-budgeting path runs
+        # a variable number of generations until the real budget is exhausted).
+        nominal_env_steps = (realized_generations + 1) * env_steps_per_iteration
+        # Correct on both paths: serial leaves ``_parallel_steps[0] == 0`` and
+        # the main-process evaluator counter is authoritative; parallel leaves
+        # the main-process evaluator counter at 0 and aggregates the workers'
+        # real per-task deltas into ``_parallel_steps[0]``.
+        real_env_steps = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
+
         # Create result
         return TrainingResult(
-            algorithm='ea',
+            algorithm="ea",
             policy=policy,
             metrics={
-                'fitness_history': fitness_history,
-                'final_fitness': best_individual.fitness.values[0],
-                'num_generations': num_generations,
-                'population_size': self.population_size,
+                "fitness_history": fitness_history,
+                "final_fitness": best_individual.fitness.values[0],
+                "num_generations": realized_generations,
+                "population_size": self.population_size,
+                "env_steps_nominal": nominal_env_steps,
+                "env_steps_consumed": real_env_steps,
             },
             metadata={
-                'genome_config': genome_config,
-                'ea_config': {
-                    'hidden_size': self.hidden_size,
-                    'population_size': self.population_size,
-                    'tournament_size': self.tournament_size,
-                    'crossover_alpha': self.crossover_alpha,
-                    'mutation_sigma': self.mutation_sigma,
-                    'mutation_indpb': self.mutation_indpb,
-                    'crossover_rate': self.crossover_rate,
-                    'mutation_rate': self.mutation_rate,
-                    'strategy': self.strategy,
-                    'mu': self.mu,
-                    'lambda_': self.lambda_,
-                    'selection_method': self.selection_method,
-                    'crossover_method': self.crossover_method,
-                    'mutation_method': self.mutation_method,
+                "genome_config": genome_config,
+                "ea_config": {
+                    "hidden_size": self.hidden_size,
+                    "population_size": self.population_size,
+                    "tournament_size": self.tournament_size,
+                    "crossover_alpha": self.crossover_alpha,
+                    "mutation_sigma": self.mutation_sigma,
+                    "mutation_indpb": self.mutation_indpb,
+                    "crossover_rate": self.crossover_rate,
+                    "mutation_rate": self.mutation_rate,
+                    "strategy": self.strategy,
+                    "mu": self.mu,
+                    "lambda_": self.lambda_,
+                    "selection_method": self.selection_method,
+                    "crossover_method": self.crossover_method,
+                    "mutation_method": self.mutation_method,
                 },
-                'num_workers': effective_workers,
-                'parallel_backend': backend,
+                "num_workers": effective_workers,
+                "parallel_backend": backend,
+                "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
             pareto_front=pareto_front,
         )
-    
+
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         """Check if EA supports the given budget mode.
-        
+
         Args:
             mode: Budget mode to check.
-            
+
         Returns:
             True if supported.
         """
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
-    
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
+
     def get_capabilities(self) -> Dict[str, Any]:
         """Get EA capabilities.
-        
+
         Returns:
             Capabilities dictionary.
         """
         return {
-            'discrete_action': True,
-            'continuous_action': True,
-            'needs_global_state': False,
-            'on_policy': False,  # EA is not on/off-policy (different paradigm)
-            'supports_turn_based': True,
+            "discrete_action": True,
+            "continuous_action": True,
+            "multidiscrete_action": True,
+            "needs_global_state": False,
+            "on_policy": False,  # EA is not on/off-policy (different paradigm)
+            "supports_turn_based": True,
         }
-    
+
     def _translate_budget(self, config: TrainingConfig) -> Dict[str, Any]:
         """Translate budget config to EA parameters.
 
@@ -696,30 +1092,42 @@ class EATrainer(BaselineTrainer):
 
         Raises:
             ValueError: If ``config.budget_mode`` is not
-                ``BudgetMode.ENV_STEPS`` or ``BudgetMode.EVAL_EPISODES``.
+                ``BudgetMode.ENV_STEPS``, ``BudgetMode.EVAL_EPISODES``, or
+                ``BudgetMode.GENERATIONS``.
         """
-        max_steps_per_episode = config.algorithm_params.get('max_steps_per_episode', 200)
-        
-        if config.budget_mode == BudgetMode.ENV_STEPS:
-            # Calculate generations from environment steps
+        max_steps_per_episode = (
+            config.max_steps_per_episode
+            if config.max_steps_per_episode is not None
+            else 200
+        )
+
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            # Generations are the EA's native unit, so honor the request exactly.
+            num_generations = max(1, int(config.budget_value))
+        elif config.budget_mode == BudgetMode.ENV_STEPS:
             # env_steps = population_size * num_generations * max_steps_per_episode
-            total_env_steps = config.budget_value
-            num_generations = total_env_steps // (self.population_size * max_steps_per_episode)
-            num_generations = max(1, num_generations)  # At least 1 generation
-            
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                max_steps_per_episode,
+                label="EA",
+            )
         elif config.budget_mode == BudgetMode.EVAL_EPISODES:
-            # Each episode evaluates one individual
-            # Total episodes = population_size * num_generations
-            total_episodes = config.budget_value
-            num_generations = total_episodes // self.population_size
-            num_generations = max(1, num_generations)
-            
+            # Each episode evaluates one individual:
+            # total_episodes = population_size * num_generations.
+            num_generations = derive_generations(
+                config.budget_value,
+                self.population_size,
+                1,
+                label="EA",
+                unit="eval episodes",
+            )
         else:
             raise ValueError(f"EA does not support budget mode: {config.budget_mode}")
-        
+
         return {
-            'num_generations': num_generations,
-            'max_steps_per_episode': max_steps_per_episode,
+            "num_generations": num_generations,
+            "max_steps_per_episode": max_steps_per_episode,
         }
 
     def _run_simple(
@@ -734,7 +1142,8 @@ class EATrainer(BaselineTrainer):
         *,
         eval_population,
         on_generation=None,
-    ) -> None:
+        stop_predicate=None,
+    ) -> int:
         """In-house ``eaSimple``-style generational loop.
 
         Preserves the historical behaviour of :class:`EATrainer`:
@@ -751,7 +1160,17 @@ class EATrainer(BaselineTrainer):
                 hall-of-fame and statistics are updated). Used by the
                 opt-in frame-recording machinery to fire one extra
                 champion-rollout episode.
+            stop_predicate: Optional zero-arg callable checked at the end of
+                each generation. When it returns ``True`` the loop breaks
+                early — used by the opt-in consumed-step budgeting to stop
+                once the real env-step budget is exhausted. ``num_generations``
+                then acts as a safety cap rather than an exact count.
+
+        Returns:
+            The realized generation count (equals ``num_generations`` on the
+            nominal path; may be fewer when ``stop_predicate`` breaks early).
         """
+        gen = 0
         for gen in range(1, num_generations + 1):
             offspring = toolbox.select(population, len(population))
             offspring = list(map(toolbox.clone, offspring))
@@ -776,13 +1195,20 @@ class EATrainer(BaselineTrainer):
             hof.update(population)
 
             record = stats.compile(population)
-            fitness_history.append({
-                'generation': gen,
-                'mean': record['avg'],
-                'std': record['std'],
-                'min': record['min'],
-                'max': record['max'],
-            })
+            fitness_history.append(
+                {
+                    "generation": gen,
+                    "mean": record["avg"],
+                    "std": record["std"],
+                    "min": record["min"],
+                    "max": record["max"],
+                }
+            )
 
             if on_generation is not None:
                 on_generation(gen)
+
+            if stop_predicate is not None and stop_predicate():
+                break
+
+        return gen

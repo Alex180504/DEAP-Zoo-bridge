@@ -24,26 +24,38 @@ R -> EX: filter(algorithm=...)
 EX --> R: filtered Experiment
 
 R -> EX: summary_table()
-EX --> R: pd.DataFrame[algorithm, env, seed, run_id, wall_time_s, final_fitness]
+EX --> R: pd.DataFrame[algorithm, env, seed, run_id, wall_time_s,\n  final_fitness, eval_mean_reward, score_provenance]
 
 R -> EX: final_scores(metric="final_fitness")
-EX --> R: dict[algo -> ndarray]
+note right of EX: "final_fitness" resolves through RunRecord.comparison_score —\nprefers held-out eval_mean_reward, never silently substitutes a\ntraining reward (provenance via score_provenances(metric))
+EX --> R: dict[algo -> ndarray]  (held-out-preferred)
 
 R -> AG: aggregate_summary(score_groups)
-AG --> R: DataFrame[mean+CI, iqm+CI, median]
+note right of AG: warns (or raises if require_equal_n) on\nunequal per-algorithm n; n_seeds surfaced.\niqm() count-trims 25%/end (== rliable, tie-safe)
+AG --> R: DataFrame[mean+CI, iqm+CI, median, n_seeds]
 
 R -> AG: learning_curve_with_ci(runs, statistic="iqm")
+note right of AG: y_col auto-detects best->mean->max so\nproduct-path runs (mean only) curve too
 AG --> R: DataFrame[x, y, low, high]
+
+R -> EX: per_agent_table()
+EX -> RR: read .trajectories (per-agent reward rows)
+EX --> R: DataFrame[algorithm, seed, agent, total_reward,\n  mean_episode_reward, n_steps]
 
 R -> CMP: pairwise_table(experiment, test="mann_whitney")
 CMP --> R: long-form DataFrame[a, b, p, cliffs_delta, cohens_d]
 
 opt rliable installed
     R -> RLB: aggregate_metrics_table(score_groups)
+    note right of RLB: optimality_gap omitted on the raw\nsingle-task path (meaningless un-normalised)
     RLB --> R: DataFrame
     R -> RLB: performance_profile(score_groups, taus)
     RLB --> R: DataFrame
 end
+
+R -> EX: export("campaign.csv", include_config=True)
+EX -> FS: write per-(algo,env,seed) rows\n+ seed/budget/git_sha/hyperparams
+EX --> R: Path
 
 alt experiment spans >= 2 environments (multi-task)
     participant "multi_task" as MT

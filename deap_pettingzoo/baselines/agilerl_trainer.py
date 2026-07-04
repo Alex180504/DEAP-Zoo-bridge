@@ -19,18 +19,13 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import time
 import warnings
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from deap_pettingzoo.baselines.base import (
-    BaselineTrainer,
-    BudgetMode,
-    TrainingConfig,
-    TrainingResult,
-)
 from deap_pettingzoo.baselines.agilerl_adapter import (
     build_parallel_env,
     build_vec_parallel_env,
@@ -38,6 +33,27 @@ from deap_pettingzoo.baselines.agilerl_adapter import (
     translate_budget_to_env_steps,
 )
 from deap_pettingzoo.baselines.agilerl_policy import AgileRLPolicyWrapper
+from deap_pettingzoo.baselines.base import (
+    BaselineTrainer,
+    BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
+    TrainingConfig,
+    TrainingResult,
+)
+from deap_pettingzoo.catalog.schema import (
+    ParamSpec,
+    ParamTarget,
+    ParamType,
+)
+
+# Imported as a module (not `from ... import cuda_available`) so the runtime
+# CUDA gating in describe_hyperparameters() reflects the *live* function — a
+# `from` import binds the name at import time and would ignore later
+# monkeypatching / a device that changes availability between import and call.
+from deap_pettingzoo.utils import device_check
+
+logger = logging.getLogger(__name__)
 
 
 # AgileRL bug-fix: misaligned state/advantage flattening in grouped IPPO
@@ -83,21 +99,28 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
     matches ``vectorize_experiences_by_agent(dim=1)`` used for advantages.
     """
     try:
-        import torch
-        import numpy as _np
         import agilerl.utils.algo_utils as _au
+        import numpy as _np
+        import torch
 
-        tensors = [_au.experience_to_tensors(experiences[aid], space, actions)
-                   for aid in experiences]
+        tensors = [
+            _au.experience_to_tensors(experiences[aid], space, actions)
+            for aid in experiences
+        ]
 
         def _stack_and_flatten(tlist, sp):
             import gymnasium.spaces as _spaces
+
             if isinstance(tlist[0], dict):
-                return {k: _stack_and_flatten([t[k] for t in tlist], sp[k])
-                        for k in tlist[0]}
+                return {
+                    k: _stack_and_flatten([t[k] for t in tlist], sp[k])
+                    for k in tlist[0]
+                }
             if isinstance(tlist[0], tuple):
-                return tuple(_stack_and_flatten([t[i] for t in tlist], sp[i])
-                             for i in range(len(tlist[0])))
+                return tuple(
+                    _stack_and_flatten([t[i] for t in tlist], sp[i])
+                    for i in range(len(tlist[0]))
+                )
             # tlist: A tensors of shape (T, E?, *features)
             # stack dim=1 → (T, A, E?, *features), matching advantage layout.
             stacked = torch.stack(tlist, dim=1)
@@ -121,7 +144,10 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
             stacklevel=2,
         )
         import agilerl.utils.algo_utils as _au
-        return _au._orig_concatenate_experiences_into_batches(experiences, space, actions)
+
+        return _au._orig_concatenate_experiences_into_batches(
+            experiences, space, actions
+        )
 
 
 def _apply_agilerl_grouping_patch() -> None:
@@ -175,6 +201,7 @@ def _apply_agilerl_grouping_patch() -> None:
     # Also patch the name already bound inside the IPPO module.
     try:
         import agilerl.algorithms.ippo as _ippo_mod
+
         _ippo_mod.concatenate_experiences_into_batches = (
             _patched_concatenate_experiences_into_batches
         )
@@ -199,19 +226,17 @@ class AgileRLTrainer(BaselineTrainer):
     - :attr:`ON_POLICY`  - ``True`` for PPO-family algorithms,
       ``False`` for DDPG-family.
     - :meth:`get_capabilities`  - per-algorithm capability flags.
-    
+
     Notes:
         AgileRL training is rollout-based, not generation-based, so the
         default cadence is the largest sensible bucket. Currently we only
-        emit a single end-of-training rollout regardless of cadence. 
+        emit a single end-of-training rollout regardless of cadence.
         The ClassVar value is kept for API parity with other trainers.
     """
 
     ALGORITHM_NAME: str = "agilerl"
     ALGORITHM_IMPORT: Tuple[str, str] = ("agilerl", "")
     ON_POLICY: bool = False
-
-    _default_recording_every_n: ClassVar[int] = 10
 
     # Default hyperparameters; subclasses may override.
     DEFAULT_PARAMS: Dict[str, Any] = {
@@ -224,13 +249,210 @@ class AgileRLTrainer(BaselineTrainer):
         "device": "cpu",
     }
 
+    @staticmethod
+    def describe_hyperparameters():
+        """Declarative hyperparameter overlay consumed by the catalog.
+
+        The four AgileRL subclasses share one hyperparameter surface. Only
+        ``device`` / ``verbose`` are constructor arguments
+        (:class:`~deap_pettingzoo.catalog.schema.ParamTarget.TRAINER`);
+        ``seed`` / ``max_steps_per_episode`` are first-class
+        :class:`~deap_pettingzoo.baselines.base.TrainingConfig` attributes
+        (``RUN_CONFIG``); every other knob is merged over
+        :attr:`DEFAULT_PARAMS` and passed through ``algorithm_params``.
+        Off-policy-only knobs (``memory_size``,
+        ``learning_delay``, ``learn_step``) and the on-policy ``rollout_steps``
+        are both surfaced; the inactive ones are ignored by the running
+        algorithm. Optimiser passthroughs (``lr_actor`` / ``lr_critic`` /
+        ``gamma`` / ``tau``) default to AgileRL's own values
+        (1e-3 / 1e-2 / 0.95 / 0.01).
+        """
+
+        I, F, B, E = (
+            ParamType.INT,
+            ParamType.FLOAT,
+            ParamType.BOOL,
+            ParamType.ENUM,
+        )
+        TR, AP, RC = (
+            ParamTarget.TRAINER,
+            ParamTarget.ALGORITHM_PARAMS,
+            ParamTarget.RUN_CONFIG,
+        )
+        _device_unavailable = (
+            () if device_check.cuda_available() else ("cuda",)
+        )  # check for CUDA GPU availability at runtime
+        return (
+            ParamSpec(
+                "batch_size",
+                I,
+                64,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                help="Mini-batch size for gradient updates.",
+            ),
+            ParamSpec(
+                "num_envs",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Parallelism",
+                help="Vectorised environments for rollout collection.",
+            ),
+            ParamSpec(
+                "memory_size",
+                I,
+                10_000,
+                minimum=1,
+                step=1000,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Replay-buffer capacity (off-policy only).",
+            ),
+            ParamSpec(
+                "learning_delay",
+                I,
+                500,
+                minimum=0,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Env steps before learning begins (off-policy).",
+            ),
+            ParamSpec(
+                "learn_step",
+                I,
+                100,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Env steps between learn() calls (off-policy).",
+            ),
+            ParamSpec(
+                "rollout_steps",
+                I,
+                256,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Steps collected per update (on-policy / IPPO).",
+            ),
+            ParamSpec(
+                "lr_actor",
+                F,
+                1e-3,
+                minimum=0.0,
+                step=1e-4,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Actor learning rate (AgileRL default: 1e-3).",
+            ),
+            ParamSpec(
+                "lr_critic",
+                F,
+                1e-2,
+                minimum=0.0,
+                step=1e-4,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Critic learning rate (AgileRL default: 1e-2).",
+            ),
+            ParamSpec(
+                "gamma",
+                F,
+                0.95,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.01,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Discount factor (AgileRL default: 0.95).",
+            ),
+            ParamSpec(
+                "tau",
+                F,
+                0.01,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.001,
+                target=AP,
+                group="Learning",
+                advanced=True,
+                help="Target-network soft-update rate (AgileRL default: 0.01).",
+            ),
+            ParamSpec(
+                "device",
+                E,
+                "cpu",
+                target=TR,
+                group="Runtime",
+                choices=("cpu", "cuda"),
+                unavailable_choices=_device_unavailable,
+                help="Torch device for training.",
+            ),
+            ParamSpec(
+                "verbose",
+                B,
+                False,
+                target=TR,
+                group="Runtime",
+                advanced=True,
+                help="Print per-interval training progress.",
+            ),
+            ParamSpec(
+                "seed",
+                I,
+                None,
+                minimum=0,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Random seed for this run (None = unseeded).",
+            ),
+            ParamSpec(
+                "max_steps_per_episode",
+                I,
+                None,
+                minimum=1,
+                step=1,
+                target=RC,
+                group="Run",
+                nullable=True,
+                help="Hard cap on env steps per evaluation episode.",
+            ),
+        )
+
     def __init__(self, device: str = "cpu", verbose: bool = False) -> None:
-        self.device = device
+        # Fall back to CPU when a CUDA device is requested but unavailable
+        # (e.g. the CPU-only torch build in the service container) so AgileRL
+        # doesn't crash with "Torch not compiled with CUDA enabled".
+        from deap_pettingzoo.utils.device_check import resolve_device
+
+        self.device = resolve_device(device)
         self.verbose = verbose
 
     # BaselineTrainer interface
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Train an AgileRL algorithm under the given budget.
 
         Raises:
@@ -250,6 +472,7 @@ class AgileRLTrainer(BaselineTrainer):
         if not self.get_capabilities().get("supports_turn_based", True):
             try:
                 from deap_pettingzoo.environments.registry import get_env_spec
+
                 spec_api = get_env_spec(config.env_name).api
             except Exception:  # pragma: no cover - registry lookup fallback
                 spec_api = None
@@ -266,7 +489,8 @@ class AgileRLTrainer(BaselineTrainer):
 
         params = dict(self.DEFAULT_PARAMS)
         params.update(config.algorithm_params or {})
-        seed = int(params.pop("seed", 0))
+        params.pop("seed", None)  # config.seed is the authoritative source
+        seed = int(config.seed) if config.seed is not None else 0
         self._seed_everything(seed)
 
         # ``num_envs`` controls vectorized rollout collection.
@@ -297,7 +521,9 @@ class AgileRLTrainer(BaselineTrainer):
             "max_steps_per_episode",
         }
         ctor_kwargs = {k: v for k, v in params.items() if k not in loop_keys}
-        ctor_kwargs["device"] = self.device  # Always use trainer's device, not DEFAULT_PARAMS "cpu"
+        ctor_kwargs["device"] = (
+            self.device
+        )  # Always use trainer's device, not DEFAULT_PARAMS "cpu"
 
         agent = self._build_agent(
             alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs
@@ -319,100 +545,58 @@ class AgileRLTrainer(BaselineTrainer):
             build_logger,
             write_summary,
         )
-        from deap_pettingzoo.utils.logging.experiment_logger import NoOpLogger
+        from deap_pettingzoo.baselines.recording import RecordingController
 
-        recording_cfg = config.recording
         with build_logger(config, algorithm=self.ALGORITHM_NAME) as log:
-            recorder = None
-            record_every_n_steps: Optional[int] = None
-            record_state = {"episode_idx": 0}
+            run_dir_str = str(log.run_dir) if config.output_dir is not None else None
 
-            # Frame-recording setup. Recording is best-effort: errors are
-            # caught (and a traceback is printed) so they cannot break
-            # training.
-            if recording_cfg.enabled and not isinstance(log, NoOpLogger):
-                try:
-                    recorder = log.get_frame_recorder(
-                        fps=recording_cfg.fps,
-                        fmt=recording_cfg.fmt,
-                        max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                        max_dim=recording_cfg.max_dim,
-                        episode_prefix=recording_cfg.episode_prefix or "train_",
-                    )
-                except Exception:  # pragma: no cover - best-effort
-                    import traceback as _tb
-                    _tb.print_exc()
-                    recorder = None
-
-            if recorder is not None and recorder.enabled:
-                # Resolve the mid-training cadence. ``every_n_steps`` (env
-                # steps) wins outright; otherwise ``every_n_generations`` is
-                # interpreted as "every N learn iterations" and converted to
-                # env steps via ``learn_step``. ``None`` on both → no
-                # mid-training recording (final rollout still emitted).
-                if recording_cfg.every_n_steps is not None:
-                    record_every_n_steps = int(recording_cfg.every_n_steps)
-                elif recording_cfg.every_n_generations is not None:
-                    learn_step = int(
-                        params.get(
-                            "learn_step", self.DEFAULT_PARAMS.get("learn_step", 1)
-                        )
-                    )
-                    record_every_n_steps = max(
-                        1, int(recording_cfg.every_n_generations) * learn_step
-                    )
-
-            from deap_pettingzoo.baselines.unified_evaluator import (
-                UnifiedEvaluator,
+            # Unified champion-rollout recording. The cadence is decided by
+            # the controller from the run's RecordingMode on the shared
+            # env-step axis (RL has no generations). The champion is the live
+            # ``policy`` wrapper around ``agent`` (weights update in place).
+            # Use the env's natural episode length for the recording rollout,
+            # NOT max_steps_per_episode from algorithm_params — that's a
+            # training knob (episode-reset frequency) that users often set
+            # to small values for off-policy efficiency.
+            _env_cfg = config.env_config or {}
+            _rec_max_steps = int(
+                config.recording.max_frames_per_episode
+                or _env_cfg.get("max_cycles")
+                or _env_cfg.get("max_time_steps")
+                or 500
+            )
+            self._recorder = RecordingController(
+                config,
+                log,
+                max_steps=_rec_max_steps,
+                seed=seed,
             )
 
-            def _record_episode() -> None:
-                """Run one champion-rollout episode through ``recorder``.
-
-                Reuses the already-built ``recorder`` (and therefore the
-                same ``run_dir``). The episode index increments per
-                successful call so artefacts are named
-                ``{prefix}episode_NNNN.{mp4,gif}`` with monotonically
-                increasing N.
-                """
-                if recorder is None or not recorder.enabled:
-                    return
-                ep_idx = record_state["episode_idx"]
-                record_state["episode_idx"] = ep_idx + 1
-                try:
-                    rec_eval = UnifiedEvaluator(
-                        max_steps=int(params.get("max_steps_per_episode", 100)),
-                        frame_recorder=recorder,
-                        record_episode_offset=ep_idx,
-                    )
-                    try:
-                        rec_eval.evaluate(
-                            policy=policy,
-                            env_name=config.env_name,
-                            num_episodes=1,
-                            seed=seed + ep_idx,
-                            env_config=dict(config.env_config)
-                            if config.env_config
-                            else None,
-                        )
-                    finally:
-                        rec_eval.close()
-                except Exception:  # pragma: no cover - best-effort
-                    import traceback as _tb
-                    _tb.print_exc()
+            def _champion():
+                return policy
 
             start = time.time()
             if self.ON_POLICY:
                 metrics = self._run_on_policy(
-                    env, agent, agent_ids, budget_steps, params, seed,
-                    record_callback=_record_episode if recorder is not None else None,
-                    record_every_n_steps=record_every_n_steps,
+                    env,
+                    agent,
+                    agent_ids,
+                    budget_steps,
+                    params,
+                    seed,
+                    champion=_champion,
+                    progress_callback=progress_callback,
                 )
             else:
                 metrics = self._run_off_policy(
-                    env, agent, agent_ids, budget_steps, params, seed,
-                    record_callback=_record_episode if recorder is not None else None,
-                    record_every_n_steps=record_every_n_steps,
+                    env,
+                    agent,
+                    agent_ids,
+                    budget_steps,
+                    params,
+                    seed,
+                    champion=_champion,
+                    progress_callback=progress_callback,
                 )
             training_time = time.time() - start
             try:
@@ -424,12 +608,12 @@ class AgileRLTrainer(BaselineTrainer):
             except Exception:  # pragma: no cover
                 pass
 
-            # Always emit one end-of-training rollout when recording is
-            # enabled, regardless of mid-training cadence — guarantees at
-            # least one mp4 even on tight budgets where the cadence never
-            # fires.
-            if recorder is not None and recorder.enabled:
-                _record_episode()
+            # Always emit one end-of-training rollout — guarantees at least one
+            # artefact even on tight budgets where no mid-run checkpoint fired.
+            self._recorder.finalize(
+                _champion, iteration=budget_steps, env_steps=budget_steps
+            )
+            self._recorder.close()
 
             ep_rewards = list(metrics.get("episode_rewards", []) or [])
             for idx, r in enumerate(ep_rewards):
@@ -443,7 +627,10 @@ class AgileRLTrainer(BaselineTrainer):
                         "success": -1,
                     },
                 )
+            for entry in metrics.get("metrics_history", []):
+                log.row("metrics", entry)
             from deap_pettingzoo.utils.logging import save_agilerl_agent
+
             save_agilerl_agent(
                 log,
                 agent,
@@ -479,6 +666,7 @@ class AgileRLTrainer(BaselineTrainer):
                 "agent_ids": agent_ids,
                 "on_policy": self.ON_POLICY,
                 "algorithm_params": params,
+                "run_dir": run_dir_str,
             },
             seed=seed,
             training_time=training_time,
@@ -507,18 +695,11 @@ class AgileRLTrainer(BaselineTrainer):
 
     @staticmethod
     def _seed_everything(seed: int) -> None:
-        np.random.seed(seed)
-        try:
-            import torch
+        from deap_pettingzoo.utils.rng import seed_everything as _se
 
-            torch.manual_seed(seed)
-        except ImportError:  # pragma: no cover
-            pass
+        _se(seed)
 
     def _budget_to_steps(self, config: TrainingConfig) -> int:
-        if config.budget_mode == BudgetMode.WALL_CLOCK:
-            # Soft cap: rely on a large step budget and let the caller's timer stop us; we return a very large number here.
-            return 10**9
         return translate_budget_to_env_steps(config)
 
     def _build_agent(
@@ -695,8 +876,10 @@ class AgileRLTrainer(BaselineTrainer):
             return np.ones(num_envs, dtype=bool)
 
         stacked = np.stack(
-            [np.asarray(done_dict[agent_id], dtype=np.float32).reshape(num_envs)
-             for agent_id in agent_ids],
+            [
+                np.asarray(done_dict[agent_id], dtype=np.float32).reshape(num_envs)
+                for agent_id in agent_ids
+            ],
             axis=0,
         )
         return np.all(np.isnan(stacked) | stacked.astype(bool), axis=0)
@@ -712,8 +895,8 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
         *,
-        record_callback: Optional[Any] = None,
-        record_every_n_steps: Optional[int] = None,
+        champion: Optional[Any] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """Hand-rolled off-policy loop using AgileRL's replay buffer.
 
@@ -749,6 +932,7 @@ class AgileRLTrainer(BaselineTrainer):
         num_envs = int(getattr(env, "num_envs", 1))
         is_vec = num_envs > 1
         progress_interval = max(1, budget_steps // 300) if self.verbose else 0
+        progress_emit_interval = max(1, budget_steps // 100)
         loop_start = time.time()
 
         obs, info = env.reset(seed=seed)
@@ -756,6 +940,7 @@ class AgileRLTrainer(BaselineTrainer):
         ep_reward = np.zeros(num_envs, dtype=np.float64)
         losses: List[float] = []
         steps_done = 0
+        metrics_history: List[Dict[str, Any]] = []
 
         def _expand_placeholder(value: Any) -> Any:
             if isinstance(value, dict):
@@ -812,8 +997,9 @@ class AgileRLTrainer(BaselineTrainer):
                 }
 
             return {
-                agent_id: float(reward_dict[agent_id])
-                if agent_id in reward_dict else np.nan
+                agent_id: (
+                    float(reward_dict[agent_id]) if agent_id in reward_dict else np.nan
+                )
                 for agent_id in agent_ids
             }
 
@@ -840,7 +1026,9 @@ class AgileRLTrainer(BaselineTrainer):
             prev_steps = steps_done
             action_result = agent.get_action(obs, infos=info)
             actions, raw_actions = (
-                action_result if isinstance(action_result, tuple) else (action_result, action_result)
+                action_result
+                if isinstance(action_result, tuple)
+                else (action_result, action_result)
             )
             env_actions = actions if is_vec else self._unwrap_actions_for_env(actions)
             next_obs, reward, termination, truncation, info = env.step(env_actions)
@@ -886,8 +1074,12 @@ class AgileRLTrainer(BaselineTrainer):
                         if mean_loss is not None:
                             losses.append(mean_loss)
                     except Exception as exc:  # pragma: no cover - version drift
-                        if self.verbose:
-                            print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+                        logger.warning(
+                            "[%s] learn() failed: %s",
+                            self.ALGORITHM_NAME,
+                            exc,
+                            exc_info=True,
+                        )
 
             env_done = self._completed_env_mask(next_done, agent_ids, num_envs)
             for i, finished in enumerate(env_done):
@@ -918,20 +1110,47 @@ class AgileRLTrainer(BaselineTrainer):
                     flush=True,
                 )
 
-            # Mid-training champion-rollout recording. Triggered every
-            # ``record_every_n_steps`` env steps when both a callback and a
-            # cadence are set; the callback is responsible for catching
-            # its own errors (see ``_record_episode`` in ``train()``).
+            # Fire the unified progress+recording hook on the emit cadence,
+            # independent of whether a progress_callback is set (recording must
+            # still happen on a headless run). _on_progress no-ops the emit when
+            # the callback is None and lets the controller decide on recording.
             if (
-                record_callback is not None
-                and record_every_n_steps
+                progress_steps // progress_emit_interval
+                > prev_steps // progress_emit_interval
+                or progress_steps >= budget_steps
             ):
-                crossed_record_boundaries = (
-                    progress_steps // record_every_n_steps
-                    - prev_steps // record_every_n_steps
+                elapsed = time.time() - loop_start
+                _emit_mean = (
+                    float(np.mean(episode_rewards[-10:])) if episode_rewards else None
                 )
-                for _ in range(max(0, crossed_record_boundaries)):
-                    record_callback()
+                _emit_best = float(max(episode_rewards)) if episode_rewards else None
+                _window = episode_rewards[-10:] if episode_rewards else []
+                metrics_history.append(
+                    {
+                        "iteration": len(metrics_history),
+                        "env_steps": int(progress_steps),
+                        "nominal_env_steps": int(progress_steps),
+                        "wall_time_s": elapsed,
+                        "mean": _emit_mean,
+                        "std": float(np.std(_window)) if _window else None,
+                        "min": float(min(_window)) if _window else None,
+                        "max": _emit_best,
+                        "mean_loss": float(losses[-1]) if losses else None,
+                    }
+                )
+                self._on_progress(
+                    progress_callback,
+                    ProgressEvent(
+                        unit="env_step",
+                        current=int(progress_steps),
+                        total=int(budget_steps),
+                        env_steps=int(progress_steps),
+                        best_fitness=_emit_best,
+                        mean_fitness=_emit_mean,
+                        wall_time_s=elapsed,
+                    ),
+                    champion=champion,
+                )
 
         if not episode_rewards:
             episode_rewards.append(float(ep_reward.sum()))
@@ -945,6 +1164,7 @@ class AgileRLTrainer(BaselineTrainer):
             "num_episodes": len(episode_rewards),
             "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
+            "metrics_history": metrics_history,
         }
 
     def _run_on_policy(
@@ -956,8 +1176,8 @@ class AgileRLTrainer(BaselineTrainer):
         params: Dict[str, Any],
         seed: int,
         *,
-        record_callback: Optional[Any] = None,
-        record_every_n_steps: Optional[int] = None,
+        champion: Optional[Any] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """On-policy rollout loop for IPPO.
 
@@ -990,6 +1210,7 @@ class AgileRLTrainer(BaselineTrainer):
         losses: List[float] = []
         steps_done = 0
         step_size = num_envs if is_vec else 1
+        metrics_history: List[Dict[str, Any]] = []
 
         # Per-(sub-)env running episode-reward accumulator. For the
         # single-env case this is a scalar in a length-1 array; for the
@@ -1051,23 +1272,22 @@ class AgileRLTrainer(BaselineTrainer):
             f"num_envs={num_envs}"
         )
 
+        on_policy_start = time.time()
         while steps_done < budget_steps:
             remaining_steps = budget_steps - steps_done
             collect_target = min(learn_step, remaining_steps)
             collect_n = max(1, (collect_target + step_size - 1) // step_size)
 
             # Per-step rollout buffers (lists of per-agent values).
-            states:       Dict[str, List] = {a: [] for a in agent_ids}
-            actions_buf:  Dict[str, List] = {a: [] for a in agent_ids}
+            states: Dict[str, List] = {a: [] for a in agent_ids}
+            actions_buf: Dict[str, List] = {a: [] for a in agent_ids}
             log_probs_buf: Dict[str, List] = {a: [] for a in agent_ids}
-            rewards_buf:  Dict[str, List] = {a: [] for a in agent_ids}
-            dones_buf:    Dict[str, List] = {a: [] for a in agent_ids}
-            values_buf:   Dict[str, List] = {a: [] for a in agent_ids}
+            rewards_buf: Dict[str, List] = {a: [] for a in agent_ids}
+            dones_buf: Dict[str, List] = {a: [] for a in agent_ids}
+            values_buf: Dict[str, List] = {a: [] for a in agent_ids}
 
             for _ in range(collect_n):
-                action_obs = {
-                    a: _sanitize_obs(obs_a) for a, obs_a in obs.items()
-                }
+                action_obs = {a: _sanitize_obs(obs_a) for a, obs_a in obs.items()}
                 action_result = agent.get_action(action_obs, infos=info)
                 # AgileRL's IPPO/PPO contract is a 4-tuple
                 # ``(action, log_prob, entropy, value)``.  Anything else is
@@ -1082,8 +1302,10 @@ class AgileRLTrainer(BaselineTrainer):
                         f"{len(action_result) if isinstance(action_result, tuple) else 'N/A'}"
                     )
                 action, log_prob, _, value = (
-                    action_result[0], action_result[1],
-                    action_result[2], action_result[3],
+                    action_result[0],
+                    action_result[1],
+                    action_result[2],
+                    action_result[3],
                 )
 
                 if is_vec:
@@ -1095,7 +1317,9 @@ class AgileRLTrainer(BaselineTrainer):
                 else:
                     # Strip leading (1, ...) batch dim for raw parallel envs.
                     env_actions = self._unwrap_actions_for_env(action)
-                    next_obs, reward, termination, truncation, info = env.step(env_actions)
+                    next_obs, reward, termination, truncation, info = env.step(
+                        env_actions
+                    )
 
                 # Per-sub-env reward / done bookkeeping.
                 step_rew = _sum_rewards_per_env(reward)
@@ -1128,24 +1352,31 @@ class AgileRLTrainer(BaselineTrainer):
                     # ``num_envs`` axis from AgileRL's get_action.
                     act_a = action.get(a)
                     actions_buf[a].append(
-                        np.asarray(act_a) if act_a is not None
+                        np.asarray(act_a)
+                        if act_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
                     lp_a = log_prob.get(a)
                     log_probs_buf[a].append(
-                        np.asarray(lp_a) if lp_a is not None
+                        np.asarray(lp_a)
+                        if lp_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
                     v_a = value.get(a)
                     values_buf[a].append(
-                        np.asarray(v_a) if v_a is not None
+                        np.asarray(v_a)
+                        if v_a is not None
                         else np.array([np.nan], dtype=np.float32)
                     )
 
                     if is_vec:
                         rewards_buf[a].append(
-                            np.asarray(reward.get(a, np.full(num_envs, np.nan, dtype=np.float32)),
-                                       dtype=np.float32).reshape(num_envs)
+                            np.asarray(
+                                reward.get(
+                                    a, np.full(num_envs, np.nan, dtype=np.float32)
+                                ),
+                                dtype=np.float32,
+                            ).reshape(num_envs)
                         )
                     else:
                         rewards_buf[a].append(
@@ -1163,23 +1394,24 @@ class AgileRLTrainer(BaselineTrainer):
                 # the environment plus the carried ``done`` flags.
                 if not is_vec and bool(env_done[0]):
                     obs, info = env.reset()
-                    done = {
-                        a: np.zeros(num_envs, dtype=np.float32)
-                        for a in agent_ids
-                    }
+                    done = {a: np.zeros(num_envs, dtype=np.float32) for a in agent_ids}
 
             # Bootstrap obs for GAE: AgileRL's learn() expects the same
             # ``(num_envs, obs_dim)`` shape as the stored states.
             bootstrap_obs = {
-                a: _batch_obs(_sanitize_obs(obs_a))
-                for a, obs_a in obs.items()
+                a: _batch_obs(_sanitize_obs(obs_a)) for a, obs_a in obs.items()
             }
 
             # Learn from the collected rollout.
             experiences = (
-                states, actions_buf, log_probs_buf,
-                rewards_buf, dones_buf, values_buf,
-                bootstrap_obs, done,
+                states,
+                actions_buf,
+                log_probs_buf,
+                rewards_buf,
+                dones_buf,
+                values_buf,
+                bootstrap_obs,
+                done,
             )
             try:
                 loss = agent.learn(experiences)
@@ -1187,9 +1419,15 @@ class AgileRLTrainer(BaselineTrainer):
                 if mean_loss is not None:
                     losses.append(mean_loss)
             except Exception as exc:
-                print(f"[{self.ALGORITHM_NAME}] learn() failed: {exc}")
+                logger.warning(
+                    "[%s] learn() failed: %s",
+                    self.ALGORITHM_NAME,
+                    exc,
+                    exc_info=True,
+                )
 
             progress_steps = min(steps_done, budget_steps)
+            elapsed_op = time.time() - on_policy_start
             loss_str = f" | mean_loss={losses[-1]:.4f}" if losses else ""
             print(
                 f"[{self.ALGORITHM_NAME}] {progress_steps:,}/{budget_steps:,} steps"
@@ -1198,21 +1436,41 @@ class AgileRLTrainer(BaselineTrainer):
                 + loss_str
             )
 
-            # Mid-training champion-rollout recording. ``steps_done`` is
-            # checked at learn-iteration boundaries (rollout chunks of
-            # ``learn_step``) so for on-policy trainers the cadence is
-            # quantised to the rollout size: a 256-step learn_step with
-            # ``record_every_n_steps=200`` records once per learn iteration
-            # rather than mid-rollout. This keeps the recording episode
-            # off-thread from the on-policy data collection.
-            if (
-                record_callback is not None
-                and record_every_n_steps
-                and progress_steps % record_every_n_steps < learn_step
-                and (progress_steps // record_every_n_steps)
-                > ((max(progress_steps - learn_step, 0)) // record_every_n_steps)
-            ):
-                record_callback()
+            # Fire the unified progress+recording hook on every learn-iteration
+            # boundary, independent of whether a progress_callback is set
+            # (recording must still happen on a headless run). _on_progress
+            # no-ops the emit when the callback is None.
+            _emit_mean = (
+                float(np.mean(episode_rewards[-10:])) if episode_rewards else None
+            )
+            _emit_best = float(max(episode_rewards)) if episode_rewards else None
+            _window = episode_rewards[-10:] if episode_rewards else []
+            metrics_history.append(
+                {
+                    "iteration": len(metrics_history),
+                    "env_steps": int(progress_steps),
+                    "nominal_env_steps": int(progress_steps),
+                    "wall_time_s": elapsed_op,
+                    "mean": _emit_mean,
+                    "std": float(np.std(_window)) if _window else None,
+                    "min": float(min(_window)) if _window else None,
+                    "max": _emit_best,
+                    "mean_loss": float(losses[-1]) if losses else None,
+                }
+            )
+            self._on_progress(
+                progress_callback,
+                ProgressEvent(
+                    unit="env_step",
+                    current=int(progress_steps),
+                    total=int(budget_steps),
+                    env_steps=int(progress_steps),
+                    best_fitness=_emit_best,
+                    mean_fitness=_emit_mean,
+                    wall_time_s=elapsed_op,
+                ),
+                champion=champion,
+            )
 
         # Flush any in-progress sub-env episodes (e.g. budget exhausted
         # mid-episode) so callers see the partial reward rather than
@@ -1231,10 +1489,12 @@ class AgileRLTrainer(BaselineTrainer):
             "num_episodes": len(episode_rewards),
             "env_steps": min(steps_done, budget_steps),
             "mean_loss": float(np.mean(losses)) if losses else None,
+            "metrics_history": metrics_history,
         }
 
 
 # Concrete trainers
+
 
 class MADDPGTrainer(AgileRLTrainer):
     """Multi-Agent DDPG via AgileRL (off-policy, decentralized actors,
@@ -1248,6 +1508,9 @@ class MADDPGTrainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's DeterministicActor supports only Box/Discrete, so
+            # MADDPG cannot train MultiDiscrete envs (gated by compatibility).
+            "multidiscrete_action": False,
             "needs_global_state": False,
             "on_policy": False,
             # MADDPG's centralized-critic replay buffer assumes every
@@ -1267,6 +1530,8 @@ class MATD3Trainer(AgileRLTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # Same DeterministicActor limitation as MADDPG: no MultiDiscrete.
+            "multidiscrete_action": False,
             "needs_global_state": False,
             "on_policy": False,
             # Same centralized-critic simultaneity assumption as MADDPG.
@@ -1281,14 +1546,30 @@ class IPPOTrainer(AgileRLTrainer):
     ALGORITHM_IMPORT = ("agilerl.algorithms.ippo", "IPPO")
     ON_POLICY = True
 
+    # Off-policy-only kwargs the shared describe_hyperparameters() surfaces but
+    # IPPO's constructor doesn't accept. lr_actor is remapped to lr; the rest
+    # are dropped silently.
+    _IPPO_UNSUPPORTED_KWARGS = frozenset({"lr_critic", "tau"})
+
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's StochasticActor (PPO) natively supports MultiDiscrete.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": True,
         }
+
+    def _build_agent(self, alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs):
+        kwargs = dict(ctor_kwargs)
+        # IPPO uses `lr` (single rate for actor+critic); remap lr_actor if set.
+        if "lr_actor" in kwargs:
+            kwargs.setdefault("lr", kwargs.pop("lr_actor"))
+        for key in self._IPPO_UNSUPPORTED_KWARGS:
+            kwargs.pop(key, None)
+        return super()._build_agent(alg_cls, obs_spaces, act_spaces, agent_ids, kwargs)
 
 
 class GroupedIPPOTrainer(IPPOTrainer):
@@ -1320,6 +1601,8 @@ class GroupedIPPOTrainer(IPPOTrainer):
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # AgileRL's StochasticActor (PPO) natively supports MultiDiscrete.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": True,
             "supports_turn_based": True,
@@ -1430,9 +1713,6 @@ class GroupedIPPOTrainer(IPPOTrainer):
             validation_obs_spaces,
             validation_act_spaces,
         )
-        return alg_cls(
-            observation_spaces=obs_spaces,
-            action_spaces=act_spaces,
-            agent_ids=agent_ids,
-            **ctor_kwargs,
+        return super()._build_agent(
+            alg_cls, obs_spaces, act_spaces, agent_ids, ctor_kwargs
         )

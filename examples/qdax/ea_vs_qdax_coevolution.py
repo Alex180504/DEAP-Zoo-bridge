@@ -26,6 +26,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+
+# Allow running as a plain script *or* as a module (-m) so the
+# experiment-side descriptor package resolves either way.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 def main() -> None:
@@ -44,6 +52,8 @@ def main() -> None:
         CoEvolutionTrainer,
         Side,
     )
+
+    from examples.qdax.descriptors import formation_spread_and_mean_distance
 
     pop = 8 if args.smoke else 32
     generations = 2 if args.smoke else 20
@@ -70,7 +80,12 @@ def main() -> None:
             "hidden_sizes": (16,) if args.smoke else (32, 32),
             "grid_shape": grid,
             "episode_length": episode_length,
-            "descriptor": "pursuit_evasion_2d",
+            # Learner side = evaders (1 ``agent_*``); opponents = 3
+            # ``adversary_*`` pursuers. Descriptor receives learner
+            # positions first (num_pursuers slot), then opponents.
+            "descriptor_fn": formation_spread_and_mean_distance(
+                num_pursuers=1, num_evaders=3
+            ),
             "seed": args.seed,
         },
     )
@@ -88,7 +103,8 @@ def main() -> None:
         env_name=args.env,
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=generations * pop,
-        algorithm_params={"coevolution": coev_cfg, "seed": args.seed},
+        seed=args.seed,
+        coevolution_config=coev_cfg,
         output_dir=Path(args.output),
     )
 

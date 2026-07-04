@@ -13,15 +13,15 @@
     nodes need to be specified in the substrate — they are placed by
     the algorithm.
 """
-    # pyright: reportCallIssue=false
+
+# pyright: reportCallIssue=false
 
 from __future__ import annotations
 
 from typing import Any, Optional
 
-import numpy as np
-
 import neat  # guarded by _require_neat
+import numpy as np
 
 from deap_pettingzoo.baselines.base import PolicyProtocol
 from deap_pettingzoo.policies.action_heads import (
@@ -30,8 +30,8 @@ from deap_pettingzoo.policies.action_heads import (
     make_head,
 )
 
+from ._pureples.es_hyperneat import ES_HYPERNEAT_PARAMS_DEFAULTS, ESNetwork
 from ._pureples.hyperneat import create_phenotype_network
-from ._pureples.es_hyperneat import ESNetwork, ES_HYPERNEAT_PARAMS_DEFAULTS
 from ._pureples.substrate import Substrate
 
 
@@ -83,7 +83,8 @@ class HyperNeatPolicy(PolicyProtocol):
         cppn = neat.nn.FeedForwardNetwork.create(genome, config)
         # Build phenotype from CPPN + substrate.
         self._network = create_phenotype_network(
-            cppn, substrate,
+            cppn,
+            substrate,
             activation_function=activation,
             weight_threshold=weight_threshold,
         )

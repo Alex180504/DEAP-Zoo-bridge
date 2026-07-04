@@ -34,7 +34,9 @@ expose a :class:`PolicyProtocol`.
 
 from __future__ import annotations
 
+import logging
 import os
+import random as _random
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -45,8 +47,12 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
+    ProgressEvent,
     TrainingConfig,
     TrainingResult,
+    derive_generations,
+    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
@@ -59,15 +65,17 @@ from deap_pettingzoo.utils.parallel import (
     make_executor,
     resolve_num_workers,
 )
+from deap_pettingzoo.utils.rng import seed_everything
 
 from .evaluator import CoEvolutionEvaluator
 from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
 
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
+
 # Worker initializer
-# ---------------------------------------------------------------------------
+
 
 def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     """ProcessPoolExecutor worker initializer.
@@ -113,12 +121,11 @@ def _format_progress_entry(stats: GenerationStats) -> str:
         filled_niches=stats.filled_niches,
         total_niches=stats.total_niches,
     )
-    return (
-        f"{stats.side_name}: {summary}"
-    )
+    return f"{stats.side_name}: {summary}"
 
 
 # QDax-specific evaluator
+
 
 class _QDaxPolicyEvaluator:
     """Thin evaluator that accepts a pre-constructed policy (FlaxPolicyAdapter)
@@ -131,9 +138,19 @@ class _QDaxPolicyEvaluator:
     against sampled opponents and returns a scalar fitness.
     """
 
-    def __init__(self, env_wrapper, learner_role_prefixes, opponent_sides,
-                 k_opponents, aggregation, max_steps, rng_factory,
-                 executor=None, env_name=None, env_config=None):
+    def __init__(
+        self,
+        env_wrapper,
+        learner_role_prefixes,
+        opponent_sides,
+        k_opponents,
+        aggregation,
+        max_steps,
+        rng_factory,
+        executor=None,
+        env_name=None,
+        env_config=None,
+    ):
         self._env = env_wrapper
         self._learner_prefixes = learner_role_prefixes
         self._opponent_sides = opponent_sides
@@ -141,21 +158,27 @@ class _QDaxPolicyEvaluator:
         self._aggregation = aggregation
         self._max_steps = max_steps
         self._rng_factory = rng_factory  # callable () -> Generator
-        self._executor = executor        # ProcessPoolExecutor or None
+        self._executor = executor  # ProcessPoolExecutor or None
         self._env_name = env_name
         self._env_config = env_config
         # Optional hook called at each episode step with (obs_dict, env_wrapper).
         # Set by QDaxSideState._evaluate_one_genotype to collect trajectory data.
         self.trajectory_hook = None  # type: ignore[assignment]
+        #: Cumulative real env ticks across all evaluate() calls on this
+        #: instance (mirrors CoEvolutionEvaluator.env_steps_consumed so the
+        #: QDax side can surface a real per-generation consumed-steps count).
+        self.env_steps_consumed: int = 0
 
         self._learner_agents = [
-            a for a in env_wrapper.possible_agents
+            a
+            for a in env_wrapper.possible_agents
             if any(a.startswith(p) for p in learner_role_prefixes)
         ]
         self._side_agents: Dict[str, list] = {}
         for side_name, prefixes, _pool in opponent_sides:
             self._side_agents[side_name] = [
-                a for a in env_wrapper.possible_agents
+                a
+                for a in env_wrapper.possible_agents
                 if any(a.startswith(p) for p in prefixes)
             ]
 
@@ -199,13 +222,15 @@ class _QDaxPolicyEvaluator:
                 try:
                     self.trajectory_hook(observations, self._env)
                 except Exception:
-                    pass
+                    logger.debug("trajectory_hook failed", exc_info=True)
             infos = getattr(self._env, "last_infos", {}) or {}
             actions: Dict[str, Any] = {}
             for agent, obs in observations.items():
                 mask = infos.get(agent, {}).get("action_mask")
                 if agent in self._learner_agents:
-                    actions[agent] = _invoke_get_action(policy, obs, mask, deterministic=True)
+                    actions[agent] = _invoke_get_action(
+                        policy, obs, mask, deterministic=True
+                    )
                 elif agent in opp_policies:
                     actions[agent] = _invoke_get_action(opp_policies[agent], obs, mask)
             observations, rew, terms, truncs, _ = self._env.step(actions)
@@ -216,12 +241,14 @@ class _QDaxPolicyEvaluator:
                 break
             if truncs and all(truncs.values()):
                 break
+        self.env_steps_consumed += int(steps)
         return total
+
+
 from deap_pettingzoo.utils.device_check import (
     torch_uses_cuda,
     warn_on_gpu_contention,
 )
-
 
 VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
 VALID_SCHEDULES = ("synchronous", "alternating")
@@ -361,8 +388,7 @@ class CoEvolutionConfig:
             )
         if self.mode == "cooperative" and len(self.sides) < 2:
             raise ValueError(
-                "cooperative mode requires at least 2 sides; got "
-                f"{len(self.sides)}."
+                "cooperative mode requires at least 2 sides; got " f"{len(self.sides)}."
             )
         if self.reporting_side is None:
             self.reporting_side = self.sides[0].name
@@ -377,9 +403,7 @@ class CoEvolutionConfig:
                 f"alternating_generations must be >= 1, got {self.alternating_generations}."
             )
         if self.snapshot_every < 1:
-            raise ValueError(
-                f"snapshot_every must be >= 1, got {self.snapshot_every}."
-            )
+            raise ValueError(f"snapshot_every must be >= 1, got {self.snapshot_every}.")
         if self.parallel_backend not in SUPPORTED_BACKENDS:
             raise ValueError(
                 f"parallel_backend={self.parallel_backend!r} invalid; "
@@ -390,8 +414,8 @@ class CoEvolutionConfig:
 class CoEvolutionTrainer(BaselineTrainer):
     """Unified co-evolution trainer.
 
-    Consumes a :class:`CoEvolutionConfig` passed in
-    ``TrainingConfig.algorithm_params['coevolution']`` and emits a
+    Consumes a :class:`CoEvolutionConfig` passed via the typed
+    ``TrainingConfig.coevolution_config`` entry point and emits a
     :class:`TrainingResult` whose ``policy`` is the best individual of
     the designated :attr:`CoEvolutionConfig.reporting_side`.
 
@@ -401,11 +425,12 @@ class CoEvolutionTrainer(BaselineTrainer):
     requires matching env / budget configuration by hand.
     """
 
-    #: Coevolution iterates per generation — default to one champion
-    #: rollout artefact per generation when recording is enabled.
-    _default_recording_every_n: ClassVar[int] = 1
-
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         """Execute the co-evolution training loop.
 
         Note:
@@ -429,24 +454,34 @@ class CoEvolutionTrainer(BaselineTrainer):
             EA/CMA sides share the worker pool for ``k_opponents`` episode
             dispatch.
 
-            Frame recording is best-effort: any error in
-            ``_record_coevolution_rollout`` is silently swallowed so it
+            Frame recording is best-effort and handled by the unified
+            :class:`~deap_pettingzoo.baselines.recording.RecordingController`
+            (heterogeneous per-agent rollout); any error is swallowed so it
             cannot interrupt training.
         """
-        coev_cfg = config.algorithm_params.get("coevolution")
+        coev_cfg = config.coevolution_config
         if not isinstance(coev_cfg, CoEvolutionConfig):
             raise ValueError(
                 "CoEvolutionTrainer requires "
-                "config.algorithm_params['coevolution'] to be a "
-                "CoEvolutionConfig instance."
+                "config.coevolution_config to be a CoEvolutionConfig "
+                "instance."
             )
-
         start = time.time()
         num_generations = self._translate_budget(config, coev_cfg)
 
-        env = PettingZooWrapper(
-            config.env_name, env_config=config.env_config or None
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
+        self._consumed_budget = consumed_budget
+        # Safety cap: when budget_on_consumed the real stop is the consumed check;
+        # max_iters prevents an infinite loop if every episode terminates in 1 step.
+        max_iters = (
+            num_generations * max(1, coev_cfg.max_steps_per_episode) + 10
+            if consumed_budget is not None
+            else num_generations
         )
+
+        env = PettingZooWrapper(config.env_name, env_config=config.env_config or None)
 
         # Stash env-construction metadata so _build_evaluator can pass
         # it down to CoEvolutionEvaluator workers.
@@ -466,11 +501,14 @@ class CoEvolutionTrainer(BaselineTrainer):
             )
         self._resolved_workers = resolved_workers
 
+        # One snapshot, reused for the process-pool initializer and shipped on
+        # episode payloads so SCOOP/Dask workers can re-register custom envs too.
+        self._registry_snapshot = get_registry_snapshot()
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
             initializer=_prewarm_and_replay,
-            initargs=(get_registry_snapshot(),),
+            initargs=(self._registry_snapshot,),
         ) as executor:
             self._executor = executor
             # Keep side initialisation inside the executor scope. This
@@ -492,18 +530,60 @@ class CoEvolutionTrainer(BaselineTrainer):
             per_side_history: Dict[str, List[GenerationStats]] = {
                 name: [] for name in states
             }
-            recording_cadence = self._setup_recording(config)
+            self._setup_recording(config, coev_cfg)
+            # Env used by the recording controller's champion provider to
+            # build per-side policies and enumerate agents (read-only use).
+            self._rec_env = env
+
+            # Per-generation progress reporting (logger-independent).
+            self._progress_callback = progress_callback
+            self._progress_total = num_generations
+            self._progress_start = start
 
             if coev_cfg.schedule == "synchronous":
-                self._run_synchronous_loop(
-                    env, states, coev_cfg, config,
-                    num_generations, per_side_history, recording_cadence,
+                realized = self._run_synchronous_loop(
+                    env,
+                    states,
+                    coev_cfg,
+                    config,
+                    max_iters,
+                    per_side_history,
+                    consumed_budget=consumed_budget,
                 )
             else:  # alternating
-                self._run_alternating_loop(
-                    env, states, coev_cfg, config,
-                    num_generations, per_side_history, recording_cadence,
+                realized = self._run_alternating_loop(
+                    env,
+                    states,
+                    coev_cfg,
+                    config,
+                    max_iters,
+                    per_side_history,
+                    consumed_budget=consumed_budget,
                 )
+
+            # Warn when the safety cap fired without the consumed-budget check
+            # triggering — this usually means every episode terminates in 0
+            # steps so the consumed total never grows.
+            if consumed_budget is not None:
+                consumed_so_far = self._aggregate_consumed(per_side_history)
+                if realized >= max_iters and consumed_so_far < consumed_budget:
+                    warnings.warn(
+                        f"CoEvolutionTrainer: safety cap ({max_iters} iterations) "
+                        f"reached before consuming target env steps "
+                        f"({consumed_so_far} < {consumed_budget}). "
+                        "Episodes may terminate immediately (0 steps). "
+                        "Check max_steps_per_episode or use "
+                        "budget_on_consumed=False.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
+            # Guarantee a final capture (dedups against the last per-gen one).
+            self._recorder.finalize(
+                lambda: self._coev_policy_map(states),
+                iteration=realized,
+                env_steps=realized * self._recording_max_steps,
+            )
 
             # Build reporting-side policy *inside* the executor scope
             # in case best_policy() ever needs to evaluate (it does
@@ -512,14 +592,21 @@ class CoEvolutionTrainer(BaselineTrainer):
             policy = reporting.best_policy(env)
 
         env.close()
-        # FrameRecorder has no close(); end_episode() is invoked per
-        # rollout in _record_coevolution_rollout. Nothing to do here.
+        self._recorder.close()
+        self._rec_env = None
         training_time = time.time() - start
+        # Real env ticks: sum each side's per-generation GenerationStats.env_steps.
+        env_steps_consumed = self._aggregate_consumed(per_side_history)
+        # Use realized (actual generations run) so nominal is consistent with
+        # the "num_generations": realized entry in the same metrics dict.
+        env_steps_nominal = self._nominal_env_steps(coev_cfg, realized)
         metrics = {
             "per_side_history": {
                 name: [self._stats_to_dict(s) for s in hist]
                 for name, hist in per_side_history.items()
             },
+            "env_steps_nominal": env_steps_nominal,
+            "env_steps_consumed": env_steps_consumed,
             "final_best": {
                 name: (
                     None
@@ -532,7 +619,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 name: (len(state.side.hof) if state.side.hof is not None else 0)
                 for name, state in states.items()
             },
-            "num_generations": num_generations,
+            "num_generations": realized,
         }
         metadata = {
             "mode": coev_cfg.mode,
@@ -542,14 +629,18 @@ class CoEvolutionTrainer(BaselineTrainer):
             "reporting_side": coev_cfg.reporting_side,
             "coevolution_num_workers": resolved_workers,
             "coevolution_parallel_backend": coev_cfg.parallel_backend,
+            "run_dir": (
+                str(self._recording_log.run_dir)
+                if config.output_dir is not None
+                and getattr(self, "_recording_log", None) is not None
+                else None
+            ),
             "sides": [
                 {
                     "name": s.name,
                     "role_prefixes": list(s.role_prefixes),
                     "optimizer": s.optimizer,
-                    "hof": (
-                        type(s.hof).__name__ if s.hof is not None else None
-                    ),
+                    "hof": (type(s.hof).__name__ if s.hof is not None else None),
                 }
                 for s in coev_cfg.sides
             ],
@@ -561,7 +652,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             per_side_history,
             states,
             training_time,
-            num_generations,
+            realized,
         )
 
         return TrainingResult(
@@ -592,7 +683,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         Emits GPU-contention and RL-parallelism warnings.
         """
         if coev_cfg.seed is not None:
-            np.random.seed(int(coev_cfg.seed))
+            seed_everything(int(coev_cfg.seed))
         self._rng = np.random.default_rng(coev_cfg.seed)
 
         states: Dict[str, SideState] = {
@@ -602,119 +693,187 @@ class CoEvolutionTrainer(BaselineTrainer):
             side_rng = np.random.default_rng(
                 self._rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
             )
+            previous_py_state = _random.getstate()
             previous_np_state = np.random.get_state()
             try:
                 state.initialise(env, rng=side_rng)
             except Exception:
+                _random.setstate(previous_py_state)
                 np.random.set_state(previous_np_state)
                 raise
+            state._py_state = _random.getstate()
             state._np_state = np.random.get_state()
+            _random.setstate(previous_py_state)
             np.random.set_state(previous_np_state)
 
         rl_cuda_sides = [
-            name for name, s in states.items()
-            if isinstance(s, RLSideState)
-            and torch_uses_cuda(s.resolved_device)
+            name
+            for name, s in states.items()
+            if getattr(s, "is_rl_side", False) and torch_uses_cuda(s.resolved_device)
         ]
         qdax_sides = [
-            name for name, s in states.items()
+            name
+            for name, s in states.items()
             if s.side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
         ]
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
 
-        has_rl_side = any(isinstance(s, RLSideState) for s in states.values())
+        has_rl_side = any(getattr(s, "is_rl_side", False) for s in states.values())
         if has_rl_side and resolved_workers > 1:
+            has_onpolicy_rl = any(
+                getattr(s, "is_rl_side", False) and getattr(s, "is_on_policy", False)
+                for s in states.values()
+            )
+            rl_detail = (
+                "On-policy RL learners (IPPO/GroupedIPPO) collect their own "
+                "rollouts serially — the live actor+critic must produce the "
+                "log_prob/value the actor-only snapshot cannot."
+                if has_onpolicy_rl
+                else "Off-policy RL rollout collection also parallelizes."
+            )
             warnings.warn(
                 "CoEvolutionConfig: num_workers="
                 f"{coev_cfg.num_workers} but an RL side is present. "
-                "EA/CMA learner sides will evaluate against RL opponents "
-                "in parallel via FrozenRLPolicyWrapper CPU snapshots. "
-                "The RL learner itself still collects rollouts serially "
-                "(parallel RL rollout collection is Phase 2).",
+                "EA/CMA learner sides evaluate against RL opponents in "
+                "parallel via FrozenRLPolicyWrapper CPU snapshots. " + rl_detail,
                 RuntimeWarning,
                 stacklevel=2,
             )
         return states
 
-    def _setup_recording(self, config: TrainingConfig) -> int:
-        """Build the run logger and optional frame recorder.
+    def _setup_recording(
+        self, config: TrainingConfig, coev_cfg: CoEvolutionConfig
+    ) -> None:
+        """Build the run logger and the unified recording controller.
 
-        Stores ``self._recording_log``, ``self._recording_recorder``
-        (``None`` when disabled), and ``self._recording_max_steps`` for
-        the generation loop, and returns the champion-recording cadence
-        (in generations).
+        Stores ``self._recording_log`` (also reused for metrics/summary
+        persistence) and ``self._recorder``. Co-evolution is heterogeneous,
+        so recordings are produced via the controller's per-agent
+        ``policy_map`` path (see :meth:`_coev_policy_map`).
         """
         from deap_pettingzoo.baselines._logging_helpers import build_logger
+        from deap_pettingzoo.baselines.recording import RecordingController
 
         self._recording_log = build_logger(config, algorithm="coevolution")
-        recording_cfg = config.recording
-        recording_cadence = self._resolve_recording_every_n(config)
-        self._recording_recorder = None
+        # Use the env's natural episode length, not
+        # CoEvolutionConfig.max_steps_per_episode.
+        _env_cfg = config.env_config or {}
         self._recording_max_steps: int = int(
-            config.algorithm_params.get("max_steps_per_episode", 100)
+            config.recording.max_frames_per_episode
+            or _env_cfg.get("max_cycles")
+            or _env_cfg.get("max_time_steps")
+            or 500
         )
-        if recording_cfg.enabled:
-            recorder = self._recording_log.get_frame_recorder(
-                fps=recording_cfg.fps,
-                fmt=recording_cfg.fmt,
-                max_frames_per_episode=recording_cfg.max_frames_per_episode,
-                max_dim=recording_cfg.max_dim,
-                episode_prefix=recording_cfg.episode_prefix or "train_",
-            )
-            if recorder.enabled:
-                self._recording_recorder = recorder
-        return recording_cadence
+        self._recorder = RecordingController(
+            config,
+            self._recording_log,
+            max_steps=self._recording_max_steps,
+            seed=coev_cfg.seed,
+        )
+
+    def _coev_policy_map(
+        self, states: Dict[str, SideState]
+    ) -> Optional[Dict[str, Any]]:
+        """Build the per-agent ``{agent_id: policy}`` map for a recording.
+
+        Each side's current best policy is mapped to the env agents whose
+        names start with the side's ``role_prefixes``. Returns ``None`` when
+        no policy can be built yet (e.g. before the first evaluation).
+        """
+        env = getattr(self, "_rec_env", None)
+        if env is None:
+            return None
+        mapping: Dict[str, Any] = {}
+        for st in states.values():
+            try:
+                pol = st.best_policy(env)
+            except Exception:
+                continue
+            for agent in env.possible_agents:
+                if agent.startswith(st.side.role_prefixes):
+                    mapping[agent] = pol
+        return mapping or None
 
     # Generation-loop helpers
-
-    def _record_champion_if_due(
-        self,
-        config: TrainingConfig,
-        coev_cfg: CoEvolutionConfig,
-        states: Dict[str, SideState],
-        gen: int,
-        cadence: int,
-    ) -> None:
-        """Render one multi-policy rollout from each side's current best.
-
-        Coevolution is heterogeneous, so we cannot reuse
-        :class:`UnifiedEvaluator` (which broadcasts a single policy to
-        every agent). Instead we drive the env directly and dispatch each
-        agent's observation to the side that owns its role prefix.
-        Best-effort: any failure is reported as a ``RuntimeWarning`` and
-        never interrupts training.
-        """
-        if self._recording_recorder is None:
-            return
-        if gen % cadence != 0:
-            return
-        try:
-            self._record_coevolution_rollout(config, coev_cfg, states, gen)
-        except Exception as _rec_exc:
-            warnings.warn(
-                f"[CoEvolution] Frame recording failed at gen {gen}: "
-                f"{type(_rec_exc).__name__}: {_rec_exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
 
     def _invoke_generation_callback(
         self,
         coev_cfg: CoEvolutionConfig,
         gen: int,
         states: Dict[str, SideState],
+        *,
+        consumed: Optional[int] = None,
     ) -> None:
-        """Call the user-supplied generation callback, isolating errors."""
-        if coev_cfg.generation_callback is None:
-            return
-        try:
-            coev_cfg.generation_callback(gen, states)
-        except Exception as _cb_exc:
-            warnings.warn(
-                f"[CoEvolution] generation_callback failed at gen {gen}: "
-                f"{type(_cb_exc).__name__}: {_cb_exc}",
-                RuntimeWarning,
-                stacklevel=2,
+        """Call the user generation callback and emit a progress event.
+
+        Both are error-isolated so neither can interrupt training. The
+        progress event is logger-independent (built from in-loop state) and
+        is wired into **both** the synchronous and alternating schedules.
+        When ``budget_on_consumed`` is active, emits an ``env_step`` unit
+        event so callers see consumed/total instead of generation/total.
+        """
+        if coev_cfg.generation_callback is not None:
+            try:
+                coev_cfg.generation_callback(gen, states)
+            except Exception as _cb_exc:
+                warnings.warn(
+                    f"[CoEvolution] generation_callback failed at gen {gen}: "
+                    f"{type(_cb_exc).__name__}: {_cb_exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        best: Optional[float] = None
+        side_best: Dict[str, float] = {}
+        for nm, st in states.items():
+            if st.side.optimizer == "frozen":
+                continue
+            try:
+                bf = float(st.best_fitness)
+            except (TypeError, ValueError):
+                continue
+            side_best[nm] = bf
+            best = bf if best is None else max(best, bf)
+        start = getattr(self, "_progress_start", None)
+        max_steps = int(getattr(self, "_recording_max_steps", 0) or 0)
+        wall = (time.time() - start) if start is not None else 0.0
+        cb = getattr(self, "_progress_callback", None)
+        champion = lambda: self._coev_policy_map(states)
+
+        # When consumed-step budgeting is active, emit env_step-unit progress
+        # so the UI/callback sees consumed/budget rather than gen/total.
+        if getattr(self, "_consumed_budget", None) is not None and consumed is not None:
+            self._on_progress(
+                cb,
+                ProgressEvent(
+                    unit="env_step",
+                    current=consumed,
+                    total=int(self._consumed_budget),
+                    env_steps=consumed,
+                    best_fitness=best,
+                    mean_fitness=None,
+                    wall_time_s=wall,
+                    extra={"side_best": side_best},
+                ),
+                champion=champion,
+            )
+        else:
+            # Single hook: emit progress and let the recording controller decide
+            # (per RecordingMode) whether to capture a heterogeneous rollout built
+            # from each side's current best policy.
+            self._on_progress(
+                cb,
+                ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=int(getattr(self, "_progress_total", 0)),
+                    env_steps=gen * max_steps,
+                    best_fitness=best,
+                    mean_fitness=None,
+                    wall_time_s=wall,
+                    extra={"side_best": side_best},
+                ),
+                champion=champion,
             )
 
     def _run_synchronous_loop(
@@ -723,29 +882,38 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         config: TrainingConfig,
-        num_generations: int,
+        max_iters: int,
         history: Dict[str, List[GenerationStats]],
-        cadence: int,
-    ) -> None:
-        """Drive the synchronous schedule: every side advances each gen."""
-        for _g in range(num_generations):
+        *,
+        consumed_budget: Optional[int] = None,
+    ) -> int:
+        """Drive the synchronous schedule: every side advances each gen.
+
+        Returns the number of generations actually completed (may be less than
+        ``max_iters`` when ``consumed_budget`` is reached).
+        """
+        realized = 0
+        for _g in range(max_iters):
             _gt = time.time()
             self._run_synchronous_generation(env, states, coev_cfg, history)
-            self._record_champion_if_due(
-                config, coev_cfg, states, _g + 1, cadence
+            realized = _g + 1
+            consumed = self._aggregate_consumed(history)
+            # Progress + champion recording happen together in the callback.
+            self._invoke_generation_callback(
+                coev_cfg, realized, states, consumed=consumed
             )
-            self._invoke_generation_callback(coev_cfg, _g + 1, states)
             _side_info = "  ".join(
-                _format_progress_entry(h[-1])
-                for n, h in history.items()
-                if h
+                _format_progress_entry(h[-1]) for n, h in history.items() if h
             )
             print(
-                f"[CoEv] gen {_g + 1}/{num_generations}  "
+                f"[CoEv] gen {realized}/{max_iters}  "
                 f"{_side_info}  "
                 f"({time.time()-_gt:.1f}s)",
                 flush=True,
             )
+            if consumed_budget is not None and consumed >= consumed_budget:
+                break
+        return realized
 
     def _run_alternating_loop(
         self,
@@ -753,37 +921,47 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         config: TrainingConfig,
-        num_generations: int,
+        max_iters: int,
         history: Dict[str, List[GenerationStats]],
-        cadence: int,
-    ) -> None:
-        """Drive the alternating schedule: one side advances at a time."""
+        *,
+        consumed_budget: Optional[int] = None,
+    ) -> int:
+        """Drive the alternating schedule: one side advances at a time.
+
+        Returns the number of side-steps actually completed (may be less than
+        ``max_iters`` when ``consumed_budget`` is reached).
+        """
         total = 0
         rotation = list(states)
-        while total < num_generations:
+        stop = False
+        while total < max_iters and not stop:
             for name in rotation:
+                if stop:
+                    break
                 for _inner in range(coev_cfg.alternating_generations):
-                    if total >= num_generations:
+                    if total >= max_iters or stop:
                         break
                     _gt = time.time()
-                    self._run_alternating_step(
-                        env, states, coev_cfg, history, name
-                    )
+                    self._run_alternating_step(env, states, coev_cfg, history, name)
                     total += 1
-                    self._record_champion_if_due(
-                        config, coev_cfg, states, total, cadence
+                    consumed = self._aggregate_consumed(history)
+                    # Progress + champion recording happen in the callback.
+                    self._invoke_generation_callback(
+                        coev_cfg, total, states, consumed=consumed
                     )
                     _side_info = "  ".join(
-                        _format_progress_entry(h[-1])
-                        for n, h in history.items()
-                        if h
+                        _format_progress_entry(h[-1]) for n, h in history.items() if h
                     )
                     print(
-                        f"[CoEv] step {total}/{num_generations} ({name})  "
+                        f"[CoEv] step {total}/{max_iters} ({name})  "
                         f"{_side_info}  "
                         f"({time.time()-_gt:.1f}s)",
                         flush=True,
                     )
+                    if consumed_budget is not None and consumed >= consumed_budget:
+                        stop = True
+                        break
+        return total
 
     # Logging helpers
 
@@ -817,15 +995,24 @@ class CoEvolutionTrainer(BaselineTrainer):
             config, algorithm="coevolution"
         )
 
+        _nominal_total = self._nominal_env_steps(coev_cfg, num_generations)
+        _nominal_per_gen = _nominal_total / max(1, num_generations)
         with log:
             for name, hist in per_side_history.items():
+                # Accumulate per-generation real env steps so the
+                # `env_steps` column is cumulative (matching EA/CMA-ES/PSO/
+                # AgileRL semantics); GenerationStats.env_steps holds the
+                # single-generation delta from a fresh per-gen evaluator.
+                _cumulative_env_steps = 0
                 for s in hist:
+                    _cumulative_env_steps += int(s.env_steps)
                     log.row(
                         "metrics",
                         {
                             "iteration": int(s.generation),
-                            "env_steps": 0,
-                            "wall_time": 0.0,
+                            "env_steps": _cumulative_env_steps,
+                            "nominal_env_steps": int(s.generation * _nominal_per_gen),
+                            "wall_time": float(s.wall_time_s),
                             "side": name,
                             "mean": s.mean,
                             "std": s.std,
@@ -868,13 +1055,14 @@ class CoEvolutionTrainer(BaselineTrainer):
         were supplied by the caller; QDax repertoires live in their
         own subprocesses and are out of scope for this hook).
         """
+        import json as _json
+
         from deap_pettingzoo.utils.logging import KIND_COEVOLUTION
         from deap_pettingzoo.utils.logging.checkpoints import (
             _checkpoints_dir,
             _is_real_logger,
             _register,
         )
-        import json as _json
 
         if not _is_real_logger(log):
             return
@@ -922,12 +1110,19 @@ class CoEvolutionTrainer(BaselineTrainer):
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
-        return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
+        return mode in {
+            BudgetMode.ENV_STEPS,
+            BudgetMode.EVAL_EPISODES,
+            BudgetMode.GENERATIONS,
+        }
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "discrete_action": True,
             "continuous_action": True,
+            # Evolutionary sides support MultiDiscrete; an RL side is
+            # validated per-optimizer by the co-evolution validator.
+            "multidiscrete_action": True,
             "needs_global_state": False,
             "on_policy": False,
             "supports_turn_based": True,
@@ -935,86 +1130,10 @@ class CoEvolutionTrainer(BaselineTrainer):
 
     # Internals
 
-    def _record_coevolution_rollout(
-        self,
-        config: TrainingConfig,
-        coev_cfg: "CoEvolutionConfig",
-        states: Dict[str, "SideState"],
-        gen: int,
-    ) -> None:
-        """Run one heterogeneous-policy rollout and stream frames.
-
-        Each side's current best policy is mapped to the env agents
-        whose names start with the side's :attr:`Side.role_prefixes`.
-        Frames are pulled via ``env.render()`` after a fresh
-        ``rgb_array`` reset and after every step. Best-effort: a
-        FrameRecorder error or env quirk should not break training,
-        so the caller wraps this in a try/except.
-        """
-        recorder = self._recording_recorder
-        if recorder is None:
-            return
-
-        # A dedicated env in rgb_array mode — keep it isolated from the
-        # training env so we don't perturb its RNG/state.
-        record_env = PettingZooWrapper(
-            config.env_name,
-            env_config=config.env_config or None,
-            render_mode="rgb_array",
-        )
-        try:
-            # Build per-agent policy mapping.
-            agent_to_policy: Dict[str, Any] = {}
-            for state in states.values():
-                pol = state.best_policy(record_env)
-                for agent in record_env.possible_agents:
-                    if agent.startswith(state.side.role_prefixes):
-                        agent_to_policy[agent] = pol
-
-            seed = coev_cfg.seed if coev_cfg.seed is not None else None
-            obs_dict = record_env.reset(
-                seed=int(seed) + gen if seed is not None else None
-            )
-            recorder.start_episode(gen)
-            try:
-                frame = record_env.render()
-                if frame is not None:
-                    recorder.add_frame(frame)
-            except Exception:
-                pass
-
-            max_steps = self._recording_max_steps
-            for _step in range(max_steps):
-                if not obs_dict:
-                    break
-                actions = {}
-                for agent, obs in obs_dict.items():
-                    pol = agent_to_policy.get(agent)
-                    if pol is None:
-                        # No side claims this agent — random fallback.
-                        actions[agent] = record_env.action_space(agent).sample()
-                    else:
-                        try:
-                            actions[agent] = pol.get_action(
-                                obs,
-                                action_space=record_env.action_space(agent),
-                            )
-                        except Exception:
-                            actions[agent] = record_env.action_space(agent).sample()
-                obs_dict, _, terms, truncs, _ = record_env.step(actions)
-                try:
-                    frame = record_env.render()
-                    if frame is not None:
-                        recorder.add_frame(frame)
-                except Exception:
-                    pass
-                if terms and all(terms.values()):
-                    break
-                if truncs and all(truncs.values()):
-                    break
-            recorder.end_episode()
-        finally:
-            record_env.close()
+    @staticmethod
+    def _aggregate_consumed(history: Dict[str, List[GenerationStats]]) -> int:
+        """Sum real per-generation env ticks across all sides and all entries."""
+        return int(sum(int(s.env_steps) for hist in history.values() for s in hist))
 
     @staticmethod
     def _stats_to_dict(s: GenerationStats) -> Dict[str, Any]:
@@ -1027,6 +1146,46 @@ class CoEvolutionTrainer(BaselineTrainer):
             "max": s.max,
             "best_fitness": s.best_fitness,
         }
+
+    @staticmethod
+    def _episodes_per_generation(coev_cfg: CoEvolutionConfig) -> int:
+        """Sum the nominal episodes per generation across evolving sides.
+
+        EA/CMA/PSO sides contribute ``population_size * k_opponents``; QDax
+        sides ``batch_size * k_opponents``; RL sides
+        ``rollout_episodes_per_gen``. Frozen sides contribute nothing.
+        Mirrors the per-side accounting in :meth:`_translate_budget`.
+        """
+        ep_per_gen = 0
+        for s in coev_cfg.sides:
+            if s.optimizer == "frozen":
+                continue
+            if s.optimizer == "rl":
+                ep_per_gen += int(s.optimizer_config.get("rollout_episodes_per_gen", 4))
+            elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("batch_size", 20)) * coev_cfg.k_opponents
+                )
+            else:
+                ep_per_gen += (
+                    int(s.optimizer_config.get("population_size", 20))
+                    * coev_cfg.k_opponents
+                )
+        return max(1, ep_per_gen)
+
+    def _nominal_env_steps(
+        self, coev_cfg: CoEvolutionConfig, num_generations: int
+    ) -> int:
+        """Nominal env-step ceiling: ``ep_per_gen * max_steps * generations``.
+
+        The honest counterpart to the real ``env_steps_consumed`` metric;
+        episodes that truncate early make consumed fall below this nominal.
+        """
+        return int(
+            self._episodes_per_generation(coev_cfg)
+            * int(coev_cfg.max_steps_per_episode)
+            * int(num_generations)
+        )
 
     def _translate_budget(
         self, config: TrainingConfig, coev_cfg: CoEvolutionConfig
@@ -1045,33 +1204,31 @@ class CoEvolutionTrainer(BaselineTrainer):
             does not apply, the RL side samples one opponent per rollout
             episode internally).
         """
+        if config.budget_mode == BudgetMode.GENERATIONS:
+            # Generations are the native unit — honor the request directly,
+            # independent of per-side episode bookkeeping.
+            return max(1, int(config.budget_value))
         evolving = [s for s in coev_cfg.sides if s.optimizer != "frozen"]
         if not evolving:
             # Pathological — nothing is actually evolving — do at least
             # one pass to produce output.
             return 1
-        ep_per_gen = 0
-        for s in evolving:
-            if s.optimizer == "rl":
-                ep_per_gen += int(
-                    s.optimizer_config.get("rollout_episodes_per_gen", 4)
-                )
-            elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
-                ep_per_gen += (
-                    int(s.optimizer_config.get("batch_size", 20))
-                    * coev_cfg.k_opponents
-                )
-            else:
-                ep_per_gen += (
-                    int(s.optimizer_config.get("population_size", 20))
-                    * coev_cfg.k_opponents
-                )
-        ep_per_gen = max(1, ep_per_gen)
+        ep_per_gen = self._episodes_per_generation(coev_cfg)
         if config.budget_mode == BudgetMode.ENV_STEPS:
-            steps_per_gen = ep_per_gen * coev_cfg.max_steps_per_episode
-            return max(1, config.budget_value // max(1, steps_per_gen))
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                coev_cfg.max_steps_per_episode,
+                label="co-evolution",
+            )
         if config.budget_mode == BudgetMode.EVAL_EPISODES:
-            return max(1, config.budget_value // ep_per_gen)
+            return derive_generations(
+                config.budget_value,
+                ep_per_gen,
+                1,
+                label="co-evolution",
+                unit="eval episodes",
+            )
         raise ValueError(
             f"CoEvolutionTrainer does not support budget mode {config.budget_mode}."
         )
@@ -1127,7 +1284,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         All opponent sampling happens on the driver before any worker is
         launched, so pool RNGs mutate exactly once per batch call.
         """
-        from .evaluator import CoEvolutionEvaluator, _EpisodePayload, _episode_rollout
+        from .evaluator import CoEvolutionEvaluator, _episode_rollout, _EpisodePayload
 
         if self._resolved_workers <= 1:
             return None
@@ -1175,10 +1332,15 @@ class CoEvolutionTrainer(BaselineTrainer):
                             side_role_prefixes=side_role_prefixes,
                             episode_seed=None,
                             max_steps=max_steps,
+                            registry_snapshot=getattr(self, "_registry_snapshot", None),
                         )
                     )
             # Dispatch all N×k episodes in parallel.
             results = list(executor.map(_episode_rollout, payloads))
+            # Funnel the real per-episode ticks (otherwise discarded on this
+            # population-parallel path) into the same cumulative counter the
+            # serial path advances via CoEvolutionEvaluator._finalise.
+            evaluator.env_steps_consumed += sum(int(r.steps) for r in results)
             # Aggregate per individual.
             fitnesses: List[tuple] = []
             for i in range(n):
@@ -1216,8 +1378,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         ordered_states = sorted(
             states.items(),
             key=lambda item: (
-                0 if item[1].side.optimizer in {"qdax_map_elites", "qdax_cma_me"}
-                else 1
+                0 if item[1].side.optimizer in {"qdax_map_elites", "qdax_cma_me"} else 1
             ),
         )
         for name, state in ordered_states:
@@ -1267,7 +1428,9 @@ class CoEvolutionTrainer(BaselineTrainer):
             child generator to avoid shared state.
         """
         opp_sides = self._collect_opponent_sides(
-            states, learner_state.side.name, coev_cfg,
+            states,
+            learner_state.side.name,
+            coev_cfg,
             pool_snapshot=pool_snapshot,
         )
         if learner_state.side.optimizer == "rl":
@@ -1275,20 +1438,17 @@ class CoEvolutionTrainer(BaselineTrainer):
             # dispatch rollout episodes to worker processes in parallel.
             # The executor is only handed over when resolved_workers > 1;
             # for serial runs None keeps the existing _collect_episode path.
-            rl_executor = (
-                self._executor if self._resolved_workers > 1 else None
-            )
+            rl_executor = self._executor if self._resolved_workers > 1 else None
             return _RLDriverContext(
                 env_wrapper=env,
                 learner_role_prefixes=learner_state.side.role_prefixes,
                 opponent_sides=opp_sides,
                 max_steps=coev_cfg.max_steps_per_episode,
-                rng=np.random.default_rng(
-                    self._rng.integers(0, 2**63 - 1)
-                ),
+                rng=np.random.default_rng(self._rng.integers(0, 2**63 - 1)),
                 executor=rl_executor,
                 env_name=self._env_name,
                 env_config=self._env_config,
+                registry_snapshot=getattr(self, "_registry_snapshot", None),
             )
         assert (
             learner_state.side.optimizer != "frozen"
@@ -1335,6 +1495,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             env_name=getattr(self, "_env_name", None),
             env_config=getattr(self, "_env_config", None),
             learner_masked=bool(getattr(learner_state, "masked", False)),
+            registry_snapshot=getattr(self, "_registry_snapshot", None),
         )
         trainer_rng = self._rng
 
@@ -1414,7 +1575,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             pool_snapshot[name] = pool
         for name, state in states.items():
             self._step_one_side(
-                env, state, states, coev_cfg, history,
+                env,
+                state,
+                states,
+                coev_cfg,
+                history,
                 pool_snapshot=pool_snapshot,
             )
 
@@ -1429,9 +1594,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._step_one_side(env, states[name], states, coev_cfg, history)
 
 
-def _build_learner_factory(
-    learner_state: SideState, coev_cfg: CoEvolutionConfig
-):
+def _build_learner_factory(learner_state: SideState, coev_cfg: CoEvolutionConfig):
     """Build the ``learner_factory`` the evaluator will call.
 
     Returns ``(genome, agent_id, action_space) -> PolicyProtocol`` that

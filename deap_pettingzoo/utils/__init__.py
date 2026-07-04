@@ -17,10 +17,12 @@ from deap_pettingzoo.utils.parallel import (
     parallel_map,
     resolve_num_workers,
 )
+from deap_pettingzoo.utils.rng import seed_everything
 
 __all__ = [
     "SUPPORTED_BACKENDS",
     "make_executor",
     "parallel_map",
     "resolve_num_workers",
+    "seed_everything",
 ]

@@ -18,7 +18,7 @@ def _make_config() -> TrainingConfig:
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=8,
-        algorithm_params={"seed": 0},
+        seed=0,
     )
 
 
@@ -53,4 +53,23 @@ class TestCMATrainerProcessPool:
         )
         result = t.train(_make_config())
         assert result.metadata["num_workers"] == 2
+        assert np.isfinite(result.metrics["final_fitness"])
+
+
+class TestCMATrainerDaskPool:
+    def test_dask_backend_completes(self):
+        pytest.importorskip("dask.distributed")
+        t = CMAESTrainer(hidden_size=8, population_size=4)
+        # Backend + workers via first-class TrainingConfig fields.
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.EVAL_EPISODES,
+            budget_value=8,
+            seed=0,
+            num_workers=2,
+            parallel_backend="dask",
+        )
+        result = t.train(config)
+        assert result.metadata["num_workers"] == 2
+        assert result.metadata["parallel_backend"] == "dask"
         assert np.isfinite(result.metrics["final_fitness"])

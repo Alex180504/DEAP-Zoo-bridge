@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 #: Environment variable that overrides the default results root.
 DEFAULT_ROOT_ENV_VAR = "DEAP_RESULTS_ROOT"
 

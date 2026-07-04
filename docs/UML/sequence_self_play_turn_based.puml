@@ -82,6 +82,16 @@ loop until done or steps >= max_steps
     end note
     Adapter -> Env : step(current_player_action)
     Env --> Adapter : next obs, reward,\n  term, trunc, info
+
+    note right of Adapter
+      Termination contract:
+      • Terminated agents absent from obs_dict/infos
+        (still present in rewards/terminations).
+      • SequentialTurnAdapter calls step(None) to
+        drain terminated agent_selection before
+        returning the next live agent's obs.
+    end note
+
     Adapter --> Wrap : parallel-shaped dicts
     Wrap --> Eval : obs, rewards, dones,\n  truncated, infos
 

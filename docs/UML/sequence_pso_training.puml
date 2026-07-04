@@ -33,14 +33,17 @@ loop for each particle
   E -> E: run episode
   E --> T: (fitness,)
 end
+T -> T: HallOfFame.update(population)
+note right: Capture champion BEFORE\nparticles move so genome ↔ fitness\npairing is not stale (F-2.5-01)
+
 T -> T: toolbox.update(population)
 note right: velocity/position update\npersonal+global best tracking
-
-T -> T: HallOfFame.update(population)
 T -> T: stats.compile(population)
+T -> T: aggregate real env steps\n(evaluator.env_steps_consumed + step_sink)
+note right: budget_on_consumed=True (opt-in):\nloop until consumed >= ENV_STEPS budget\ninstead of a fixed num_generations
 
 == Result ==
 T -> T: champion = hof[0].genome
 T -> T: GenomePolicyWrapper(champion) → PolicyProtocol
-T --> User: TrainingResult(policy, metrics)
+T --> User: TrainingResult(policy, metrics)\nmetrics include env_steps_nominal\n+ env_steps_consumed (real ticks)
 @enduml

@@ -61,7 +61,7 @@ def _tcfg(coev_cfg: CoEvolutionConfig, budget: int = 12) -> TrainingConfig:
         env_config={"continuous_actions": True},  # MADDPG/MATD3 native
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=budget,
-        algorithm_params={"coevolution": coev_cfg},
+        coevolution_config=coev_cfg,
     )
 
 
@@ -97,8 +97,12 @@ class TestSideValidation:
             make_side_state(side)
 
 
-class TestOnPolicyGated:
-    def test_ippo_raises_notimplemented_at_initialise(self):
+class TestOnPolicySupported:
+    def test_ippo_initialises_without_replay_buffer(self):
+        """On-policy IPPO is now supported: initialise() builds the agent +
+        wrapper + pool and keeps no replay buffer (PPO collects fresh
+        rollouts each generation).  Detailed learning behaviour is covered by
+        ``tests/test_coevolution_rl_onpolicy.py``."""
         from deap_pettingzoo.environments.pettingzoo_wrapper import (
             PettingZooWrapper,
         )
@@ -108,13 +112,16 @@ class TestOnPolicyGated:
             _rl_cfg(algo="ippo"),
         )
         state = RLSideState(side)
+        assert state.is_on_policy
         env = PettingZooWrapper(
             "simple_tag_v3",
             env_config={"continuous_actions": False},
         )
         try:
-            with pytest.raises(NotImplementedError, match="on-policy"):
-                state.initialise(env, rng=np.random.default_rng(0))
+            state.initialise(env, rng=np.random.default_rng(0))
+            assert state._memory is None
+            assert state._wrapper is not None
+            assert state._pool is not None
         finally:
             env.close()
 

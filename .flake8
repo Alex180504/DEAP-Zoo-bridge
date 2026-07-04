@@ -1,0 +1,12 @@
+[flake8]
+# Match black's line length (flake8 has no pyproject.toml support without a
+# plugin, so this mirrors [tool.black] in pyproject.toml).
+max-line-length = 88
+extend-ignore =
+    E203,
+    W503
+exclude =
+    .venv,
+    build,
+    dist,
+    docs/UML

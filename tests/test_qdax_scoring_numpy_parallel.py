@@ -25,7 +25,7 @@ pytest.importorskip("pettingzoo.mpe")
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
-from deap_pettingzoo.contrib.qdax.descriptors import pursuit_evasion as pe
+from examples.qdax import descriptors as pe
 from deap_pettingzoo.contrib.qdax.policy import (
     init_flax_mlp_params,
     make_flax_mlp,
@@ -136,3 +136,23 @@ class TestNumpyScoringParallel:
         close_scoring_function(fn)
         # Second close must not raise.
         close_scoring_function(fn)
+
+
+class TestNumpyScoringEnvStepsConsumed:
+    """The numpy scoring path tracks real consumed env ticks"""
+
+    def test_counter_starts_zero_and_accumulates(self, _scoring_setup):
+        layer_sizes, module, _ = _scoring_setup
+        fn = _make_fn(_scoring_setup, num_workers=1)
+        try:
+            assert fn._env_steps_consumed == 0
+            geno = _build_genotypes(module, layer_sizes, batch=3)
+            fn(geno, jax.random.PRNGKey(0))
+            after_one = fn._env_steps_consumed
+            # episode_length=10, batch=3 -> at most 30 ticks, at least 1.
+            assert 0 < after_one <= 3 * 10
+            fn(geno, jax.random.PRNGKey(1))
+            # Cumulative across scoring calls.
+            assert fn._env_steps_consumed > after_one
+        finally:
+            close_scoring_function(fn)

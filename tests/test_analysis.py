@@ -84,6 +84,18 @@ def test_iqm_handles_small_sample():
     assert abs(iqm([1.0, 2.0, 3.0]) - 2.0) < 1e-12
 
 
+def test_iqm_tie_heavy_count_trims_not_quantile_masks():
+    # Test trim IQM quantile mask returns 1.75
+    arr = [1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert abs(iqm(arr) - 1.75) < 1e-12
+
+
+def test_iqm_matches_scipy_trim_mean_on_ties():
+    stats = pytest.importorskip("scipy.stats")
+    arr = np.array([1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    assert abs(iqm(arr) - float(stats.trim_mean(arr, 0.25))) < 1e-12
+
+
 def test_iqm_empty_returns_nan():
     assert np.isnan(iqm([]))
 
@@ -231,6 +243,134 @@ def test_learning_curve_raises_when_columns_missing(tmp_path: Path):
         learning_curve_with_ci(runs, x_col="env_steps", y_col="nonexistent_col")
 
 
+def _make_mean_only_run(
+    output_dir: Path, *, algorithm: str, seed: int, series: List[float]
+) -> Path:
+    """Create a product-path-shaped run: metrics carry ``mean`` but no ``best``."""
+    with ExperimentLogger.create(
+        output_dir=output_dir,
+        algorithm=algorithm,
+        env_name="dummy_env",
+        seed=seed,
+        budget_mode="GENERATIONS",
+        budget_value=len(series),
+        hyperparams={},
+    ) as log:
+        for i, v in enumerate(series):
+            log.row(
+                "metrics",
+                {
+                    "iteration": i,
+                    "env_steps": i * 10,
+                    "wall_time": 0.0,
+                    "mean": float(v),
+                    "min": float(v) - 1.0,
+                    "max": float(v) + 1.0,
+                },
+            )
+        log.summary({"final_fitness": float(series[-1]), "algorithm": algorithm})
+    return log.run_dir  # type: ignore[attr-defined]
+
+
+def test_learning_curve_auto_detects_mean_when_best_absent(tmp_path: Path):
+    # The UI path writes mean/min/max but
+    # never "best", so the old default y_col="best" produced an empty
+    # curve. Auto-detection (best->mean->max) must yield a non-empty curve.
+    for seed in range(3):
+        _make_mean_only_run(
+            tmp_path, algorithm="ea", seed=seed, series=[0.0, 1.0 + seed, 2.0 + seed]
+        )
+    exp = load_experiment(tmp_path)
+    runs = list(exp.by_algorithm()["ea"])
+    df = learning_curve_with_ci(runs)  # no y_col -> auto-detect
+    assert len(df) > 0
+    assert {"env_steps", "mean", "lo", "hi", "n_runs"} <= set(df.columns)
+
+
+def test_aggregate_summary_warns_on_unequal_n(tmp_path: Path):
+    # Pooling unequal seed counts must warn and still surface each algorithm's n.
+    for seed in range(4):
+        _make_run(tmp_path, algorithm="ea", seed=seed,
+                  final_fitness=1.0 + 0.1 * seed, series=[0.0, 1.0])
+    for seed in range(2):
+        _make_run(tmp_path, algorithm="cma-es", seed=seed,
+                  final_fitness=2.0 + 0.1 * seed, series=[0.0, 2.0])
+    exp = load_experiment(tmp_path)
+    with pytest.warns(UserWarning, match="unequal run counts"):
+        agg = aggregate_summary(exp.final_scores())
+    assert dict(agg["n_seeds"]) == {"ea": 4, "cma-es": 2}
+
+
+def test_aggregate_summary_require_equal_n_raises(tmp_path: Path):
+    for seed in range(3):
+        _make_run(tmp_path, algorithm="ea", seed=seed, final_fitness=float(seed),
+                  series=[0.0, 1.0])
+    _make_run(tmp_path, algorithm="cma-es", seed=0, final_fitness=2.0,
+              series=[0.0, 2.0])
+    exp = load_experiment(tmp_path)
+    with pytest.raises(ValueError, match="unequal run counts"):
+        aggregate_summary(exp.final_scores(), require_equal_n=True)
+
+
+def test_per_agent_table_one_row_per_agent():
+    # A per-agent decomposition sourced from a
+    # run's trajectories frame. The frame is built in memory (the exact shape
+    # trajectories.parquet hydrates into via load_run) to avoid a
+    # known Windows pyarrow native crash in the test suite.
+    pd = pytest.importorskip("pandas")
+    from deap_pettingzoo.analysis.loaders import RunRecord, per_agent_table
+
+    traj = pd.DataFrame(
+        {
+            "episode_idx": [0, 0, 1, 1],
+            "step": [0, 0, 0, 0],
+            "agent": ["agent_0", "agent_1", "agent_0", "agent_1"],
+            "reward": [1.0, 2.0, 3.0, 4.0],
+            "done": [True, True, True, True],
+        }
+    )
+    rec = RunRecord(
+        run_dir=Path("run_0"),
+        manifest={"algorithm": "ea", "env_name": "dummy_env", "seed": 0,
+                  "run_id": "run_0"},
+        trajectories=traj,
+    )
+    table = per_agent_table([rec])
+    assert sorted(table["agent"]) == ["agent_0", "agent_1"]
+    by_agent = dict(zip(table["agent"], table["total_reward"]))
+    assert by_agent["agent_0"] == 4.0  # 1 + 3
+    assert by_agent["agent_1"] == 6.0  # 2 + 4
+    # mean over the 2 episodes
+    mean_by_agent = dict(zip(table["agent"], table["mean_episode_reward"]))
+    assert mean_by_agent["agent_0"] == 2.0
+    assert (table["source"] == "trajectories").all()
+    # Also reachable through the Experiment facade.
+    exp_table = Experiment(root=Path("."), runs=[rec]).per_agent_table()
+    assert len(exp_table) == 2
+
+
+def test_per_agent_table_falls_back_to_held_out_eval():
+    # When no trajectories.parquet exists,
+    # the per-agent view must still surface the held-out per-agent means that
+    # the runner persists to summary['eval_agent_rewards'].
+    pytest.importorskip("pandas")
+    from deap_pettingzoo.analysis.loaders import RunRecord, per_agent_table
+
+    rec = RunRecord(
+        run_dir=Path("run_0"),
+        manifest={"algorithm": "maddpg", "env_name": "simple_tag", "seed": 1,
+                  "run_id": "run_0"},
+        trajectories=None,
+        summary={"eval_agent_rewards": {"adversary_0": -1.5, "agent_0": 1.5}},
+    )
+    table = per_agent_table([rec])
+    assert sorted(table["agent"]) == ["adversary_0", "agent_0"]
+    assert (table["source"] == "held_out_eval").all()
+    means = dict(zip(table["agent"], table["mean_episode_reward"]))
+    assert means["adversary_0"] == -1.5
+    assert means["agent_0"] == 1.5
+
+
 def test_pairwise_table_two_algos(tmp_path: Path):
     for seed in range(3):
         _make_run(tmp_path, algorithm="ea", seed=seed,
@@ -302,7 +442,14 @@ def test_rliable_aggregate_metrics_table(tmp_path: Path):
 
     tbl = aggregate_metrics_table(exp.final_scores(), reps=100)
     assert sorted(tbl.index) == ["cma-es", "ea"]
-    assert {"mean", "median", "iqm", "optimality_gap"} <= set(tbl.columns)
+    assert {"mean", "median", "iqm"} <= set(tbl.columns)
+    # Optimality_gap is meaningless on raw single-task scores, so
+    # it is dropped from that path unless explicitly requested.
+    assert "optimality_gap" not in tbl.columns
+    forced = aggregate_metrics_table(
+        exp.final_scores(), reps=100, include_optimality_gap=True
+    )
+    assert "optimality_gap" in forced.columns
 
     taus, points, intervals = performance_profile(exp.final_scores(), n_tau=5, reps=100)
     assert taus.size == 5

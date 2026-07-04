@@ -155,8 +155,10 @@ def translate_budget_to_env_steps(
         Integer number of environment steps.
 
     Raises:
-        ValueError: If ``config.budget_mode`` is ``WALL_CLOCK`` (not
-            supported here; trainer should short-circuit on a timer).
+        ValueError: If ``config.budget_mode`` is neither ``ENV_STEPS`` nor
+            ``EVAL_EPISODES`` — notably ``GENERATIONS``, which is a
+            population-trainer-only unit with no meaning for the step-based
+            AgileRL learners.
     """
     mode = config.budget_mode
     if mode == BudgetMode.ENV_STEPS:
@@ -168,9 +170,12 @@ def translate_budget_to_env_steps(
             ep_len = default_episode_len
         return int(config.budget_value) * int(ep_len)
     raise ValueError(
-        f"Cannot translate budget mode {mode} to env steps; "
-        "wall-clock training must use a timer-based stop condition."
+        f"AgileRL trainers cannot translate budget mode {mode} to env steps. "
+        "Use BudgetMode.ENV_STEPS or BudgetMode.EVAL_EPISODES; "
+        "BudgetMode.GENERATIONS is supported only by the population trainers "
+        "(EA / CMA-ES / PSO / co-evolution / QDax)."
     )
+
 
 __all__ = [
     "build_parallel_env",

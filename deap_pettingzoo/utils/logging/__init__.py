@@ -27,10 +27,6 @@ See ``docs/api/api_specification.md`` (section "Logging") for the full
 contract.
 """
 
-from deap_pettingzoo.utils.logging.experiment_logger import (
-    ExperimentLogger,
-    NoOpLogger,
-)
 from deap_pettingzoo.utils.logging.checkpoints import (
     KIND_AGILERL,
     KIND_CMA_GENOME,
@@ -43,15 +39,19 @@ from deap_pettingzoo.utils.logging.checkpoints import (
     save_agilerl_agent,
     save_ea_genome,
 )
+from deap_pettingzoo.utils.logging.experiment_logger import (
+    ExperimentLogger,
+    NoOpLogger,
+)
 from deap_pettingzoo.utils.logging.manifest import (
     RunManifest,
     capture_environment_metadata,
 )
 from deap_pettingzoo.utils.logging.replay import FrameRecorder
 from deap_pettingzoo.utils.logging.schema import (
-    SCHEMA_VERSION,
     EPISODES_COLUMNS,
     METRICS_REQUIRED_COLUMNS,
+    SCHEMA_VERSION,
 )
 from deap_pettingzoo.utils.logging.sinks import (
     CsvScalarSink,

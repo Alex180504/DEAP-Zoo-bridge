@@ -35,6 +35,10 @@ class RunSummary:
     final_summary: dict
     started_at: Optional[datetime] = field(default=None)
     display_name: Optional[str] = field(default=None)
+    experiment_id: Optional[str] = field(default=None)
+    """Experiment ID parsed from the run directory path when under
+    ``_experiments/<exp_id>/``. ``None`` for CLI runs or runs not
+    created via the UI queue."""
 
 
 def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
@@ -87,6 +91,19 @@ def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
             except (ValueError, TypeError):
                 pass
         display_name: Optional[str] = (rec.manifest or {}).get("display_name") or None
+
+        # Parse experiment_id from path when under _experiments/<exp_id>/.
+        exp_id: Optional[str] = None
+        try:
+            parts = run_dir.parts
+            # Look for "_experiments" in the path; the next segment is the exp_id.
+            for i, part in enumerate(parts):
+                if part == "_experiments" and i + 1 < len(parts):
+                    exp_id = parts[i + 1]
+                    break
+        except (ValueError, IndexError):
+            pass
+
         out.append(
             RunSummary(
                 run_id=rec.run_id,
@@ -98,6 +115,7 @@ def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
                 final_summary=dict(rec.summary or {}),
                 started_at=started_at,
                 display_name=display_name,
+                experiment_id=exp_id,
             )
         )
 
@@ -120,7 +138,11 @@ def load_experiment_cached(run_dirs: List[Path]) -> "Experiment":
     directly. Keeping the cache decorator inside the page module rather
     than here means this module is import-safe without ``streamlit``.
     """
-    from deap_pettingzoo.analysis.loaders import Experiment, expand_coevolution_run, load_run
+    from deap_pettingzoo.analysis.loaders import (
+        Experiment,
+        expand_coevolution_run,
+        load_run,
+    )
 
     runs: List["RunRecord"] = []
     resolved_parents: List[Path] = []

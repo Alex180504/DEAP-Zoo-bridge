@@ -11,6 +11,13 @@ with :func:`~deap_pettingzoo.environments.registry.register_env`.
 
 from __future__ import annotations
 
+from deap_pettingzoo.catalog.schema import (
+    ParamSpec,
+    ParamTarget,
+    ParamType,
+    TeamSpec,
+)
+
 from .registry import is_registered, register_env
 
 """
@@ -38,9 +45,8 @@ _MPE_NOTES = {
         "Heterogeneous agents (adversary vs good). One genome per role."
     ),
     "simple_reference_v3": (
-        "MultiDiscrete action space (movement + communication). "
-        "FeedforwardNeuralPolicy does NOT support MultiDiscrete — use "
-        "AgileRL trainers."
+        "Homogeneous Discrete(50) action space (movement x communication "
+        "flattened into a single Discrete). Trainable by all backends."
     ),
     "simple_speaker_listener_v3": (
         "Heterogeneous: speaker has Discrete comm-only action, listener has "
@@ -50,11 +56,222 @@ _MPE_NOTES = {
     "simple_spread_v3": "",
     "simple_tag_v3": "",
     "simple_world_comm_v3": (
-        "MultiDiscrete action space and heterogeneous agents. "
-        "FeedforwardNeuralPolicy does NOT support MultiDiscrete — use "
-        "AgileRL trainers."
+        "Heterogeneous Discrete action spaces across roles "
+        "(leadadversary/adversary/agent differ). FeedforwardNeuralPolicy "
+        "requires one genome per role; use MixedPolicyEvaluator or an "
+        "AgileRL trainer."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Declarative env-config schemas + team metadata (for the catalog / setup UI).
+#
+# MPE2 ``parallel_env`` factories use ``**kwargs`` passthrough, so the real
+# constructor parameters cannot be introspected reliably (see
+# ``deap_pettingzoo/catalog/introspection.py``). The schemas below are
+# hand-authored from the verified ``raw_env.__init__`` signatures.
+# ---------------------------------------------------------------------------
+
+_EC = ParamTarget.ENV_CONFIG
+_INT, _FLOAT, _BOOL = ParamType.INT, ParamType.FLOAT, ParamType.BOOL
+
+
+def _mpe_common_params() -> list:
+    """Return the env-config params shared by every MPE2 environment."""
+    return [
+        ParamSpec(
+            "max_cycles",
+            _INT,
+            25,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Episode",
+            help="Maximum steps before the episode truncates.",
+        ),
+        ParamSpec(
+            "continuous_actions",
+            _BOOL,
+            False,
+            target=_EC,
+            group="Actions",
+            help="Use Box (continuous) actions instead of Discrete.",
+        ),
+        ParamSpec(
+            "dynamic_rescaling",
+            _BOOL,
+            False,
+            target=_EC,
+            advanced=True,
+            group="Actions",
+            help="Dynamically rescale entity sizes / positions.",
+        ),
+    ]
+
+
+#: Per-env extra constructor params (agent / landmark counts, ratios).
+_MPE_EXTRA_PARAMS = {
+    "simple_adversary_v3": [
+        ParamSpec(
+            "N",
+            _INT,
+            2,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of good agents (and landmarks).",
+        ),
+    ],
+    "simple_reference_v3": [
+        ParamSpec(
+            "local_ratio",
+            _FLOAT,
+            0.5,
+            minimum=0.0,
+            maximum=1.0,
+            step=0.05,
+            target=_EC,
+            group="Reward",
+            help="Weight of local vs global reward.",
+        ),
+    ],
+    "simple_spread_v3": [
+        ParamSpec(
+            "N",
+            _INT,
+            3,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of agents (and landmarks).",
+        ),
+        ParamSpec(
+            "local_ratio",
+            _FLOAT,
+            0.5,
+            minimum=0.0,
+            maximum=1.0,
+            step=0.05,
+            target=_EC,
+            group="Reward",
+            help="Weight of local vs global reward.",
+        ),
+    ],
+    "simple_tag_v3": [
+        ParamSpec(
+            "num_good",
+            _INT,
+            1,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of prey (good) agents.",
+        ),
+        ParamSpec(
+            "num_adversaries",
+            _INT,
+            3,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of predator (adversary) agents.",
+        ),
+        ParamSpec(
+            "num_obstacles",
+            _INT,
+            2,
+            minimum=0,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of static obstacles.",
+        ),
+    ],
+    "simple_world_comm_v3": [
+        ParamSpec(
+            "num_good",
+            _INT,
+            2,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of good agents.",
+        ),
+        ParamSpec(
+            "num_adversaries",
+            _INT,
+            4,
+            minimum=1,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of adversaries.",
+        ),
+        ParamSpec(
+            "num_obstacles",
+            _INT,
+            1,
+            minimum=0,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of static obstacles.",
+        ),
+        ParamSpec(
+            "num_food",
+            _INT,
+            2,
+            minimum=0,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of food landmarks.",
+        ),
+        ParamSpec(
+            "num_forests",
+            _INT,
+            2,
+            minimum=0,
+            step=1,
+            target=_EC,
+            group="Agents",
+            help="Number of forest landmarks.",
+        ),
+    ],
+}
+
+
+#: Declared teams for competitive MPE2 envs (predator/prey-style). Cooperative
+#: and heterogeneous-non-competitive envs declare no teams (single group).
+_MPE_TEAMS = {
+    "simple_tag_v3": (
+        TeamSpec("predators", ("adversary",), role="predator"),
+        TeamSpec("prey", ("agent",), role="prey"),
+    ),
+    "simple_adversary_v3": (
+        TeamSpec("adversaries", ("adversary",), role="predator"),
+        TeamSpec("good", ("agent",), role="prey"),
+    ),
+    "simple_push_v3": (
+        TeamSpec("adversaries", ("adversary",), role="predator"),
+        TeamSpec("good", ("agent",), role="prey"),
+    ),
+    "simple_world_comm_v3": (
+        TeamSpec("adversaries", ("adversary", "leadadversary"), role="predator"),
+        TeamSpec("good", ("agent",), role="prey"),
+    ),
+}
+
+
+def _mpe_params(env_name: str) -> tuple:
+    """Build the full env-config ParamSpec tuple for an MPE2 environment."""
+    return tuple(_MPE_EXTRA_PARAMS.get(env_name, []) + _mpe_common_params())
 
 
 def _try_register_mpe2() -> None:
@@ -93,6 +310,8 @@ def _try_register_mpe2() -> None:
             continuous_default=False,
             notes=_MPE_NOTES.get(env_name, ""),
             tags={"mpe2"},
+            params=_mpe_params(env_name),
+            teams=_MPE_TEAMS.get(env_name, ()),
         )
 
 
@@ -117,6 +336,7 @@ def _patch_aquarium() -> None:  # pragma: no cover
         _parts = (0, 0, 0)
     if _parts < (0, 1, 11):
         import warnings
+
         warnings.warn(
             f"marl-aquarium v{_aq_ver} has known FOV observation bugs "
             f"(padding formula, missing cap guards, wrong sensor params). "
@@ -145,6 +365,52 @@ def _try_register_aquarium() -> None:
             "episodes); long episodes."
         ),
         tags={"aquarium", "third_party"},
+        params=(
+            ParamSpec(
+                "predator_count",
+                _INT,
+                3,
+                minimum=1,
+                step=1,
+                target=_EC,
+                group="Agents",
+                help="Number of predator fish.",
+            ),
+            ParamSpec(
+                "prey_count",
+                _INT,
+                6,
+                minimum=1,
+                step=1,
+                target=_EC,
+                group="Agents",
+                help="Number of prey fish.",
+            ),
+            ParamSpec(
+                "max_time_steps",
+                _INT,
+                3000,
+                minimum=1,
+                step=50,
+                target=_EC,
+                group="Episode",
+                help="Maximum environment steps per episode.",
+            ),
+            ParamSpec(
+                "observable_walls",
+                _BOOL,
+                False,
+                target=_EC,
+                advanced=True,
+                group="Topology",
+                help="Rectangle (clamped) topology with wall features "
+                "instead of torus wrap.",
+            ),
+        ),
+        teams=(
+            TeamSpec("predators", ("predator",), role="predator"),
+            TeamSpec("prey", ("prey",), role="prey"),
+        ),
     )
 
 

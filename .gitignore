@@ -182,3 +182,12 @@ results/
 .report-out/
 errors.txt
 test_results.txt
+
+# Baseline test/linter files
+_baseline_mypy.txt
+_baseline_pylint.txt
+_baseline_pytest.txt
+
+*.jar
+
+smoke.py

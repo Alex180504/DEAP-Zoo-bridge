@@ -1,9 +1,13 @@
+import logging
 from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 
-from .base_evaluator import BaseEvaluator
 from ..environments import PettingZooWrapper
 from ..policies import FeedforwardNeuralPolicy
+from .base_evaluator import BaseEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 class SingleEpisodeEvaluator(BaseEvaluator):
@@ -26,13 +30,13 @@ class SingleEpisodeEvaluator(BaseEvaluator):
     identical to the historical behaviour.
     """
 
-    VALID_AGGREGATIONS = ['sum', 'mean', 'min', 'max', 'team']
+    VALID_AGGREGATIONS = ["sum", "mean", "min", "max", "team"]
 
     def __init__(
         self,
         env_wrapper: PettingZooWrapper,
         max_steps: int = 500,
-        aggregation_method: str = 'sum',
+        aggregation_method: str = "sum",
         team_mapping: Optional[Dict[str, str]] = None,
         fitness_spec: Optional[Any] = None,
     ) -> None:
@@ -71,26 +75,27 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         self.aggregation_method = aggregation_method
         self.team_mapping = team_mapping or {}
         self.fitness_spec = fitness_spec
+        #: Cumulative count of *real* environment steps consumed across every
+        #: :meth:`evaluate` call on this instance.
+        self.env_steps_consumed = 0
         if fitness_spec is not None:
             fitness_spec.validate()
-    
+
     def evaluate(
-        self,
-        individual: Any,
-        seed: Optional[int] = None
+        self, individual: Any, seed: Optional[int] = None
     ) -> Tuple[float, ...]:
         """
         Evaluate individual in one episode.
-        
+
         Args:
             individual: DEAP individual with genome attribute
             seed: Optional seed for episode reproducibility
-            
+
         Returns:
             Tuple of fitness values (length 1 for backward-compatible
             single-objective; N for multi-objective; flat vector for
             lexicase modes).
-            
+
         Raises:
             ValueError: If individual or genome is None/invalid.
             RuntimeError: If an exception occurs during the episode rollout
@@ -99,21 +104,21 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         # Validate inputs
         if individual is None:
             raise ValueError("Individual cannot be None")
-        
-        if not hasattr(individual, 'genome'):
+
+        if not hasattr(individual, "genome"):
             raise ValueError(
                 f"Individual must have 'genome' attribute, got type {type(individual)}"
             )
-        
+
         if individual.genome is None:
             raise ValueError("Individual's genome cannot be None")
-        
+
         # Reset environment
         observations = self.env_wrapper.reset(seed=seed)
-        
+
         # Create policies for each agent using the same genome
         policies = self._create_policies(individual.genome, observations)
-        
+
         # Run episode
         cumulative_rewards = {agent: 0.0 for agent in observations.keys()}
         reward_components: Optional[Dict[str, float]] = (
@@ -121,7 +126,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         )
         done = False
         steps = 0
-        
+
         try:
             while not done and steps < self.max_steps:
                 # Get actions from policies
@@ -133,13 +138,17 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                         actions[agent] = policies[agent].get_action(
                             obs, deterministic=True, action_mask=mask
                         )
-                
-                # Step environment
-                observations, rewards, dones, truncated, infos = self.env_wrapper.step(actions)
 
-                # Accumulate rewards
+                # Step environment
+                observations, rewards, dones, truncated, infos = self.env_wrapper.step(
+                    actions
+                )
+
+                # Accumulate rewards; .get avoids KeyError for agents absent at reset.
                 for agent, reward in rewards.items():
-                    cumulative_rewards[agent] += reward
+                    cumulative_rewards[agent] = (
+                        cumulative_rewards.get(agent, 0.0) + reward
+                    )
 
                 # Accumulate reward components (per the fitness spec hook).
                 if reward_components is not None and self.fitness_spec is not None:
@@ -147,18 +156,22 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                     if rc_fn is not None:
                         step_rc = rc_fn(infos or {}, rewards)
                         for k, v in step_rc.items():
-                            reward_components[k] = reward_components.get(k, 0.0) + float(v)
-                
+                            reward_components[k] = reward_components.get(
+                                k, 0.0
+                            ) + float(v)
+
                 # Check if episode is done
                 done = all(dones.values()) or all(truncated.values())
                 steps += 1
-            
+                self.env_steps_consumed += 1
+
             # Aggregate fitness across agents
             aggregated = self._aggregate_fitness(cumulative_rewards)
 
             # Build multi-objective / lexicase vector when a spec is set.
             if self.fitness_spec is not None and self.fitness_spec.objectives:
                 from deap_pettingzoo.integration.objectives import build_fitness_vector
+
                 return build_fitness_vector(
                     aggregated_reward=aggregated,
                     per_episode_rewards=[aggregated],  # single episode
@@ -167,16 +180,15 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                     genome=individual.genome,
                     spec=self.fitness_spec,
                 )
-            
+
             return (aggregated,)
         except Exception as e:
             # Log error and re-raise with context
+            logger.exception("Error during episode evaluation")
             raise RuntimeError(f"Error during episode evaluation: {e}") from e
-    
+
     def _create_policies(
-        self,
-        genome,
-        observations: Dict[str, np.ndarray]
+        self, genome, observations: Dict[str, np.ndarray]
     ) -> Dict[str, FeedforwardNeuralPolicy]:
         """Create one shared-weights policy per agent.
 
@@ -206,39 +218,37 @@ class SingleEpisodeEvaluator(BaseEvaluator):
         policies: Dict[str, FeedforwardNeuralPolicy] = {}
         for agent in observations.keys():
             action_space = self.env_wrapper.action_space(agent)
-            policies[agent] = FeedforwardNeuralPolicy(
-                genome, action_space=action_space
-            )
+            policies[agent] = FeedforwardNeuralPolicy(genome, action_space=action_space)
         return policies
 
     def _aggregate_fitness(self, cumulative_rewards: Dict[str, float]) -> float:
         """
         Aggregate rewards across agents into single fitness value.
-        
+
         Args:
             cumulative_rewards: Dict mapping agent_id to total reward
-            
+
         Returns:
             Aggregated fitness value
         """
         if not cumulative_rewards:
             return 0.0
-        
+
         rewards = list(cumulative_rewards.values())
-        
-        if self.aggregation_method == 'sum':
+
+        if self.aggregation_method == "sum":
             return float(np.sum(rewards))
-        elif self.aggregation_method == 'mean':
+        elif self.aggregation_method == "mean":
             return float(np.mean(rewards))
-        elif self.aggregation_method == 'min':
+        elif self.aggregation_method == "min":
             return float(np.min(rewards))
-        elif self.aggregation_method == 'max':
+        elif self.aggregation_method == "max":
             return float(np.max(rewards))
-        elif self.aggregation_method == 'team':
+        elif self.aggregation_method == "team":
             return self._aggregate_team_fitness(cumulative_rewards)
-        
+
         return 0.0
-    
+
     def _aggregate_team_fitness(self, cumulative_rewards: Dict[str, float]) -> float:
         """
         Aggregate fitness for two-team competitive scenarios.
@@ -270,7 +280,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
 
         team_rewards: Dict[str, float] = {}
         for agent, reward in cumulative_rewards.items():
-            team = self.team_mapping.get(agent, 'default')
+            team = self.team_mapping.get(agent, "default")
             team_rewards[team] = team_rewards.get(team, 0.0) + reward
 
         if len(team_rewards) > 2:

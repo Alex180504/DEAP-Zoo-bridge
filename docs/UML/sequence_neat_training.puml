@@ -36,14 +36,15 @@ activate UE
 Trainer -> Pop: neat.Population(config, seed)
 activate Pop
 
-Trainer -> RR: _RecordingReporter(record_fn, cadence)
+Trainer -> RR: _RecordingReporter(record_fn)
 Trainer -> Pop: add_reporter(recording_reporter)
 
 == Parallel or sequential eval ==
-alt num_workers > 1
+Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_workers if != 1 else self._num_workers)\n  backend = config.parallel_backend if != "process" else self._parallel_backend\n  (config takes precedence over the trainer-constructor default)
+alt effective_workers > 1
     Trainer -> Trainer: get_registry_snapshot()
-    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, ...)
-    Trainer -> Executor: make_executor(n_workers,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))
+    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, max_steps,\n  registry_snapshot=snapshot, ...)
+    Trainer -> Executor: make_executor(effective_workers, backend=backend,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))\n  note: snapshot also rides on the spec so SCOOP/Dask\n  workers replay it (replay_registry_snapshot_once)
 
     loop n_generations
         Trainer -> Pop: run(parallel_eval_function, n=1)
@@ -52,13 +53,16 @@ alt num_workers > 1
             Pop -> Executor: map(_neat_worker_evaluate, [(genome, spec), ...])
             Executor -> Executor: each worker rebuilds:\n  neat.Config + PettingZooWrapper + NeatPolicy
             Executor -> Executor: evaluate genome across eval_eps episodes
-            Executor --> Pop: [(genome_id, fitness), ...]
+            Executor --> Pop: [(genome_id, (fitness, steps)), ...]\n  worker returns real env-tick count;\n  driver sums deltas into step_sink
         end
+        Pop -> Trainer: on_generation(best_fitness, gen_steps)\n
+        Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)\n  self._env_steps_history.append(gen_steps)
 
         Pop -> Pop: reproduce / speciate
     end
     Trainer -> Executor: executor.__exit__()
-else num_workers == 1 (sequential)
+    Trainer -> Trainer: self._env_steps_consumed += step_sink[0]
+else effective_workers == 1 (sequential)
     loop n_generations
         Trainer -> Pop: run(eval_function, n=1)
         activate Pop
@@ -77,6 +81,7 @@ else num_workers == 1 (sequential)
             loop episode steps
                 Trainer -> Env: step(actions_dict)
                 Env --> Trainer: observations, rewards, dones, truncateds, infos
+                Trainer -> Trainer: self._env_steps_consumed += 1
             end
             Trainer -> Trainer: genome.fitness = mean(rewards)
         end
@@ -86,12 +91,12 @@ else num_workers == 1 (sequential)
     end
 end
 
-== Recording: champion rollout (every N gens, hooks post_evaluate) ==
+== Recording: champion rollout (RecordingController decides per mode) ==
 alt recording enabled
-    loop generation g where g > 0 and g % cadence == 0
+    loop generation g where g > 0
         Pop -> RR: post_evaluate(config, pop, species, best_genome)
-        RR -> RR: _record_fn(g, best_genome)
-        RR -> UE: evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, seed, env_config)
+        RR -> RR: _record_fn(g, best_genome) → RecordingController.observe(ProgressEvent(g), champion)
+        RR -> UE: (when due) evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, iteration=g, env_steps)
         UE -> FR: start_episode()
         loop rollout steps
             UE -> UE: env.render('rgb_array')
@@ -105,6 +110,7 @@ end
 
 Trainer -> Policy: NeatPolicy(best_genome, config)
 Trainer -> Result: TrainingResult(algorithm="NEAT", policy=champion, metrics)
+note right: metrics include env_steps_nominal\n+ env_steps_consumed (real ticks, serial + parallel)
 
 Trainer -> UE: close()
 Trainer -> EL: close()

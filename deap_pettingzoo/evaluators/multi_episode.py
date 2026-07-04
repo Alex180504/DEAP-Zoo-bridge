@@ -1,9 +1,10 @@
 from typing import Any, List, Optional, Tuple
+
 import numpy as np
 
+from ..environments import PettingZooWrapper
 from .base_evaluator import BaseEvaluator
 from .single_episode import SingleEpisodeEvaluator
-from ..environments import PettingZooWrapper
 
 
 class MultiEpisodeEvaluator(BaseEvaluator):
@@ -23,16 +24,16 @@ class MultiEpisodeEvaluator(BaseEvaluator):
       historical behaviour.
     """
 
-    VALID_AGGREGATIONS = ['mean', 'median', 'min', 'max']
+    VALID_AGGREGATIONS = ["mean", "median", "min", "max"]
 
     def __init__(
         self,
         env_wrapper: PettingZooWrapper,
         num_episodes: int = 5,
-        aggregation_method: str = 'mean',
+        aggregation_method: str = "mean",
         base_seed: int = 42,
         fitness_spec: Optional[Any] = None,
-        **single_eval_kwargs
+        **single_eval_kwargs,
     ) -> None:
         """
         Initialize multi-episode evaluator.
@@ -77,16 +78,32 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             fitness_spec=fitness_spec,
             **single_eval_kwargs,
         )
-    
+
+    @property
+    def env_steps_consumed(self) -> int:
+        """Cumulative real env steps across every delegated episode.
+
+        Mirrors :attr:`SingleEpisodeEvaluator.env_steps_consumed`; the
+        underlying single-episode evaluator accumulates ticks across all
+        episodes this evaluator runs, so the count is below the nominal
+        ``num_episodes * max_steps`` whenever episodes terminate early
+        """
+        return self.single_evaluator.env_steps_consumed
+
     def evaluate(
         self,
-        individual: Any
+        individual: Any,
+        seed: Optional[int] = None,
     ) -> Tuple[float, ...]:
         """
         Evaluate individual across multiple episodes.
 
         Args:
             individual: DEAP individual with genome.
+            seed: Optional base seed for this call's episode sequence.
+                When provided it overrides :attr:`base_seed` for this
+                invocation only, allowing parallel workers to pass a
+                run-specific seed without mutating shared state.
 
         Returns:
             Tuple of fitness values.  When no ``fitness_spec`` is set,
@@ -105,7 +122,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             self.fitness_spec is not None
             and self.fitness_spec.lexicase_mode == "per_episode"
         ):
-            fitness_tuples = self._evaluate_episodes(individual)
+            fitness_tuples = self._evaluate_episodes(individual, base_seed=seed)
             # Each tuple is (per_episode_val, ...) per objective already
             # flattened by build_fitness_vector.  Concatenate them.
             flat: List[float] = []
@@ -114,7 +131,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             return tuple(flat)
 
         # ---- standard (single- or multi-objective) path ----
-        fitness_tuples = self._evaluate_episodes(individual)
+        fitness_tuples = self._evaluate_episodes(individual, base_seed=seed)
         if not fitness_tuples:
             return (0.0,)
 
@@ -165,13 +182,16 @@ class MultiEpisodeEvaluator(BaseEvaluator):
             float(np.max(fitnesses)),
         )
 
-    def _evaluate_episodes(self, individual: Any) -> List[Tuple[float, ...]]:
+    def _evaluate_episodes(
+        self,
+        individual: Any,
+        base_seed: Optional[int] = None,
+    ) -> List[Tuple[float, ...]]:
         """Run all evaluation episodes and return per-episode fitness tuples."""
-        # Validate inputs
         if individual is None:
             raise ValueError("Individual cannot be None")
 
-        if not hasattr(individual, 'genome'):
+        if not hasattr(individual, "genome"):
             raise ValueError(
                 f"Individual must have 'genome' attribute, got type {type(individual)}"
             )
@@ -179,9 +199,10 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         if individual.genome is None:
             raise ValueError("Individual's genome cannot be None")
 
+        effective_base = self.base_seed if base_seed is None else base_seed
         results: List[Tuple[float, ...]] = []
         for episode_idx in range(self.num_episodes):
-            episode_seed = self.base_seed + episode_idx
+            episode_seed = effective_base + episode_idx
             fitness = self.single_evaluator.evaluate(individual, seed=episode_seed)
             results.append(fitness)
         return results
@@ -208,13 +229,13 @@ class MultiEpisodeEvaluator(BaseEvaluator):
         Returns:
             Aggregated fitness
         """
-        if self.aggregation_method == 'mean':
+        if self.aggregation_method == "mean":
             return float(np.mean(fitnesses))
-        elif self.aggregation_method == 'median':
+        elif self.aggregation_method == "median":
             return float(np.median(fitnesses))
-        elif self.aggregation_method == 'min':
+        elif self.aggregation_method == "min":
             return float(np.min(fitnesses))
-        elif self.aggregation_method == 'max':
+        elif self.aggregation_method == "max":
             return float(np.max(fitnesses))
 
         return 0.0

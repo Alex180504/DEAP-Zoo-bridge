@@ -3,12 +3,13 @@
 title AgileRL Evolvable-HPO Training Sequence
 
 actor User
-participant "EvolveHPOTrainer\n(MADDPGHPO / MATD3HPO)" as Trainer
+participant "EvolveHPOTrainer\n(MADDPG/MATD3/IPPO/GroupedIPPO HPO)" as Trainer
 participant "agilerl.hpo" as HPO
 participant "PettingZooWrapper" as Env
+participant "ExperimentLogger" as Log
 participant "AgileRLPolicyWrapper" as Policy
 
-User -> Trainer: train(TrainingConfig)
+User -> Trainer: train(config, *, progress_callback)
 activate Trainer
 
 Trainer -> Trainer: _build_hp_config(spec)
@@ -17,25 +18,35 @@ activate HPO
 HPO --> Trainer: hp_config
 deactivate HPO
 
-Trainer -> Trainer: _build_population(size=N, obs_spaces, act_spaces, net_config, hp_config)
+Trainer -> Trainer: _prepare_population_build(...)
+note right: GroupedIPPOHPOTrainer installs the\ngrouped-IPPO patch + validates grouping.
+Trainer -> Trainer: _build_population(size=N, obs/act spaces, net_config, hp_config)
 note right
     Population of N AgileRL agents,
     each with a different sampled
     architecture + hyperparameter set.
 end note
 
-loop ep_cycle
+loop ep_cycle (until env-step budget)
     loop for each agent in population
-        Trainer -> Env: reset / step loop
-        note right: Collect rollouts with current architecture/HP
-        Trainer -> Policy: agent.learn()
-        note right: Train one learn_step of gradient updates
+        alt ON_POLICY (IPPO / grouped IPPO)
+            Trainer -> Env: _train_one_agent_on_policy(...)
+            note right: Shared agilerl_onpolicy.train_agent_on_policy:\ncollect rollouts -> agent.learn() (GAE)
+        else off-policy (MADDPG / MATD3)
+            Trainer -> Env: _train_one_agent(...)
+            note right
+                Replay-buffer rollout:\n1. MultiAgentReplayBuffer built per agent\n   (memory_size, agent_ids, device)\n2. save_to_memory(obs, raw_actions, reward,\n   next_obs, done) once per transition\n   using agent-keyed dicts\n3. agent.learn(memory.sample(batch_size))\n   gated on len(buffer)>=batch_size\n   and learning_delay/learn_step cadence
+            end note
+        end
     end
 
     Trainer -> Env: evaluate each agent (k episodes)
     Trainer -> Trainer: fitnesses = [mean(ep_rewards) for each agent]
+    Trainer -> Log: row("metrics", {generation, env_steps, mean, max, ...})
+    Trainer -> User: progress_callback(ProgressEvent)
+    note right: Per-generation live UI feed.
 
-    Trainer -> HPO: TournamentSelection.select(population, fitnesses)
+    Trainer -> HPO: TournamentSelection.select(population)
     activate HPO
     HPO --> Trainer: selected (elite + tournament winners)
     deactivate HPO
@@ -54,8 +65,9 @@ loop ep_cycle
     deactivate HPO
 end
 
+Trainer -> Log: save_agilerl_agent(champion) + write_summary(...)
 Trainer -> Policy: AgileRLPolicyWrapper(best_agent, agent_ids)
-Trainer --> User: TrainingResult(algorithm="MADDPG-HPO", policy=champion)
+Trainer --> User: TrainingResult(algorithm="<algo>-hpo", policy=champion)
 deactivate Trainer
 
 @enduml
