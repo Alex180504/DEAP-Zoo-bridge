@@ -226,6 +226,13 @@ package "deap_pettingzoo.contrib.openspiel" {
     }
 
     openspiel ..> registry : register_env
+
+    note bottom of openspiel
+      Opt-in; nothing registered on import.
+      Requires `pip install deap-pettingzoo[shimmy]`.
+      Wraps shimmy.OpenSpielCompatibilityV0
+      for OpenSpiel turn-based games.
+    end note
 }
 
 package "examples.pursuit_evasion.simple_tag" {
@@ -240,23 +247,9 @@ package "examples.pursuit_evasion.simple_tag" {
         + num_agent_neighbors: Optional[int]
         + num_landmark_neighbors: Optional[int]
         + boundary_threshold: float
-        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
-    }
-
-    class SelfPlayEvaluator {
-        - env_wrapper: PettingZooWrapper
-        - max_steps: int
-        - aggregation: str
-        - team_mapping: Dict[str, str]
-        - team: Optional[str]
-        - masked: bool
-        - flatten_obs: bool
-        --
-        + __init__(env_wrapper, max_steps, aggregation, team_mapping, team, masked, flatten_obs)
-        + evaluate(individual, seed=None) -> Tuple[float]
-        -- one shared-weights policy plays\n   every role in a turn-based env;\n   aggregation ∈ {sum, mean,\n     first_agent, team_mapping} --
         + boundary_scale: float
         + boundary_sharpness: float
+        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
     }
 
     class ObsLayout <<dataclass>> {
@@ -286,12 +279,7 @@ package "deap_pettingzoo.evaluators" {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
         + env_steps_consumed: int
-    BaseEvaluator <|-- SelfPlayEvaluator
-    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
-    SingleEpisodeEvaluator --> PettingZooWrapper : uses
-    SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
-    SelfPlayEvaluator --> PettingZooWrapper : uses
-    SelfPlayEvaluator ..> FeedforwardNeuralPolicy : creates (masked head)
+        --
         + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
         + evaluate(individual, seed=None) -> Tuple[float]
         - _create_policies(genome, observations) -> dict
@@ -881,14 +869,7 @@ note bottom of registry
   instead of failing opaquely mid-cluster.
 end note
 
-note bottom of openspiel
-  Opt-in; nothing registered on import.
-  Requires `pip install deap-pettingzoo[shimmy]`.
-  Wraps shimmy.OpenSpielCompatibilityV0
-  for OpenSpiel turn-based games.
-end note
-
-package "deap_pettingzoo.contrib.neat" {
+package "deap_pettingzoo.contrib.neat" as neat_pkg {
     class NeatPolicy {
         - _genome: neat.DefaultGenome
         - _config: neat.Config
@@ -943,7 +924,7 @@ package "deap_pettingzoo.contrib.neat" {
     ESHyperNeatSideState --|> NeatSideState
 }
 
-note bottom of "deap_pettingzoo.contrib.neat"
+note bottom of neat_pkg
   Lazy-imported; gated by import neat.
   Requires `pip install deap-pettingzoo[neat]`.
   Vendored pureples core in _pureples/.
@@ -1133,6 +1114,8 @@ package "deap_pettingzoo.baselines.coevolution" {
   class QDaxSideState {
       -- optimizer = "qdax_map_elites" / "qdax_cma_me"
   }
+
+  class RLPolicyPool {
     - policy: PolicyProtocol
     + update(policy)
     + sample_opponent(rng): PolicyProtocol
