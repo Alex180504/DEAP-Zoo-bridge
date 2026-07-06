@@ -201,15 +201,23 @@ class FlaxPolicyAdapter:
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: Optional[bool] = None,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        """Decode an action; ``deterministic`` is accepted for protocol
+        compatibility (decoding is already deterministic)."""
+        del deterministic
         import jax.numpy as jnp
 
         obs = jnp.asarray(np.asarray(observation, dtype=np.float32))
         raw = np.asarray(self._module.apply({"params": self._params}, obs))
         if self._head is not None:
-            return self._head.decode(raw, action_mask=action_mask)
+            # Only mask-aware heads (supports_mask) take the kwarg; BoxHead
+            # and plain DiscreteHead do not.
+            if getattr(self._head, "supports_mask", False):
+                return self._head.decode(raw, action_mask=action_mask)
+            return self._head.decode(raw)
         return raw
 
 
