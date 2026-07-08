@@ -65,8 +65,7 @@ def build_vec_parallel_env(
     Workers run in subprocesses (``multiprocessing``); per-env auto-reset
     on episode end is handled inside the worker. Observations, rewards
     and termination/truncation flags returned from ``reset``/``step``
-    have a leading ``num_envs`` axis (i.e. ``obs[a].shape ==
-    (num_envs, *single_obs_shape)``).
+    have a leading ``num_envs`` axis (i.e. ``obs[a].shape == (num_envs, *single_obs_shape)``).
 
     Args:
         env_name: Registered PettingZoo environment name.
@@ -173,7 +172,7 @@ def translate_budget_to_env_steps(
         f"AgileRL trainers cannot translate budget mode {mode} to env steps. "
         "Use BudgetMode.ENV_STEPS or BudgetMode.EVAL_EPISODES; "
         "BudgetMode.GENERATIONS is supported only by the population trainers "
-        "(EA / CMA-ES / PSO / co-evolution / QDax)."
+        "(EA / CMA-ES / PSO / co-evolution / QDax / NEAT / HyperNEAT)."
     )
 
 

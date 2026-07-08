@@ -54,8 +54,8 @@ def _sync_from_catalog() -> None:
             continue
         try:
             module = importlib.import_module(module_path)
-            # Walk a possibly-nested ``"Outer.Inner"`` qualname (a plain
-            # getattr would AttributeError on it).
+            # Walk a possibly-nested ``"Outer.Inner"`` qualname
+            # (a plain getattr would AttributeError on it).
             trainer_cls = module
             for part in class_name.split("."):
                 trainer_cls = getattr(trainer_cls, part)

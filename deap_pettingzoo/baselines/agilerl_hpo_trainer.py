@@ -35,7 +35,7 @@ from deap_pettingzoo.baselines.base import (
 logger = logging.getLogger(__name__)
 
 #: Mutation-probability keys understood by AgileRL's ``Mutations`` and the
-#: order in which the flat ``prob_*`` form-knobs map onto them.
+#: order in which the flat ``prob_*`` form knobs map onto them.
 _MUTATION_PROB_KEYS = (
     "no_mutation",
     "architecture",
@@ -90,9 +90,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
         self._mutation_probs.setdefault("activation", 0.0)
         self._mutation_probs.setdefault("rl_hp", 0.2)
 
-    # ------------------------------------------------------------------
+
     # Catalog hyperparameter surface
-    # ------------------------------------------------------------------
 
     @staticmethod
     def describe_hyperparameters():
@@ -257,9 +256,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 mut_probs[key] = float(flat)
         return mut_probs
 
-    # ------------------------------------------------------------------
+
     # BaselineTrainer
-    # ------------------------------------------------------------------
 
     def train(
         self,
@@ -304,7 +302,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 "Install with: pip install 'deap-pettingzoo[rl-baselines]'"
             ) from exc
 
-        # ---- resolve algorithm class and environment ----
+        # Resolve algorithm class and environment.
         alg_cls = self._import_algorithm()
         env, obs_spaces, act_spaces, agent_ids = self._build_env(config)
         is_vec = config.algorithm_params.get("num_envs", 1) > 1
@@ -314,7 +312,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             else 200
         )
 
-        # ---- HPO hyperparameters ----
+        # HPO hyperparameters.
         pop_size = config.algorithm_params.get(
             "population_size", self._hpo_population_size
         )
@@ -334,11 +332,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
             RLParameter,
         )
 
-        # ---- build population ----
+        # Build population.
         ctor_kwargs: Dict[str, Any] = {}
         ctor_kwargs["device"] = config.algorithm_params.get("device", self.device)
-        # memory_size and learning_delay are buffer/rollout params consumed by
-        # _train_one_agent; convert them to valid MADDPG/MATD3 constructor args.
+        # memory_size and learning_delay are buffer/rollout params consumed by _train_one_agent;
+        # convert them to valid MADDPG/MATD3 constructor args.
         self._hpo_memory_size = int(config.algorithm_params.get("memory_size", 100_000))
         self._hpo_learning_delay = int(config.algorithm_params.get("learning_delay", 0))
         for key in (
@@ -371,7 +369,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             ctor_kwargs,
         )
 
-        # ---- HPO machinery ----
+        # HPO wiring.
         mut_probs = self._assemble_mutation_probs(config.algorithm_params)
         mutations = Mutations(
             no_mutation=mut_probs["no_mutation"],
@@ -391,7 +389,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             eval_loop=1,
         )
 
-        # ---- training loop ----
+        # Training loop.
         rng = np.random.default_rng(seed)
         budget_steps = self._resolve_budget_steps(config)
         steps_done = 0
@@ -468,8 +466,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     gen_progress += gen_steps
 
                 # Guard against a non-progressing population (e.g. an agent that
-                # is not actually trainable) so the budget loop can never spin
-                # forever.
+                # is not actually trainable) so the budget loop can never iterate forever.
                 if gen_progress == 0:
                     logger.warning(
                         "[%s] generation %d consumed 0 env steps; stopping early",
@@ -629,9 +626,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
             training_time=training_time,
         )
 
-    # ------------------------------------------------------------------
+
     # BaselineTrainer — capabilities
-    # ------------------------------------------------------------------
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
@@ -648,9 +644,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             "supports_turn_based": False,
         }
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_hp_config(
@@ -1051,7 +1045,7 @@ class GroupedIPPOHPOTrainer(IPPOHPOTrainer):
     agents whose ids share a prefix share one actor/critic network. The
     grouped-IPPO flattening patch is installed and the grouping is validated
     up-front (via :meth:`_prepare_population_build`) before the population is
-    built — no silent fallback to per-agent networks.
+    built to avoid silent fallback to per-agent networks.
     """
 
     ALGORITHM_NAME = "ippo-grouped"

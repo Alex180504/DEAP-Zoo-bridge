@@ -62,7 +62,7 @@ def derive_generations(
     whenever the request is too small to fund more than a single generation.
     Without that signal an "equal budget" EA-vs-RL comparison can silently
     collapse the EA to its random initial population and report a misleading
-    "EA lost"..
+    "EA lost".
 
     Args:
         budget_steps: Total budget, in the same unit as ``pop * max_steps``.
@@ -103,8 +103,7 @@ def reject_consumed_budgeting(config: "TrainingConfig", trainer_label: str) -> N
     The ``budget_on_consumed`` flag is honoured by: EA ``simple``, CMA-ES,
     PSO, and co-evolution (shared aggregate pool across all sides). The DEAP
     built-in EA strategies (``mu_plus_lambda`` / ``mu_comma_lambda``), QDax,
-    and NEAT/HyperNEAT standalone trainers reject the flag with a clear
-    message rather than silently ignoring it.
+    and NEAT/HyperNEAT standalone trainers reject the flag with a clear message.
 
     Args:
         config: The training configuration to inspect.
@@ -129,7 +128,7 @@ class RecordingMode(str, Enum):
 
     The cadence is expressed once, in terms every trainer shares — the
     normalized training progress (:attr:`ProgressEvent.fraction`) and the
-    cumulative env-step count (:attr:`ProgressEvent.env_steps`) — so EA
+    cumulative env-step count (:attr:`ProgressEvent.env_steps`), so EA
     "generations" and RL "iterations" behave identically.
 
     * ``COUNT`` — record :attr:`RecordingConfig.max_recordings` videos spread
@@ -590,7 +589,7 @@ class ComparisonConfig:
         eval_episodes: Number of episodes for final evaluation.
         env_config: Environment configuration dict threaded into **both**
             training and the held-out evaluation so every backend trains and is
-            scored on the identical environment (F-3.3-02). Catalog defaults
+            scored on the identical environment. Catalog defaults
             fill in the rest via :func:`build_configs`.
         max_steps_per_episode: Per-episode step cap for the held-out evaluator.
             A first-class field (previously mis-read from the per-algorithm

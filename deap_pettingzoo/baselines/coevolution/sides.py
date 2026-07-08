@@ -789,10 +789,7 @@ class CMAESSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # PSO side
-# ---------------------------------------------------------------------------
-
 
 class PSOSideState(SideState):
     """PSO side — particle swarm over a flat weight vector.
@@ -1001,10 +998,7 @@ class PSOSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # Frozen side
-# ---------------------------------------------------------------------------
-
 
 class FrozenSideState(SideState):
     """Non-evolving side — wraps a static :class:`FrozenPolicyPool`.
@@ -1134,7 +1128,7 @@ def _load_es_hyperneat_side_state() -> type:
 #: returning the matching :class:`SideState` subclass. Each loader owns any
 #: lazy import + the friendly "install the X extra" :class:`ImportError`, so
 #: :func:`make_side_state` stays a one-line lookup and third parties can add a
-#: side without editing this module (see :func:`register_side_state`). This is
+#: side without editing this module (see :func:`register_side_state`). This acts as
 #: the authoritative source for :meth:`Side.__post_init__` validation too.
 _SIDE_STATE_FACTORIES: Dict[str, Callable[[], type]] = {
     "ea": lambda: EASideState,

@@ -1,4 +1,4 @@
-"""Co-evolution trainer — orchestrates multi-side generational evolution.
+"""Co-evolution trainer: orchestrates multi-side generational evolution.
 
 :class:`CoEvolutionTrainer` is a :class:`BaselineTrainer` subclass that
 handles three modes via one config-driven entry point:
@@ -438,9 +438,7 @@ class CoEvolutionTrainer(BaselineTrainer):
     the designated :attr:`CoEvolutionConfig.reporting_side`.
 
     The trainer is registered in :mod:`comparison` as ``"coevolution"``
-    so it plugs into :func:`compare_baselines` — but note that a
-    meaningful co-evolution head-to-head against plain :class:`EATrainer`
-    requires matching env / budget configuration by hand.
+    so it plugs into :func:`compare_baselines`.
     """
 
     def train(
@@ -451,7 +449,8 @@ class CoEvolutionTrainer(BaselineTrainer):
     ) -> TrainingResult:
         """Execute the co-evolution training loop.
 
-        Note:
+        Note
+        ----
             Seeding order: ``np.random.seed`` and the per-trainer
             ``default_rng`` are set *before* any side's ``initialise()``
             so results are reproducible regardless of side-iteration order.
@@ -794,8 +793,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         from deap_pettingzoo.baselines.recording import RecordingController
 
         self._recording_log = build_logger(config, algorithm="coevolution")
-        # Use the env's natural episode length, not
-        # CoEvolutionConfig.max_steps_per_episode.
+        # Use the env's natural episode length, not CoEvolutionConfig.max_steps_per_episode.
         _env_cfg = config.env_config or {}
         self._recording_max_steps: int = int(
             config.recording.max_frames_per_episode
@@ -1022,8 +1020,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         Note:
             Reuses the logger built in ``train()`` (so frame recording and
             metrics share a single run directory). Falls back to building a
-            fresh one if the trainer is used outside ``train()``
-            (defensive).
+            fresh one if the trainer is used outside ``train()`` (defensive).
         """
         from deap_pettingzoo.baselines._logging_helpers import (
             build_logger,
@@ -1473,11 +1470,6 @@ class CoEvolutionTrainer(BaselineTrainer):
             pool_snapshot=pool_snapshot,
         )
         if learner_state.side.optimizer == "rl":
-            # Phase-2: pass executor + env identity so RLSideState can
-            # dispatch rollout episodes to worker processes in parallel.
-            # The executor is only handed over on the parallel path (workers
-            # > 1 or a remote Dask scheduler); for serial runs None keeps the
-            # existing _collect_episode path.
             rl_executor = self._executor if self._use_parallel else None
             return _RLDriverContext(
                 env_wrapper=env,

@@ -116,7 +116,8 @@ def write_summary(
     payload = dict(summary)
     if training_time_s is not None and "training_time_s" not in payload:
         payload["training_time_s"] = float(training_time_s)
-    # Override the manifest's wall_time_s to reflect *training* duration rather than the time spent inside the logging context manager.
+    # Override the manifest's wall_time_s to reflect *training* duration 
+    # rather than the time spent inside the logging context manager.
     if training_time_s is not None and not isinstance(logger, NoOpLogger):
         try:
             logger.manifest.wall_time_s = float(training_time_s)
