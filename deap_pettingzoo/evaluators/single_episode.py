@@ -26,8 +26,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
     Pass ``fitness_spec`` (a :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`)
     to return N-tuples for multi-objective fitness or flat vectors for
     lexicase selection.  When ``fitness_spec`` is ``None`` (default)
-    the evaluator returns a 1-tuple ``(aggregated_reward,)`` —
-    identical to the historical behaviour.
+    the evaluator returns a 1-tuple ``(aggregated_reward,)``.
     """
 
     VALID_AGGREGATIONS = ["sum", "mean", "min", "max", "team"]
@@ -291,8 +290,7 @@ class SingleEpisodeEvaluator(BaseEvaluator):
                 "most two teams, or a different aggregation_method."
             )
 
-        # Order teams by name so the difference is deterministic regardless
-        # of agent/dict insertion order.
+        # Order teams by name so the difference is deterministic regardless of agent/dict insertion order.
         ordered_totals = [team_rewards[name] for name in sorted(team_rewards)]
         if len(ordered_totals) == 2:
             return float(ordered_totals[0] - ordered_totals[1])

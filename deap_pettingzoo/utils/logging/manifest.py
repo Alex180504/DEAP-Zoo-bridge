@@ -1,4 +1,4 @@
-"""Run manifest: the always-present JSON header for a run directory."""
+"""Run manifest — the persistent JSON header for a run directory."""
 
 from __future__ import annotations
 
@@ -71,8 +71,7 @@ class RunManifest:
 
     Persisted as ``<run_dir>/manifest.json``. Stable across schema
     versions: never remove a field; bump :data:`SCHEMA_VERSION` and
-    add a migration in
-    :func:`deap_pettingzoo.analysis.loaders.load_run` instead.
+    add a migration in :func:`deap_pettingzoo.analysis.loaders.load_run` instead.
 
     Attributes:
         run_id: Unique identifier; recommended format

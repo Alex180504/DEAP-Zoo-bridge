@@ -20,18 +20,18 @@ from deap_pettingzoo.catalog.schema import (
 
 from .registry import is_registered, register_env
 
-"""
-MPE2 registration metadata.
 
-MPE2 is currently a required dependency in deap-bridge's ``pyproject.toml``,
-but registration stays wrapped in ``try/except`` so
-``environments/__init__.py`` never hard-crashes.
+# MPE2 registration metadata.
 
-``_MPE_NOTES`` flags environments that may be heterogeneous across agents or
-use non-Box/Discrete action spaces, allowing downstream policies,
-compatibility checks, and tests to raise clear errors instead of obscure shape
-mismatches.
-"""
+# MPE2 is currently a required dependency in deap-bridge's ``pyproject.toml``,
+# but registration stays wrapped in ``try/except`` so
+#:``environments/__init__.py`` never hard-crashes.
+
+# ``_MPE_NOTES`` flags environments that may be heterogeneous across agents or
+# use non-Box/Discrete action spaces, allowing downstream policies,
+# compatibility checks, and tests to raise clear errors instead of obscure shape
+# mismatches.
+
 _MPE_NOTES = {
     "simple_v3": "",
     "simple_adversary_v3": (
@@ -64,14 +64,12 @@ _MPE_NOTES = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Declarative env-config schemas + team metadata (for the catalog / setup UI).
-#
+
 # MPE2 ``parallel_env`` factories use ``**kwargs`` passthrough, so the real
 # constructor parameters cannot be introspected reliably (see
 # ``deap_pettingzoo/catalog/introspection.py``). The schemas below are
 # hand-authored from the verified ``raw_env.__init__`` signatures.
-# ---------------------------------------------------------------------------
 
 _EC = ParamTarget.ENV_CONFIG
 _INT, _FLOAT, _BOOL = ParamType.INT, ParamType.FLOAT, ParamType.BOOL
@@ -247,8 +245,8 @@ _MPE_EXTRA_PARAMS = {
 }
 
 
-#: Declared teams for competitive MPE2 envs (predator/prey-style). Cooperative
-#: and heterogeneous-non-competitive envs declare no teams (single group).
+#: Declared teams for competitive MPE2 envs (predator/prey-style).
+#: Cooperative and heterogeneous-non-competitive envs declare no teams (single group).
 _MPE_TEAMS = {
     "simple_tag_v3": (
         TeamSpec("predators", ("adversary",), role="predator"),

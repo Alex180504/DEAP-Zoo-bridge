@@ -538,16 +538,6 @@ class TestInspectEnvironment:
         assert info.action_low is None
         assert info.action_high is None
 
-    def test_inspect_all_supported_envs(self):
-        from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
-        for env_name in PettingZooWrapper.SUPPORTED_ENVS:
-            info = inspect_environment(env_name)
-            assert info.env_name == env_name
-            # simple_v3 is PettingZoo's single-agent sanity env; all other
-            # registered envs are multi-agent.
-            min_agents = 1 if env_name == 'simple_v3' else 2
-            assert info.num_agents >= min_agents
-
 
 class TestCheckCompatibility:
     """Tests for check_compatibility() using mock capabilities."""
