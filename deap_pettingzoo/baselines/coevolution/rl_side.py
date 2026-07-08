@@ -97,10 +97,7 @@ class _RLDriverContext:
     registry_snapshot: Optional[list] = None
 
 
-# ---------------------------------------------------------------------------
-# Phase-2 parallel rollout helpers (top-level so they are picklable)
-# ---------------------------------------------------------------------------
-
+# Parallel rollout helpers (top-level so they are picklable)
 
 @dataclass
 class _RLStepData:
@@ -148,7 +145,7 @@ class _RLRolloutPayload:
     rl_role_prefixes: Tuple[str, ...]
     #: One snapshot per opponent side (keyed by side name).
     opponent_snapshots: Dict[str, Any]  # Dict[str, OpponentSnapshot]
-    #: Maps opponent side name → role_prefixes.
+    #: Maps opponent side name -> role_prefixes.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
     #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
@@ -199,7 +196,7 @@ def _rl_rollout_worker_fn(payload: _RLRolloutPayload) -> _RLTrajectory:
         for a in members:
             opp_policies[a] = side_policy
 
-    # The frozen RL policy — already a PolicyProtocol.
+    # The frozen RL policy (already a PolicyProtocol).
     frozen_rl = payload.frozen_rl_snapshot
     if hasattr(frozen_rl, "reset"):
         frozen_rl.reset()
@@ -306,7 +303,7 @@ class RLSideState(SideState):
     supported for EA/CMA learner sides that face an RL opponent: the
     trainer ships :class:`~deap_pettingzoo.baselines.agilerl_policy.FrozenRLPolicyWrapper`
     CPU snapshots across worker boundaries.  The RL learner's own
-    rollout collection is still serial; see the module TODO comment.
+    rollout collection is serial;
     * ``rollout_episodes_per_gen`` (int, default ``4``) — number of
       episodes collected per :meth:`step_generation` call against the
       current opponent-pool snapshot.
@@ -502,8 +499,8 @@ class RLSideState(SideState):
         if self._bootstrap_ctx is None:
             return
         if self.is_on_policy:
-            # On-policy keeps no replay buffer to warm up; the first
-            # step_generation collects a fresh rollout and learns directly.
+            # On-policy keeps no replay buffer to warm up;
+            # the first step_generation collects a fresh rollout and learns directly.
             return
         try:
             r = self._collect_episode(self._bootstrap_ctx)
@@ -537,7 +534,7 @@ class RLSideState(SideState):
             )
         self.generation += 1
         _gen_t0 = time.time()
-        # Snapshot the cumulative transition counter so we can report the
+        # Snapshot the cumulative transition counter to report the
         # per-generation delta (GenerationStats.env_steps is per-generation,
         # consistent with the EA/CMA/PSO sides and the trainer's top-level sum).
         _transitions_before = self._total_transitions
@@ -550,7 +547,7 @@ class RLSideState(SideState):
             # frozen snapshot) and run one PPO update over the rollout.
             episode_returns = self._collect_onpolicy_rollout(ctx)
         else:
-            # --- Off-policy collection (Phase-2 parallel path) ---
+            # Off-policy collection
             if (
                 ctx.executor is not None
                 and ctx.env_name is not None
@@ -736,9 +733,7 @@ class RLSideState(SideState):
         Note: this returns a *reference* to the same underlying torch
         agent — subsequent generations will mutate it in place. For
         proper checkpointed self-play HoF, deep-copy via the wrapped
-        agent's ``save_checkpoint`` API in user code; v1 stores live
-        references, which is sufficient for the canonical
-        "current-pool-only" co-evolution flow.
+        agent's ``save_checkpoint`` API in user code.
         """
         return self._wrapper
 
@@ -749,7 +744,7 @@ class RLSideState(SideState):
 
         Uses ``self._agent.get_action`` for our side's agents (training
         mode = stochastic actions for exploration; the AgileRL agent
-        chooses based on its own training/eval flag — we don't pass
+        chooses based on its own training/eval flag — do not pass
         ``training=True`` because the API is inconsistent across
         algorithms; the buffer's diversity is driven by the
         algorithm's own action-noise schedule).
@@ -823,7 +818,7 @@ class RLSideState(SideState):
 
             # Build env_actions from processed `actions` (scalar for
             # Discrete, clipped float for Continuous), restricted to
-            # *active* agents only — terminated agents must not be
+            # active agents only — terminated agents must not be
             # included in env.step().
             env_actions: Dict[str, Any] = {}
             for aid in active_obs:
@@ -969,8 +964,7 @@ class RLSideState(SideState):
         buf = OnPolicyRolloutBuffer(rl_ids)
 
         episode_returns: List[float] = []
-        # Pre-step done flag per agent (CleanRL convention: 1.0 marks the first
-        # step of a new episode so GAE does not bootstrap across boundaries).
+        # Pre-step done flag per agent.
         prev_done: Dict[str, np.ndarray] = {
             a: np.zeros(1, dtype=np.float32) for a in rl_ids
         }

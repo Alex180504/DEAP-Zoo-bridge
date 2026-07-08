@@ -26,14 +26,11 @@ from .pools import FrozenPolicyPool, OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
-    # Underscore keys (historical / programmatic).
+    # Underscore keys.
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3_hpo": ("agilerl.algorithms.matd3", "MATD3", False),
     "ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
     "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
-    # Hyphenated catalog names (injected into ``optimizer_config['algorithm']``
-    # by ``experiment_spec._build_coevolution_plan``). Mirrors the dual-key
-    # pattern ``rl_side.SUPPORTED_RL_ALGORITHMS`` uses for grouped IPPO.
     "maddpg-hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3-hpo": ("agilerl.algorithms.matd3", "MATD3", False),
     "ippo-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
@@ -98,9 +95,7 @@ class RLEvolveHPOSideState(SideState):
         self._action_space: Any = None
         self._rng: np.random.Generator = np.random.default_rng()
 
-    # ------------------------------------------------------------------
     # SideState protocol
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -124,7 +119,7 @@ class RLEvolveHPOSideState(SideState):
             )
         self._action_space = env.action_space(self._learner_ids[0])
 
-        # Build HPO population.
+        # Build the HPO population.
         try:
             import importlib
 
@@ -185,7 +180,7 @@ class RLEvolveHPOSideState(SideState):
 
         # Sample one policy per opponent side for non-learner agents.
         # CoEvolutionEvaluator exposes .opponent_sides (list of
-        # (name, prefixes, pool) triples) and .side_agents (name → agent list).
+        # (name, prefixes, pool) triples) and .side_agents (name -> agent list).
         learner_id_set = set(self._learner_ids)
         opponent_policies: Dict[str, Any] = {}
         for side_name, _prefixes, pool in getattr(evaluator, "opponent_sides", []):
@@ -296,9 +291,7 @@ class RLEvolveHPOSideState(SideState):
         assert self._champion_wrapper is not None
         return self._champion_wrapper.make_frozen_cpu_snapshot()
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_hp_config(hp_config_spec: dict) -> Any:

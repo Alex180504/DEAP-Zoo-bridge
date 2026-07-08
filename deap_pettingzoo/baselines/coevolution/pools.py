@@ -7,12 +7,11 @@ protocol with a single required method::
 
 Any object that can produce a policy-like object on demand can satisfy
 this protocol: DEAP populations, Hall-of-Fame archives, static
-pre-trained policies (scripted or frozen RL), or — in the future — a
-QDax :class:`MapElitesRepertoire` wrapped by a thin adapter.
+pre-trained policies (scripted or frozen RL) etc.
 
 This is the *only* integration point co-evolution code needs to depend
 on for opponent sourcing; the trainer, the evaluator, and downstream
-samplers remain unaware of where opponents ultimately come from.
+samplers remain unaware of where opponents actually come from.
 """
 
 from __future__ import annotations
@@ -641,9 +640,9 @@ class CompositePool(_BasePool):
     sub-pool. Empty sub-pools are skipped (their effective weight is
     re-distributed over the remaining pools).
 
-    Canonical use: 50/50 blend of the current-generation
+    Example canonical use: 50/50 blend of the current-generation
     :class:`PopulationPool` and a :class:`ArchivePool` wrapping a
-    Hall-of-Fame — the PSRO-ish "current + historical" opponent set.
+    Hall-of-Fame.
 
     >>> pool = CompositePool([pop_pool, hof_pool], weights=[0.5, 0.5])
     """
@@ -748,7 +747,7 @@ class RLPolicyPool(_BasePool):
         Args:
             population_like: A :class:`PolicyProtocol` instance. Other
                 pool implementations accept iterables; this one is
-                always size-1 so we accept the policy directly.
+                always size-1 so accept the policy directly.
         """
         if population_like is None:
             raise ValueError("RLPolicyPool.update: policy must not be None.")

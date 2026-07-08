@@ -53,7 +53,7 @@ from deap_pettingzoo.utils.parallel import (
 def _resolve_shared_action_space(env: PettingZooWrapper) -> Any:
     """Return the single shared action space across ``env.possible_agents``.
 
-    deap-bridge's EA/CMA-ES stack is built around homogeneous-team
+    The system's EA/CMA-ES stack is built around homogeneous-team
     neuroevolution: every agent is driven by the same genome, so the
     action decoding has to be identical across agents.  This helper
     enforces that contract.
@@ -167,8 +167,7 @@ class EATrainer(BaselineTrainer):
         (``seed`` / ``max_steps_per_episode``, routed via ``RUN_CONFIG``).
 
         Dict-valued knobs (``selection_params`` / ``crossover_params`` /
-        ``mutation_params``) and ``fitness_spec`` are intentionally omitted —
-        they are raw-config / Python-API territory (see the UI-overhaul spec).
+        ``mutation_params``) and ``fitness_spec`` are omitted — they are raw-config / Python-API only.
         """
         from deap_pettingzoo.catalog.schema import (
             ParamSpec,
@@ -610,7 +609,7 @@ class EATrainer(BaselineTrainer):
             fitness_spec=self.fitness_spec,
         )
 
-        # Setup DEAP — with multi-objective weights when appropriate.
+        # Setup DEAP; with multi-objective weights when appropriate.
         if self._is_multiobjective and self.fitness_spec is not None:
             setup_deap_creators(weights=self.fitness_spec.weights)
         else:
@@ -624,7 +623,8 @@ class EATrainer(BaselineTrainer):
             seed_everything(int(seed))
 
         # Create genome configuration.
-        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
+        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. 
+        # DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
         is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
@@ -757,9 +757,8 @@ class EATrainer(BaselineTrainer):
             if event is not None:
                 self._on_progress(progress_callback, event, champion=_ea_champion)
 
-        # num_workers / parallel_backend / scheduler_address are first-class
-        # TrainingConfig fields; the trainer-constructor value is the fallback
-        # used only when the config leaves them at their defaults.
+        # num_workers / parallel_backend / scheduler_address are TrainingConfig fields;
+        # the trainer-constructor value is used only when the config  leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
         backend = (
             config.parallel_backend
@@ -771,9 +770,9 @@ class EATrainer(BaselineTrainer):
             if config.scheduler_address is not None
             else self.scheduler_address
         )
-        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
-        # live elsewhere, so skip the driver CPU cap and force the parallel
-        # dispatch path even for num_workers <= 1 (advisory there).
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers live elsewhere,
+        # so skip the driver CPU cap and force the parallel dispatch path 
+        # even for num_workers <= 1.
         effective_scheduler = (
             resolve_scheduler_address(scheduler_address) if backend == "dask" else None
         )
@@ -862,7 +861,7 @@ class EATrainer(BaselineTrainer):
             )
             _emit_gen_progress(0)
 
-            # Evolution loop — strategy-dependent. Defaults to the nominal
+            # Evolution loop (strategy-dependent). Defaults to the nominal
             # generation count; the consumed-budgeting ``simple`` path below
             # overrides it with the realized count once the loop stops.
             realized_generations = num_generations
@@ -1008,7 +1007,8 @@ class EATrainer(BaselineTrainer):
             pareto_front = list(hof.items)
 
         # Persist results via the logger
-        # No-op when ``config.output_dir is None`` (NoOpLogger) so the backend stays usable without the analysis stack.
+        # No-op when ``config.output_dir is None`` (NoOpLogger) 
+        # so the backend stays usable without the analysis stack.
         try:
             with log:
                 dump_fitness_history(
@@ -1190,7 +1190,7 @@ class EATrainer(BaselineTrainer):
     ) -> int:
         """In-house ``eaSimple``-style generational loop.
 
-        Preserves the historical behaviour of :class:`EATrainer`:
+        Preserves the behaviour of :class:`EATrainer`:
         per-pair crossover probability ``self.crossover_rate`` and
         per-individual mutation probability ``self.mutation_rate``,
         with full replacement.

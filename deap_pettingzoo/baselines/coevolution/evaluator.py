@@ -100,11 +100,9 @@ class _EpisodePayload:
     learner_genome: Any  # FixedTopologyGenome (picklable)
     learner_role_prefixes: Tuple[str, ...]
     learner_masked: bool
-    # Per-side opponent snapshot (one snapshot per side, not per
-    # agent — the canonical "one champion drives the team" contract).
+    #: Per-side opponent snapshot (one snapshot per side, not per agent).
     opponent_snapshots: Dict[str, OpponentSnapshot]
-    # Side metadata so the worker can rebuild ``side_agents`` without
-    # a driver round-trip.
+    #: Side metadata so the worker can rebuild ``side_agents`` without a driver round-trip.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
     episode_seed: Optional[int]
     max_steps: int

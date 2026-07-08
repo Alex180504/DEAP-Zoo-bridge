@@ -1,10 +1,5 @@
 """Hall-of-Fame archives for co-evolution.
 
-A *Hall-of-Fame* stores past champions so future generations can be
-evaluated against a diverse set of historical opponents (a standard
-countermeasure against "opponent forgetting" in competitive
-co-evolution — see Rosin & Belew, 1997; Ficici & Pollack, 2003).
-
 Archives store opaque **snapshots** — any Python object — and expose
 them via ``items`` / ``fitnesses`` for consumption by an
 :class:`~deap_pettingzoo.baselines.coevolution.pools.ArchivePool`. The

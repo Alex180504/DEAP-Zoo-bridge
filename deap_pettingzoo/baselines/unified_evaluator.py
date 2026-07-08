@@ -197,8 +197,8 @@ class UnifiedEvaluator(BaselineEvaluator):
                 recorder.end_episode()
 
         if recording:
-            # Advance offset so successive evaluate() calls (e.g. one per
-            # generation) keep producing distinct episode_NNNN artefacts.
+            # Advance offset so successive evaluate() calls (e.g. one per generation)
+            # keep producing distinct episode_NNNN artefacts.
             self.record_episode_offset += num_episodes
 
         # Mean-over-episodes reward per agent (decomposition that the

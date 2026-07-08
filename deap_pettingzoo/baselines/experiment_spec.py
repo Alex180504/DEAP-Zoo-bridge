@@ -1,15 +1,14 @@
 """Serializable experiment specification + config builder + validator.
 
-This module is the bridge between the experiment-setup UI (Phase 3) and the
+This module provides a bridge between the experiment setup UI and the
 unified training API. The UI produces an :class:`ExperimentSpec` (pure data,
-JSON round-trippable); the subprocess runner (Phase 2) calls
+JSON round-trippable); the subprocess runner calls
 :func:`validate_spec` then :func:`build_configs` to turn it into the
 ``TrainingConfig`` / ``CoEvolutionConfig`` objects the trainers consume.
 
 Three-layer configuration merge
 -------------------------------
-Per the UI-overhaul spec, configuration resolves in three layers with
-increasing precedence:
+The experiment configuration resolves in three layers with increasing precedence:
 
 1. **Catalog defaults** — every ``ParamSpec.default`` from the catalog.
 2. **Raw config overlay** — a free-form YAML/JSON dict the advanced user
@@ -19,9 +18,8 @@ increasing precedence:
    merged last so a single tweaked slider wins over the raw config while the
    rest of the raw config stays intact.
 
-The contract is therefore: *the form submits only explicitly-set values*; the
-catalog fills in everything else. This keeps the "tweak one slider, keep a
-complex raw config" workflow working.
+The contract is therefore: the form submits only explicitly-set values, while the
+catalog fills in everything else.
 """
 
 from __future__ import annotations
@@ -42,10 +40,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
 
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
     """Recursively merge ``overlay`` onto ``base`` (overlay wins).
@@ -64,10 +59,7 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str,
     return result
 
 
-# ---------------------------------------------------------------------------
 # Spec dataclasses
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class BudgetSpec:
@@ -171,7 +163,7 @@ class RecordingSettings:
 
 @dataclass
 class ParallelismSettings:
-    """Parallel-evaluation options (population-based trainers).
+    """Parallel evaluation options (population-based trainers).
 
     ``scheduler_address`` targets a remote Dask scheduler (a ``tcp://...``
     URL or a scheduler-file path) and requires ``parallel_backend ==
@@ -275,7 +267,7 @@ class ExperimentSpec:
 
     ``env_config`` and ``hyperparameters`` should carry only the values the
     user explicitly set; the catalog supplies all other defaults during
-    :func:`build_configs` (see the module docstring's three-layer merge).
+    :func:`build_configs` (see the module docstring).
     """
 
     environment: str
@@ -329,10 +321,7 @@ class ExperimentSpec:
         )
 
 
-# ---------------------------------------------------------------------------
 # Built plan (output of build_configs)
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class SubRun:
@@ -360,10 +349,7 @@ class BuiltPlan:
     sub_runs: List[SubRun] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # Effective-value resolution (three-layer merge)
-# ---------------------------------------------------------------------------
-
 
 def _catalog_env_defaults(env_spec) -> Dict[str, Any]:
     """Non-null env-config defaults from the catalog."""
@@ -434,9 +420,7 @@ def _split_hyperparameters(
     return trainer_params, algorithm_params, run_config
 
 
-# ---------------------------------------------------------------------------
 # Auto-padding for heterogeneous-obs environments
-# ---------------------------------------------------------------------------
 
 _AUTO_PADDED_SUFFIX = "__deap_auto_padded"
 
@@ -479,7 +463,7 @@ def _maybe_auto_pad_env(
     except ImportError:
         return spec.environment  # can't pad — let it fail with a clear error
 
-    # Already padded or already has custom wrappers?
+    # Determine whether a padded variant is already registered; if not, register one.
     padded_name = f"{spec.environment}{_AUTO_PADDED_SUFFIX}"
     from deap_pettingzoo.environments.registry import (
         get_env_spec,
@@ -517,9 +501,7 @@ def _maybe_auto_pad_env(
     return padded_name
 
 
-# ---------------------------------------------------------------------------
-# build_configs
-# ---------------------------------------------------------------------------
+# Build configs
 
 
 def build_configs(
@@ -549,9 +531,9 @@ def build_configs(
     )
 
     # Auto-apply SuperSuit padding when an evolutionary algorithm is used
-    # on a heterogeneous-observation environment.  Python-API users who
-    # construct TrainingConfig directly are unaffected — this only fires
-    # through the ExperimentSpec → build_configs path (UI + programmatic).
+    # on a heterogeneous-observation environment. Python API experiments that
+    # construct TrainingConfig directly are unaffected as this only fires
+    # through the ExperimentSpec -> build_configs path (UI + programmatic).
     effective_env_name = _maybe_auto_pad_env(spec, env_spec)
 
     padded = (
@@ -596,9 +578,8 @@ def build_configs(
             base_algo_params,
             base_run_config,
         )
-        # Population-based trainers consume parallelism via first-class
-        # TrainingConfig fields; MARL trainers ignore them (they parallelise
-        # via num_envs), so leave those at the serial defaults.
+        # Population-based trainers consume parallelism via TrainingConfig fields;
+        # MARL trainers ignore them (they parallelise via num_envs), so leave those at the serial defaults.
         if algo_spec.family == "evolutionary":
             cfg_num_workers = spec.parallelism.num_workers
             cfg_parallel_backend = spec.parallelism.parallel_backend
@@ -673,8 +654,8 @@ def _build_coevolution_plan(
                     or side_spec.algorithm
                 )
                 # RL / RL-HPO sides resolve their concrete AgileRL algorithm
-                # from ``optimizer_config['algorithm']``; inject the catalog name
-                # the user picked (the UI sends empty per-side hyperparameters).
+                # from ``optimizer_config['algorithm']``; 
+                # inject the catalog name the user picked (the UI sends empty per-side hyperparameters).
                 optimizer_config.setdefault("algorithm", side_spec.algorithm)
             sides.append(
                 Side(
@@ -727,7 +708,7 @@ def _build_coevolution_plan(
     return BuiltPlan(mode="coevolution", sub_runs=sub_runs)
 
 
-# Validate_spec
+# Validate spec
 
 _VALID_BUDGET_MODES = ("env_steps", "eval_episodes", "generations")
 _SUPPORTED_BACKENDS = ("process", "dask")
@@ -737,7 +718,7 @@ def validate_spec(spec: ExperimentSpec) -> "ValidationReport":
     """Validate an :class:`ExperimentSpec` against the catalog.
 
     Produces a :class:`~deap_pettingzoo.catalog.schema.ValidationReport` with
-    field-level, machine-coded issues. This is the single validation entry
+    per-field machine-coded issues. This is the single validation entry
     point: the Setup page calls it client-side and the FastAPI service calls it
     again server-side on submit (defense in depth).
 
@@ -893,9 +874,8 @@ def _validate_parallelism(spec, report):
         )
         return
     # Warn (non-blocking) when a real parallel backend is selected but its
-    # optional package is not installed — it would otherwise only fail at run
-    # time with an ImportError. The service shares the trainer environment, so
-    # its install state is authoritative.
+    # optional package is not installed — it would otherwise only fail at runtime
+    # with an ImportError.
     if par.num_workers and par.num_workers > 1:
         from deap_pettingzoo.catalog.availability import module_available
 
@@ -1012,8 +992,8 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         _validate_aggregation(spec, report, algo_spec)
 
         # EA / CMA-ES / PSO require homogeneous observation sizes.
-        # When SuperSuit is available, build_configs auto-pads — warn
-        # instead of blocking.  Without SuperSuit, this is a hard error.
+        # When SuperSuit is available, build_configs auto-pads — warn instead of blocking.  
+        # Without SuperSuit, this is a hard error.
         if env_has_heterogeneous_obs and algo_spec.family == "evolutionary":
             try:
                 import supersuit  # noqa: F401

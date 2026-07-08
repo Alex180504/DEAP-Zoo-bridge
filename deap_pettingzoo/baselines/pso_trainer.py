@@ -2,7 +2,7 @@
 PSO trainer mirroring :class:`CMAESTrainer`.
 
 Drives a particle swarm over the flat weight vector of a
-:class:`FixedTopologyGenome`.  The best-found genome is wrapped as a
+:class:`FixedTopologyGenome`.  The best found genome is wrapped as a
 :class:`PolicyProtocol` via :class:`GenomePolicyWrapper`.
 """
 
@@ -320,8 +320,8 @@ class PSOTrainer(BaselineTrainer):
                 hof[0].genome, config.env_name, action_space=action_space
             )
 
-        # num_workers / parallel_backend / scheduler_address are first-class
-        # TrainingConfig fields; the trainer-constructor value is the fallback
+        # num_workers / parallel_backend / scheduler_address are TrainingConfig fields;
+        # the trainer constructor value is the fallback
         # used only when the config leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
         backend = (
@@ -336,7 +336,7 @@ class PSOTrainer(BaselineTrainer):
         )
         # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
         # live elsewhere, so skip the driver CPU cap and force the parallel
-        # dispatch path even for num_workers <= 1 (advisory there).
+        # dispatch path even for num_workers <= 1.
         effective_scheduler = (
             resolve_scheduler_address(scheduler_address) if backend == "dask" else None
         )
