@@ -1,6 +1,6 @@
 """High-level :class:`ExperimentLogger` wiring sinks and the manifest.
 
-Trainers should construct a logger via :meth:`ExperimentLogger.from_config`
+Trainers construct a logger via :meth:`ExperimentLogger.from_config`
 or :meth:`ExperimentLogger.create`. When ``output_dir is None`` a
 :class:`NoOpLogger` is returned, so calling code can use the same
 ``with logger:`` pattern unconditionally.
@@ -66,8 +66,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         self._closed = False
         self._frame_recorder: Optional[FrameRecorder] = None
 
-    # -- factory -----------------------------------------------------
-
+    # Factory methods
     @classmethod
     def create(
         cls,
@@ -199,8 +198,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
             extra_sinks=extra_sinks,
         )
 
-    # -- context manager --------------------------------------------
-
+    # Context manager
     def __enter__(self) -> "ExperimentLogger":
         self._t0 = time.time()
         return self
@@ -213,8 +211,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
     ) -> None:
         self.close()
 
-    # -- core API ---------------------------------------------------
-
+    # Core API
     def row(self, table: str, row: Mapping[str, Any]) -> None:
         """Append ``row`` to the named table (CSV / TB / Parquet sinks)."""
         if self._closed:
@@ -241,8 +238,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         self._sink.log_row("summary", summary)
         self.manifest.final_summary = dict(summary)
 
-    # -- frame recorder hook ----------------------------------------
-
+    # Frame recorder hook
     def get_frame_recorder(
         self,
         *,
@@ -270,8 +266,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
             )
         return self._frame_recorder
 
-    # -- finalisation -----------------------------------------------
-
+    # Destructor
     def close(self) -> None:
         if self._closed:
             return
@@ -338,9 +333,9 @@ class NoOpLogger(ExperimentLogger):
         return None
 
     def get_frame_recorder(self, **kwargs: Any) -> FrameRecorder:  # type: ignore[override]
-        # Return a recorder whose run_dir is a temp-y placeholder and that is
+        # Return a recorder whose run_dir is a temp placeholder and that is
         # disabled by default. Callers can flip ``enabled=True`` at their own
-        # risk if they really want frames without an output_dir.
+        # risk if they really need frames without an output_dir.
         rec = FrameRecorder(Path("."), **kwargs)
         rec.enabled = False
         return rec

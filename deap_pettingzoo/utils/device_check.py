@@ -42,7 +42,7 @@ def resolve_device(requested: object) -> str:
 
     This guards against the common containerised-deployment failure where an
     experiment (or a pasted script) asks for ``"cuda"`` but the backend ships a
-    **CPU-only** torch build — AgileRL then crashes with
+    **CPU-only** torch build, prompting AgileRL to crash with
     ``AssertionError: Torch not compiled with CUDA enabled``. Instead of
     crashing, fall back to CPU (with a one-time warning).
 

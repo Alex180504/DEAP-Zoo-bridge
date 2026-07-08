@@ -1,4 +1,4 @@
-"""Utility functions for logging, parallel execution, and analysis support.
+"""Utility functions for logging, parallel execution, and analysis tooling.
 
 Subpackages:
 

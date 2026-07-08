@@ -1,7 +1,7 @@
 """Frame recording for environment replay.
 
 :class:`FrameRecorder` consumes ``rgb_array`` frames returned by
-``env.render()`` and writes a video (mp4) or animated GIF artefact to
+``env.render()`` and writes a video (mp4) or animated GIF to
 ``<run_dir>/frames/episode_<n>.{mp4,gif}``. This is opt-in to keep
 training loops fast.
 """
@@ -17,7 +17,7 @@ import numpy as np
 
 
 class FrameRecorder:
-    """Lightweight rgb_array → mp4/gif recorder.
+    """Lightweight rgb_array -> mp4/gif recorder.
 
     Lifecycle:
 
@@ -25,15 +25,15 @@ class FrameRecorder:
     2. ``recorder.start_episode(n)`` at episode begin
     3. ``recorder.add_frame(env.render())`` per env step (best-effort;
        silently skips when ``frame is None``)
-    4. ``recorder.end_episode()`` writes the artefact and returns its path
+    4. ``recorder.end_episode()`` writes the result and returns its path
 
     Format selection: ``mp4`` requires ``imageio[ffmpeg]``; ``gif`` works
     with the base ``imageio`` install. If the requested format is not
     available the recorder transparently falls back to ``gif`` and emits
     a single warning.
 
-    Parameters
-    ----------
+    Parameters:
+
     run_dir:
         Output root; frames are written to ``run_dir/frames/``.
     fps:
@@ -46,9 +46,7 @@ class FrameRecorder:
     max_dim:
         If set, each frame is downscaled via numpy index subsampling so
         that its larger dimension is at most ``max_dim`` pixels before
-        buffering.  Useful for large envs (e.g. 6000×6000) that would
-        exceed H.264 macroblock limits or exhaust RAM.
-        No external dependency — pure numpy.
+        buffering.  Useful for large envs that would degrate performance at full scale.
     episode_prefix:
         String prepended to each output filename, e.g. ``"ea_"`` →
         ``frames/ea_episode_0001.mp4``.
@@ -80,7 +78,7 @@ class FrameRecorder:
         self._episode_idx: Optional[int] = None
         self._frames_dir = self.run_dir / "frames"
         self._warned_fallback = False
-        # Sidecar metadata: every successfully written artefact appends an
+        # Sidecar metadata: every successfully written artifact appends an
         # entry to ``self._recordings`` and the list is mirrored to
         # ``frames/recordings.json`` so the UI can associate a recording
         # with the training iteration/generation it captured.
@@ -88,7 +86,7 @@ class FrameRecorder:
         self._pending_meta: Dict[str, Any] = {}
         self._t0 = time.time()
 
-    # -- lifecycle ---------------------------------------------------
+    # Lifecycle
 
     def start_episode(
         self,
@@ -124,7 +122,7 @@ class FrameRecorder:
             return
         arr = np.asarray(frame)
         if arr.ndim != 3 or arr.shape[-1] not in (3, 4):
-            return  # silently skip malformed frames
+            return  # silently skip broken frames
         if arr.dtype != np.uint8:
             arr = np.clip(arr, 0, 255).astype(np.uint8)
         if self.max_dim is not None:
@@ -216,12 +214,12 @@ class FrameRecorder:
         self._pending_meta = {}
         return path
 
-    # -- sidecar metadata --------------------------------------------
+    # Metadata sidecar
 
     def _append_recording(self, path: Path, episode_idx: int) -> None:
         """Record ``path`` in ``frames/recordings.json`` (best-effort).
 
-        Associates the just-written artefact with the iteration/generation
+        Associates the just-written artifact with the iteration/generation
         metadata stashed by :meth:`start_episode`. Any I/O error is
         swallowed so recording can never break a training run.
         """

@@ -6,9 +6,9 @@ Trainers accept an :class:`ExperimentLogger` (or build one from
 :meth:`ExperimentLogger.scalar`, :meth:`ExperimentLogger.artifact`
 at the existing places where ``metrics`` dicts are built.
 
-The core design contract: **the backend remains fully usable without
-any logging configured**. ``ExperimentLogger.from_config(config)``
-returns a no-op logger when ``config.output_dir is None``.
+The backend remains fully usable without any logging configured. 
+The ``ExperimentLogger.from_config(config)`` returns a no-op logger
+when ``config.output_dir is None``.
 
 On-disk schema (per run directory):
 

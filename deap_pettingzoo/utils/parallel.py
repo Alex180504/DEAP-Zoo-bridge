@@ -1,4 +1,4 @@
-"""Parallel evaluation plumbing for DEAP and QDax trainers.
+"""Parallel evaluation plumbing for population-based trainers (DEAP, QDax, NEAT, HyperNEAT).
 
 This module provides a unified interface over the following execution backends:
 
@@ -26,12 +26,12 @@ Remote Dask clusters
 The remote path is driven by one knob — a *scheduler address* — resolved
 with the following precedence (centralised in :func:`make_executor`):
 
-1. an injected ``dask_client`` (power users; lifetime stays theirs),
-2. the ``scheduler_address`` argument,
+1. an injected ``dask_client``;
+2. the ``scheduler_address`` argument;
 3. the :data:`DASK_SCHEDULER_ENV_VAR` (``DEAP_DASK_SCHEDULER``)
-   environment variable — the Slurm ergonomic: the sbatch script exports
-   it and unmodified driver scripts just work,
-4. an auto-built local cluster (previous behavior).
+   environment variable (Slurm batching) — the sbatch script exports
+   it and unmodified driver scripts just work;
+4. an auto-built local cluster.
 
 Address semantics: a value containing ``://`` (e.g.
 ``tcp://10.0.0.1:8786``) is connected to directly; anything else is
@@ -162,8 +162,7 @@ def _dask_address_kwargs(scheduler_address: str) -> Dict[str, Any]:
     """Map a scheduler address onto ``dask.distributed.Client`` kwargs.
 
     A value containing ``://`` is a direct scheduler URL; anything else
-    is treated as a scheduler-file path (the canonical dask-on-Slurm
-    pattern over a shared filesystem).
+    is treated as a scheduler-file path.
     """
     if "://" in scheduler_address:
         return {"address": scheduler_address}
@@ -171,7 +170,7 @@ def _dask_address_kwargs(scheduler_address: str) -> Dict[str, Any]:
 
 
 def _connect_timeout_s() -> float:
-    """Remote-connect timeout in seconds (env override, default 120)."""
+    """Remote-connect timeout in seconds (env override)."""
     raw = os.environ.get(DASK_CONNECT_TIMEOUT_ENV_VAR, "").strip()
     try:
         return float(raw) if raw else _DEFAULT_CONNECT_TIMEOUT_S
@@ -265,8 +264,8 @@ class _DaskExecutor:
                 # (``_WORKER_CACHE`` and friends) and the rebuilt envs are not
                 # thread-safe — they assume one task at a time per process, like
                 # ``ProcessPoolExecutor``. Dask's multi-threaded default would
-                # let concurrent tasks corrupt a shared cached env. Inject your
-                # own ``Client`` if you need a different layout.
+                # let concurrent tasks corrupt a shared cached env. Inject a
+                # custom ``Client`` if a different layout is needed.
                 client = Client(
                     n_workers=max(2, num_workers),
                     threads_per_worker=1,
@@ -287,8 +286,7 @@ class _DaskExecutor:
 
         timeout_s = _connect_timeout_s()
         try:
-            # ``set_as_default=False`` keeps the library side-effect free —
-            # we always dispatch through ``self._client`` explicitly.
+            # ``set_as_default=False`` as we always dispatch through ``self._client`` explicitly.
             client = Client(
                 timeout=timeout_s,
                 set_as_default=False,
@@ -315,7 +313,7 @@ class _DaskExecutor:
                 f"{DASK_CONNECT_TIMEOUT_ENV_VAR} for slow queues."
             ) from e
         # Surface worker-side ``logging`` records on the driver (worker
-        # ``warnings``/stdout stay worker-local — they land in the job's
+        # ``warnings``/stdout stay worker-local as they land in the job's
         # srun output on Slurm). Skipped for in-process (inproc://) clusters:
         # there the workers already share the driver's root logger, and
         # forwarding would echo every record back to itself forever.
@@ -333,9 +331,10 @@ class _DaskExecutor:
         """Warn-only sanity checks after a remote connect.
 
         (a) any worker running more than one thread (the worker-side
-        caches are not thread-safe), and (b) a driver-vs-worker
-        ``deap-pettingzoo`` version mismatch (catches stale installs;
-        Dask's own handshake already covers dask/python/numpy skew).
+        caches are not thread-safe);
+        and 
+        (b) a driver-vs-worker ``deap-pettingzoo`` version mismatch 
+        (catches stale installs; Dask's own handshake already covers dask/python/numpy skew).
         """
         try:
             workers = client.scheduler_info().get("workers", {})
@@ -379,7 +378,7 @@ class _DaskExecutor:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._owned:
             try:
-                # Closes our client (and the auto-built LocalCluster it owns
+                # Closes the client (and the auto-built LocalCluster it owns
                 # on the local path); a remote cluster is never torn down.
                 self._client.close()
             finally:
@@ -490,7 +489,7 @@ def make_executor(
     )
 
     n = resolve_num_workers(num_workers, cap_to_cpu=not remote)
-    # Serial fast-path — skipped when remote intent was made explicit.
+    # Serial fast-path — skipped when remote intents is made explicit.
     if n <= 1 and not remote:
         return _SerialExecutor()
 

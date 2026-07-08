@@ -1,4 +1,4 @@
-"""Open environment registry for deap-bridge.
+"""Open environment registry for the system.
 
 A single source-of-truth mapping a string ``env_name`` to the factory used
 by :class:`~deap_pettingzoo.environments.PettingZooWrapper` and
@@ -639,16 +639,16 @@ def get_registry_snapshot(
                 # a factory that actually pickles fine).
                 try:
                     pickle.dumps(spec.factory)
-                    culprit = (
+                    issue_source = (
                         "non-picklable metadata (a wrapper / param / team — "
                         "the factory itself pickles fine)"
                     )
                 except Exception:  # noqa: BLE001
-                    culprit = (
+                    issue_source = (
                         "a non-picklable factory " f"({type(spec.factory).__name__})"
                     )
                 warnings.warn(
-                    f"Environment {name!r} has {culprit} and will not propagate "
+                    f"Environment {name!r} has {issue_source} and will not propagate "
                     "to parallel workers (num_workers>1); it must be "
                     "re-registered there. Use a module-level factory function "
                     "or class (and picklable wrappers) instead of a "
@@ -709,10 +709,10 @@ def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
         )
 
 
-# Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
-# of env names a snapshot carries, which is stable across pickled copies (each
-# task ships its own copy of the snapshot), so a worker replays a given snapshot
-# at most once even when it has no evaluator cache to gate on.
+#: Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
+#: of env names a snapshot carries, which is stable across pickled copies (each
+#: task ships its own copy of the snapshot), so a worker replays a given snapshot
+#: at most once even when it has no evaluator cache to gate on.
 _REPLAYED_SNAPSHOT_KEYS: set = set()
 
 
@@ -721,7 +721,7 @@ def replay_registry_snapshot_once(
 ) -> None:
     """Replay ``snapshot`` at most once per worker process.
 
-    Worker payloads carry a :func:`get_registry_snapshot` result so
+    Worker payloads carry a :func:`get_registry_snapshot` result so that
     Dask workers (which have no per-worker ``initializer`` hook) can
     re-register custom environments before building any env. This wrapper
     makes that cheap to call on every task: the first call for a given set of

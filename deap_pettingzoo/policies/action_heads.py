@@ -12,10 +12,11 @@ Three heads are provided:
   sub-action and argmax each, returns a ``np.int64`` array of shape
   ``(len(nvec),)``.
 
-:class:`Tuple` and :class:`Dict` action spaces remain **not supported** for
+:class:`Tuple` and :class:`Dict` action spaces are **not supported** for
 EA-driven policies.  :func:`make_head` raises :class:`NotImplementedError`
 with a message pointing callers at the AgileRL trainers, which handle those
-spaces natively.
+spaces natively (relevant for custom enviroments only, 
+the native PettingZoo envs never use them).
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ class MaskedDiscreteHead(DiscreteHead):
     actions can be selected. When ``action_mask`` is ``None`` the head
     behaves identically to :class:`DiscreteHead`.
 
-    If the mask is entirely zero (no legal action — e.g. a "waiting"
+    If the mask is entirely zero (no legal action, e.g. a "waiting"
     agent on the other side of a turn-based board under the masked
     adapter), :meth:`decode` returns ``0`` by convention; the adapter
     discards the action anyway.
@@ -316,7 +317,7 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
     if action_space is None:
         raise TypeError("make_head requires a gymnasium Space, got None.")
 
-    # Use duck-typing so we don't force a hard gymnasium import here.
+    # Use duck-typing so to avoid a hard gymnasium import here.
     if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
         cls = MaskedDiscreteHead if masked else DiscreteHead
         return cls(int(action_space.n))
