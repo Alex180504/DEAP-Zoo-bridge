@@ -1,4 +1,4 @@
-"""Tests for PSOTrainer (Phase 1.4)."""
+"""Tests for PSOTrainer."""
 import numpy as np
 import pytest
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig

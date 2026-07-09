@@ -1,4 +1,4 @@
-"""Regression tests for the QDax numpy/JAX scoring boundary (Phase 10).
+"""Regression tests for the QDax numpy/JAX scoring boundary.
 
 Covers:
 

@@ -381,9 +381,7 @@ class TestEvaluatorIntegration:
             assert len(ind.fitness.values) == 1
 
 
-# ===========================================================================
-# Multi-objective / lexicase evaluator tests (Phase 1.1)
-# ===========================================================================
+# Multi-objective / lexicase evaluator tests.
 
 
 class _MockFitnessSpec:

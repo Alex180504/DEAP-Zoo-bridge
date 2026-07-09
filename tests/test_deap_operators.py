@@ -171,7 +171,7 @@ def test_default_methods_backwards_compatible(evaluator, genome_config):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.2 — Advanced selection operator tests
+# Advanced selection operator tests
 # ---------------------------------------------------------------------------
 
 

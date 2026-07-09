@@ -280,7 +280,7 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
       fitness vectors (one test-case per position).  They are a no-op
       for single-objective evaluators but work correctly with
       :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`
-      lexicase modes set up in Phase 1.1.
+      lexicase modes.
     """
     method = cfg.get("method", "tournament")
     if method == "tournament":

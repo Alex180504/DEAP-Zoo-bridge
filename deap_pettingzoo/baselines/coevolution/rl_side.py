@@ -72,13 +72,6 @@ class _RLDriverContext:
 
     Constructed by :meth:`CoEvolutionTrainer._build_evaluator` whenever
     the learner side has ``optimizer == "rl"``.
-
-    The optional ``executor``, ``env_name``, and ``env_config`` fields
-    support Phase-2 parallel rollout collection: when ``executor`` is
-    not ``None``, :meth:`RLSideState.step_generation` dispatches
-    rollout episodes to worker processes via
-    :func:`_rl_rollout_worker_fn` instead of calling
-    :meth:`~RLSideState._collect_episode` serially.
     """
 
     env_wrapper: PettingZooWrapper

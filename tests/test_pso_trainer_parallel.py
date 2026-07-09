@@ -1,4 +1,4 @@
-"""Parallel PSO trainer test (Phase 1.4)."""
+"""Parallel PSO trainer test."""
 import numpy as np
 import pytest
 

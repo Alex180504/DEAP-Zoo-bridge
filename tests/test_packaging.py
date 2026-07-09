@@ -1,5 +1,4 @@
-"""Tests for Phase 6: packaging import smoke, launcher arg parsing,
-and integrated-launch mode.
+"""Tests for packaging import smoke, launcher arg parsing, and integrated-launch mode.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Live smoke test for AgileRL HPO trainer (Phase 2.1).
+"""Live smoke test for AgileRL HPO trainer.
 
 Requires the ``rl-baselines`` extra.  Gated behind ``importorskip`` and
 marked ``slow``.

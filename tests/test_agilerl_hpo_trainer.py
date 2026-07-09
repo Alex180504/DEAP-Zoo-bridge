@@ -1,4 +1,4 @@
-"""Surface tests for AgileRL HPO trainer (Phase 2.1).
+"""Surface tests for AgileRL HPO trainer.
 
 :class:`TestEvolveHPOTrainerInit`, :class:`TestConcreteTrainers` and
 :class:`TestBudgetMode` require only the core package (no agilerl).

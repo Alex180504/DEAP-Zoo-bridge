@@ -312,8 +312,6 @@ class EASideState(SideState):
         self.activation = cfg.get("activation", "tanh")
         self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
-
-        # Multi-objective support (Phase 1.3).
         self._is_multiobjective = self.selection_method in {"nsga2", "spea2"}
 
         self.toolbox = None
