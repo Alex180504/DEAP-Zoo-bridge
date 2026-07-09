@@ -31,9 +31,6 @@ tests/
 # Documentation & project notes (not needed at runtime)
 docs/
 #examples/
-code_review/
-project_notes.md
-ui_overhaul_spec.md
 
 # IDE / editor
 .vscode/

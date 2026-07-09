@@ -47,10 +47,10 @@ def resolve_device(requested: object) -> str:
     crashing, fall back to CPU (with a one-time warning).
 
     Rules:
-    * ``None`` → auto: ``"cuda"`` if available, else ``"cpu"``.
+    * ``None`` -> auto: ``"cuda"`` if available, else ``"cpu"``.
     * a CUDA device (e.g. ``"cuda"`` / ``"cuda:0"``) when CUDA is unavailable
-      → ``"cpu"`` (+ one :class:`RuntimeWarning` per distinct requested device).
-    * anything else → ``str(requested)`` unchanged.
+      -> ``"cpu"`` (+ one :class:`RuntimeWarning` per distinct requested device).
+    * anything else -> ``str(requested)`` unchanged.
     """
     cuda_ok = _torch_cuda_available()
     if requested is None:

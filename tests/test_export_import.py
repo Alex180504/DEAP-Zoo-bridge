@@ -331,7 +331,7 @@ class TestValidateImportZip:
             zf.writestr("experiment.json", "{}")
             # No some_run/manifest.json written.
         result = validate_import_zip(zip_path, tmp_results_root)
-        # No valid runs → should error.
+        # No valid runs -> should error.
         assert not result.ok
         assert any(e.code == "no_valid_runs" for e in result.errors)
         assert any(w.code == "run_missing_manifest" for w in result.warnings)

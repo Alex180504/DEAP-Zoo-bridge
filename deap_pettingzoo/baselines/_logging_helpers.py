@@ -64,9 +64,9 @@ def dump_fitness_history(
     The ``gen_offset`` parameter aligns the x-axis across indexing schemes:
 
     * EA / NEAT are 0-indexed (gen 0 = initial population) — use
-      ``gen_offset=0`` (default) so gen 0 → env_steps 0, nominal = 1×N.
+      ``gen_offset=0`` (default) so gen 0 -> env_steps 0, nominal = 1×N.
     * CMA-ES / PSO are 1-indexed (gen 1 = first update) — use
-      ``gen_offset=-1`` so gen 1 → env_steps 0, nominal = 1×N.
+      ``gen_offset=-1`` so gen 1 -> env_steps 0, nominal = 1×N.
 
     No-op when ``logger`` is a :class:`NoOpLogger`.
     """

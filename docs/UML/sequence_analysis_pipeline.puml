@@ -1,5 +1,5 @@
 @startuml sequence_analysis_pipeline
-title Analysis Pipeline – Disk → Experiment → Stats / Plots / Report
+title Analysis Pipeline – Disk -> Experiment -> Stats / Plots / Report
 
 actor "Researcher" as R
 participant "load_experiment" as LE

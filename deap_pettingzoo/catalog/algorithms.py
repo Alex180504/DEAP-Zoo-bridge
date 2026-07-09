@@ -65,7 +65,7 @@ class _AlgorithmDefinition:
             ``multidiscrete_action``, ``needs_global_state``, ``on_policy``,
             ``supports_turn_based``.
         aliases: Alternative names that resolve to this algorithm (e.g.
-            ``"cma"`` → ``"cma-es"``, ``"genetic"`` → ``"ea"``). Populated
+            ``"cma"`` -> ``"cma-es"``, ``"genetic"`` -> ``"ea"``). Populated
             into :data:`_ALIAS_TO_CANONICAL`.
         coevolution_optimizer: The ``Side.optimizer`` token for co-evolution,
             looked up in :data:`~deap_pettingzoo.baselines.coevolution.sides._SIDE_STATE_FACTORIES`.
@@ -324,7 +324,7 @@ def _rebuild_lookups() -> None:
 def canonical_name(name: str) -> Optional[str]:
     """Resolve an algorithm name or alias to its canonical form.
 
-    ``"cma"`` → ``"cma-es"``; ``"ea"`` → ``"ea"``; unknown → ``None``.
+    ``"cma"`` -> ``"cma-es"``; ``"ea"`` -> ``"ea"``; unknown -> ``None``.
     """
     return _ALIAS_TO_CANONICAL.get(name)
 

@@ -1,6 +1,6 @@
 @startuml sequence_genome_to_action
 !theme plain
-title Sequence Diagram: Genome → Policy → Action Flow
+title Sequence Diagram: Genome -> Policy -> Action Flow
 
 actor "Evolution\nAlgorithm" as EA
 participant "Individual\n(DEAP)" as Ind

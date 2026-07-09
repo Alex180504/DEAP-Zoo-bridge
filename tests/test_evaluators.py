@@ -485,7 +485,7 @@ class TestSingleEpisodeEvaluatorMultiObjective:
         )
         result = evaluator.evaluate(individual, seed=42)
         assert isinstance(result, tuple)
-        # N agents in the env, 1 objective → N scalars
+        # N agents in the env, 1 objective -> N scalars
         assert len(result) > 0
 
 

@@ -74,15 +74,15 @@ state AdvancedMode {
     AdvancedMode : Toggle — one tool shown at a time
     AdvancedMode : 📦 Install deps — pip/git (allowlisted), live scrollable output
     AdvancedMode : 🐍 Script editor — paste full script (text area; rich editor opt-in)
-    AdvancedMode : Validate script (static) → POST /experiments/script/validate
-    AdvancedMode : Submit script → POST /experiments/script (kind="script")
+    AdvancedMode : Validate script (static) -> POST /experiments/script/validate
+    AdvancedMode : Submit script -> POST /experiments/script (kind="script")
 }
 
 [*] --> AdvancedMode : select "Advanced" mode
-AdvancedMode --> [*] : script submitted → Queue
+AdvancedMode --> [*] : script submitted -> Queue
 
 state Validate {
-    Validate : Click "Validate" → POST /experiments/validate
+    Validate : Click "Validate" -> POST /experiments/validate
     Validate : Render field errors grouped by tab
     Validate : Render warnings (e.g. unverifiable import)
 }
@@ -91,9 +91,9 @@ Validate --> Submit : no blocking errors
 Validate --> EnvTab : fix errors
 
 state Submit {
-    Submit : Click "Submit" → POST /experiments
-    Submit : Server re-validates (defense in depth → 422 on failure)
-    Submit : On success → toast + auto-navigate to Queue
+    Submit : Click "Submit" -> POST /experiments
+    Submit : Server re-validates (defense in depth -> 422 on failure)
+    Submit : On success -> toast + auto-navigate to Queue
 }
 
 Submit --> [*]

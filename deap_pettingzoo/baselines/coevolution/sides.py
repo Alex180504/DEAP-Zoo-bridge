@@ -525,7 +525,7 @@ class EASideState(SideState):
                 sampler=self.side.archive_sampler,
             )
             if len(self.side.hof) == 0:
-                # Archive empty → behave as if pure current-gen pool.
+                # Archive empty -> behave as if pure current-gen pool.
                 return pop_pool
             weights = (1.0 - self.side.archive_mix, self.side.archive_mix)
             return CompositePool([pop_pool, archive_pool], weights=weights)

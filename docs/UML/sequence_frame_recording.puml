@@ -1,5 +1,5 @@
 @startuml sequence_frame_recording
-title Frame Recording — Trainer → RecordingController → FrameRecorder → frames/{prefix}episode_NNNN.{ext}
+title Frame Recording — Trainer -> RecordingController -> FrameRecorder -> frames/{prefix}episode_NNNN.{ext}
 
 actor "Researcher" as R
 participant "EATrainer / CMAESTrainer / PSOTrainer /\nCoEvolutionTrainer / AgileRLTrainer /\nNEAT family / QDax" as T
@@ -21,10 +21,10 @@ FR --> RC: recorder (enabled?)
 RC -> UE: UnifiedEvaluator(max_steps, frame_recorder=recorder)
 note over RC
   Resolves the cadence schedule from ``RecordingConfig.mode``:
-   • COUNT    → max_recordings evenly-spread fraction checkpoints in [0,1]
-   • EVERY    → record on every observe()
-   • INTERVAL → checkpoints at every_n_steps env-step multiples
-   • FINAL    → no mid-run checkpoints
+   • COUNT    -> max_recordings evenly-spread fraction checkpoints in [0,1]
+   • EVERY    -> record on every observe()
+   • INTERVAL -> checkpoints at every_n_steps env-step multiples
+   • FINAL    -> no mid-run checkpoints
   Disabled controller (recording off / NoOpLogger / imageio missing)
   makes observe()/finalize() cheap no-ops.
 end note
@@ -40,7 +40,7 @@ loop each generation / iteration
         UE -> FR: start_episode(idx, iteration, env_steps)
         activate FR
         loop step
-            UE -> PZ: render() → np.ndarray (H,W,3) uint8
+            UE -> PZ: render() -> np.ndarray (H,W,3) uint8
             UE -> FR: add_frame(frame)
             UE -> PZ: step(actions)
         end

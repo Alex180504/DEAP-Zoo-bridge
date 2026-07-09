@@ -303,7 +303,7 @@ def _instantiate_factory(factory, render_mode, kwargs, preferred: str):
 
     Resolution order:
       1. If ``factory`` exposes ``<preferred>``, call that.
-      2. Else fall back in order: ``parallel_env`` → ``env`` → ``raw_env``.
+      2. Else fall back in order: ``parallel_env`` -> ``env`` -> ``raw_env``.
       3. Else treat ``factory`` itself as callable.
     """
     tried = []
@@ -412,8 +412,8 @@ def _coerce_to_parallel(env, name: str, *, declared: str):
 def _coerce_turn_based(env, name: str, *, mode: str):
     """Wrap a turn-based AEC env in the appropriate adapter.
 
-    ``mode='aec_masked'`` → :class:`MaskedSimultaneousAdapter`;
-    ``mode='aec_sequential'`` → :class:`SequentialTurnAdapter`.
+    ``mode='aec_masked'`` -> :class:`MaskedSimultaneousAdapter`;
+    ``mode='aec_sequential'`` -> :class:`SequentialTurnAdapter`.
     Both are imported lazily from
     :mod:`deap_pettingzoo.environments.turn_based`.
     """

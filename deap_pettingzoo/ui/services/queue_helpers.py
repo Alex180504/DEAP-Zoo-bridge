@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-#: Status → emoji mapping for the list badges.
+#: Status -> emoji mapping for the list badges.
 _STATUS_BADGE: Dict[str, str] = {
     "queued": "\u23f3",
     "running": "\U0001f504",

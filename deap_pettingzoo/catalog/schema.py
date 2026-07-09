@@ -38,7 +38,7 @@ class ParamType(str, Enum):
     """The value type of a single configurable parameter.
 
     Inherits from :class:`str` so instances serialise directly to JSON
-    (``ParamType.INT`` → ``"int"``) and compare equal to their string form.
+    (``ParamType.INT`` -> ``"int"``) and compare equal to their string form.
     """
 
     INT = "int"
@@ -75,7 +75,7 @@ class ParamTarget(str, Enum):
 def humanize(name: str) -> str:
     """Turn a snake_case identifier into a Title Case label.
 
-    ``"population_size"`` → ``"Population Size"``; ``"lr_actor"`` →
+    ``"population_size"`` -> ``"Population Size"``; ``"lr_actor"`` ->
     ``"Lr Actor"``. Used as the fallback display label when a
     :class:`ParamSpec` does not set one explicitly.
     """
@@ -443,7 +443,7 @@ class AlgorithmSpec:
         label: Human-readable display name.
         family: Coarse grouping — ``"evolutionary"`` or ``"marl"``.
         aliases: Alternative names that resolve to this algorithm (e.g.
-            ``"cma"`` → ``"cma-es"``), reconciling the historical
+            ``"cma"`` -> ``"cma-es"``), reconciling the historical
             vocabulary drift between the trainer registry and co-evolution.
         hyperparameters: Ordered tuple of :class:`ParamSpec` describing the
             configurable knobs.

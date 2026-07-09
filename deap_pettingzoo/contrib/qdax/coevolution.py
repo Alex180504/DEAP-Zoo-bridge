@@ -1,4 +1,4 @@
-"""QDax ↔ co-evolution bridge (experimental).
+"""QDax <-> co-evolution bridge (experimental).
 
 Adds two concrete plug-ins that slot into
 :mod:`deap_pettingzoo.baselines.coevolution`:
@@ -851,7 +851,7 @@ class QDaxSideState(SideState):
             flat_weights_list.append(flat)
 
         # Sample opponents from each side's pool up-front (requires picklable
-        # snapshots; EAPool → "feedforward", QDaxRepertoirePool → "qdax_flax").
+        # snapshots; EAPool -> "feedforward", QDaxRepertoirePool -> "qdax_flax").
         side_role_prefixes: Dict[str, Tuple[str, ...]] = {}
         per_side_snaps: Dict[str, List[Any]] = {}
         for side_name, prefixes, pool in evaluator._opponent_sides:

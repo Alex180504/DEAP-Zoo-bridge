@@ -40,7 +40,7 @@ def test_neat_records_per_generation(tmp_path: Path):
     config = TrainingConfig(
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
-        budget_value=3 * 5,  # pop=3, gens=5 → 15 eval episodes
+        budget_value=3 * 5,  # pop=3, gens=5 -> 15 eval episodes
         algorithm_params={
             "pop_size": 3,
             "eval_episodes_per_genome": 1,
@@ -54,7 +54,7 @@ def test_neat_records_per_generation(tmp_path: Path):
         ),
     )
     trainer.train(config)
-    # mode=EVERY → one artefact per evaluated generation. neat-python may
+    # mode=EVERY -> one artefact per evaluated generation. neat-python may
     # early-stop on its fitness threshold, so assert "at least one".
     assert _count_frames(tmp_path) >= 1
 

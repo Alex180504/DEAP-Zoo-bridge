@@ -135,7 +135,7 @@ class TestTrainerReadsConfigFields:
         pytest.importorskip("pettingzoo.mpe")
         from deap_pettingzoo.baselines.ea_trainer import EATrainer
 
-        # Config leaves num_workers at the default (1) → constructor value used.
+        # Config leaves num_workers at the default (1) -> constructor value used.
         trainer = EATrainer(hidden_size=8, population_size=4, num_workers=2)
         result = trainer.train(self._make_config())
         assert result.metadata["num_workers"] == 2

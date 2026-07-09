@@ -95,7 +95,7 @@ end
 alt recording enabled
     loop generation g where g > 0
         Pop -> RR: post_evaluate(config, pop, species, best_genome)
-        RR -> RR: _record_fn(g, best_genome) → RecordingController.observe(ProgressEvent(g), champion)
+        RR -> RR: _record_fn(g, best_genome) -> RecordingController.observe(ProgressEvent(g), champion)
         RR -> UE: (when due) evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, iteration=g, env_steps)
         UE -> FR: start_episode()
         loop rollout steps

@@ -9,14 +9,14 @@ provides its own evaluation and logging.
 Modules
 -------
 * ``substrate`` — :class:`Substrate` (input / output / hidden coordinate layout).
-* ``hyperneat`` — :func:`create_phenotype_network` (CPPN → substrate-query → ANN).
+* ``hyperneat`` — :func:`create_phenotype_network` (CPPN -> substrate-query -> ANN).
 * ``es_hyperneat`` — :class:`ESNetwork` (evolvable-substrate HyperNEAT via quadtree).
-* ``create_cppn`` — :func:`create_cppn` (genome → :class:`~neat.nn.FeedForwardNetwork`).
+* ``create_cppn`` — :func:`create_cppn` (genome -> :class:`~neat.nn.FeedForwardNetwork`).
 
 Patches applied for neat-python ≥ 2.0
 --------------------------------------
-* ``neat.config.Config`` → ``neat.Config`` (top-level import).
-* ``neat.population.Population`` → ``neat.Population``.
+* ``neat.config.Config`` -> ``neat.Config`` (top-level import).
+* ``neat.population.Population`` -> ``neat.Population``.
 * ``neat.genome.DefaultGenome`` / ``neat.reproduction.DefaultReproduction`` /
   ``neat.species.DefaultSpeciesSet`` / ``neat.stagnation.DefaultStagnation``
   — these are still importable from their sub-packages in neat-python 2.x;

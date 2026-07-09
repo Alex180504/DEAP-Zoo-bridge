@@ -176,7 +176,7 @@ def test_fov_shape_alpha_rewards_visible_prey() -> None:
     observations, _ = wrapper.reset(seed=0)
     _, rewards, _, _, _ = wrapper.step({agent: 0 for agent in observations})
 
-    # 2 prey visible (fov_enabled absent → all visible), alpha=1.0 → bonus = 2.0
+    # 2 prey visible (fov_enabled absent -> all visible), alpha=1.0 -> bonus = 2.0
     assert rewards["predator_0"] == pytest.approx(2.0)
 
 
@@ -229,5 +229,5 @@ def test_proximity_shaping_skipped_when_prey_outside_fov() -> None:
     inner.predators[0].position.x = 54.0
     _, rewards, _, _, _ = wrapper.step({agent: 0 for agent in observations})
 
-    # Prey is outside FOV → no proximity shaping → reward == 0.0
+    # Prey is outside FOV -> no proximity shaping -> reward == 0.0
     assert rewards["predator_0"] == pytest.approx(0.0)

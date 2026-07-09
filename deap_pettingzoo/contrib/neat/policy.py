@@ -2,7 +2,7 @@
 
 :class:`NeatPolicy` satisfies
 :class:`~deap_pettingzoo.baselines.base.PolicyProtocol` and is the
-bridge between neat-python's genome→network pipeline and the unified
+bridge between neat-python's genome->network pipeline and the unified
 evaluator API.  It supports both discrete and continuous action spaces
 via the same :mod:`~deap_pettingzoo.policies.action_heads` machinery
 used by :class:`~deap_pettingzoo.policies.FeedforwardNeuralPolicy`.

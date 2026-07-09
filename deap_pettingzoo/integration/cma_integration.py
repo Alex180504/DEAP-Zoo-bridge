@@ -163,9 +163,9 @@ def register_cma_toolbox(
 
     Registers:
 
-    * ``toolbox.generate`` → ``strategy.generate(ind_init)``
-    * ``toolbox.update`` → ``strategy.update``
-    * ``toolbox.evaluate`` → :func:`evaluate_individual` bound to ``evaluator``
+    * ``toolbox.generate`` -> ``strategy.generate(ind_init)``
+    * ``toolbox.update`` -> ``strategy.update``
+    * ``toolbox.evaluate`` -> :func:`evaluate_individual` bound to ``evaluator``
 
     Args:
         strategy: The CMA strategy returned by :func:`setup_cma_strategy`.

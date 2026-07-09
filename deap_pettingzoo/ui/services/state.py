@@ -34,7 +34,7 @@ class UIState:
     setup_config: Optional[str] = None
     #: Which experiment detail is expanded on the Queue page.
     queue_expanded: str = ""
-    #: Last source in the Setup → Advanced script editor (persisted as text).
+    #: Last source in the Setup -> Advanced script editor (persisted as text).
     advanced_script: str = ""
     #: Which Advanced subwindow is selected ("install" or "script").
     advanced_view: str = "install"

@@ -37,7 +37,7 @@ class UISettings:
 
 
 def load_settings(*, results_root: Optional[str] = None) -> UISettings:
-    """Resolve UI settings from CLI override → env var → default.
+    """Resolve UI settings from CLI override -> env var -> default.
 
     Parameters
     ----------

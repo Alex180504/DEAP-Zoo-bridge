@@ -295,7 +295,7 @@ preselected_indices = [
 ]
 _table_key = "browse_table"
 
-# Store row data so the on_select callback can resolve indices → run IDs
+# Store row data so the on_select callback can resolve indices -> run IDs
 st.session_state["_browse_rows"] = rows
 
 
@@ -482,7 +482,7 @@ if selected_run_ids:
                             f"Spec loaded from experiment {selected_exp}. "
                             "Go to the Setup page to review and submit."
                         )
-                        st.page_link("pages/8_Setup.py", label="Go to Setup page →")
+                        st.page_link("pages/8_Setup.py", label="Go to Setup page ->")
                     else:
                         st.warning("No valid spec found for this experiment.")
                 except Exception as exc:

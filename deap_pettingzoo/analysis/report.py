@@ -208,7 +208,7 @@ def _build_multitask_section(
 
         forest = aggregate_metrics_forest(normed, reps=2000)
     except ImportError:
-        forest = None  # rliable not installed → table omitted
+        forest = None  # rliable not installed -> table omitted
 
     figures: list = []
     if include_figures:

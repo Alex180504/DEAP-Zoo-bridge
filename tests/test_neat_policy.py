@@ -46,7 +46,7 @@ class TestNeatPolicy:
         assert np.all(action >= -1.0) and np.all(action <= 1.0)
 
     def test_construct_raw(self, genome, neat_config):
-        """No action_space → raw network output."""
+        """No action_space -> raw network output."""
         policy = NeatPolicy(genome, neat_config)
         obs = np.random.randn(8).astype(np.float32)
         output = policy.get_action(obs)

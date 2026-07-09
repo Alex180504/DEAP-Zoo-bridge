@@ -97,7 +97,7 @@ class Connection:
 
     def __repr__(self) -> str:
         return (
-            f"Connection(({self.x1:.3f},{self.y1:.3f})→"
+            f"Connection(({self.x1:.3f},{self.y1:.3f})->"
             f"({self.x2:.3f},{self.y2:.3f}), w={self.weight:.3f})"
         )
 
@@ -369,7 +369,7 @@ class ESNetwork:
     ) -> None:
         """Determine which connections to express via variance pruning.
 
-        High variance → subdivide further.  Low variance → check
+        High variance -> subdivide further.  Low variance -> check
         neighbouring points for band-level connectivity.
         """
         for c in p.cs:
@@ -505,7 +505,7 @@ class ESNetwork:
         -------
         tuple
             ``(true_nodes, true_connections)`` containing only nodes and
-            connections on valid input→output paths.
+            connections on valid input->output paths.
         """
         inputs = set(self.substrate.input_coordinates)
         outputs = set(self.substrate.output_coordinates)

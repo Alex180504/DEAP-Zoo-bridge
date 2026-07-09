@@ -319,7 +319,7 @@ def test_ea_trainer_box_genome_uses_linear_output():
         low = env.action_space(agent).low
         mid = (high + low) / 2.0
         half_range = (high - low) / 2.0
-        # Single tanh in BoxHead.decode with extreme input → normalized deviation near 1.
+        # Single tanh in BoxHead.decode with extreme input -> normalized deviation near 1.
         # Double-tanh would cap it at tanh(1) ≈ 0.762.
         normalized_dev = np.abs(action - mid) / half_range
         assert np.all(normalized_dev > 0.9), (

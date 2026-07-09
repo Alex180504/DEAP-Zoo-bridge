@@ -49,7 +49,7 @@ class SelfPlayEvaluator(BaseEvaluator):
             * ``'team_mapping'`` — sum rewards for agents whose
               ``team_mapping[agent]`` matches ``team``. Requires
               ``team_mapping`` and ``team`` to be supplied.
-        team_mapping: Maps ``agent_id`` → team name. Required when
+        team_mapping: Maps ``agent_id`` -> team name. Required when
             ``aggregation='team_mapping'``.
         team: Team name to sum rewards for. Required when
             ``aggregation='team_mapping'``.

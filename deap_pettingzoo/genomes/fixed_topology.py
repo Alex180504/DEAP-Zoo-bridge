@@ -66,7 +66,7 @@ class FixedTopologyGenome:
                 f"got {len(layer_sizes)}"
             )
 
-        # Validate and canonicalize activations ('identity' → 'linear').
+        # Validate and canonicalize activations ('identity' -> 'linear').
         activation = self._ACTIVATION_ALIASES.get(activation, activation)
         if activation not in self.SUPPORTED_ACTIVATIONS:
             raise ValueError(
