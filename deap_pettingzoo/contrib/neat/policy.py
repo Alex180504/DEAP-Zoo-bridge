@@ -72,9 +72,7 @@ class NeatPolicy(PolicyProtocol):
             else None
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,
@@ -107,9 +105,7 @@ class NeatPolicy(PolicyProtocol):
         """No-op — the feed-forward policy has no hidden state."""
         pass
 
-    # ------------------------------------------------------------------
-    # Convenience properties
-    # ------------------------------------------------------------------
+    # Utility properties
 
     @property
     def genome(self) -> neat.DefaultGenome:
@@ -121,9 +117,7 @@ class NeatPolicy(PolicyProtocol):
         """The NEAT config (read-only)."""
         return self._config
 
-    # ------------------------------------------------------------------
     # Pickling helpers (used by OpponentSnapshot kind="neat")
-    # ------------------------------------------------------------------
 
     @classmethod
     def from_snapshot_payload(

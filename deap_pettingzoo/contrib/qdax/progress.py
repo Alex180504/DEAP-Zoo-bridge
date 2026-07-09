@@ -2,7 +2,7 @@
 
 This module intentionally avoids importing JAX/QDax so both the standalone
 QDax trainers and the generic co-evolution trainer can reuse the same
-formatting without pulling heavy optional dependencies at module-import time.
+formatting without pulling heavy optional dependencies at module import time.
 """
 
 from __future__ import annotations

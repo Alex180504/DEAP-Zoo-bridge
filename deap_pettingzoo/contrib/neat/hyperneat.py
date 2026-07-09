@@ -98,9 +98,7 @@ class HyperNeatPolicy(PolicyProtocol):
             else None
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,
@@ -189,9 +187,7 @@ class ESHyperNeatPolicy(PolicyProtocol):
             else None
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,

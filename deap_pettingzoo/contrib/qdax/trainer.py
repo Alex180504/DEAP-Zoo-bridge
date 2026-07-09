@@ -545,7 +545,7 @@ def _extract_champion(repertoire, module, *, action_space=None):
 class MAPElitesTrainer(BaselineTrainer):
     """MAP-Elites trainer over a Flax MLP policy.
 
-    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``,
+    Supported :class:`BudgetMode`s: ``ENV_STEPS``, ``EVAL_EPISODES``,
     ``GENERATIONS`` (iterations are the native unit).
     """
 

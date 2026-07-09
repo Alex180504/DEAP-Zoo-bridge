@@ -3,15 +3,6 @@
 Mirrors the EA :class:`~deap_pettingzoo.integration.deap_integration._EvalWorkerSpec`
 pattern: ship picklable genome + environment metadata to worker processes,
 rebuild env + policy on each worker, run episodes, return fitness.
-
-Data flow
----------
-Driver:  genome ──pickle──→ Worker: rebuild genome via pickle
-         _NeatWorkerSpec ──→        rebuild neat.Config from input/output sizes
-                                    rebuild action space from hint
-                                    build PettingZooWrapper from env_name
-                                    build NeatPolicy / HyperNeatPolicy / ESHyperNeatPolicy
-                                    run eval_eps episodes → return mean fitness
 """
 
 from __future__ import annotations
@@ -141,8 +132,8 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
 
     genome, spec = payload
 
-    # Re-register custom envs so Dask workers can resolve env_name; no-op
-    # on repeat calls and for built-in-only snapshots.
+    # Re-register custom envs so Dask workers can resolve env_name;
+    # no-op on repeat calls and for built-in-only snapshots.
     replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,

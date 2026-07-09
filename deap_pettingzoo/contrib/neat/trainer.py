@@ -157,9 +157,7 @@ class NEATTrainer(BaselineTrainer):
         self._parallel_backend = str(parallel_backend)
         self._scheduler_address = scheduler_address
 
-    # ------------------------------------------------------------------
     # BaselineTrainer interface
-    # ------------------------------------------------------------------
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
@@ -234,13 +232,13 @@ class NEATTrainer(BaselineTrainer):
         params = dict(config.algorithm_params)
         max_steps = self._resolve_max_steps(config)
 
-        # --- Resolve budget to generations -----------------------------------
+        # Resolve budget to generations
         pop_size = int(params.get("pop_size", 50))
         n_generations = params.get("n_generations", None)
         if n_generations is None:
             n_generations = self._budget_to_generations(config, pop_size)
 
-        # --- Build env -------------------------------------------------------
+        # Build env
         env = PettingZooWrapper(
             config.env_name,
             env_config=config.env_config,
@@ -258,7 +256,7 @@ class NEATTrainer(BaselineTrainer):
             )
         shared_action_space = reference_space
 
-        # --- Build NEAT config -----------------------------------------------
+        # Build NEAT config
         obs_shape = env.observation_space(env.possible_agents[0]).shape
         input_size = int(obs_shape[0]) if obs_shape else 1
         output_size = required_output_size(shared_action_space)
@@ -273,7 +271,7 @@ class NEATTrainer(BaselineTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + unified champion-rollout recording ---------------------
+        # Logger + unified champion-rollout recording
         log = build_logger(config, algorithm="neat")
         self._recorder = RecordingController(
             config,
@@ -282,17 +280,17 @@ class NEATTrainer(BaselineTrainer):
             seed=seed,
         )
 
-        # --- Create initial population ---------------------------------------
+        # Create initial population
         pop = neat.Population(neat_config, seed=seed)
 
-        # --- Evaluation callback for neat ------------------------------------
+        # Evaluation callback for neat
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         aggregator = params.get("action_aggregator", "mean")
 
         # Build action-space hint for worker spec.
         _act_hint = _action_space_hint(shared_action_space)
 
-        # --- Recording reporter ----------------------------------------------
+        # Recording reporter
         def _neat_champion(best_genome):
             return NeatPolicy(
                 best_genome, neat_config, action_space=shared_action_space
@@ -317,7 +315,7 @@ class NEATTrainer(BaselineTrainer):
             self._resolve_parallelism(config)
         )
 
-        # --- Parallel or sequential eval -------------------------------------
+        # Parallel or sequential eval
         if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
@@ -430,10 +428,10 @@ class NEATTrainer(BaselineTrainer):
                 # Per-generation real env steps (serial path).
                 self._env_steps_history.append(int(self._env_steps_consumed) - _before)
 
-        # --- Add reporters ---------------------------------------------------
+        # Add reporters
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
 
-        # --- Run NEAT --------------------------------------------------------
+        # Run NEAT
         try:
             if _is_parallel and _executor_ctx is not None:
                 with _executor_ctx:
@@ -450,7 +448,7 @@ class NEATTrainer(BaselineTrainer):
             )
             best_genome = pop.best_genome
 
-        # --- Build result policy --------------------------------------------
+        # Build result policy
         champion = NeatPolicy(
             best_genome, neat_config, action_space=shared_action_space
         )
@@ -503,9 +501,7 @@ class NEATTrainer(BaselineTrainer):
             training_time=elapsed,
         )
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
 
     def _log(
         self,

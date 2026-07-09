@@ -13,7 +13,7 @@ What lives here:
   equivalent to :class:`~deap_pettingzoo.genomes.FixedTopologyGenome`)
   plus :class:`FlaxPolicyAdapter` (satisfies
   :class:`~deap_pettingzoo.baselines.base.PolicyProtocol`) and
-  flat-weight\u2194pytree bridges.
+  flat-weight<->pytree bridges.
 * :mod:`.descriptors` — the generic :class:`DescriptorProtocol`
   contract for behavioural-descriptor callables (trajectory-summary
   dict -> 1-D :class:`jnp.ndarray`). Concrete descriptors are supplied
