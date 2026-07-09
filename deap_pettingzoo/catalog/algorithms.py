@@ -529,7 +529,7 @@ def register_algorithm(
 
     Args
     ----
-    
+
         name: Canonical algorithm identifier.
         label: Human-readable display name.
         family: Coarse grouping (``"evolutionary"`` / ``"marl"`` / custom).
@@ -561,7 +561,7 @@ def register_algorithm(
 
     Note
     ----
-    
+
         A programmatic ``register_algorithm`` runs only in the process that
         calls it; like a custom :func:`register_env`, it does **not** auto-
         replay into spawned workers. For parallel/worker runs, ship the

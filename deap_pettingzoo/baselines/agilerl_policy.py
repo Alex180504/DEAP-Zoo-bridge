@@ -227,7 +227,6 @@ class AgileRLPolicyWrapper:
         self._obs_cache: Dict[str, np.ndarray] = {}
         self._algorithm_name = algorithm_name or type(agent).__name__
 
-
     # Policy protocol
 
     def get_action(self, observation: np.ndarray, **_: Any) -> Any:
@@ -299,7 +298,7 @@ class AgileRLPolicyWrapper:
         agent they were constructed with to be keyed in the input dict.
         not just the subset this wrapper dispatches for.
         Placeholders only matter for decentralized-actor algorithms in the warm-up
-        phase before the first full rotation completes; 
+        phase before the first full rotation completes;
         thereafter every slot holds the most recent real observation for that agent.
         """
         full: Dict[str, np.ndarray] = {}

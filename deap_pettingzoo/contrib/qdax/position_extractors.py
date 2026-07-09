@@ -37,6 +37,7 @@ import numpy as np
 
 # Generic obs-based extractor
 
+
 def obs_first_two(
     obs_dict: Dict[str, np.ndarray],
     env_wrapper: Any,

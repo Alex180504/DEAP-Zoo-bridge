@@ -332,8 +332,8 @@ class _DaskExecutor:
 
         (a) any worker running more than one thread (the worker-side
         caches are not thread-safe);
-        and 
-        (b) a driver-vs-worker ``deap-pettingzoo`` version mismatch 
+        and
+        (b) a driver-vs-worker ``deap-pettingzoo`` version mismatch
         (catches stale installs; Dask's own handshake already covers dask/python/numpy skew).
         """
         try:

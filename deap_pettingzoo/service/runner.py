@@ -81,6 +81,7 @@ class ProgressWriter:
 
 # Runner helpers
 
+
 def _load_spec(spec_file: Path) -> Any:
     spec_text = spec_file.read_text(encoding="utf-8")
     spec_data = json.loads(spec_text)

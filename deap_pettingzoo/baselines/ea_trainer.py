@@ -622,7 +622,7 @@ class EATrainer(BaselineTrainer):
             seed_everything(int(seed))
 
         # Create genome configuration.
-        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. 
+        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash.
         # DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
         is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
@@ -770,7 +770,7 @@ class EATrainer(BaselineTrainer):
             else self.scheduler_address
         )
         # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers live elsewhere,
-        # so skip the driver CPU cap and force the parallel dispatch path 
+        # so skip the driver CPU cap and force the parallel dispatch path
         # even for num_workers <= 1.
         effective_scheduler = (
             resolve_scheduler_address(scheduler_address) if backend == "dask" else None
@@ -1006,7 +1006,7 @@ class EATrainer(BaselineTrainer):
             pareto_front = list(hof.items)
 
         # Persist results via the logger
-        # No-op when ``config.output_dir is None`` (NoOpLogger) 
+        # No-op when ``config.output_dir is None`` (NoOpLogger)
         # so the backend stays usable without the analysis stack.
         try:
             with log:

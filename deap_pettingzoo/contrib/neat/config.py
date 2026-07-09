@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 import neat
 
 # Sensible defaults for small-to-medium neuroevolution problems
-# 
+#
 _DEFAULT_NEAT_CONFIG_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "NEAT": {
         "fitness_criterion": "max",

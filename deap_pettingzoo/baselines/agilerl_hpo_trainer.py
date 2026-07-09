@@ -90,7 +90,6 @@ class EvolveHPOTrainer(AgileRLTrainer):
         self._mutation_probs.setdefault("activation", 0.0)
         self._mutation_probs.setdefault("rl_hp", 0.2)
 
-
     # Catalog hyperparameter surface
 
     @staticmethod
@@ -255,7 +254,6 @@ class EvolveHPOTrainer(AgileRLTrainer):
             if flat is not None:
                 mut_probs[key] = float(flat)
         return mut_probs
-
 
     # BaselineTrainer
 
@@ -625,7 +623,6 @@ class EvolveHPOTrainer(AgileRLTrainer):
             },
             training_time=training_time,
         )
-
 
     # BaselineTrainer — capabilities
 

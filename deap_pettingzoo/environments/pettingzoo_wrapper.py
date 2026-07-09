@@ -69,6 +69,7 @@ def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
 
     base.draw = _fixed_draw
 
+
 class PettingZooWrapper:
     """
     Wrapper for PettingZoo environments.
@@ -93,7 +94,7 @@ class PettingZooWrapper:
         episode_length: Current episode step count
         cumulative_rewards: Dict of cumulative rewards per agent
     """
-    
+
     @classmethod
     def supported_envs(cls) -> List[str]:
         """Return the sorted list of currently-registered environment names."""

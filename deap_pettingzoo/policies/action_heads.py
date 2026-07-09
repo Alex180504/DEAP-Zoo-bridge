@@ -15,7 +15,7 @@ Three heads are provided:
 :class:`Tuple` and :class:`Dict` action spaces are **not supported** for
 EA-driven policies.  :func:`make_head` raises :class:`NotImplementedError`
 with a message pointing callers at the AgileRL trainers, which handle those
-spaces natively (relevant for custom enviroments only, 
+spaces natively (relevant for custom enviroments only,
 the native PettingZoo envs never use them).
 """
 

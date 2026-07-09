@@ -122,6 +122,7 @@ def _stack_consistent_positions(
 
 # Worker-side helpers for parallel genotype evaluation.
 
+
 @dataclass
 class _QDaxGenotypePayload:
     """Picklable payload sent to each worker process for one genotype."""
@@ -287,6 +288,7 @@ def _run_qdax_worker_episode(
 
 # Pool
 
+
 class QDaxRepertoirePool(_BasePool):
     """Opponent pool backed by a QDax :class:`MapElitesRepertoire`.
 
@@ -423,6 +425,7 @@ class QDaxRepertoirePool(_BasePool):
 
 # Side state
 
+
 @dataclass
 class _QDaxSideConfig:
     """Normalised view of ``Side.optimizer_config`` for QDax sides."""
@@ -524,7 +527,7 @@ class QDaxSideState(SideState):
         self._current_evaluator: Any = _NullEvaluator()
 
     # Lifecycle
-    
+
     def initialise(
         self,
         env: PettingZooWrapper,

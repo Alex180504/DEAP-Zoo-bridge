@@ -28,6 +28,7 @@ from .deap_integration import evaluate_individual, setup_deap_creators
 
 # Creator management
 
+
 def _setup_pso_creators() -> None:
     """Idempotently create ``creator.PSOParticle`` (list subclass)."""
     setup_deap_creators()
@@ -47,6 +48,7 @@ def _setup_pso_creators() -> None:
 
 
 # Swarm setup
+
 
 def setup_pso_swarm(
     genome_config: Dict[str, Any],
@@ -110,6 +112,7 @@ def setup_pso_swarm(
 
 # Particle initialiser
 
+
 def make_pso_ind_init(
     genome_config: Dict[str, Any],
     pso_state: Dict[str, Any],
@@ -149,6 +152,7 @@ def make_pso_ind_init(
 
 # Toolbox registration
 
+
 def register_pso_toolbox(
     pso_state: Dict[str, Any],
     ind_init: Callable[[], Any],
@@ -173,6 +177,7 @@ def register_pso_toolbox(
 
 
 # PSO update (module-level for DEAP picklability)
+
 
 def _pso_update_top_level(
     population: List[Any],
