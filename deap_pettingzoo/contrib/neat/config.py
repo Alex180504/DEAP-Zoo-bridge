@@ -21,9 +21,8 @@ from typing import Any, Dict, Optional
 
 import neat
 
-# ---------------------------------------------------------------------------
-# Sensible defaults for small-medium neuroevolution problems
-# ---------------------------------------------------------------------------
+# Sensible defaults for small-to-medium neuroevolution problems
+# 
 _DEFAULT_NEAT_CONFIG_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "NEAT": {
         "fitness_criterion": "max",
@@ -174,9 +173,7 @@ def build_neat_config(
         os.unlink(tmp.name)
 
 
-# ---------------------------------------------------------------------------
 # CPPN-specific config
-# ---------------------------------------------------------------------------
 
 #: CPPN-compatible activation functions — includes periodic (sin),
 #: Gaussian, absolute-value, and clamped variants that enable the CPPN

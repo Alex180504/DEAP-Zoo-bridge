@@ -104,7 +104,7 @@ class HyperNEATTrainer(NEATTrainer):
         input_size = int(obs_shape[0]) if obs_shape else 1
         output_size = required_output_size(shared_action_space)
 
-        # --- Substrate ---------------------------------------------------
+        # Substrate
         substrate = params.get("substrate", None)
         if substrate is None:
             hidden_layers = params.get("substrate_hidden_layers", None)
@@ -120,7 +120,7 @@ class HyperNEATTrainer(NEATTrainer):
                 hidden_layers=hidden_layers,
             )
 
-        # --- CPPN config (5 inputs: x1,y1,x2,y2,bias; 1 output: weight) -
+        # CPPN config (5 inputs: x1,y1,x2,y2,bias; 1 output: weight) -
         cppn_input_size = 5
         cppn_output_size = 1
         overrides = dict(params.get("neat_config_overrides", {}))
@@ -133,7 +133,7 @@ class HyperNEATTrainer(NEATTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + unified champion-rollout recording -----------------
+        # Logger + unified champion-rollout recording
         log = build_logger(config, algorithm="hyperneat")
         self._recorder = RecordingController(
             config,
@@ -142,14 +142,14 @@ class HyperNEATTrainer(NEATTrainer):
             seed=seed,
         )
 
-        # --- Create population -------------------------------------------
+        # Create population
         pop = neat.Population(neat_config, seed=seed)
 
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         activation = params.get("phenotype_activation", "sigmoid")
         weight_threshold = float(params.get("weight_threshold", 0.1))
 
-        # --- Recording reporter ------------------------------------------
+        # Recording reporter
         def _hn_champion(best_genome):
             return HyperNeatPolicy(
                 best_genome,
@@ -179,7 +179,7 @@ class HyperNEATTrainer(NEATTrainer):
             self._resolve_parallelism(config)
         )
 
-        # --- Parallel or sequential eval -------------------------------------
+        # Parallel or sequential eval
         if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
@@ -392,7 +392,7 @@ class ESHyperNEATTrainer(NEATTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + unified champion-rollout recording -----------------
+        # Logger + unified champion-rollout recording
         log = build_logger(config, algorithm="es-hyperneat")
         self._recorder = RecordingController(
             config,
@@ -406,7 +406,7 @@ class ESHyperNEATTrainer(NEATTrainer):
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         es_params = dict(params.get("es_params", ES_HYPERNEAT_PARAMS_DEFAULTS))
 
-        # --- Recording reporter ------------------------------------------
+        # Recording reporter
         def _esn_champion(best_genome):
             return ESHyperNeatPolicy(
                 best_genome,
@@ -435,7 +435,7 @@ class ESHyperNEATTrainer(NEATTrainer):
             self._resolve_parallelism(config)
         )
 
-        # --- Parallel or sequential eval -------------------------------------
+        # Parallel or sequential eval
         if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,

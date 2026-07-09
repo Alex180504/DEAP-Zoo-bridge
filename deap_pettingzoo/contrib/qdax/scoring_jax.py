@@ -1,4 +1,4 @@
-"""JAX-native scoring function builder for QDax (Goal 1).
+"""JAX-native scoring function builder for QDax.
 
 Produces a :func:`jit`/:func:`vmap`-able scoring function satisfying the
 QDax contract:

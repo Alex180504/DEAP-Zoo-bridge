@@ -413,7 +413,7 @@ def make_numpy_scoring_function(
             flat genotypes.
         episode_length: Max steps per rollout.
         descriptor_fn: Pure JAX descriptor function. The numpy
-            trajectory is converted to :class:`jnp.ndarray`\u200bs before
+            trajectory is converted to :class:`jnp.ndarray`s before
             calling. Must be a **top-level** callable (or a closure
             over picklable state) when ``num_workers > 1``.
         env_config: Optional env kwargs.
