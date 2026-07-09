@@ -273,6 +273,7 @@ class NeatSideState(SideState):
 
 # Internal pool implementation
 
+
 class _NeatPopulationPool(OpponentPool):
     """Population-pool adapter for NEAT genomes.
 

@@ -310,7 +310,7 @@ def check_compatibility(
         )
 
     # Warnings (non-fatal)
-    
+
     if env_info.num_agents > 8:
         warnings.append(
             f"Environment has {env_info.num_agents} agents; scalability may be a concern."

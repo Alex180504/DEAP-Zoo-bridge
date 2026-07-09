@@ -181,5 +181,8 @@ def register_existing_artifact(
 
 def _is_real_logger(logger: Any) -> bool:
     """True iff ``logger`` writes to disk (i.e. not :class:`NoOpLogger`)."""
-    from deap_pettingzoo.utils.logging.experiment_logger import NoOpLogger  # lazy import to avoid circular dependency
+    from deap_pettingzoo.utils.logging.experiment_logger import (
+        NoOpLogger,
+    )  # lazy import to avoid circular dependency
+
     return logger is not None and not isinstance(logger, NoOpLogger)

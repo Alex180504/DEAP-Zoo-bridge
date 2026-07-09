@@ -4,8 +4,8 @@ Primary use case: let numpy / torch trainers (``EATrainer``,
 ``CMAESTrainer``, ``AgileRLTrainer``) drive environments from
 `JaxMARL <https://github.com/FLAIROx/JaxMARL>`_ without changing any
 downstream code.  Per-step numpy<->JAX orchestration is applied, which
-makes this adapter *slow* (roughly at the speed of a native PettingZoo MPE env); 
-the fast QDax training path bypasses this adapter entirely via 
+makes this adapter *slow* (roughly at the speed of a native PettingZoo MPE env);
+the fast QDax training path bypasses this adapter entirely via
 :mod:`deap_pettingzoo.contrib.qdax.scoring_jax`.
 
 The adapter expects the underlying env to satisfy :class:`JaxEnvProtocol`

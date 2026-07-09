@@ -789,6 +789,7 @@ class CMAESSideState(SideState):
 
 # PSO side
 
+
 class PSOSideState(SideState):
     """PSO side — particle swarm over a flat weight vector.
 
@@ -997,6 +998,7 @@ class PSOSideState(SideState):
 
 
 # Frozen side
+
 
 class FrozenSideState(SideState):
     """Non-evolving side — wraps a static :class:`FrozenPolicyPool`.

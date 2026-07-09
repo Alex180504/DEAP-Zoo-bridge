@@ -900,7 +900,7 @@ def _mixed_worker_run(
     genome.set_weights(np.asarray(payload.weights, dtype=float))
 
     # Resolve factories and build the evaluator once per worker process.
-    # The cache key includes all fields that influence evaluator construction so that 
+    # The cache key includes all fields that influence evaluator construction so that
     # a single worker correctly handles spec changes across runs.
     cache_key = (
         spec.env_factory_qualname,

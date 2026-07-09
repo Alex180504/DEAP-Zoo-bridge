@@ -42,6 +42,7 @@ from deap_pettingzoo.baselines.base import (
 
 # Helpers
 
+
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
     """Recursively merge ``overlay`` onto ``base`` (overlay wins).
 
@@ -60,6 +61,7 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str,
 
 
 # Spec dataclasses
+
 
 @dataclass
 class BudgetSpec:
@@ -323,6 +325,7 @@ class ExperimentSpec:
 
 # Built plan (output of build_configs)
 
+
 @dataclass
 class SubRun:
     """One concrete training invocation derived from an :class:`ExperimentSpec`.
@@ -350,6 +353,7 @@ class BuiltPlan:
 
 
 # Effective-value resolution (three-layer merge)
+
 
 def _catalog_env_defaults(env_spec) -> Dict[str, Any]:
     """Non-null env-config defaults from the catalog."""
@@ -654,7 +658,7 @@ def _build_coevolution_plan(
                     or side_spec.algorithm
                 )
                 # RL / RL-HPO sides resolve their concrete AgileRL algorithm
-                # from ``optimizer_config['algorithm']``; 
+                # from ``optimizer_config['algorithm']``;
                 # inject the catalog name the user picked (the UI sends empty per-side hyperparameters).
                 optimizer_config.setdefault("algorithm", side_spec.algorithm)
             sides.append(
@@ -992,7 +996,7 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         _validate_aggregation(spec, report, algo_spec)
 
         # EA / CMA-ES / PSO require homogeneous observation sizes.
-        # When SuperSuit is available, build_configs auto-pads — warn instead of blocking.  
+        # When SuperSuit is available, build_configs auto-pads — warn instead of blocking.
         # Without SuperSuit, this is a hard error.
         if env_has_heterogeneous_obs and algo_spec.family == "evolutionary":
             try:

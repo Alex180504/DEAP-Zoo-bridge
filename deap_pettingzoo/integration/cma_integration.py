@@ -9,7 +9,7 @@ classical EA toolbox.
 Design notes
 ------------
 
-* CMA-ES samples **real-valued vectors** of length ``N = FixedTopologyGenome(...).get_weight_count()``. 
+* CMA-ES samples **real-valued vectors** of length ``N = FixedTopologyGenome(...).get_weight_count()``.
   Each sample is therefore represented as a list-typed DEAP individual (``creator.CMAIndividual``,
   a subclass of ``list``) so that :meth:`deap.cma.Strategy.update` can
   rebuild the sample matrix via ``numpy.array(population)``.

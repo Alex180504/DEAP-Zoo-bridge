@@ -209,6 +209,7 @@ def _apply_agilerl_grouping_patch() -> None:
 
 # Abstract base
 
+
 class AgileRLTrainer(BaselineTrainer):
     """Abstract :class:`BaselineTrainer` backed by AgileRL.
 
@@ -1488,6 +1489,7 @@ class AgileRLTrainer(BaselineTrainer):
 
 
 # Concrete trainers
+
 
 class MADDPGTrainer(AgileRLTrainer):
     """Multi-Agent DDPG via AgileRL (off-policy, decentralized actors,

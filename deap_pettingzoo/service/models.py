@@ -46,6 +46,7 @@ class ExperimentStatus(str, Enum):
 
 # Spec sub-models (API layer — mirror experiment_spec dataclasses)
 
+
 class BudgetSpecModel(BaseModel):
     mode: str = "env_steps"
     value: int = Field(default=50_000, gt=0)
