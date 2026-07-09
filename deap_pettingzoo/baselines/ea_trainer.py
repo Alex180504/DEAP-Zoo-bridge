@@ -402,7 +402,6 @@ class EATrainer(BaselineTrainer):
         num_workers: int = 1,
         parallel_backend: str = "process",
         scheduler_address: Optional[str] = None,
-        # --- multi-objective (Phase 1.3) ---
         fitness_spec: Optional[Any] = None,
     ):
         """Initialize EA trainer.

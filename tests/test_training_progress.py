@@ -1,4 +1,4 @@
-"""Tests for Phase 1 trainer-facing additions: progress, aggregation, recording.
+"""Tests for trainer-facing progress, aggregation, recording.
 
 Covers the base.py data models (:class:`ProgressEvent`, :class:`FitnessConfig`,
 :class:`RecordingConfig.max_recordings`) and their wiring into the EA / CMA-ES /
@@ -181,8 +181,7 @@ class TestRunDirAndAggregation:
     def test_aggregation_is_reachable(self):
         """'mean' and 'sum' aggregation must now be selectable and differ.
 
-        Previously every trainer hard-coded 'sum'; this is the gap Phase 1
-        closes. With identical seeds the two runs should not coincide
+        With identical seeds the two runs should not coincide
         (sum aggregates across all agents, mean divides by agent count).
         """
         cfg_sum = _tiny_config(fitness=FitnessConfig(aggregation_method="sum"))

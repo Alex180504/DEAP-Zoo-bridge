@@ -7,7 +7,7 @@ a side — as plain JSON-able data the setup UI can render into dropdowns.
 The mode / schedule / aggregation constants mirror the authoritative tuples in
 :mod:`deap_pettingzoo.baselines.coevolution.trainer` and
 :mod:`...coevolution.evaluator`. They are duplicated here (rather than imported)
-so the catalog stays import-light; a Phase 0 drift test asserts the two stay in
+so the catalog stays import-light; a dedicated drift test asserts the two stay in
 sync, giving single-source-of-truth-by-test without importing the heavy
 co-evolution stack to build a dropdown.
 """

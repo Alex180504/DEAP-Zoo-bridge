@@ -1,4 +1,4 @@
-"""Tests for the Phase 2 service package: models, db, runner, dispatcher, app.
+"""Tests for the service business logic: models, db, runner, dispatcher, app.
 
 Requires the ``fastapi``, ``pydantic``, ``httpx``, and ``uvicorn`` packages.
 These are part of the ``[service]`` extra and are installed in the dev venv.

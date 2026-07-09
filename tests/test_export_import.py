@@ -1,4 +1,4 @@
-"""Tests for the export/import utilities (Phase 2 of export/import feature).
+"""Tests for the export/import utilities.
 
 Covers: export manifest, run ZIP creation, experiment ZIP streaming,
 import validation (valid, missing manifest, path traversal, corrupted,

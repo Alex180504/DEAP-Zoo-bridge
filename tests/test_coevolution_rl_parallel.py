@@ -1,4 +1,4 @@
-"""End-to-end parallel RL co-evolution tests (Phase 2).
+"""End-to-end parallel RL co-evolution tests.
 
 Gated on AgileRL + torch availability.  Verifies:
 
@@ -282,7 +282,7 @@ class TestEAvsRLParallel:
     def test_ea_vs_rl_num_workers_2_succeeds(self):
         """A competitive run with num_workers=2 and an RL side must complete
         without error. EA evaluates against FrozenRLPolicyWrapper in
-        parallel; RL still collects serially (Phase 2 serial fallback)."""
+        parallel; RL still collects serially."""
         cfg = CoEvolutionConfig(
             mode="competitive_2pop",
             sides=[
