@@ -48,7 +48,7 @@ _SCHEDULE_HELP = {
 
 #: Tokens accepted by ``Side.optimizer`` that correspond to the standard,
 #: UI-exposable algorithms (plus the special ``frozen`` opponent). QDax / NEAT /
-#: HyperNEAT optimizers are Python-API-only per the UI spec and excluded here.
+#: HyperNEAT optimizers are Python-API-only and excluded here.
 _FROZEN_OPTIMIZER = "frozen"
 
 

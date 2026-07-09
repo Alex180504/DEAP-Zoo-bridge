@@ -53,9 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 EXPORT_MANIFEST_SCHEMA_VERSION = 1
 """Bump when the export manifest format changes incompatibly."""
@@ -76,10 +74,7 @@ _OPTIONAL_ARTIFACTS: Dict[str, List[str]] = {
 _MAX_EXTRACT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB sanity cap
 
 
-# ---------------------------------------------------------------------------
 # Result types
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class ImportValidationError:
@@ -106,9 +101,7 @@ class ImportItem:
     run_count: int
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _now_iso() -> str:
@@ -120,9 +113,7 @@ def _safe_filename(label: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in "._- ") else "_" for ch in label)[:80]
 
 
-# ---------------------------------------------------------------------------
 # Export manifest
-# ---------------------------------------------------------------------------
 
 
 def build_export_manifest(
@@ -151,9 +142,7 @@ def build_export_manifest(
     }
 
 
-# ---------------------------------------------------------------------------
 # Run-level export
-# ---------------------------------------------------------------------------
 
 
 def _iter_run_files(
@@ -225,9 +214,7 @@ def create_run_export_zip(
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
 # Experiment-level export (streaming)
-# ---------------------------------------------------------------------------
 
 
 def _iter_experiment_zip(
@@ -360,10 +347,7 @@ def export_filename(exp_id: str, label: str) -> str:
     return f"deap_export_{exp_id}_{safe_label}.zip"
 
 
-# ---------------------------------------------------------------------------
 # Import validation
-# ---------------------------------------------------------------------------
-
 
 def validate_import_zip(
     zip_path: Path,
@@ -470,7 +454,7 @@ def validate_import_zip(
                 )
 
             # 5. Path-traversal check.  Normalise to forward slashes first so
-            #    that Windows-style "..\\" entries are also caught.
+            #    that Windows format "..\\" entries are also caught.
             for name in names:
                 norm = name.replace("\\", "/")
                 if norm.startswith("/") or ".." in norm.split("/"):
@@ -530,9 +514,7 @@ def validate_import_zip(
         return ImportValidationResult(ok=False, errors=errors, warnings=warnings)
 
 
-# ---------------------------------------------------------------------------
 # Import extraction
-# ---------------------------------------------------------------------------
 
 
 def extract_import_zip(
@@ -626,16 +608,13 @@ def extract_import_zip(
     return extracted
 
 
-# ---------------------------------------------------------------------------
 # DB restore
-# ---------------------------------------------------------------------------
 
 
 def _parse_iso_to_epoch(value: Optional[str]) -> Optional[float]:
     """Reverse :func:`deap_pettingzoo.service.db._iso` — parse an archived
     ISO-8601 timestamp back to a Unix epoch float. Returns ``None`` for
-    missing/unparseable values (e.g. a 'queued' run's never-set
-    ``started_at``)."""
+    missing/unparseable values (e.g. a 'queued' run's never-set ``started_at``)."""
     if not value:
         return None
     try:

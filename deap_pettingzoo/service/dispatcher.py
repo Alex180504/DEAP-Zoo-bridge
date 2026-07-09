@@ -1,4 +1,4 @@
-"""Asyncio experiment dispatcher — manages the queue lifecycle.
+"""Asyncio experiment dispatcher that manages the queue lifecycle.
 
 The dispatcher runs as a background task in the FastAPI lifespan. Its loop:
 
@@ -218,7 +218,7 @@ class Dispatcher:
             or Path(os.environ.get("DEAP_RESULTS_ROOT", "results")) / "_experiments"
         )
 
-    # -- lifecycle (called from FastAPI lifespan) --------------------------
+    # Lifecycle (called from FastAPI lifespan)
 
     async def start(self) -> None:
         """Boot the dispatcher: crash-recovery, then begin the main loop."""
@@ -248,7 +248,7 @@ class Dispatcher:
             await _wait_or_kill(self._running_proc)
         logger.info("Dispatcher stopped")
 
-    # -- main loop ---------------------------------------------------------
+    # Main loop
 
     async def _loop(self) -> None:
         while True:
@@ -473,7 +473,7 @@ class Dispatcher:
                 "Experiment %s failed: %s", exp_id, summary[0] if summary else error
             )
 
-    # -- external control --------------------------------------------------
+    # External control
 
     async def cancel(self, exp_id: str) -> Optional[str]:
         """Cancel ``exp_id``. Returns ``'terminated'`` if running,

@@ -1,7 +1,7 @@
 """Hybrid hyperparameter discovery helpers.
 
 The catalog discovers an algorithm's hyperparameters using a **hybrid**
-strategy (see the UI-overhaul plan):
+strategy:
 
 * **Introspection** supplies the *names* and *defaults* — read from
   ``inspect.signature`` of the trainer constructor and/or a class-level

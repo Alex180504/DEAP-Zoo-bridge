@@ -16,7 +16,10 @@ heavy training dependency:
 * *What does the whole thing look like as one JSON document the backend can
   serve?* :func:`to_json`.
 
-Design note — **lazy imports**. The pure schema primitives
+Design note
+-----------
+
+The pure schema primitives
 (:class:`ParamSpec`, :class:`AlgorithmSpec`, :class:`EnvironmentSpec`, ...) are
 re-exported eagerly because they have no dependencies. Everything that touches
 the environment registry, trainers or compatibility checker is imported *inside*
@@ -68,7 +71,7 @@ __all__ = [
 ]
 
 
-# -- algorithms -----------------------------------------------------------
+# Algorithms
 
 
 def list_algorithms(*, only_available: bool = False) -> List[AlgorithmSpec]:
@@ -111,7 +114,7 @@ def is_algorithm_available(name: str) -> bool:
     return algorithms.is_algorithm_available(name)
 
 
-# -- environments ---------------------------------------------------------
+# Environments
 
 
 def list_environments(*, only_available: bool = False) -> List[EnvironmentSpec]:
@@ -135,7 +138,7 @@ def is_environment_available(name: str) -> bool:
     return environments.is_environment_available(name)
 
 
-# -- co-evolution ---------------------------------------------------------
+# Co-evolution
 
 
 def get_coevolution_options() -> Dict[str, Any]:
@@ -145,7 +148,7 @@ def get_coevolution_options() -> Dict[str, Any]:
     return coevolution.get_coevolution_options()
 
 
-# -- compatibility --------------------------------------------------------
+# Compatibility
 
 
 def compatible_algorithms(env_name: str) -> List[str]:
@@ -165,7 +168,7 @@ def compatibility_matrix(
     return compatibility.compatibility_matrix(env_name, algorithm_names)
 
 
-# -- full snapshot --------------------------------------------------------
+# Full catalog JSON
 
 
 def to_json(*, only_available: bool = False) -> Dict[str, Any]:
