@@ -1,10 +1,5 @@
 """Advanced-feature gate for the experiment service.
 
-The "advanced" surface — the dependency-install panel (``/env/install``) and the
-custom-script submission/execution path (``/experiments/script``) — is arbitrary
-code/command execution **by design**, consistent with the documented
-trusted-input / localhost model (see ``docs/known_issues.md``).
-
 It is gated behind the ``DEAP_ENABLE_ADVANCED`` environment variable. The default
 is **enabled** (so the single-user / localhost workflow works out of the box), but
 operators of a shared deployment can set ``DEAP_ENABLE_ADVANCED=0`` to disable the

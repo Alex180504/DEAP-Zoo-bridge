@@ -1,8 +1,8 @@
 """Optional-dependency availability probing for the catalog.
 
 Algorithms and environments in deap-bridge are gated behind optional pip
-extras (``rl-baselines`` → ``agilerl``/``torch``, ``aquarium`` →
-``marl_aquarium``, ``jax``/``qdax`` → ``jax``/``qdax`` ...). The catalog must
+extras (``rl-baselines`` -> ``agilerl``/``torch``, ``aquarium`` ->
+``marl_aquarium``, ``jax``/``qdax`` -> ``jax``/``qdax`` ...). The catalog must
 report *which* options are actually usable on the current install so the UI
 can grey out the rest instead of letting a user submit an experiment that
 fails at import time.

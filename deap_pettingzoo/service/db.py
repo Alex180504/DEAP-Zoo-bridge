@@ -44,9 +44,7 @@ def _now() -> float:
     return time.time()
 
 
-# ---------------------------------------------------------------------------
 # Connection helpers
-# ---------------------------------------------------------------------------
 
 
 def _connect(
@@ -113,16 +111,14 @@ def create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-# ---------------------------------------------------------------------------
 # Async CRUD
-# ---------------------------------------------------------------------------
 
 
 async def _run_sync(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
-# -- experiments -----------------------------------------------------------
+# Experiments
 
 
 async def insert_experiment(
@@ -438,7 +434,7 @@ async def set_pid(exp_id: str, pid: int, path: Optional[str] = None) -> None:
     await _run_sync(_set)
 
 
-# -- queue_state -----------------------------------------------------------
+# Queue state
 
 
 async def get_queue_state(path: Optional[str] = None) -> Dict[str, Any]:
@@ -514,9 +510,7 @@ async def update_progress(
     await _run_sync(_upd)
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:

@@ -1,7 +1,7 @@
 """Dependency-free schema primitives for the unified catalog.
 
 This module is the **foundation layer** of :mod:`deap_pettingzoo.catalog`.
-It is deliberately self-contained — it imports only the Python standard
+It is self-contained — it imports only the Python standard
 library, never :mod:`deap_pettingzoo.baselines`, :mod:`...environments`,
 ``torch``, ``agilerl`` or ``jax``. That guarantees two things:
 
@@ -220,7 +220,7 @@ class ParamSpec:
     nullable: bool = False
     unavailable_choices: Tuple[Any, ...] = ()
 
-    # -- presentation -----------------------------------------------------
+    # Presentation
 
     @property
     def display_label(self) -> str:
@@ -235,7 +235,7 @@ class ParamSpec:
         unavailable = set(self.unavailable_choices)
         return tuple(c for c in self.choices if c not in unavailable)
 
-    # -- coercion ---------------------------------------------------------
+    # Coercion
 
     def coerce(self, value: Any) -> Any:
         """Convert a loosely-typed input into this parameter's native type.
@@ -329,7 +329,7 @@ class ParamSpec:
 
         raise ValueError(f"Unsupported ParamType {self.type!r}")  # pragma: no cover
 
-    # -- validation -------------------------------------------------------
+    # Validation
 
     def validate(self, value: Any, path: Optional[str] = None) -> List[ValidationIssue]:
         """Validate ``value`` against this spec, returning any issues.
@@ -380,7 +380,7 @@ class ParamSpec:
 
         return issues
 
-    # -- serialisation ----------------------------------------------------
+    # Serialization
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a JSON-serialisable description for the frontend."""

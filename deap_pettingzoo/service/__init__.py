@@ -1,4 +1,4 @@
-"""DEAP-bridge experiment service — FastAPI sidecar for the UI overhaul.
+"""DEAP-bridge experiment service — FastAPI sidecar for the UI service.
 
 Serves the catalog as JSON, manages experiment submission / queue lifecycle,
 and provides live progress + stdout streaming.

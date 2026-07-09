@@ -1,6 +1,6 @@
 """FastAPI application — the REST sidecar for experiment lifecycle management.
 
-This module exposes the full REST surface described in the UI-overhaul plan.
+This module exposes the full REST API surface for inter-service communication.
 The Streamlit frontend connects to it via ``FASTAPI_URL`` and never imports
 ``torch`` / ``agilerl`` / ``jax``.
 
@@ -51,19 +51,14 @@ except ImportError:  # pragma: no cover
         "Install with: pip install deap-pettingzoo[service]"
     )
 
-
-# ---------------------------------------------------------------------------
 # Globals (set by lifespan / create_app)
-# ---------------------------------------------------------------------------
 
 _dispatcher: Optional[Dispatcher] = None
 _db_path: Optional[str] = None
 _experiments_dir: Optional[Path] = None
 
 
-# ---------------------------------------------------------------------------
 # Lifespan
-# ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
@@ -91,9 +86,7 @@ async def _lifespan(app: FastAPI):
     logger.info("Service stopped")
 
 
-# ---------------------------------------------------------------------------
 # App factory
-# ---------------------------------------------------------------------------
 
 
 def create_app(
@@ -137,9 +130,7 @@ def create_app(
     return app
 
 
-# ---------------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------------------------
 
 
 def _validate_spec(spec: ExperimentSpecModel) -> ValidationReportModel:
@@ -189,16 +180,12 @@ def _experiment_to_record(
     )
 
 
-# ---------------------------------------------------------------------------
 # Log / stdout tailing helper (shared by GET /experiments/{id}/stdout and /logs)
-# ---------------------------------------------------------------------------
 
 
 from deap_pettingzoo.service.logtail import read_tail as _read_tail  # noqa: E402
 
-# ---------------------------------------------------------------------------
 # Health
-# ---------------------------------------------------------------------------
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -213,7 +200,7 @@ def _register_routes(app: FastAPI) -> None:
             advanced_enabled=advanced_enabled(),
         )
 
-    # -- catalog -----------------------------------------------------------
+    # Catalog
 
     @app.get("/catalog")
     async def get_catalog():
@@ -276,7 +263,7 @@ def _register_routes(app: FastAPI) -> None:
         )
         return catalog.compatibility_matrix(env, algo_list)
 
-    # -- experiments -------------------------------------------------------
+    # Experiments
 
     @app.post("/experiments", status_code=201, response_model=SubmitResponse)
     async def submit_experiment(spec: ExperimentSpecModel):
@@ -567,7 +554,7 @@ def _register_routes(app: FastAPI) -> None:
                     },
                 )
 
-            # Read experiment.json from the ZIP in memory — do not rely on
+            # Read experiment.json from the ZIP in memory; do not rely on
             # it being written to disk (extract_import_zip skips metadata files).
             import zipfile as _zipfile
 
@@ -618,7 +605,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         return {"spec": raw.get("spec", {})}
 
-    # -- run management ----------------------------------------------------
+    # Run management
 
     def _results_root() -> Path:
         return Path(os.environ.get("DEAP_RESULTS_ROOT", "results")).resolve()
@@ -677,7 +664,7 @@ def _register_routes(app: FastAPI) -> None:
                 errors.append({"path": str(p), "error": str(exc)})
         return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}
 
-    # -- queue control -----------------------------------------------------
+    # Queue control
 
     @app.get("/queue", response_model=QueueState)
     async def get_queue():
@@ -693,10 +680,10 @@ def _register_routes(app: FastAPI) -> None:
         await db.set_paused(False, path=_db_path)
         return {"paused": False}
 
-    # -- advanced: dependency install + custom-script submission -----------
+    # Advanced: dependency install + custom-script submission
     #
     # Arbitrary code/command execution by design — gated behind
-    # DEAP_ENABLE_ADVANCED (default on). See docs/known_issues.md.
+    # DEAP_ENABLE_ADVANCED (default on).
 
     def _require_advanced() -> None:
         from deap_pettingzoo.service.advanced import advanced_enabled
@@ -752,7 +739,7 @@ def _register_routes(app: FastAPI) -> None:
 
         # Store the script as a discriminated "script"-kind spec. The dispatcher
         # branches on the "kind" field and runs the source as a subprocess.
-        # NOTE: we serialise the dict directly (not via ExperimentSpecModel) so
+        # NOTE: serialise the dict directly (not via ExperimentSpecModel) so
         # the extra `script`/`kind`/`entry` keys are preserved in spec_json.
         spec_json = json.dumps(
             {

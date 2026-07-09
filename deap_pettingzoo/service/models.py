@@ -6,7 +6,8 @@ validation (catalog compatibility, budget-mode support by algorithm) is
 delegated to :func:`~deap_pettingzoo.baselines.experiment_spec.validate_spec`
 as a second layer (defense in depth).
 
-Design notes:
+Design notes
+------------
 - The API-layer :class:`BudgetSpec`, :class:`FitnessSettings` etc. mirror the
   dataclasses in :mod:`deap_pettingzoo.baselines.experiment_spec` but are
   **pydantic** so they participate in FastAPI's automatic OpenAPI schema
@@ -32,9 +33,7 @@ except ImportError:  # pragma: no cover
         "Install with: pip install deap-pettingzoo[service]"
     )
 
-# ---------------------------------------------------------------------------
 # Enums
-# ---------------------------------------------------------------------------
 
 
 class ExperimentStatus(str, Enum):
@@ -45,10 +44,7 @@ class ExperimentStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-# ---------------------------------------------------------------------------
 # Spec sub-models (API layer — mirror experiment_spec dataclasses)
-# ---------------------------------------------------------------------------
-
 
 class BudgetSpecModel(BaseModel):
     mode: str = "env_steps"
@@ -175,9 +171,7 @@ class CoevolutionSettingsModel(BaseModel):
         )
 
 
-# ---------------------------------------------------------------------------
 # Top-level request model
-# ---------------------------------------------------------------------------
 
 
 class ExperimentSpecModel(BaseModel):
@@ -225,9 +219,7 @@ class ExperimentSpecModel(BaseModel):
         )
 
 
-# ---------------------------------------------------------------------------
 # Response models
-# ---------------------------------------------------------------------------
 
 
 class ValidationIssueModel(BaseModel):
@@ -297,9 +289,7 @@ class HealthResponse(BaseModel):
     Setup → Advanced section."""
 
 
-# ---------------------------------------------------------------------------
 # Advanced surface — dependency install + custom-script submission
-# ---------------------------------------------------------------------------
 
 
 class InstallRequest(BaseModel):

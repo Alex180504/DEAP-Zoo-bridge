@@ -20,10 +20,6 @@ Safety model (this is gated behind ``DEAP_ENABLE_ADVANCED`` — see
 Jobs run detached; combined stdout/stderr stream to
 ``<DEAP_RESULTS_ROOT>/_installs/<job_id>/install.log`` and are tailed by the
 status endpoint via :func:`deap_pettingzoo.service.logtail.read_tail`.
-
-Caveat (containerised deployment): packages installed this way live in the
-backend container's site-packages and are **lost on container rebuild**.  For a
-permanent environment, add the package to ``Dockerfile.server``.
 """
 
 from __future__ import annotations
