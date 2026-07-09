@@ -1,14 +1,14 @@
 """Reconstruct a runnable policy from a logged run.
-# TODO: FInish live rollout functionality
+
 The UI's *Live Rollout* page calls
 :func:`load_policy` to turn a :class:`~deap_pettingzoo.analysis.loaders.RunRecord`
 back into a :class:`~deap_pettingzoo.policies.base.PolicyProtocol` it can
 roll out against an env factory.
 
-The loader is intentionally read-only (no env construction) so the UI can
+The loader is read-only (no env construction) so the UI can
 preview metadata before deciding whether to spin up a rollout env.
 """
-
+# TODO: Finish the live rollout functionality
 from __future__ import annotations
 
 import json

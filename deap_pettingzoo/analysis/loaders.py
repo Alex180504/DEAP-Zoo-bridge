@@ -1,6 +1,6 @@
-"""Hydrate on-disk run artefacts into Python objects.
+"""Convert on-disk run artefacts into Python objects.
 
-The loaders are deliberately tolerant: missing optional artefacts
+The loaders are deliberately tolerant to missing imports: missing optional artifacts
 (``episodes.csv``, ``trajectories.parquet``) silently degrade to
 ``None`` rather than raising, so analysis code can branch on
 availability. Only :file:`manifest.json` is required.

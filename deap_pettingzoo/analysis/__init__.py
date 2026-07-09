@@ -1,13 +1,14 @@
 """Analysis library for deap-bridge experiment results.
 
-This package is a *pure consumer* of the on-disk artefacts produced by
+This package is a *pure consumer* of the on-disk artifacts produced by
 :mod:`deap_pettingzoo.utils.logging`. It is intentionally decoupled from
 the trainer code path: nothing in :mod:`deap_pettingzoo.baselines`
 imports from here, so the analysis stack can be installed and used
 without touching production training paths (and vice versa — training
 runs without ``deap-pettingzoo[analysis]`` installed).
 
-The public surface is intentionally small:
+API surface:
+------------
 
 - :func:`load_run` / :func:`load_experiment` — hydrate on-disk runs
   into :class:`RunRecord` / :class:`Experiment` objects.
