@@ -9,15 +9,12 @@
 #   docker run -p 8100:8100 -v ./results:/app/results deap-bridge-service
 #
 # GPU / CUDA variant (for GPU-accelerated RL training):
-#   The torch wheel index is a build arg, so no base-image change is needed —
-#   the pip CUDA wheels bundle their own CUDA runtime; the host driver is
-#   injected at run time by the NVIDIA Container Toolkit (`--gpus all`).
+#   The torch wheel index is a build arg, so no base-image change is needed.
 #     docker build -f Dockerfile.server \
 #       --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 \
 #       -t deap-bridge-service:cuda .
 #     docker run --gpus all -p 8100:8100 -v ./results:/app/results deap-bridge-service:cuda
-#   Or use the compose override: see docker-compose.gpu.yml and the README
-#   "GPU support" section. Default build stays CPU-only (lean, no GPU needed).
+#   Or use the compose override: see docker-compose.gpu.yml
 # ===========================================================================
 
 FROM python:3.11-slim-bookworm
@@ -46,7 +43,7 @@ WORKDIR /app
 # Copy only what pip needs first (layer caching for deps).
 COPY pyproject.toml README.md LICENSE.txt ./
 COPY deap_pettingzoo/ deap_pettingzoo/
-# Ship the example experiment scripts so user-pasted scripts (Setup → Advanced)
+# Ship the example experiment scripts so user-pasted scripts (Setup -> Advanced)
 # that import `examples.pursuit_evasion.*` modules resolve. PYTHONPATH/
 # DEAP_PROJECT_ROOT are set below so both `deap_pettingzoo` and `examples` import.
 COPY examples/ examples/
@@ -84,9 +81,6 @@ RUN mkdir -p /app/results /app/data && chown deap:deap /app/results /app/data
 ENV DEAP_RESULTS_ROOT=/app/results
 ENV DEAP_SERVICE_DB=/app/data/_service.db
 
-# Project root for custom-script (Setup → Advanced) execution: prepended to the
-# script subprocess's PYTHONPATH so `import deap_pettingzoo` and `import
-# examples...` both resolve regardless of the experiment working directory.
 ENV DEAP_PROJECT_ROOT=/app
 ENV PYTHONPATH=/app
 

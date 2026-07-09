@@ -69,7 +69,7 @@ def test_warn_skipped_when_recording_disabled():
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=100,
-        # No recording= kwarg → default RecordingConfig(enabled=False).
+        # No recording= kwarg -> default RecordingConfig(enabled=False).
     )
 
     with warnings.catch_warnings(record=True) as w:

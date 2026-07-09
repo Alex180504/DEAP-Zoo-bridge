@@ -42,21 +42,21 @@ state "Experiment lifecycle" as Lifecycle {
 
 note right of Active
   Polls every ~2s via st.rerun():
-  • GET /queue → paused/running/queued
-  • GET /experiments/{id}/progress → bar + metrics
-  • GET /experiments/{id}/stdout → log tail
-  • GET /experiments → table data
+  • GET /queue -> paused/running/queued
+  • GET /experiments/{id}/progress -> bar + metrics
+  • GET /experiments/{id}/stdout -> log tail
+  • GET /experiments -> table data
 end note
 
 note right of Lifecycle
   Queue-level pause:
-  • Pause → dispatcher stops dequeueing
+  • Pause -> dispatcher stops dequeueing
   • Running experiment continues
-  • Resume → dispatcher resumes
+  • Resume -> dispatcher resumes
 
   Cancel:
-  • Queued → status = cancelled (skip)
-  • Running → proc.terminate() (+ kill timeout)
+  • Queued -> status = cancelled (skip)
+  • Running -> proc.terminate() (+ kill timeout)
   • Partial results preserved in experiment dir
 end note
 

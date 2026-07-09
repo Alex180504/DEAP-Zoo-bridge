@@ -175,7 +175,7 @@ class TestFrozenWrapperIPPO:
 
     def test_ippo_grouped_actor_mapping(self):
         """A grouped IPPO shares one actor across adversaries; the frozen
-        wrapper must carry the per-agent → actor index map."""
+        wrapper must carry the per-agent -> actor index map."""
         wrapper = _build_rl_wrapper(algo="ippo", role=("adversary",))
         frozen = wrapper.make_frozen_cpu_snapshot()
         # 3 adversaries share a single actor.

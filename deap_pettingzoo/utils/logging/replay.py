@@ -48,7 +48,7 @@ class FrameRecorder:
         that its larger dimension is at most ``max_dim`` pixels before
         buffering.  Useful for large envs that would degrate performance at full scale.
     episode_prefix:
-        String prepended to each output filename, e.g. ``"ea_"`` →
+        String prepended to each output filename, e.g. ``"ea_"`` ->
         ``frames/ea_episode_0001.mp4``.
 
     Use ``recorder.enabled = False`` to short-circuit recording without

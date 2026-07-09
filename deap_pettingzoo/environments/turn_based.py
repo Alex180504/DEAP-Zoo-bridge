@@ -123,7 +123,7 @@ class _TurnBasedAdapterBase(ParallelEnv):
 
 
 class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
-    """Turn-based AEC env → parallel-shaped facade.
+    """Turn-based AEC env -> parallel-shaped facade.
 
     Every ``reset`` / ``step`` returns dicts keyed by all currently-active
     agents. At each ``step`` only the current player's action is executed

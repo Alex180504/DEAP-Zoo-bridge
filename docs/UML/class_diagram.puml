@@ -77,7 +77,7 @@ package "deap_pettingzoo.policies" {
         + low, high: np.ndarray
         .. single-squash contract ..
         + decode(raw) -> np.ndarray
-        .. decode: tanh(raw) → rescale to [low, high] ..
+        .. decode: tanh(raw) -> rescale to [low, high] ..
         .. requires genome.output_activation="linear" so ..
         .. tanh is applied exactly once (not twice) ..
     }
@@ -198,7 +198,7 @@ package "deap_pettingzoo.environments" {
     class JaxEnvToPettingZooAdapter {
         per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
         .. termination contract ..
-        dones["__truncated__"] → truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
+        dones["__truncated__"] -> truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
     }
 
     JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
@@ -885,7 +885,7 @@ package "deap_pettingzoo.contrib.neat" as neat_pkg {
         - _substrate: Substrate
         - _network: neat.nn.RecurrentNetwork
         - _activation_steps: int
-        -- CPPN → substrate-query phenotype
+        -- CPPN -> substrate-query phenotype
         + get_action(obs, action_mask=None) -> Any
         + reset() -> None
     }
@@ -893,7 +893,7 @@ package "deap_pettingzoo.contrib.neat" as neat_pkg {
     class ESHyperNeatPolicy {
         - _es_params: dict
         - _activation_steps: int
-        -- CPPN → ESNetwork quadtree phenotype
+        -- CPPN -> ESNetwork quadtree phenotype
         + get_action(obs, action_mask=None) -> Any
         + reset() -> None
     }
@@ -1387,8 +1387,8 @@ RunManifest ..> capture_environment_metadata : "fills .environment"
 note bottom of ExperimentLogger
   All baseline trainers use
   baselines._logging_helpers.build_logger()
-  → ExperimentLogger.from_config().
-  When config.output_dir is None →
+  -> ExperimentLogger.from_config().
+  When config.output_dir is None ->
   NoOpLogger (zero disk I/O).
   Backend has no functional dependency
   on artefacts; the analysis & UI

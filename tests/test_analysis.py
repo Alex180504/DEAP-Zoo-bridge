@@ -124,7 +124,7 @@ def test_cohens_d_sign_and_magnitude():
     a = np.full(20, 1.0) + 1e-3 * np.arange(20)
     b = np.full(20, 0.0) + 1e-3 * np.arange(20)
     d = cohens_d(a, b)
-    assert d > 100  # essentially identical std → very large effect
+    assert d > 100  # essentially identical std -> very large effect
 
 
 def test_cliffs_delta_bounds():

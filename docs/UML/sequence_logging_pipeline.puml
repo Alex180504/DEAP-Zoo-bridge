@@ -1,6 +1,6 @@
 @startuml sequence_logging_pipeline
 !theme plain
-title Diagnostic Logging Pipeline – configure_logging → handlers → retrieval
+title Diagnostic Logging Pipeline – configure_logging -> handlers -> retrieval
 
 ' NOTE: This is backend *diagnostic* logging (exceptions, warnings, lifecycle,
 ' component activation).  For the *experiment-results* pipeline (metrics /

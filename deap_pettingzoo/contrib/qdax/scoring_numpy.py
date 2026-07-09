@@ -340,7 +340,7 @@ def _rollout_once(
 
 
 def _numpy_rollout(args):
-    """Worker entry point: one genotype → averaged fitness/descriptor.
+    """Worker entry point: one genotype -> averaged fitness/descriptor.
 
     Args:
         args: ``(spec, flat_params, seed)`` tuple. ``spec`` is a

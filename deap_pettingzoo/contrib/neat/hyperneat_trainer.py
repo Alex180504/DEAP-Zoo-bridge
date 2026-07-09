@@ -110,7 +110,7 @@ class HyperNEATTrainer(NEATTrainer):
             hidden_layers = params.get("substrate_hidden_layers", None)
             if hidden_layers is None:
                 # HyperNEAT MUST have at least one hidden layer; without
-                # hidden nodes the CPPN can only produce direct input→output
+                # hidden nodes the CPPN can only produce direct input->output
                 # weights and the phenotype effectively does nothing.
                 hidden_layers = [4, 4]
             substrate = substrate_for_env(

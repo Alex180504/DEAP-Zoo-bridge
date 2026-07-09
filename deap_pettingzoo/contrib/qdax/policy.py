@@ -16,7 +16,7 @@ The public contract:
 * :class:`FlaxPolicyAdapter` — satisfies
   :class:`~deap_pettingzoo.baselines.base.PolicyProtocol`
   (``get_action(obs, action_mask=None) -> np.ndarray | int``) and
-    marshals numpy ↔ JAX at the boundary. Used in numpy-boundary
+    marshals numpy <-> JAX at the boundary. Used in numpy-boundary
   scoring and by :class:`QDaxRepertoirePool` when sampling an opponent
   from a repertoire cell.
 

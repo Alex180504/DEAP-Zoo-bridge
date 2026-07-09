@@ -105,7 +105,7 @@ class TestPSOChampionFitnessNotStale:
         assert np.isfinite(re_eval), f"Re-eval fitness is non-finite: {re_eval}"
         assert abs(re_eval - reported) < abs(reported) * 2.0 + 20.0, (
             f"Re-eval fitness {re_eval:.2f} diverges from reported "
-            f"{reported:.2f} — stale genome→fitness pairing suspected"
+            f"{reported:.2f} — stale genome->fitness pairing suspected"
         )
 
     def test_champion_genome_produces_valid_actions(self):

@@ -41,7 +41,7 @@ else validation ok
 end
 
 == Re-run (UI-origin experiments only) ==
-User -> Browse: select UI-origin runs → ⚙️ Manage → 🔄 Load spec into Setup
+User -> Browse: select UI-origin runs -> ⚙️ Manage -> 🔄 Load spec into Setup
 Browse -> API: GET /experiments/{exp_id}/spec
 API -> DB: get_experiment(exp_id)
 DB --> API: {spec: ExperimentSpec}

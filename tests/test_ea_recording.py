@@ -49,7 +49,7 @@ def test_ea_records_per_generation(tmp_path: Path):
         ),
     )
     trainer.train(config)
-    # mode=EVERY → one train artefact per generation (5).
+    # mode=EVERY -> one train artefact per generation (5).
     assert _count_frames(tmp_path) == 5
 
 

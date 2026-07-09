@@ -683,7 +683,7 @@ with tab_rec:
                 value=int(_prev_n),
                 min_value=1,
                 step=1,
-                help="First → start of run, last → end, the rest spaced evenly.",
+                help="First -> start of run, last -> end, the rest spaced evenly.",
             )
         )
     elif rec_mode == "interval":

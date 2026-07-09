@@ -124,10 +124,10 @@ def test_aquarium_extractor_reads_entity_positions() -> None:
     result = extractor({}, env)
     assert result is not None
     assert result.shape == (3, 2)
-    # predator_0 at (100, 200) → (0.05, 0.0667)
+    # predator_0 at (100, 200) -> (0.05, 0.0667)
     np.testing.assert_allclose(result[0, 0], 100 / 2000, atol=1e-5)
     np.testing.assert_allclose(result[0, 1], 200 / 3000, atol=1e-5)
-    # prey_0 at (1000, 1500) → (0.5, 0.5)
+    # prey_0 at (1000, 1500) -> (0.5, 0.5)
     np.testing.assert_allclose(result[2, 0], 0.5, atol=1e-5)
     np.testing.assert_allclose(result[2, 1], 0.5, atol=1e-5)
 

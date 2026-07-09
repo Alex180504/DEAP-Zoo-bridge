@@ -1,5 +1,5 @@
 @startuml sequence_multitask_aggregation
-title Multi-task Aggregation — collect → normalise → rliable forest
+title Multi-task Aggregation — collect -> normalise -> rliable forest
 
 actor "Researcher" as R
 participant "Experiment" as EX

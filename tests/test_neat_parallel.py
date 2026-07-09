@@ -17,7 +17,7 @@ from deap_pettingzoo.baselines.coevolution.pools import (
 
 
 class TestNeatParallel:
-    """Parallel evaluation: snapshot → worker rebuild → policy evaluation."""
+    """Parallel evaluation: snapshot -> worker rebuild -> policy evaluation."""
 
     def test_snapshot_roundtrip_many_genomes(self):
         """Multiple genomes should survive the round-trip."""
@@ -75,5 +75,5 @@ class TestNeatParallel:
         obs = np.random.randn(4).astype(np.float32)
         a1 = p1.get_action(obs)
         a2 = p2.get_action(obs)
-        # Same genome, same obs → same action (deterministic).
+        # Same genome, same obs -> same action (deterministic).
         assert a1 == a2

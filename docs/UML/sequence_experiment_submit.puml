@@ -35,9 +35,9 @@ API --> Client: 201 {id, status="queued", position}
 Client --> Setup: SubmitResponse
 Setup --> User: success toast + navigate to Queue
 
-== Submit (custom script — Setup → Advanced) ==
+== Submit (custom script — Setup -> Advanced) ==
 note over Setup, API: gated by DEAP_ENABLE_ADVANCED (else 403)
-User -> Setup: Advanced tab → paste script → "Submit to queue"
+User -> Setup: Advanced tab -> paste script -> "Submit to queue"
 Setup -> Client: POST /experiments/script {script, label}
 Client -> API: HTTP POST
 API -> API: validate_script_source(script)\n(ast.parse + structural checks)
@@ -51,7 +51,7 @@ note over Disp: _loop body wrapped in try/except —\na single hung/erroring exp
 Disp -> Disp: _loop: poll every 1s
 Disp -> DB: dequeue_next()\n(One atomic UPDATE...RETURNING,\nqueued -> running + started_at, gated on\nnot-paused + no other 'running' row)
 DB --> Disp: experiment (spec_json, id) — already 'running' in DB
-Disp -> Disp: parse spec_json → kind ("spec" | "script")\nderive per-experiment timeout from budget\n(_compute_timeout_seconds)
+Disp -> Disp: parse spec_json -> kind ("spec" | "script")\nderive per-experiment timeout from budget\n(_compute_timeout_seconds)
 note right of Disp: mkdir / write spec / open _stdout.log\nall inside the same try/except as the spawn below\n — a filesystem error marks failed,\nit cannot kill the dispatcher task
 
 alt kind == "script"
@@ -65,8 +65,8 @@ note right of Disp: logger.info "Experiment {id} running (pid, log, timeout)"\n(
 
 == Training ==
 Runner -> Runner: configure_logging()\n(console only; level inherited via DEAP_LOG_LEVEL env)
-Runner -> Runner: load spec → re-validate
-Runner -> Runner: build_configs(spec) → [SubRun, ...]
+Runner -> Runner: load spec -> re-validate
+Runner -> Runner: build_configs(spec) -> [SubRun, ...]
 note right of Runner: logger.info component activation\n(env, algorithms, budget, parallelism, coevolution)
 note over Runner, Evaluator: standard mode only — one shared UnifiedEvaluator\nfor the whole comparison (co-evolution sub-runs are not re-evaluated)
 loop for each SubRun (algo × seed)
@@ -83,7 +83,7 @@ loop for each SubRun (algo × seed)
     Evaluator --> Runner: EvalResult(mean_reward, std_reward)
     deactivate Evaluator
     Runner -> Runner: record eval_mean_reward / eval_std_reward\n+ provenance="held_out_unified" into _result.json final_metrics
-    Runner -> Runner: _persist_eval_metrics → merge eval keys into\nmanifest.json final_summary + summary.json
+    Runner -> Runner: _persist_eval_metrics -> merge eval keys into\nmanifest.json final_summary + summary.json
 end
 note right of Runner: on failure: logger.exception(...) before _result.json
 Runner -> Runner: write _result.json\n{status, run_dirs[], final_metrics{eval_mean_reward, ...}, error?}
@@ -98,8 +98,8 @@ alt timeout expires
 else proc exits in time
     note right of Disp: kind=="script": synthesise _result.json from exit code\n+ run_dirs discovered via rglob("manifest.json")
     Disp -> Disp: read _result.json
-    Disp -> DB: exit=0 → set_completed\n≠0 → set_failed
-    note right of Disp: completed → logger.info\nfailed → logger.error "Experiment {id} failed: ..."
+    Disp -> DB: exit=0 -> set_completed\n≠0 -> set_failed
+    note right of Disp: completed -> logger.info\nfailed -> logger.error "Experiment {id} failed: ..."
 end
 Disp --> DB: done
 

@@ -1,9 +1,9 @@
 @startuml sequence_env_install
 !theme plain
-title Dependency Install — Setup → Advanced (gated)
+title Dependency Install — Setup -> Advanced (gated)
 
 actor User
-participant "Setup → Advanced\n(Streamlit)" as Adv
+participant "Setup -> Advanced\n(Streamlit)" as Adv
 participant "api_client\n(httpx)" as Client
 participant "FastAPI\n/app.py" as API
 participant "install_jobs.py\n(job manager)" as Jobs
@@ -13,13 +13,13 @@ participant "install.log" as Log
 note over Adv, API: Tab shown only if /health advanced_enabled (DEAP_ENABLE_ADVANCED)
 
 == Start install ==
-User -> Adv: choose op (pip install | pip uninstall | git clone)\n+ package/URL → "Run"
+User -> Adv: choose op (pip install | pip uninstall | git clone)\n+ package/URL -> "Run"
 Adv -> Client: POST /env/install {manager, action, args}
 Client -> API: HTTP POST
 API -> API: _require_advanced() (else 403)
 API -> Jobs: start_install(manager, action, args)
 Jobs -> Jobs: build_command(...)\nallowlist + reject metacharacters
-note right of Jobs: InstallValidationError → 400
+note right of Jobs: InstallValidationError -> 400
 Jobs -> Proc: create_subprocess_exec(\n  [python -m pip ...] | [git clone --depth 1 ...],\n  stdout=install.log)
 Jobs -> Jobs: create_task(_await_proc)\n(track {job_id: proc})
 Jobs --> API: job_id
@@ -37,7 +37,7 @@ loop until status != running
     Client --> Adv: render command + 🔄/✅/❌ badge + st.code(log)
 end
 
-Proc --> Jobs: exit code → status completed/failed
+Proc --> Jobs: exit code -> status completed/failed
 
 note over Adv
   Container caveat: installs land in the backend

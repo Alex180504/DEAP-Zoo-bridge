@@ -102,7 +102,7 @@ dask = [
 ui = [
     "deap-pettingzoo[analysis]",
     "streamlit>=1.37",  # st.fragment (Queue/Advanced live panels) + st.container(height=...)
-    "streamlit-code-editor>=0.1.20",  # Setup → Advanced script editor (opt-in; reliable st.text_area fallback)
+    "streamlit-code-editor>=0.1.20",  # Setup -> Advanced script editor (opt-in; reliable st.text_area fallback)
     "plotly>=5.0",
     "pillow>=10.0",
     "imageio>=2.31",

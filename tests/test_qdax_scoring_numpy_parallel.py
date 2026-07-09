@@ -5,7 +5,7 @@ they exercise :func:`make_numpy_scoring_function` directly to verify:
 
 * The serial path returns finite fitness/descriptor arrays.
 * The process-pool path returns identical results to the serial path
-  for the same inputs (same key → same per-rollout seeds).
+  for the same inputs (same key -> same per-rollout seeds).
 * The returned callable exposes ``close()``, ``_num_workers``, and
   ``_parallel_backend`` for pool lifecycle management.
 """
@@ -122,7 +122,7 @@ class TestNumpyScoringParallel:
         finally:
             close_scoring_function(parallel_fn)
 
-        # Same key → same seeds → identical fitness/descriptor.
+        # Same key -> same seeds -> identical fitness/descriptor.
         np.testing.assert_allclose(sf, pf, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(sd, pd, rtol=1e-5, atol=1e-5)
 

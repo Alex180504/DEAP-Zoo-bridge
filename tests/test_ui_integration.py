@@ -1,5 +1,5 @@
 """Tests for UI: api_client, param_widget coercion, validation grouping,
-and the Setup page's form→spec logic (streamlit-free helpers).
+and the Setup page's form->spec logic (streamlit-free helpers).
 """
 
 from __future__ import annotations

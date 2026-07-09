@@ -26,7 +26,7 @@ def create_cppn(
 ) -> neat.nn.FeedForwardNetwork:
     """Build a CPPN (:class:`~neat.nn.FeedForwardNetwork`) from a genome.
 
-    This is the standard "genome → phenotype" method used by pureples
+    This is the standard "genome -> phenotype" method used by pureples
     for HyperNEAT / ES-HyperNEAT.  The output nodes' activation function
     can be overridden (e.g. to ``"sigmoid"`` for weight-production CPPNs).
 

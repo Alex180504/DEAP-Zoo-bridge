@@ -130,7 +130,7 @@ def build_neat_config(
         output_size: Dimension of the action vector / logits (num outputs).
         pop_size: Population size for the NEAT run.
         seed: Optional random seed placed into ``[NEAT] seed = ...``.
-        overrides: Optional nested dict of section → key → value to
+        overrides: Optional nested dict of section -> key -> value to
             override any default parameter.
 
     Returns:
@@ -230,7 +230,7 @@ def build_cppn_config(
     seed:
         Optional RNG seed.
     overrides:
-        Optional section→key→value overrides (merged on top of
+        Optional section->key->value overrides (merged on top of
         defaults).
 
     Returns

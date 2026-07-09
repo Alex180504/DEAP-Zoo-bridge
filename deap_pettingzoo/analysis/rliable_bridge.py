@@ -307,7 +307,7 @@ def sample_efficiency_curve(
     ``x``, ``iqm``, ``lo``, ``hi``.
 
     When ``y_col`` is ``None`` (default) the value column is
-    auto-detected (``best`` → ``mean`` → ``max``) across all runs, so
+    auto-detected (``best`` -> ``mean`` -> ``max``) across all runs, so
     product-path runs that log ``mean`` but never ``best`` yield a
     non-empty curve. Mirrors
     :func:`deap_pettingzoo.analysis.aggregate.learning_curve_with_ci`.

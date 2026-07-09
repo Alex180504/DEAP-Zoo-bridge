@@ -286,7 +286,7 @@ class HealthResponse(BaseModel):
     advanced_enabled: bool = True
     """Whether the advanced (install panel + custom-script) surface is enabled.
     Driven by ``DEAP_ENABLE_ADVANCED``; the UI reads this to show/hide the
-    Setup → Advanced section."""
+    Setup -> Advanced section."""
 
 
 # Advanced surface — dependency install + custom-script submission

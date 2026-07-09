@@ -29,13 +29,13 @@ LP -> RS: run_episode(run_dir, max_steps, time_budget)
 RS -> ENV: build from manifest.env_name + env_config\n(render_mode="rgb_array")
 RS -> POL: load policy from manifest.artifacts\n(or rebuild from summary.best_genome)
 
-ENV -> RS: reset() → obs
+ENV -> RS: reset() -> obs
 loop while not done and within budget
     RS -> POL: act(obs)
     POL --> RS: action
     RS -> ENV: step(action)
     ENV --> RS: obs, reward, done, info
-    ENV --> RS: render() → rgb frame
+    ENV --> RS: render() -> rgb frame
     RS --> LP: yield frame
     LP --> U: refresh st.image placeholder
 end

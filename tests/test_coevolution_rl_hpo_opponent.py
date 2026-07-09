@@ -36,7 +36,7 @@ def _hpo_side_cfg() -> dict:
 
 
 class TestRLHPOPoolRoundtrip:
-    """Regression tests for B4: RLPolicyPool([list]) → AttributeError crash."""
+    """Regression tests for B4: RLPolicyPool([list]) -> AttributeError crash."""
 
     def test_rl_hpo_pool_roundtrip(self):
         """Drives the full producer -> rebuild -> infer chain.

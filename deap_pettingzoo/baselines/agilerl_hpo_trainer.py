@@ -244,7 +244,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         """Merge constructor defaults, a nested ``mutation_probs`` dict and the
         flat ``prob_*`` form-knobs into the AgileRL ``Mutations`` probability dict.
 
-        Precedence (lowest → highest): constructor defaults <
+        Precedence (lowest -> highest): constructor defaults <
         ``algorithm_params['mutation_probs']`` (programmatic) <
         ``algorithm_params['prob_<key>']`` (UI form).
         """

@@ -250,12 +250,12 @@ class _DrainRequiredAEC(AECEnv):
             self._b_turn_count += 1
             self.rewards["b"] = 1.0
             if "a" not in self.agents:
-                # a already drained; b's second turn → episode over.
+                # a already drained; b's second turn -> episode over.
                 self.terminations["b"] = True
                 self.agents = []
                 self.agent_selection = None
             else:
-                # a still in agents (not yet drained) → cycle back to terminated a.
+                # a still in agents (not yet drained) -> cycle back to terminated a.
                 self.agent_selection = "a"
 
     def render(self):
@@ -341,7 +341,7 @@ class TestMaskedSimultaneousAdapter:
     def test_episode_terminates_cleanly(self):
         env = self._make()
         env.reset(seed=0)
-        # n_turns=3 → 6 turns total.
+        # n_turns=3 -> 6 turns total.
         for _ in range(6):
             # pick an action that differs from player's last action
             masks = {a: env.aec_env.observe(a).get("action_mask") for a in env.agents}
@@ -459,7 +459,7 @@ class TestSelfPlayEvaluator:
         _register_turn_env("tc_selfplay_v0", api="aec_masked")
         wrapper = PettingZooWrapper(env_name="tc_selfplay_v0")
 
-        # Genome sized for flattened 2-D obs → 3 discrete actions.
+        # Genome sized for flattened 2-D obs -> 3 discrete actions.
         genome = FixedTopologyGenome([2, 8, 3], activation="tanh", random_seed=42)
 
         class _Ind:
