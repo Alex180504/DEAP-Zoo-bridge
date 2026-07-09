@@ -33,7 +33,7 @@ def iqm(values: Sequence[float]) -> float:
     :func:`rliable.metrics.aggregate_iqm`, i.e.
     :func:`scipy.stats.trim_mean` with ``proportiontocut=0.25``. A
     quantile mask keeps the wrong number of samples on ties (e.g.
-    ``[1,1,1,1,2,3,4,5]`` → 1.5 instead of the correct 1.75).
+    ``[1,1,1,1,2,3,4,5]`` -> 1.5 instead of the correct 1.75).
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size == 0:
@@ -76,7 +76,7 @@ def bootstrap_ci(
         Number of resamples. 2000 is a good compromise between speed
         and CI precision; raise for tighter intervals on small samples.
     ci:
-        Coverage in ``(0, 1)``. ``0.95`` → 95 % CI.
+        Coverage in ``(0, 1)``. ``0.95`` -> 95 % CI.
     rng:
         Optional NumPy generator for reproducibility.
 
@@ -156,7 +156,7 @@ def resolve_y_col(
     """Pick the first candidate value column actually present in ``runs``.
 
     Returns the first column from ``candidates`` (default
-    ``best`` → ``mean`` → ``max``) that co-occurs with ``x_col`` in at
+    ``best`` -> ``mean`` -> ``max``) that co-occurs with ``x_col`` in at
     least one run's ``metrics`` frame, or ``None`` when none do. This
     lets :func:`learning_curve_with_ci` plot product-path runs (which
     write ``mean``/``min``/``max`` but no ``best``) without the caller
@@ -199,7 +199,7 @@ def learning_curve_with_ci(
         requested columns are silently skipped.
     y_col:
         Value column to aggregate. When ``None`` (default) it is
-        auto-detected via :func:`resolve_y_col` (``best`` → ``mean`` →
+        auto-detected via :func:`resolve_y_col` (``best`` -> ``mean`` ->
         ``max``) so the library's product-path runs — which log
         ``mean`` but never ``best`` — produce a non-empty curve instead
         of raising.
