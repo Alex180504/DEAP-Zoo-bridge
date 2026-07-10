@@ -65,7 +65,7 @@ _API_DESCRIPTION = (
     "/ `--port` or the `FASTAPI_URL` environment variable).\n\n"
     "**Content type** is `application/json` for every request and response "
     "body except the ZIP download / upload endpoints.\n\n"
-    "**Error model** — every error response is `{\"detail\": \"...\"}`; "
+    '**Error model** — every error response is `{"detail": "..."}`; '
     "request-validation failures (422) return a list of per-field errors "
     "under `detail`."
 )
@@ -84,8 +84,7 @@ _OPENAPI_TAGS = [
     },
     {
         "name": "Progress & Logs",
-        "description": "Live progress snapshots and stdout / service-log "
-        "tailing.",
+        "description": "Live progress snapshots and stdout / service-log " "tailing.",
     },
     {
         "name": "Export / Import",
@@ -338,8 +337,7 @@ def _register_routes(app: FastAPI) -> None:
         "/catalog/environments/{name}",
         tags=["Catalog"],
         summary="Get one environment",
-        description="A single environment with its config params and team "
-        "metadata.",
+        description="A single environment with its config params and team " "metadata.",
         responses={404: _NOT_FOUND},
     )
     async def get_catalog_environment(name: str):
@@ -397,8 +395,12 @@ def _register_routes(app: FastAPI) -> None:
         summary="Submit an experiment",
         description="Validate the spec server-side (defense in depth) and, if "
         "it passes, enqueue it. Returns the new id and queue position.",
-        responses={422: {"description": "Validation failed — field-level "
-                         "errors are returned in the body."}},
+        responses={
+            422: {
+                "description": "Validation failed — field-level "
+                "errors are returned in the body."
+            }
+        },
     )
     async def submit_experiment(spec: ExperimentSpecModel):
         report = _validate_spec(spec)
@@ -456,8 +458,7 @@ def _register_routes(app: FastAPI) -> None:
         response_model=ExperimentRecord,
         tags=["Experiments"],
         summary="Get one experiment",
-        description="A single experiment by id, including its live queue "
-        "position.",
+        description="A single experiment by id, including its live queue " "position.",
         responses={404: _NOT_FOUND},
     )
     async def get_experiment(exp_id: str):
@@ -783,9 +784,7 @@ def _register_routes(app: FastAPI) -> None:
         summary="Import experiments (ZIP upload)",
         description="Upload a previously exported ZIP, validate it, and restore "
         "its experiment records and run directories.",
-        responses={
-            422: {"description": "The uploaded archive failed validation."}
-        },
+        responses={422: {"description": "The uploaded archive failed validation."}},
     )
     async def import_experiments(
         file: UploadFile = File(
