@@ -280,6 +280,52 @@ class StdoutChunk(BaseModel):
     eof: bool
 
 
+class DeletedResponse(BaseModel):
+    """Returned by ``DELETE /experiments/{id}``."""
+
+    deleted: bool
+
+
+class PausedResponse(BaseModel):
+    """Returned by ``POST /queue/pause`` and ``POST /queue/resume``."""
+
+    paused: bool
+
+
+class RunDeleteError(BaseModel):
+    path: str
+    error: str
+
+
+class RunsDeleteResponse(BaseModel):
+    """Returned by ``POST /runs/delete``."""
+
+    ok: bool
+    deleted: List[str] = Field(default_factory=list)
+    errors: List[RunDeleteError] = Field(default_factory=list)
+
+
+class ImportedExperiment(BaseModel):
+    original_exp_id: str
+    new_exp_id: str
+    label: str = ""
+    run_count: int = 0
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ImportResponse(BaseModel):
+    """Returned by ``POST /experiments/import`` on success (HTTP 200)."""
+
+    ok: bool
+    imported: List[ImportedExperiment] = Field(default_factory=list)
+
+
+class SpecResponse(BaseModel):
+    """Returned by ``GET /experiments/{id}/spec`` — the raw stored spec JSON."""
+
+    spec: Dict[str, Any] = Field(default_factory=dict)
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
