@@ -2,11 +2,12 @@
 AgileRL <-> PettingZoo adapter utilities.
 
 Provides helpers to:
+
 - Build a raw PettingZoo parallel environment compatible with AgileRL's
   multi-agent training APIs (reset -> (obs, info), step -> 5-tuple).
 - Build a vectorized PettingZoo environment via AgileRL's
-    :class:`AsyncPettingZooVecEnv` for AgileRL trainers that opt into
-    ``num_envs > 1``.
+  :class:`AsyncPettingZooVecEnv` for AgileRL trainers that opt into
+  ``num_envs > 1``.
 - Extract per-agent observation/action spaces as the list-aligned structure
   AgileRL constructors expect (works for both single and vec envs).
 - Translate a :class:`BudgetMode` to an environment-step budget.

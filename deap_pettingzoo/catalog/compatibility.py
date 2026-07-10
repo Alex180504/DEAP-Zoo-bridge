@@ -40,8 +40,10 @@ def compatibility_matrix(
             catalog algorithm.
 
     Returns:
-        ``{"env_name", "results": {algo: {compatible, issues, warnings,
-        available}}, "compatible": [algo, ...]}``.
+        A JSON-able report of the shape::
+
+            {"env_name", "results": {algo: {compatible, issues, warnings,
+             available}}, "compatible": [algo, ...]}
     """
     from deap_pettingzoo.baselines.compatibility import (
         check_compatibility,

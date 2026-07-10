@@ -1,6 +1,7 @@
 """Reusable UI components for the experiment setup and queue pages.
 
 Modules:
+
 * :mod:`.param_widgets` — map a :class:`~deap_pettingzoo.catalog.schema.ParamSpec`
   JSON dict to a Streamlit widget.
 * :mod:`.forms` — tabbed dynamic-form scaffolding that produces

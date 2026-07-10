@@ -82,8 +82,7 @@ def register_openspiel_game(
 ):
     """Register an OpenSpiel game under the deap-bridge env registry.
 
-    Args
-    ----
+    Args:
         name: Canonical registry name (e.g. ``"openspiel_connect_four"``).
         game_name: OpenSpiel short name passed to
             ``OpenSpielCompatibilityV0`` (e.g. ``"tic_tac_toe"``,
@@ -105,14 +104,12 @@ def register_openspiel_game(
             are always added.
         **extra_reg_kwargs: Forwarded to :func:`register_env`.
 
-    Raises
-    -------
+    Raises:
         ImportError: If ``shimmy`` (or its ``openspiel`` extra) is not
             installed.
         ValueError: If ``api`` is not one of the two turn-based modes.
 
-    Example
-    --------
+    Example:
         >>> from deap_pettingzoo.contrib.openspiel import (
         ...     register_openspiel_game,
         ... )

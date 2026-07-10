@@ -5,7 +5,7 @@ Adds a fourth runtime-state class to the
 :class:`RLSideState` that wraps an AgileRL multi-agent algorithm
 (off-policy MADDPG / MATD3 or on-policy IPPO / GroupedIPPO) and trains it
 generation-by-generation against opponents drawn from the *other* sides'
-current :class:`OpponentPool`s.
+current :class:`OpponentPool` objects.
 
 The difference from EA / CMA / QDax sides:
 
@@ -297,7 +297,8 @@ class RLSideState(SideState):
     supported for EA/CMA learner sides that face an RL opponent: the
     trainer ships :class:`~deap_pettingzoo.baselines.agilerl_policy.FrozenRLPolicyWrapper`
     CPU snapshots across worker boundaries.  The RL learner's own
-    rollout collection is serial;
+    rollout collection is serial.
+
     * ``rollout_episodes_per_gen`` (int, default ``4``) — number of
       episodes collected per :meth:`step_generation` call against the
       current opponent-pool snapshot.

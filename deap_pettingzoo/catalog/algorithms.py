@@ -527,9 +527,7 @@ def register_algorithm(
     :func:`catalog.to_json`, and (via the self-healing trainer registry)
     :func:`deap_pettingzoo.baselines.comparison.get_trainer`.
 
-    Args
-    ----
-
+    Args:
         name: Canonical algorithm identifier.
         label: Human-readable display name.
         family: Coarse grouping (``"evolutionary"`` / ``"marl"`` / custom).
@@ -551,17 +549,14 @@ def register_algorithm(
         description: One-line summary.
         overwrite: Replace an existing registration instead of raising.
 
-    Raises
-    ------
+    Raises:
         ValueError: On a name/alias collision when ``overwrite`` is ``False``,
             or if ``side_state`` is given without ``coevolution_optimizer``,
             or if ``side_state`` is given and ``coevolution_optimizer`` already
             exists in ``_SIDE_STATE_FACTORIES`` (overwrite must be ``True`` to
             replace).
 
-    Note
-    ----
-
+    Note:
         A programmatic ``register_algorithm`` runs only in the process that
         calls it; like a custom :func:`register_env`, it does **not** auto-
         replay into spawned workers. For parallel/worker runs, ship the

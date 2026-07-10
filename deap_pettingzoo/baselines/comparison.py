@@ -139,25 +139,26 @@ def compare_baselines(
             and skip algorithms that are incompatible with the environment.
 
     Returns:
-        Dictionary with comparison results:
-        {
-            'ea': {
-                'seeds': [
-                    {
-                        'seed': 0,
-                        'training_time': 12.3,
-                        'training_metrics': {...},
-                        'eval_result': EvalResult(...),
-                    },
-                    ...
-                ],
-                'mean_reward': 45.6,
-                'std_reward': 3.2,
-                'best_seed': 1,
-            },
-            'maddpg': {...},
-            'config': {...},
-        }
+        Dictionary with comparison results, keyed by algorithm name::
+
+            {
+                'ea': {
+                    'seeds': [
+                        {
+                            'seed': 0,
+                            'training_time': 12.3,
+                            'training_metrics': {...},
+                            'eval_result': EvalResult(...),
+                        },
+                        ...
+                    ],
+                    'mean_reward': 45.6,
+                    'std_reward': 3.2,
+                    'best_seed': 1,
+                },
+                'maddpg': {...},
+                'config': {...},
+            }
     """
     from collections import OrderedDict
 
