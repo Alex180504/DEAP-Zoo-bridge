@@ -458,8 +458,8 @@ def make_numpy_scoring_function(
         * ``scoring_function._executor`` — lazily-created executor ref
           (``None`` until first parallel call; the actual executor
           object thereafter; reset to ``None`` after ``close()``).
-                * ``scoring_function._last_batch_fitness`` — last fitness batch
-                    scored by the numpy path, or ``None`` before the first call.
+        * ``scoring_function._last_batch_fitness`` — last fitness batch
+          scored by the numpy path, or ``None`` before the first call.
     """
     import jax
     import jax.numpy as jnp

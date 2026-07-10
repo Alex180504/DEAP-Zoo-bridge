@@ -22,7 +22,7 @@ The dispatcher runs as a background task in the FastAPI lifespan. Its loop:
    (+kill-after-grace).
 
 The ``worker_limit`` (currently 1) is the concurrency seam: when it becomes
- >1 the dispatcher will spawn up to N subprocesses and track them in a set,
+>1 the dispatcher will spawn up to N subprocesses and track them in a set,
 awaiting ``asyncio.wait(FIRST_COMPLETED)``.
 """
 

@@ -7,7 +7,7 @@ The public contract:
   :class:`~deap_pettingzoo.genomes.FixedTopologyGenome`. For a genome
   with ``layer_sizes = [n_0, n_1, ..., n_L]`` there are ``L`` Dense
   layers with sizes ``n_1, ..., n_L`` and activations applied between
-    the hidden layers (not the output) — matching ``FixedTopologyGenome``
+  the hidden layers (not the output) — matching ``FixedTopologyGenome``
   semantics.
 * :func:`flat_to_pytree` / :func:`pytree_to_flat` — bijection between
   flat weight vectors (DEAP's native representation) and Flax pytrees.
@@ -16,7 +16,7 @@ The public contract:
 * :class:`FlaxPolicyAdapter` — satisfies
   :class:`~deap_pettingzoo.baselines.base.PolicyProtocol`
   (``get_action(obs, action_mask=None) -> np.ndarray | int``) and
-    marshals numpy <-> JAX at the boundary. Used in numpy-boundary
+  marshals numpy <-> JAX at the boundary. Used in numpy-boundary
   scoring and by :class:`QDaxRepertoirePool` when sampling an opponent
   from a repertoire cell.
 

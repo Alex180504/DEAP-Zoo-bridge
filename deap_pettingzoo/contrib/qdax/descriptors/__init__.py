@@ -1,8 +1,9 @@
 """Behavioural-descriptor primitives for QDax scoring functions.
 
- A descriptor is a pure function mapping a *trajectory summary* (a dict
- of ``jnp.ndarray``s produced inside :func:`~scoring_jax.make_jax_scoring_function`
-or :func:`~scoring_numpy.make_numpy_scoring_function`) to a 1-D
+A descriptor is a pure function mapping a *trajectory summary* (a dict
+of ``jnp.ndarray`` values produced inside
+:func:`~scoring_jax.make_jax_scoring_function` or
+:func:`~scoring_numpy.make_numpy_scoring_function`) to a 1-D
 :class:`jnp.ndarray` of fixed shape.
 
 Descriptor functions must be **pure** and :func:`jit`-compatible (no

@@ -167,24 +167,31 @@ def create_toolbox(
 
     Args:
         genome_config: Configuration for genome creation
+
             - layer_sizes: List[int] - Network architecture
             - activation: str (optional) - Hidden-layer activation function
             - output_activation: str (optional) - Output-layer activation
             - weight_range: tuple (optional) - Weight initialization range
             - random_seed: int (optional) - Seed for reproducibility
+
         evaluator: Evaluator for fitness calculation
         selection_config: Selection operator configuration
+
             - method: str (default: 'tournament') - one of
               ``'tournament'``, ``'roulette'``, ``'best'``, ``'random'``
             - tournament_size: int (default: 3, only for 'tournament')
+
         crossover_config: Crossover operator configuration
+
             - method: str (default: 'blend') - one of
               ``'blend'``, ``'one_point'``, ``'two_point'``, ``'uniform'``,
               ``'sbx'`` (simulated-binary-bounded), ``'es_blend'``
             - alpha: float (default: 0.5) - blend/BLX-α parameter
             - indpb: float (default: 0.5) - per-gene swap prob for 'uniform'
             - eta: float (default: 15.0) - SBX distribution index
+
         mutation_config: Mutation operator configuration
+
             - method: str (default: 'gaussian') - one of
               ``'gaussian'``, ``'polynomial_bounded'``
             - mu: float (default: 0.0) - Gaussian mean
