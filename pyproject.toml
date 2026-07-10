@@ -51,6 +51,12 @@ logging = [
 tensorboard = [
     "tensorboard>=2.13",
 ]
+docs = [
+    "sphinx>=7.2",
+    "furo>=2024.1",
+    "myst-parser>=2.0",
+    "sphinxcontrib-mermaid>=0.9",
+]
 analysis = [
     "deap-pettingzoo[viz]",
     "pandas>=2.0",
@@ -126,7 +132,7 @@ ui-full = [
     "deap-pettingzoo[ui,service]",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,dask,ui,service,ui-full]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,docs,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,dask,ui,service,ui-full]"
 ]
 
 # Plugin entry-point groups.
