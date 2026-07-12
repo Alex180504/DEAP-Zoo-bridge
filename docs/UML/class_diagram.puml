@@ -426,7 +426,7 @@ package "deap_pettingzoo.baselines" {
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
         -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
-        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool / NEAT+HyperNEAT / QDax numpy\n   scoring path); rejected by mu±lambda and the QDax\n   JAX-native scoring path --
         -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
         -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
     }
@@ -808,8 +808,9 @@ note bottom of EATrainer
   the parallel path); below nominal when episodes
   truncate early. QDax reports it on the numpy
   scoring path, None on the JAX-native path.
-  budget_on_consumed=True makes EA simple / CMA-ES /
-  PSO run until the real ENV_STEPS budget is spent.
+  budget_on_consumed=True makes EA simple / CMA-ES / PSO /
+  NEAT+HyperNEAT / QDax (numpy path) run until the real
+  ENV_STEPS budget is spent.
 end note
 
 note bottom of GenomePolicyWrapper
