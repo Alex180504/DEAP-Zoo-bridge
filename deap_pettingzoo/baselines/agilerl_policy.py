@@ -652,19 +652,39 @@ class FrozenRLPolicyWrapper:
     # hold instance-bound methods or a cached torch distribution), each actor
     # is serialised as pure data via :func:`_serialize_actor` (class +
     # init_dict + CPU state_dict) and rebuilt with :func:`_rebuild_actor` on
-    # the far side.  This is standard-pickle-safe (no cloudpickle) and immune
-    # to non-leaf / cached-distribution tensors, so it survives
-    # multiprocessing's ForkingPickler for both deterministic and stochastic actors.
+    # the far side.  The state_dict is additionally converted to numpy:
+    # under multiprocessing's ForkingPickler, torch tensors are shared via
+    # one file descriptor per storage (held open by the driver's resource
+    # sharer until the worker detaches), so a snapshot embedded in every
+    # per-episode payload exhausts RLIMIT_NOFILE (ulimit -n 1024 on typical
+    # clusters) and kills the pool with BrokenProcessPool. Numpy arrays
+    # cross as plain bytes.
 
     def __getstate__(self) -> dict:
         state = {k: v for k, v in self.__dict__.items() if k != "_actors"}
-        state["_actor_states"] = [_serialize_actor(a) for a in self._actors]
+        serialized = []
+        for actor in self._actors:
+            data = _serialize_actor(actor)
+            if data.get("mode") == "evolvable":
+                data["state"] = {
+                    k: v.detach().cpu().contiguous().numpy()
+                    for k, v in data["state"].items()
+                }
+            serialized.append(data)
+        state["_actor_states"] = serialized
         return state
 
     def __setstate__(self, state: dict) -> None:
         _ensure_agilerl_imports()
+        import torch  # type: ignore[import]
 
         actor_states = state.pop("_actor_states", [])
+        for data in actor_states:
+            if data.get("mode") == "evolvable":
+                data["state"] = {
+                    k: torch.from_numpy(np.ascontiguousarray(v))
+                    for k, v in data["state"].items()
+                }
         self.__dict__.update(state)
         self._actors = [_rebuild_actor(d) for d in actor_states]
 

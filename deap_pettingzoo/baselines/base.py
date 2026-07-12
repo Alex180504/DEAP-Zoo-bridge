@@ -390,16 +390,19 @@ class TrainingConfig:
             ``parallel_backend == "dask"``. The trainer-constructor value is
             used only when this is left at the default ``None``.
         budget_on_consumed: Opt-in. When ``True`` *and*
-            ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers
-            (EA ``simple``, CMA-ES, PSO) run until the *real* consumed env-step
-            budget is exhausted instead of a precomputed generation count. This
-            trades the exact/deterministic generation count of nominal
-            budgeting for a real-tick budget (the realized generation count
-            then depends on how early episodes truncate). Default ``False``
+            ``budget_mode == BudgetMode.ENV_STEPS``, the supporting trainers
+            (EA ``simple``, CMA-ES, PSO, and ``CoEvolutionTrainer`` — the
+            latter against a shared consumed-step pool across all sides) run
+            until the *real* consumed env-step budget is exhausted instead
+            of a precomputed generation count. This trades the
+            exact/deterministic generation count of nominal budgeting for a
+            real-tick budget (the realized generation count then depends on
+            how early episodes truncate). Default ``False``
             (nominal/deterministic budgeting). Has no effect under
             other budget modes, and is rejected (``ValueError``) by trainers /
             strategies that cannot honor it: EA ``mu_plus_lambda`` /
-            ``mu_comma_lambda``, QDax, co-evolution, and NEAT.
+            ``mu_comma_lambda``, QDax, and NEAT/HyperNEAT (see
+            :func:`reject_consumed_budgeting`).
     """
 
     env_name: str

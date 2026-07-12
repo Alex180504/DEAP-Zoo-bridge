@@ -69,6 +69,7 @@ Design notes
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -197,6 +198,35 @@ def _library_version() -> Optional[str]:
     except Exception:  # noqa: BLE001
         # Absence is an answer, not an error.
         return None
+
+
+#: BLAS / OpenMP thread-pool knobs capped to 1 in process-pool workers.
+#: Workers run one evaluation at a time, so intra-op parallelism only
+#: makes sibling workers fight for the same cores .
+_WORKER_THREAD_ENV_VARS: Tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def _process_worker_init(
+    user_initializer: Optional[Callable[..., None]],
+    user_initargs: Tuple[Any, ...],
+) -> None:
+    """Per-worker init for the ``process`` backend (spawn children).
+
+    Runs before any task — and, critically, before the child's first
+    ``torch``/``numpy`` BLAS import, so ``setdefault`` here is enough to
+    size every native thread pool to 1 without paying an import.
+    Explicit values exported by the user are inherited through the
+    child's environment and win over the default.
+    """
+    for var in _WORKER_THREAD_ENV_VARS:
+        os.environ.setdefault(var, "1")
+    if user_initializer is not None:
+        user_initializer(*user_initargs)
 
 
 class _SerialExecutor:
@@ -494,10 +524,15 @@ def make_executor(
         return _SerialExecutor()
 
     if backend == "process":
+        # Always spawn: Linux's default fork inherits the parent's CUDA
+        # context / torch and JAX thread state, which deadlocks workers
+        # when a GPU trainer (e.g. an RL coevolution side) initialised
+        # CUDA before the pool starts.
         return ProcessPoolExecutor(
             max_workers=n,
-            initializer=initializer,
-            initargs=initargs,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_process_worker_init,
+            initargs=(initializer, initargs),
         )
 
     if backend == "dask":
