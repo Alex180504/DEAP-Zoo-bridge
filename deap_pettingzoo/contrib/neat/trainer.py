@@ -37,7 +37,6 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -224,7 +223,11 @@ class NEATTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
-        reject_consumed_budgeting(config, "NEATTrainer")
+        # Opt-in consumed-step budgeting: run until the real env-tick budget
+        # is exhausted instead of the nominal generation count.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
         # Reset per-run state so reusing a trainer instance does not carry a
         # previous run's consumed-step count into this run's metrics.
         self._env_steps_consumed = 0
@@ -315,6 +318,10 @@ class NEATTrainer(BaselineTrainer):
             self._resolve_parallelism(config)
         )
 
+        # 1-element sink so worker step-deltas aggregate across generations
+        # (stays at 0 on the serial path, which counts on the trainer itself).
+        _parallel_steps = [0]
+
         # Parallel or sequential eval
         if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
@@ -346,8 +353,6 @@ class NEATTrainer(BaselineTrainer):
                 scheduler_address=scheduler_address,
             )
             _executor_ctx = _executor
-            # 1-element sink so worker step-deltas aggregate across generations.
-            _parallel_steps = [0]
 
             def _on_generation(best_fitness: float, gen_steps: int) -> None:
                 # Parallel path: neat.Population.run() never touches these
@@ -432,14 +437,35 @@ class NEATTrainer(BaselineTrainer):
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
 
         # Run NEAT
+        def _consumed_total() -> int:
+            return int(self._env_steps_consumed) + int(_parallel_steps[0])
+
+        def _run_population() -> Any:
+            if consumed_budget is None:
+                return pop.run(_eval_genomes, n=n_generations)
+            # Consumed budgeting: step one generation at a time until the
+            # real env-tick budget is exhausted. ``Population`` carries all
+            # state across ``run()`` calls and the NEAT config pins
+            # ``no_fitness_termination=True``, so n=1 stepping is
+            # semantically identical to a single n=N call. The safety cap
+            # mirrors the EA loop: each generation consumes at least one
+            # tick per genome, so nominal_gens * max_steps always suffices.
+            safety_cap = n_generations * max(1, max_steps) + 10
+            best = None
+            for _ in range(safety_cap):
+                if _consumed_total() >= consumed_budget:
+                    break
+                best = pop.run(_eval_genomes, n=1)
+            return best if best is not None else pop.best_genome
+
         try:
             if _is_parallel and _executor_ctx is not None:
                 with _executor_ctx:
-                    best_genome = pop.run(_eval_genomes, n=n_generations)
+                    best_genome = _run_population()
                 # Fold the aggregated worker step-deltas into the run total.
                 self._env_steps_consumed += int(_parallel_steps[0])
             else:
-                best_genome = pop.run(_eval_genomes, n=n_generations)
+                best_genome = _run_population()
         except neat.CompleteExtinctionException:
             warnings.warn(
                 "NEAT population went extinct before completing the budget. "
@@ -455,11 +481,15 @@ class NEATTrainer(BaselineTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        # Realized count: equals n_generations under nominal budgeting, but
+        # consumed budgeting (and extinction) can realize a different number.
+        realized_gens = int(self._generation_num)
+
         # Guarantee a final capture (dedups against the last per-gen one).
         self._recorder.finalize(
             lambda: _neat_champion(best_genome),
-            iteration=n_generations,
-            env_steps=n_generations * max_steps,
+            iteration=realized_gens,
+            env_steps=realized_gens * max_steps,
         )
 
         try:
@@ -487,9 +517,10 @@ class NEATTrainer(BaselineTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 # Nominal ceiling: every genome evaluated for ``eval_eps``
-                # episodes of up to ``max_steps`` ticks, across ``n_generations``.
+                # episodes of up to ``max_steps`` ticks, across the
+                # generations that actually ran.
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * max_steps
+                    realized_gens * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
