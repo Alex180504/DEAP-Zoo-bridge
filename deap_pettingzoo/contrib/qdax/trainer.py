@@ -36,7 +36,6 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import (
@@ -305,6 +304,59 @@ def _budget_to_iterations(config: TrainingConfig, params: Dict[str, Any]) -> int
     )
 
 
+def _resolve_consumed_budget(
+    config: TrainingConfig, scoring_fn: Any, trainer_label: str
+) -> Optional[int]:
+    """Return the real env-step budget under opt-in consumed budgeting.
+
+    ``None`` when ``budget_on_consumed`` is off or budgeting is not
+    ENV_STEPS-based (the flag is inert there, matching the other trainers).
+    Consumed budgeting needs a real per-tick counter, which only the
+    numpy/PettingZoo scoring path maintains; the JAX-native path rolls out
+    inside ``jax.jit``/``vmap`` with no Python-side counter (a documented
+    structural limit) and rejects the flag.
+    """
+    if not (
+        config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS
+    ):
+        return None
+    if not hasattr(scoring_fn, "_env_steps_consumed"):
+        raise ValueError(
+            f"{trainer_label} supports budget_on_consumed=True only on the "
+            "numpy/PettingZoo scoring path, whose rollouts report real env "
+            "ticks. The JAX-native scoring path has no per-tick counter "
+            "(rollouts run inside jax.jit/vmap). Use budget_on_consumed=False "
+            "there."
+        )
+    return int(config.budget_value)
+
+
+def _budget_iterations(
+    num_iters: int,
+    consumed_budget: Optional[int],
+    scoring_fn: Any,
+    episode_length: int,
+):
+    """Yield 1-based iteration indices under the active budgeting mode.
+
+    Nominal mode is simply ``range(1, num_iters + 1)``. Under consumed
+    budgeting, iterations are yielded until the scoring function's real
+    tick counter (which already includes the init-repertoire evaluation)
+    reaches the budget. The safety cap mirrors the EA ``simple`` loop:
+    each iteration consumes at least one tick per evaluated candidate and
+    episodes run at most ``episode_length`` ticks, so no more than
+    ``num_iters * episode_length`` iterations are ever needed.
+    """
+    if consumed_budget is None:
+        yield from range(1, num_iters + 1)
+        return
+    safety_cap = num_iters * max(1, episode_length) + 10
+    it = 0
+    while it < safety_cap and int(scoring_fn._env_steps_consumed) < consumed_budget:
+        it += 1
+        yield it
+
+
 def _print_qdax_plan(
     label: str,
     *,
@@ -569,7 +621,6 @@ class MAPElitesTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
-        reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
         from qdax.core.emitters.mutation_operators import isoline_variation
@@ -581,6 +632,9 @@ class MAPElitesTrainer(BaselineTrainer):
         _apply_universal_keys(config, params)
         env, module, layer_sizes, descriptor_fn, scoring_fn, init_params = (
             _build_env_and_scoring(config, params)
+        )
+        consumed_budget = _resolve_consumed_budget(
+            config, scoring_fn, "MAPElitesTrainer"
         )
 
         min_bd = tuple(getattr(descriptor_fn, "min_bd", (0.0, 0.0)))
@@ -656,12 +710,16 @@ class MAPElitesTrainer(BaselineTrainer):
 
             history: list = [init_metrics]
             start = time.time()
-            for iter_idx in range(1, num_iters + 1):
+            realized_iters = 0
+            for iter_idx in _budget_iterations(
+                num_iters, consumed_budget, scoring_fn, int(params["episode_length"])
+            ):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                realized_iters = iter_idx
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -690,7 +748,7 @@ class MAPElitesTrainer(BaselineTrainer):
         metadata: Dict[str, Any] = {
             "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             "layer_sizes": tuple(layer_sizes),
             "init_batch_size": int(params["init_batch_size"]),
             "init_mode": str(params.get("init_mode", "flax_perturb")),
@@ -714,8 +772,10 @@ class MAPElitesTrainer(BaselineTrainer):
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
-            "num_iterations": num_iters,
-            "env_steps_nominal": int(_init_env_steps + num_iters * _env_steps_per_iter),
+            "num_iterations": realized_iters,
+            "env_steps_nominal": int(
+                _init_env_steps + realized_iters * _env_steps_per_iter
+            ),
             # Real int on the numpy/PettingZoo scoring path; None on the
             # JAX-native path, where scoring runs inside jax.jit/vmap with no
             # Python-side per-tick counter (a documented structural limit).
@@ -780,8 +840,6 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
-        reject_consumed_budgeting(config, "CMAMETrainer")
-
         import jax
         import jax.numpy as jnp
         from qdax.core.emitters.cma_improvement_emitter import CMAImprovementEmitter
@@ -799,6 +857,7 @@ class CMAMETrainer(BaselineTrainer):
         env, module, layer_sizes, descriptor_fn, scoring_fn, _ = _build_env_and_scoring(
             config, params
         )
+        consumed_budget = _resolve_consumed_budget(config, scoring_fn, "CMAMETrainer")
 
         genotype_dim = flat_count(layer_sizes)
         batch_size = int(params["batch_size"])
@@ -875,12 +934,16 @@ class CMAMETrainer(BaselineTrainer):
 
             history = [init_metrics]
             start = time.time()
-            for iter_idx in range(1, num_iters + 1):
+            realized_iters = 0
+            for iter_idx in _budget_iterations(
+                num_iters, consumed_budget, scoring_fn, int(params["episode_length"])
+            ):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                realized_iters = iter_idx
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -913,7 +976,7 @@ class CMAMETrainer(BaselineTrainer):
         metadata: Dict[str, Any] = {
             "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             "layer_sizes": tuple(layer_sizes),
             "genotype_dim": genotype_dim,
             "eval_episodes": max(1, int(params.get("eval_episodes", 1))),
@@ -935,9 +998,9 @@ class CMAMETrainer(BaselineTrainer):
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             # init batch + one batch per iteration.
-            "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
+            "env_steps_nominal": int((realized_iters + 1) * _iter_env_steps),
             # Real int on the numpy/PettingZoo path; None on the JAX-native
             # path (no Python-side per-tick counter, documented).
             "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),

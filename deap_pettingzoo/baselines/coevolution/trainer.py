@@ -52,7 +52,6 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper

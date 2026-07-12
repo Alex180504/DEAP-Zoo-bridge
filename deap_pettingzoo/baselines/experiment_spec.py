@@ -1110,27 +1110,11 @@ def _validate_coevolution(spec, report, env_spec, cat_algorithms):
             f"Reporting side {coev.reporting_side!r} is not a declared side.",
         )
 
-    # QDax sides evaluate an entire JAX batch before returning per-generation
-    # env-step counts, so per-generation overshoot can be orders-of-magnitude
-    # larger than budget_value.  Block the combination rather than let it
-    # silently consume a multiple of the intended budget.
-    _QDAX_COEV_OPTIMIZERS = frozenset({"qdax_map_elites", "qdax_cma_me"})
-    if spec.budget.budget_on_consumed and spec.budget.mode == "env_steps":
-        qdax_sides = []
-        for side in coev.sides:
-            if side.algorithm == "frozen":
-                continue
-            optimizer = cat_algorithms.coevolution_optimizer_for(side.algorithm)
-            if optimizer in _QDAX_COEV_OPTIMIZERS:
-                qdax_sides.append(side.name)
-        if qdax_sides:
-            report.add(
-                "budget.budget_on_consumed",
-                "qdax_coarse_step",
-                f"budget_on_consumed=True with QDax co-evolution sides "
-                f"{qdax_sides!r}: QDax evaluates a full JAX batch "
-                f"(batch_size × eval_episodes × max_steps env ticks) before "
-                f"reporting per-generation counts, so per-generation overshoot "
-                f"can far exceed budget_value. "
-                f"Use budget_on_consumed=False or BudgetMode.GENERATIONS instead.",
-            )
+    # QDax co-evolution sides are allowed under budget_on_consumed: they
+    # evaluate a full batch per generation, so the shared consumed pool's
+    # overshoot bound is one generation's pooled cost *including* that
+    # batch (batch_size × k_opponents × max_steps ticks) — the same
+    # finish-generation-then-stop bound every other side type has, and
+    # negligible at realistic ENV_STEPS budgets. The QDax side reports
+    # real per-generation env ticks into GenerationStats.env_steps, so
+    # the aggregate the trainer stops on is exact.

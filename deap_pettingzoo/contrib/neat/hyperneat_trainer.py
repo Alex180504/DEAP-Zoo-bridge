@@ -26,10 +26,10 @@ import numpy as np
 
 from deap_pettingzoo.baselines._logging_helpers import build_logger
 from deap_pettingzoo.baselines.base import (
+    BudgetMode,
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
@@ -59,16 +59,35 @@ def _run_neat(
     pop: neat.Population,
     fitness_func: Any,
     n_generations: int,
+    consumed_budget: Optional[int] = None,
+    consumed_fn: Optional[Any] = None,
+    max_steps: int = 1,
 ) -> None:
     """Run the NEAT population and handle extinction.
 
     Mutates *pop* in-place; ``pop.best_genome`` is set after completion.
+
+    Under opt-in consumed-step budgeting (``consumed_budget`` set,
+    ``consumed_fn`` returning the real env ticks so far) the population is
+    stepped one generation at a time until the budget is exhausted:
+    ``Population`` carries all state across ``run()`` calls and the NEAT
+    config pins ``no_fitness_termination=True``, so n=1 stepping is
+    semantically identical to a single n=N call. The safety cap mirrors
+    the EA loop — each generation consumes at least one tick per genome,
+    so ``n_generations * max_steps`` iterations always suffice.
     """
     import warnings
 
     pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
     try:
-        pop.run(fitness_func, n=n_generations)
+        if consumed_budget is None or consumed_fn is None:
+            pop.run(fitness_func, n=n_generations)
+        else:
+            safety_cap = n_generations * max(1, max_steps) + 10
+            for _ in range(safety_cap):
+                if consumed_fn() >= consumed_budget:
+                    break
+                pop.run(fitness_func, n=1)
     except neat.CompleteExtinctionException:
         warnings.warn("NEAT population went extinct.", stacklevel=2)
 
@@ -83,7 +102,11 @@ class HyperNEATTrainer(NEATTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
-        reject_consumed_budgeting(config, "HyperNEATTrainer")
+        # Opt-in consumed-step budgeting: run until the real env-tick budget
+        # is exhausted instead of the nominal generation count.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
         self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
         max_steps = self._resolve_max_steps(config)
@@ -213,6 +236,9 @@ class HyperNEATTrainer(NEATTrainer):
                 self._fitness_history.append(best_fitness)
 
             _parallel_steps = [0]
+            _consumed_fn = lambda: (  # noqa: E731
+                int(self._env_steps_consumed) + int(_parallel_steps[0])
+            )
             with make_executor(
                 effective_workers,
                 backend=backend,
@@ -226,7 +252,14 @@ class HyperNEATTrainer(NEATTrainer):
                     step_sink=_parallel_steps,
                     on_generation=_on_generation,
                 )
-                _run_neat(pop, _eval_genomes, n_generations)
+                _run_neat(
+                    pop,
+                    _eval_genomes,
+                    n_generations,
+                    consumed_budget=consumed_budget,
+                    consumed_fn=_consumed_fn,
+                    max_steps=max_steps,
+                )
             self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
@@ -279,7 +312,14 @@ class HyperNEATTrainer(NEATTrainer):
                 if gen_fitnesses:
                     self._fitness_history.append(float(np.max(gen_fitnesses)))
 
-            _run_neat(pop, _eval_genomes, n_generations)
+            _run_neat(
+                pop,
+                _eval_genomes,
+                n_generations,
+                consumed_budget=consumed_budget,
+                consumed_fn=lambda: int(self._env_steps_consumed),
+                max_steps=max_steps,
+            )
 
         best_genome = pop.best_genome
 
@@ -294,10 +334,14 @@ class HyperNEATTrainer(NEATTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        # Realized count: equals n_generations under nominal budgeting, but
+        # consumed budgeting (and extinction) can realize a different number.
+        realized_gens = int(self._generation_num)
+
         self._recorder.finalize(
             lambda: _hn_champion(best_genome),
-            iteration=n_generations,
-            env_steps=n_generations * max_steps,
+            iteration=realized_gens,
+            env_steps=realized_gens * max_steps,
         )
 
         try:
@@ -325,7 +369,7 @@ class HyperNEATTrainer(NEATTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * max_steps
+                    realized_gens * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
@@ -345,7 +389,11 @@ class ESHyperNEATTrainer(NEATTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
-        reject_consumed_budgeting(config, "ESHyperNEATTrainer")
+        # Opt-in consumed-step budgeting: run until the real env-tick budget
+        # is exhausted instead of the nominal generation count.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
         self._env_steps_consumed = 0
         params = dict(config.algorithm_params)
         max_steps = self._resolve_max_steps(config)
@@ -468,6 +516,9 @@ class ESHyperNEATTrainer(NEATTrainer):
                 self._fitness_history.append(best_fitness)
 
             _parallel_steps = [0]
+            _consumed_fn = lambda: (  # noqa: E731
+                int(self._env_steps_consumed) + int(_parallel_steps[0])
+            )
             with make_executor(
                 effective_workers,
                 backend=backend,
@@ -481,7 +532,14 @@ class ESHyperNEATTrainer(NEATTrainer):
                     step_sink=_parallel_steps,
                     on_generation=_on_generation,
                 )
-                _run_neat(pop, _eval_genomes, n_generations)
+                _run_neat(
+                    pop,
+                    _eval_genomes,
+                    n_generations,
+                    consumed_budget=consumed_budget,
+                    consumed_fn=_consumed_fn,
+                    max_steps=max_steps,
+                )
             self._env_steps_consumed += int(_parallel_steps[0])
         else:
             _base_seed = seed if seed is not None else 0
@@ -533,7 +591,14 @@ class ESHyperNEATTrainer(NEATTrainer):
                 if gen_fitnesses:
                     self._fitness_history.append(float(np.max(gen_fitnesses)))
 
-            _run_neat(pop, _eval_genomes, n_generations)
+            _run_neat(
+                pop,
+                _eval_genomes,
+                n_generations,
+                consumed_budget=consumed_budget,
+                consumed_fn=lambda: int(self._env_steps_consumed),
+                max_steps=max_steps,
+            )
 
         best_genome = pop.best_genome
 
@@ -547,10 +612,14 @@ class ESHyperNEATTrainer(NEATTrainer):
 
         elapsed = time.perf_counter() - t0
 
+        # Realized count: equals n_generations under nominal budgeting, but
+        # consumed budgeting (and extinction) can realize a different number.
+        realized_gens = int(self._generation_num)
+
         self._recorder.finalize(
             lambda: _esn_champion(best_genome),
-            iteration=n_generations,
-            env_steps=n_generations * max_steps,
+            iteration=realized_gens,
+            env_steps=realized_gens * max_steps,
         )
 
         try:
@@ -578,7 +647,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * max_steps
+                    realized_gens * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
