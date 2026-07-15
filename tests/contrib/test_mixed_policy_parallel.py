@@ -17,14 +17,9 @@ import numpy as np
 import pytest
 
 pytest.importorskip("deap")
-pytest.importorskip("pettingzoo.mpe")
+pytest.importorskip("mpe2")
 
-from examples.pursuit_evasion.simple_tag import (
-    APFConfig,
-    APFEvaderPolicy,
-    PursuitEvasionConfig,
-    PursuitEvasionEnv,
-)
+from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.evaluators import MixedPolicyEvaluator
 from deap_pettingzoo.genomes.fixed_topology import FixedTopologyGenome
 from deap_pettingzoo.integration.deap_integration import (
@@ -44,12 +39,13 @@ from deap_pettingzoo.utils.parallel import _SerialExecutor, make_executor
 # Minimal env config (fast; suitable for unit tests)
 # ---------------------------------------------------------------------------
 
-_SMALL_CFG = PursuitEvasionConfig(
-    num_adversaries=2,
-    num_good=2,
-    num_obstacles=1,
-    max_cycles=20,
-)
+_MAX_CYCLES = 20
+_ENV_CONFIG = {
+    "num_adversaries": 2,
+    "num_good": 2,
+    "num_obstacles": 1,
+    "max_cycles": _MAX_CYCLES,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +53,30 @@ _SMALL_CFG = PursuitEvasionConfig(
 # ---------------------------------------------------------------------------
 
 
-def _build_env() -> PursuitEvasionEnv:
-    return PursuitEvasionEnv(config=_SMALL_CFG)
+class _NoOpPolicy:
+    """Trivial scripted stand-in: always emits the no-op discrete action."""
+
+    def get_action(self, observation, **kwargs):
+        del observation, kwargs
+        return 0
+
+    def reset(self) -> None:
+        pass
 
 
-def _build_scripted(env: PursuitEvasionEnv) -> dict:
-    cfg = APFConfig()
+def _build_env() -> PettingZooWrapper:
+    return PettingZooWrapper(env_name="simple_tag_v3", env_config=dict(_ENV_CONFIG))
+
+
+def _adversaries(env: PettingZooWrapper) -> list:
+    return [a for a in env.possible_agents if a.startswith("adversary")]
+
+
+def _build_scripted(env: PettingZooWrapper) -> dict:
     return {
-        name: APFEvaderPolicy(layout=env.get_layout(name), config=cfg)
-        for name in env.good_agents
+        name: _NoOpPolicy()
+        for name in env.possible_agents
+        if not name.startswith("adversary")
     }
 
 
@@ -78,7 +89,7 @@ def _learner_factory(genome, agent_id, action_space):
 # ---------------------------------------------------------------------------
 
 
-def _make_individual(env: PursuitEvasionEnv | None = None, hidden: int = 8):
+def _make_individual(env: PettingZooWrapper | None = None, hidden: int = 8):
     """Build a DEAP Individual with a random FixedTopologyGenome."""
     setup_deap_creators()
     from deap import creator
@@ -90,7 +101,7 @@ def _make_individual(env: PursuitEvasionEnv | None = None, hidden: int = 8):
         close_env = False
 
     obs = env.reset(seed=0)
-    pursuer_id = env.adversary_agents[0]
+    pursuer_id = _adversaries(env)[0]
     in_size = obs[pursuer_id].shape[0]
     out_size = env.action_space(pursuer_id).n
     genome = FixedTopologyGenome(
@@ -162,8 +173,8 @@ class TestMixedPolicyEvaluatorFactoryValidation:
         env = _build_env()
         scripted = _build_scripted(env)
         # Cover all agents as scripted so learner side is empty.
-        for a in env.adversary_agents:
-            scripted[a] = APFEvaderPolicy(layout=env.get_layout(a))
+        for a in _adversaries(env):
+            scripted[a] = _NoOpPolicy()
         try:
             with pytest.raises(ValueError, match="No agents matched"):
                 MixedPolicyEvaluator(
@@ -190,7 +201,7 @@ class TestMixedPolicyEvaluatorFactoryPath:
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         # Factory path: validation env is built and closed during __init__,
         # so env_wrapper is None — agent lists are cached for use by workers.
@@ -204,12 +215,12 @@ class TestMixedPolicyEvaluatorFactoryPath:
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         ind, _ = _make_individual()
         res = evaluator.run_episode(ind, seed=0)
         assert res.steps > 0
-        assert res.steps <= _SMALL_CFG.max_cycles
+        assert res.steps <= _MAX_CYCLES
         assert np.isfinite(res.learner_reward)
         assert np.isfinite(res.scripted_reward)
         assert res.fitness == res.learner_reward
@@ -220,7 +231,7 @@ class TestMixedPolicyEvaluatorFactoryPath:
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         ind, _ = _make_individual()
         result = evaluator.evaluate(ind, seed=1)
@@ -239,14 +250,14 @@ class TestMixedPolicyEvaluatorFactoryPath:
             scripted_policies=scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         factory_ev = MixedPolicyEvaluator(
             env_factory=_build_env,
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         try:
             live_fit = live_ev.evaluate(ind, seed=7)
@@ -272,7 +283,7 @@ class TestMakeMixedParallelEvaluateMap:
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         return ev
 
@@ -460,7 +471,7 @@ class TestMixedParallelProcessPool:
             scripted_policy_factory=_build_scripted,
             learner_agent_prefixes=["adversary"],
             learner_factory=_learner_factory,
-            max_steps=_SMALL_CFG.max_cycles,
+            max_steps=_MAX_CYCLES,
         )
         ind, _ = _make_individual()
         population = [ind, ind, ind, ind]
