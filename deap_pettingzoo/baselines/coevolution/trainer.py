@@ -99,6 +99,31 @@ def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     replay_registry_snapshot(snapshot)
 
 
+def _callback_accepts_context(callback: Callable) -> bool:
+    """True when ``callback`` can take a third positional ``context`` arg.
+
+    Uses signature inspection so the legacy two-arg ``(gen, states)``
+    contract keeps working unchanged. Callables whose signature cannot be
+    inspected are treated as legacy two-arg.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= 3
+
+
 def _format_progress_entry(stats: GenerationStats) -> str:
     """Format one side's progress entry for the console line."""
     if stats.qd_score is None or stats.coverage is None:
@@ -320,6 +345,13 @@ class CoEvolutionConfig:
     the current champion for each side.  Exceptions raised by the
     callback are silently swallowed (a ``RuntimeWarning`` is emitted)
     so they cannot interrupt training.
+
+    A callback accepting a third positional parameter is instead invoked
+    with ``(gen, states, context)`` where ``context`` is a dict carrying
+    ``"logger"`` (the run's live :class:`ExperimentLogger`, e.g. for
+    ``logger.row("probe", ...)`` benchmark rows that must land in the run
+    directory) and ``"env_steps_consumed"`` (the pooled real env-tick count
+    at this generation, ``None`` when unavailable).
     """
 
     def __post_init__(self) -> None:
@@ -850,7 +882,14 @@ class CoEvolutionTrainer(BaselineTrainer):
         """
         if coev_cfg.generation_callback is not None:
             try:
-                coev_cfg.generation_callback(gen, states)
+                if _callback_accepts_context(coev_cfg.generation_callback):
+                    context = {
+                        "logger": getattr(self, "_recording_log", None),
+                        "env_steps_consumed": consumed,
+                    }
+                    coev_cfg.generation_callback(gen, states, context)
+                else:
+                    coev_cfg.generation_callback(gen, states)
             except Exception as _cb_exc:
                 warnings.warn(
                     f"[CoEvolution] generation_callback failed at gen {gen}: "

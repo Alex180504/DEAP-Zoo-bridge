@@ -343,6 +343,15 @@ class CMAESTrainer(BaselineTrainer):
             max_steps=max_steps_per_episode,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps_per_episode,
+            seed=seed,
+        )
 
         def _cma_champion():
             if len(hof) == 0:
@@ -499,6 +508,12 @@ class CMAESTrainer(BaselineTrainer):
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
+        self._prober.finalize(
+            _cma_champion,
+            iteration=num_generations,
+            env_steps=num_generations * env_steps_per_iteration,
+        )
+        self._prober.close()
         training_time = time.time() - start_time
 
         best_individual = hof[0]

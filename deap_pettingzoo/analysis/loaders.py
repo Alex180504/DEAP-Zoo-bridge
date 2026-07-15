@@ -344,6 +344,21 @@ def load_run(run_dir: str | Path) -> RunRecord:
     episodes = _read_csv_if_exists(run_dir / "episodes.csv")
     trajectories = _read_parquet_if_exists(run_dir / "trajectories.parquet")
 
+    # Held-out probe checkpoints (probe.csv, written by ProbeController or by
+    # experiment-script benchmark callbacks) are merged into the metrics
+    # frame as extra rows: probe rows carry `env_steps` plus `probe_*`
+    # columns, trainer rows keep theirs, and each column pair dropna()s to
+    # its own rows downstream (learning_curve_with_ci, the Compare page).
+    # This makes probe curves selectable in the UI without a dedicated loader path.
+    probe = _read_csv_if_exists(run_dir / "probe.csv")
+    if probe is not None and len(probe) > 0:
+        import pandas as pd
+
+        if metrics is None:
+            metrics = probe
+        else:
+            metrics = pd.concat([metrics, probe], ignore_index=True, sort=False)
+
     summary: Dict[str, Any] = dict(manifest.get("final_summary") or {})
     if not summary:
         summary_path = run_dir / "summary.json"

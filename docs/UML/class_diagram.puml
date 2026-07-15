@@ -425,6 +425,7 @@ package "deap_pettingzoo.baselines" {
         + scheduler_address: Optional[str] = None
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
+        + probe: ProbeConfig
         -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
         -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool / NEAT+HyperNEAT / QDax numpy\n   scoring path); rejected by mu±lambda and the QDax\n   JAX-native scoring path --
         -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
@@ -464,6 +465,33 @@ package "deap_pettingzoo.baselines" {
     RecordingController ..> RecordingConfig : reads
     RecordingController ..> UnifiedEvaluator : drives
 
+    class ProbeConfig <<dataclass>> {
+        + enabled: bool
+        + every_n_steps: Optional[int]
+        + n_episodes: int
+        + env_name: Optional[str]
+        + env_config: Optional[Dict]
+        + info_keys: tuple
+        + seed: Optional[int]
+        -- held-out champion probe: off-budget measurement,\n   env-step cadence only (the algorithm-agnostic axis);\n   rows -> <run_dir>/probe.csv --
+    }
+
+    class ProbeController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        + flush_to(experiment_logger)
+        --
+        Rides the same _on_progress champion hook as
+        RecordingController. Rolls n_episodes held-out
+        episodes via UnifiedEvaluator (info_keys tracked),
+        writes one probe.csv row per checkpoint; buffers
+        rows when the logger is built late (QDax).
+        Fixed episode seeds per run (CRN across checkpoints).
+    }
+    ProbeController ..> ProbeConfig : reads
+    ProbeController ..> UnifiedEvaluator : drives
+
     class TrainingResult <<dataclass>> {
         + algorithm: str
         + policy: PolicyProtocol
@@ -482,7 +510,9 @@ package "deap_pettingzoo.baselines" {
         + episode_rewards: List[float]
         + episode_lengths: List[int]
         + agent_rewards: Dict[str, float]
+        + info_metrics: Dict[str, List[float]]
         + to_dict() -> dict
+        -- info_metrics: per-episode env-info task metrics\n   (episode-max per key), filled only when the evaluator\n   was built with info_keys --
     }
 
     class ComparisonConfig <<dataclass>> {
@@ -712,11 +742,13 @@ package "deap_pettingzoo.baselines" {
         - env_cache: dict
         - aggregation: str
         - score_agents: Optional[set[str]]
+        - info_keys: tuple
         --
-        + __init__(max_steps, *, aggregation="sum", score_agents=None)
+        + __init__(max_steps, *, aggregation="sum", score_agents=None, info_keys=None)
         + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
         - _aggregate_reward(agent_rewards) -> float
-        - _run_episode(policy, env, seed) -> (agent_rewards, length)
+        - _run_episode(policy, env, seed) -> (agent_rewards, length, info_metrics)
+        - _track_info_metrics(acc, step_infos)
         + close()
     }
     note bottom of UnifiedEvaluator

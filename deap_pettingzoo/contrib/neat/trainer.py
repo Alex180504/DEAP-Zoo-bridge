@@ -282,6 +282,15 @@ class NEATTrainer(BaselineTrainer):
             max_steps=max_steps,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
 
         # Create initial population
         pop = neat.Population(neat_config, seed=seed)
@@ -299,18 +308,22 @@ class NEATTrainer(BaselineTrainer):
                 best_genome, neat_config, action_space=shared_action_space
             )
 
-        if self._recorder.enabled:
+        if self._recorder.enabled or self._prober.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                self._recorder.observe(
-                    ProgressEvent(
-                        unit="generation",
-                        current=gen,
-                        total=n_generations,
-                        env_steps=gen * max_steps,
-                    ),
-                    lambda: _neat_champion(best_genome),
+                # Real cumulative env ticks (serial counter + worker sink):
+                # the recorder's COUNT cadence only uses `fraction`, but the
+                # probe paces on env_steps, which must be the honest counter.
+                consumed = int(self._env_steps_consumed) + int(_parallel_steps[0])
+                event = ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=n_generations,
+                    env_steps=consumed,
                 )
+                champion = lambda: _neat_champion(best_genome)  # noqa: E731
+                self._recorder.observe(event, champion)
+                self._prober.observe(event, champion)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -491,12 +504,18 @@ class NEATTrainer(BaselineTrainer):
             iteration=realized_gens,
             env_steps=realized_gens * max_steps,
         )
+        self._prober.finalize(
+            lambda: _neat_champion(best_genome),
+            iteration=realized_gens,
+            env_steps=int(self._env_steps_consumed) + int(_parallel_steps[0]),
+        )
 
         try:
             env.close()
         except Exception:
             pass
         self._recorder.close()
+        self._prober.close()
 
         self._log(
             config,
@@ -506,7 +525,7 @@ class NEATTrainer(BaselineTrainer):
             algorithm="NEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
-        if config.recording.enabled:
+        if config.recording.enabled or config.probe.enabled:
             log.close()
 
         return TrainingResult(

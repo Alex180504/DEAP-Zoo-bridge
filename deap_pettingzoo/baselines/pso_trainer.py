@@ -312,6 +312,17 @@ class PSOTrainer(BaselineTrainer):
             max_steps=max_steps,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget by construction: probe
+        # episodes run on the controller's own env, outside the evaluator's
+        # consumed-step counter).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
 
         def _pso_champion():
             if len(hof) == 0:
@@ -463,12 +474,19 @@ class PSOTrainer(BaselineTrainer):
         # Realized generation count (== num_generations on the nominal path).
         num_generations = gen
         env.close()
+        final_env_steps = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
         self._recorder.finalize(
             _pso_champion,
             iteration=num_generations,
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
+        self._prober.finalize(
+            _pso_champion,
+            iteration=num_generations,
+            env_steps=final_env_steps,
+        )
+        self._prober.close()
         training_time = time.time() - start_time
 
         best_ind = hof[0]

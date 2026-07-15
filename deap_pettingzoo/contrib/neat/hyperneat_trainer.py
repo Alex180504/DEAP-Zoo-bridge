@@ -164,6 +164,18 @@ class HyperNEATTrainer(NEATTrainer):
             max_steps=max_steps,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        # The probe paces on real cumulative env ticks; the parallel branch
+        # swaps this counter for one that includes the live worker sink.
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
+        self._live_steps_fn = lambda: int(self._env_steps_consumed)
 
         # Create population
         pop = neat.Population(neat_config, seed=seed)
@@ -183,18 +195,18 @@ class HyperNEATTrainer(NEATTrainer):
                 weight_threshold=weight_threshold,
             )
 
-        if self._recorder.enabled:
+        if self._recorder.enabled or self._prober.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                self._recorder.observe(
-                    ProgressEvent(
-                        unit="generation",
-                        current=gen,
-                        total=n_generations,
-                        env_steps=gen * max_steps,
-                    ),
-                    lambda: _hn_champion(best_genome),
+                event = ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=n_generations,
+                    env_steps=self._live_steps_fn(),
                 )
+                champion = lambda: _hn_champion(best_genome)  # noqa: E731
+                self._recorder.observe(event, champion)
+                self._prober.observe(event, champion)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -239,6 +251,7 @@ class HyperNEATTrainer(NEATTrainer):
             _consumed_fn = lambda: (  # noqa: E731
                 int(self._env_steps_consumed) + int(_parallel_steps[0])
             )
+            self._live_steps_fn = _consumed_fn
             with make_executor(
                 effective_workers,
                 backend=backend,
@@ -261,6 +274,7 @@ class HyperNEATTrainer(NEATTrainer):
                     max_steps=max_steps,
                 )
             self._env_steps_consumed += int(_parallel_steps[0])
+            self._live_steps_fn = lambda: int(self._env_steps_consumed)
         else:
             _base_seed = seed if seed is not None else 0
 
@@ -343,12 +357,18 @@ class HyperNEATTrainer(NEATTrainer):
             iteration=realized_gens,
             env_steps=realized_gens * max_steps,
         )
+        self._prober.finalize(
+            lambda: _hn_champion(best_genome),
+            iteration=realized_gens,
+            env_steps=int(self._env_steps_consumed),
+        )
 
         try:
             env.close()
         except Exception:
             pass
         self._recorder.close()
+        self._prober.close()
 
         self._log(
             config,
@@ -358,7 +378,7 @@ class HyperNEATTrainer(NEATTrainer):
             algorithm="HyperNEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
-        if config.recording.enabled:
+        if config.recording.enabled or config.probe.enabled:
             log.close()
 
         return TrainingResult(
@@ -448,6 +468,16 @@ class ESHyperNEATTrainer(NEATTrainer):
             max_steps=max_steps,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
+        self._live_steps_fn = lambda: int(self._env_steps_consumed)
 
         pop = neat.Population(neat_config, seed=seed)
 
@@ -464,18 +494,18 @@ class ESHyperNEATTrainer(NEATTrainer):
                 es_params=es_params,
             )
 
-        if self._recorder.enabled:
+        if self._recorder.enabled or self._prober.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                self._recorder.observe(
-                    ProgressEvent(
-                        unit="generation",
-                        current=gen,
-                        total=n_generations,
-                        env_steps=gen * max_steps,
-                    ),
-                    lambda: _esn_champion(best_genome),
+                event = ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=n_generations,
+                    env_steps=self._live_steps_fn(),
                 )
+                champion = lambda: _esn_champion(best_genome)  # noqa: E731
+                self._recorder.observe(event, champion)
+                self._prober.observe(event, champion)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -519,6 +549,7 @@ class ESHyperNEATTrainer(NEATTrainer):
             _consumed_fn = lambda: (  # noqa: E731
                 int(self._env_steps_consumed) + int(_parallel_steps[0])
             )
+            self._live_steps_fn = _consumed_fn
             with make_executor(
                 effective_workers,
                 backend=backend,
@@ -541,6 +572,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                     max_steps=max_steps,
                 )
             self._env_steps_consumed += int(_parallel_steps[0])
+            self._live_steps_fn = lambda: int(self._env_steps_consumed)
         else:
             _base_seed = seed if seed is not None else 0
 
@@ -621,12 +653,18 @@ class ESHyperNEATTrainer(NEATTrainer):
             iteration=realized_gens,
             env_steps=realized_gens * max_steps,
         )
+        self._prober.finalize(
+            lambda: _esn_champion(best_genome),
+            iteration=realized_gens,
+            env_steps=int(self._env_steps_consumed),
+        )
 
         try:
             env.close()
         except Exception:
             pass
         self._recorder.close()
+        self._prober.close()
 
         self._log(
             config,
@@ -636,7 +674,7 @@ class ESHyperNEATTrainer(NEATTrainer):
             algorithm="ES-HyperNEAT",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
         )
-        if config.recording.enabled:
+        if config.recording.enabled or config.probe.enabled:
             log.close()
 
         return TrainingResult(
