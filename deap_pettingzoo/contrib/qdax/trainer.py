@@ -316,9 +316,7 @@ def _resolve_consumed_budget(
     inside ``jax.jit``/``vmap`` with no Python-side counter (a documented
     structural limit) and rejects the flag.
     """
-    if not (
-        config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS
-    ):
+    if not (config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS):
         return None
     if not hasattr(scoring_fn, "_env_steps_consumed"):
         raise ValueError(

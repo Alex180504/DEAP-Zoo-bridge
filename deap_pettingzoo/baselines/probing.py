@@ -85,9 +85,7 @@ class ProbeController:
         else:
             self._env_config = dict(config.env_config) if config.env_config else None
         self._seed = cfg.seed if cfg.seed is not None else seed
-        self.evaluator = UnifiedEvaluator(
-            max_steps=max_steps, info_keys=cfg.info_keys
-        )
+        self.evaluator = UnifiedEvaluator(max_steps=max_steps, info_keys=cfg.info_keys)
         # First probe fires on the first progress event (baseline point);
         # subsequent probes every `every_n_steps` env steps.
         self._interval = max(1, int(cfg.every_n_steps))
@@ -192,7 +190,9 @@ class ProbeController:
         }
         for key in self._cfg.info_keys:
             values = result.info_metrics.get(key, [])
-            row[f"probe_{key}_mean"] = float(np.mean(values)) if values else float("nan")
+            row[f"probe_{key}_mean"] = (
+                float(np.mean(values)) if values else float("nan")
+            )
             row[f"probe_{key}_std"] = float(np.std(values)) if values else float("nan")
         self._last_key = (int(iteration), int(env_steps))
         if self._log is None:

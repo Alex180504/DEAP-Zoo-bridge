@@ -191,3 +191,5 @@ _baseline_pytest.txt
 *.jar
 
 smoke.py
+
+archive/
