@@ -2,7 +2,7 @@
 
 Authoritative reference for every public class, function, and dataclass in
 `deap_pettingzoo/`. All signatures, defaults, and behaviours match the
-current code (see [../../README.md](../../README.md) for the narrative
+current code (see the [project overview](../index.md) for the narrative
 overview). Private helpers (leading underscore) are omitted unless they
 are contractually relevant.
 
@@ -19,7 +19,7 @@ are contractually relevant.
 7. [Baselines (`deap_pettingzoo.baselines`)](#baselines)
 8. [Co-evolution (`baselines.coevolution`)](#co-evolution-baselinescoevolution)
 9. [Catalog (`deap_pettingzoo.catalog`)](#catalog) — see also [configuration_schemas.md](configuration_schemas.md)
-10. [Experiment Service (`deap_pettingzoo.service`)](#experiment-service) — see [service_api.md](service_api.md)
+10. Experiment Service (`deap_pettingzoo.service`) — see [service_api.md](service_api.md)
 11. [Logging & Analysis](#logging--analysis) — see [logging_and_analysis.md](logging_and_analysis.md)
 12. [Type & protocol reference](#type--protocol-reference)
 13. [Error handling conventions](#error-handling-conventions)
@@ -200,7 +200,7 @@ Hyperparameters for `APFEvaderPolicy`.
 ### `class APFEvaderPolicy`
 
 Scripted, stateless evader. Reads the agent's observation through a
-supplied [`ObsLayout`](#class-obslayout), computes a resultant repulsive
+supplied [`ObsLayout`](#dataclass-obslayout), computes a resultant repulsive
 force, then quantises it to one of the five discrete MPE actions.
 
 ```python
@@ -1447,8 +1447,7 @@ def make_cma_stats() -> tools.Statistics:
     same keys as EATrainer's fitness_history records."""
 ```
 
-Typical loop (see
-[examples/pursuit_evasion_cmaes_vs_apf.py](../../examples/pursuit_evasion_cmaes_vs_apf.py)):
+Typical loop (see `examples/`):
 
 ```python
 strategy, dim = setup_cma_strategy(genome_config, sigma0, population_size)
@@ -1554,7 +1553,27 @@ class TrainingConfig:
     output_dir: Optional[Path] = None
     render: bool = False
     recording: RecordingConfig = RecordingConfig()
+    probe: ProbeConfig = ProbeConfig()
     budget_on_consumed: bool = False  # opt-in real-tick budgeting (ENV_STEPS only)
+
+
+@dataclass
+class ProbeConfig:
+    """Opt-in periodic held-out champion evaluation ("probe"). Every
+    `every_n_steps` cumulative env steps (plus a baseline probe at the first
+    progress event and a guaranteed end-of-run probe) the frozen current
+    champion plays `n_episodes` episodes on a separate env instance — never
+    charged to the training budget — and one row lands in
+    `<run_dir>/probe.csv`. Driven by the shared `ProbeController`
+    (`deap_pettingzoo/baselines/probing.py`); see
+    `docs/api/logging_and_analysis.md` -> "Held-out champion probe"."""
+    enabled: bool = False
+    every_n_steps: Optional[int] = None   # required when enabled
+    n_episodes: int = 16
+    env_name: Optional[str] = None        # held-out env override (default: training env)
+    env_config: Optional[Dict[str, Any]] = None
+    info_keys: tuple = ()                 # env-info task metrics, episode-max aggregation
+    seed: Optional[int] = None            # fixed per run -> CRN across checkpoints
 
 
 @dataclass
@@ -1587,6 +1606,15 @@ identically. The `RecordingController` (`deap_pettingzoo/baselines/recording.py`
 owns the recorder, the `UnifiedEvaluator`, the schedule, episode-offset bookkeeping,
 sidecar metadata, and best-effort error handling; each trainer reports progress
 through `BaselineTrainer._on_progress(callback, event, champion)`.
+
+The `ProbeController` (`deap_pettingzoo/baselines/probing.py`) rides the same
+`_on_progress` champion hook: any trainer that supports mid-run recording also
+supports the held-out probe. QDax MAP-Elites probes mid-loop with buffered rows
+(its logger only exists at persistence time); co-evolution does not use the
+controller (a mixed-side rollout has no single champion score) and instead
+passes `{"logger", "env_steps_consumed"}` context to three-argument
+`generation_callback`s so callers can write the same `probe.csv` schema
+per side.
 
 **`continuous` shortcut.** Setting `continuous=True` merges
 `{"continuous_actions": True}` into `env_config` at construction time
@@ -1746,7 +1774,11 @@ read from the first-class `config.max_steps_per_episode` (default
 `TrainingConfig.budget_on_consumed=True` under `BudgetMode.ENV_STEPS` to
 run until the *real* consumed env-step count reaches `budget_value` instead
 of stopping after the pre-computed nominal generation count. Supported by
-EA `simple`, CMA-ES, PSO, and co-evolution (shared pool). The realized
+EA `simple`, CMA-ES, PSO, co-evolution (shared pool),
+NEAT/HyperNEAT/ES-HyperNEAT (`n=1` population stepping), and the QDax
+trainers on the numpy/PettingZoo scoring path; rejected by EA
+`mu_plus_lambda` / `mu_comma_lambda` and the QDax JAX-native scoring path.
+The realized
 `num_generations` and `env_steps_consumed` are then determined at runtime.
 Result metrics include `env_steps_nominal` (the pre-computed ceiling) and
 `env_steps_consumed` (real ticks, always ≤ `env_steps_nominal` in nominal
