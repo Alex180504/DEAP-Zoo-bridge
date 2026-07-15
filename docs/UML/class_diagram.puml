@@ -94,28 +94,6 @@ package "deap_pettingzoo.policies" {
     FeedforwardNeuralPolicy --> ActionHead : optional head
 }
 
-package "examples.pursuit_evasion.simple_tag (APF)" {
-    class APFConfig <<dataclass>> {
-        + k_pursuer: float
-        + k_landmark: float
-        + k_boundary: float
-        + boundary_threshold: float
-        + no_op_threshold: float
-        + softening: float
-    }
-
-    class APFEvaderPolicy {
-        - config: APFConfig
-        - layout: ObsLayout
-        --
-        + __init__(layout, config=None)
-        + get_action(observation) -> action
-        + reset() -> None
-    }
-
-    APFEvaderPolicy --> APFConfig : uses
-}
-
 package "deap_pettingzoo.environments" {
     class PettingZooWrapper {
         - env
@@ -233,41 +211,6 @@ package "deap_pettingzoo.contrib.openspiel" {
       Wraps shimmy.OpenSpielCompatibilityV0
       for OpenSpiel turn-based games.
     end note
-}
-
-package "examples.pursuit_evasion.simple_tag" {
-    class PursuitEvasionConfig <<dataclass>> {
-        + num_adversaries: int
-        + num_good: int
-        + num_obstacles: int
-        + max_cycles: int
-        + equal_ability: bool
-        + equal_max_speed: float
-        + equal_accel: float
-        + num_agent_neighbors: Optional[int]
-        + num_landmark_neighbors: Optional[int]
-        + boundary_threshold: float
-        + boundary_scale: float
-        + boundary_sharpness: float
-        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
-    }
-
-    class ObsLayout <<dataclass>> {
-        + describes observation vector slicing
-    }
-
-    class PursuitEvasionEnv {
-        + config: PursuitEvasionConfig
-        + obs_layout: ObsLayout
-        --
-        + __init__(config=None, **kwargs)
-        + reset(seed) -> observations
-        + step(actions) -> tuple
-    }
-
-    PursuitEvasionEnv --|> PettingZooWrapper
-    PursuitEvasionEnv --> PursuitEvasionConfig : uses
-    PursuitEvasionEnv --> ObsLayout : uses
 }
 
 package "deap_pettingzoo.evaluators" {
@@ -809,7 +752,6 @@ package "deap_pettingzoo.baselines" {
     comparison_mod --> ComparisonConfig : consumes
 
     FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
-    APFEvaderPolicy ..|> PolicyProtocol : implements
 }
 
 ' Cross-package interaction notes
