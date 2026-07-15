@@ -813,8 +813,7 @@ class _MixedWorkerSpec:
     :func:`_resolve_callable`.
 
     Attributes:
-        env_factory_qualname: Fully-qualified name of the env factory
-            (e.g. ``"examples.pursuit_evasion.ea_vs_apf.build_env"``).
+        env_factory_qualname: Fully-qualified name of the env factory.
         scripted_factory_qualname: Fully-qualified name of the scripted-
             policy factory.
         learner_factory_qualname: Fully-qualified name of the learner-
