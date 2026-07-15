@@ -208,6 +208,58 @@ class RecordingConfig:
 
 
 @dataclass
+class ProbeConfig:
+    """Opt-in periodic held-out evaluation nested on :class:`TrainingConfig`.
+
+    When ``enabled=True``, supported trainers evaluate a frozen snapshot of
+    the current champion for :attr:`n_episodes` episodes every
+    :attr:`every_n_steps` cumulative env steps and append one row per probe
+    to ``<run_dir>/probe.csv`` (columns: ``iteration``, ``env_steps``,
+    ``probe_reward_mean/std``, ``probe_episodes``, plus
+    ``probe_<key>_mean/std`` per :attr:`info_keys` entry). Probe episodes are
+    *measurement*, not training: they run on a separate env instance and are
+    never counted against the training budget, so equal-budget comparisons
+    stay fair when probing is enabled uniformly across algorithms.
+
+    Attributes:
+        enabled: Master on/off switch.
+        every_n_steps: Env-step interval between probes. The first probe
+            fires on the first progress event (baseline point) and a final
+            probe is guaranteed at end of run. Required when ``enabled``.
+        n_episodes: Episodes per probe; the row carries mean/std over these.
+        env_name: Probe env override; ``None`` uses the training env.
+        env_config: Probe env-config override; ``None`` uses the training
+            env config (only consulted when it is not ``None`` — pass ``{}``
+            to force an empty config alongside ``env_name``).
+        info_keys: Env ``info`` dict keys tracked as task metrics. Each key
+            is aggregated per episode as the max of ``float(info[key])``
+            over all steps and agents (the running-total convention used by
+            counters like ``prey_lost_total``).
+        seed: Base seed for probe episodes; ``None`` leaves them unseeded.
+    """
+
+    enabled: bool = False
+    every_n_steps: Optional[int] = None
+    n_episodes: int = 16
+    env_name: Optional[str] = None
+    env_config: Optional[Dict[str, Any]] = None
+    info_keys: tuple = ()
+    seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.enabled and (self.every_n_steps is None or self.every_n_steps <= 0):
+            raise ValueError(
+                "ProbeConfig.enabled=True requires a positive every_n_steps, "
+                f"got {self.every_n_steps}"
+            )
+        if self.n_episodes <= 0:
+            raise ValueError(
+                f"ProbeConfig.n_episodes must be positive, got {self.n_episodes}"
+            )
+        self.info_keys = tuple(self.info_keys)
+
+
+@dataclass
 class FitnessConfig:
     """Fitness-aggregation configuration nested on :class:`TrainingConfig`.
 
@@ -398,6 +450,7 @@ class TrainingConfig:
     scheduler_address: Optional[str] = None
     budget_on_consumed: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    probe: ProbeConfig = field(default_factory=ProbeConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
     def __post_init__(self):
@@ -530,6 +583,10 @@ class EvalResult:
             the per-agent decomposition that ``mean_reward`` collapses to
             a single team scalar (degenerate on zero-sum competitive
             envs); empty for legacy callers that did not record it.
+        info_metrics: Per-episode task-metric values keyed by env ``info``
+            key, tracked only when the evaluator was built with
+            ``info_keys`` (episode value = max of ``float(info[key])``
+            over all steps and agents). Empty otherwise.
     """
 
     mean_reward: float
@@ -540,6 +597,7 @@ class EvalResult:
     episode_rewards: List[float] = field(default_factory=list)
     episode_lengths: List[int] = field(default_factory=list)
     agent_rewards: Dict[str, float] = field(default_factory=dict)
+    info_metrics: Dict[str, List[float]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -552,6 +610,10 @@ class EvalResult:
             "episode_rewards": [float(r) for r in self.episode_rewards],
             "episode_lengths": [int(l) for l in self.episode_lengths],
             "agent_rewards": {str(k): float(v) for k, v in self.agent_rewards.items()},
+            "info_metrics": {
+                str(k): [float(v) for v in vals]
+                for k, vals in self.info_metrics.items()
+            },
         }
 
 
@@ -638,11 +700,18 @@ class BaselineTrainer(ABC):
         this ``event`` warrants a champion-rollout recording. ``champion`` is
         called lazily (only when a recording is actually due) and returns the
         policy (or per-agent policy map) to roll out, or ``None`` to skip.
+
+        A :class:`~deap_pettingzoo.baselines.probing.ProbeController` set as
+        ``self._prober`` is observed the same way, so any trainer that feeds
+        its champion through this hook supports periodic held-out probes.
         """
         self._emit_progress(callback, event)
         recorder = getattr(self, "_recorder", None)
         if recorder is not None and champion is not None:
             recorder.observe(event, champion, extra=extra)
+        prober = getattr(self, "_prober", None)
+        if prober is not None and champion is not None:
+            prober.observe(event, champion, extra=extra)
 
     @staticmethod
     def _emit_progress(

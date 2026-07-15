@@ -103,9 +103,13 @@ class HyperNeatPolicy(PolicyProtocol):
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        # Heads are deterministic decoders; the kwarg exists for
+        # PolicyProtocol compatibility (benchmark probes pass it).
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         self._network.reset()
         raw = None
@@ -192,9 +196,13 @@ class ESHyperNeatPolicy(PolicyProtocol):
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        # Heads are deterministic decoders; the kwarg exists for
+        # PolicyProtocol compatibility (benchmark probes pass it).
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         self._network.reset()
         raw = None

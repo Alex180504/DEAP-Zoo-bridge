@@ -77,6 +77,7 @@ class NeatPolicy(PolicyProtocol):
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
@@ -84,6 +85,9 @@ class NeatPolicy(PolicyProtocol):
 
         Args:
             observation: 1-D array of shape ``(input_dim,)``.
+            deterministic: Accepted for PolicyProtocol compatibility
+                (benchmark probes pass it); the heads are deterministic
+                decoders, so the value has no effect.
             action_mask: Optional boolean mask forwarded to the head
                 when the head supports masking.
 
@@ -91,6 +95,7 @@ class NeatPolicy(PolicyProtocol):
             Decoded action (type depends on the configured head) or
             raw ``np.ndarray`` when no head was configured.
         """
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         raw = self._network.activate(obs)
         raw_arr = np.asarray(raw, dtype=np.float32)

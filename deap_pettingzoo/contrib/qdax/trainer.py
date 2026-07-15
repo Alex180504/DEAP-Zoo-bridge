@@ -682,6 +682,38 @@ class MAPElitesTrainer(BaselineTrainer):
         num_iters = _budget_to_iterations(config, params)
         verbose = bool(params.get("verbose", True))
         progress_every = max(1, int(params.get("progress_every", 1)))
+
+        # Periodic held-out champion probe. The run's ExperimentLogger only
+        # exists inside _persist_qdax_results, so rows buffer in memory and
+        # are flushed there. env_steps uses the scoring function's real tick
+        # counter on the numpy path, nominal iteration cost on the JAX path.
+        from deap_pettingzoo.baselines.base import ProgressEvent
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        _probe_ep_len = int(params["episode_length"])
+        _probe_eval_eps = max(1, int(params.get("eval_episodes", 1)))
+        _probe_steps_per_iter = (
+            int(params["batch_size"]) * _probe_ep_len * _probe_eval_eps
+        )
+        _probe_init_steps = (
+            int(params["init_batch_size"]) * _probe_ep_len * _probe_eval_eps
+        )
+        self._prober = ProbeController(
+            config,
+            None,
+            max_steps=_probe_ep_len,
+            seed=int(params["seed"]),
+        )
+        _probe_action_space = (
+            _resolve_shared_action_space(env) if self._prober.enabled else None
+        )
+
+        def _probe_env_steps(iter_idx: int) -> int:
+            consumed = getattr(scoring_fn, "_env_steps_consumed", None)
+            if consumed is not None:
+                return int(consumed)
+            return _probe_init_steps + iter_idx * _probe_steps_per_iter
+
         if verbose:
             _print_qdax_plan(
                 "MAP-Elites",
@@ -720,6 +752,17 @@ class MAPElitesTrainer(BaselineTrainer):
                 )
                 history.append(metrics)
                 realized_iters = iter_idx
+                self._prober.observe(
+                    ProgressEvent(
+                        unit="generation",
+                        current=iter_idx,
+                        total=num_iters,
+                        env_steps=_probe_env_steps(iter_idx),
+                    ),
+                    lambda _rep=repertoire: _extract_champion(
+                        _rep, module, action_space=_probe_action_space
+                    )[0],
+                )
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -743,6 +786,11 @@ class MAPElitesTrainer(BaselineTrainer):
             repertoire,
             module,
             action_space=_resolve_shared_action_space(env),
+        )
+        self._prober.finalize(
+            lambda: champion_policy,
+            iteration=realized_iters,
+            env_steps=_probe_env_steps(realized_iters),
         )
 
         metadata: Dict[str, Any] = {
@@ -791,6 +839,7 @@ class MAPElitesTrainer(BaselineTrainer):
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=_ep_len,
+            prober=self._prober,
             repertoire_path=(
                 Path(metadata["repertoire_path"])
                 if "repertoire_path" in metadata
@@ -1098,8 +1147,14 @@ def _persist_qdax_results(
     env_steps_per_iteration: int = 0,
     init_env_steps: int = 0,
     env_steps_consumed: Optional[int] = None,
+    prober: Optional[Any] = None,
 ) -> None:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
+
+    ``prober``, when given, is the trainer's buffered
+    :class:`~deap_pettingzoo.baselines.probing.ProbeController`; its rows are
+    flushed to ``probe.csv`` here because the run's logger only exists inside
+    this function.
 
     Each entry in ``history`` is a dict-like of QDax scalars (typically
     ``qd_score``, ``coverage``, ``max_fitness``, ``min_fitness``,
@@ -1131,6 +1186,9 @@ def _persist_qdax_results(
     )
 
     with build_logger(config, algorithm=algorithm) as log:
+        if prober is not None:
+            prober.flush_to(log)
+            prober.close()
         for i, entry in enumerate(history):
             # history[0] is the initial repertoire (init_env_steps); each
             # later iteration adds env_steps_per_iteration.

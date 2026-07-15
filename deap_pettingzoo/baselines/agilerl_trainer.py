@@ -566,6 +566,16 @@ class AgileRLTrainer(BaselineTrainer):
                 max_steps=_rec_max_steps,
                 seed=seed,
             )
+            from deap_pettingzoo.baselines.probing import ProbeController
+
+            # Periodic held-out champion probe on the same env-step axis
+            # (never counted into the budget).
+            self._prober = ProbeController(
+                config,
+                log,
+                max_steps=_rec_max_steps,
+                seed=seed,
+            )
 
             def _champion():
                 return policy
@@ -609,6 +619,10 @@ class AgileRLTrainer(BaselineTrainer):
                 _champion, iteration=budget_steps, env_steps=budget_steps
             )
             self._recorder.close()
+            self._prober.finalize(
+                _champion, iteration=budget_steps, env_steps=budget_steps
+            )
+            self._prober.close()
 
             ep_rewards = list(metrics.get("episode_rewards", []) or [])
             for idx, r in enumerate(ep_rewards):

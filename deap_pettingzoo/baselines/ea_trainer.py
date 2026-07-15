@@ -696,6 +696,17 @@ class EATrainer(BaselineTrainer):
             max_steps=max_steps_per_episode,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget by construction: probe
+        # episodes run on the controller's own env, outside the evaluator's
+        # consumed-step counter).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps_per_episode,
+            seed=seed,
+        )
 
         def _ea_champion():
             """Lazy champion provider for the recording controller."""
@@ -912,6 +923,11 @@ class EATrainer(BaselineTrainer):
                     iteration=realized_generations,
                     env_steps=realized_generations * env_steps_per_iteration,
                 )
+                self._prober.finalize(
+                    _ea_champion,
+                    iteration=realized_generations,
+                    env_steps=realized_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
                     population,
@@ -942,6 +958,11 @@ class EATrainer(BaselineTrainer):
                 # eaMu*Lambda doesn't expose a per-gen hook and hof holds only
                 # the final champion; record once at the end.
                 self._recorder.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
+                self._prober.finalize(
                     _ea_champion,
                     iteration=num_generations,
                     env_steps=num_generations * env_steps_per_iteration,
@@ -978,6 +999,11 @@ class EATrainer(BaselineTrainer):
                     iteration=num_generations,
                     env_steps=num_generations * env_steps_per_iteration,
                 )
+                self._prober.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
 
@@ -988,6 +1014,7 @@ class EATrainer(BaselineTrainer):
         # Clean up
         env.close()
         self._recorder.close()
+        self._prober.close()
 
         training_time = time.time() - start_time
 

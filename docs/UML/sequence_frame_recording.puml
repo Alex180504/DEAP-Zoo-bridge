@@ -78,4 +78,20 @@ note right of T
   The controller reuses the same ``ExperimentLogger`` that writes
   ``metrics.csv`` / ``summary.json`` so ``frames/`` shares one ``run_dir``.
 end note
+
+== Sibling: held-out champion probe ==
+note right of T
+  ``ProbeController`` (``baselines/probing.py``, config via
+  ``TrainingConfig.probe``) rides the SAME ``_on_progress`` /
+  reporter hooks and champion providers as recording, but instead
+  of capturing frames it rolls ``n_episodes`` held-out episodes of
+  the frozen champion (off-budget, own env, fixed CRN seeds) every
+  ``every_n_steps`` cumulative env steps and appends one row to
+  ``<run_dir>/probe.csv``. QDax MAP-Elites probes mid-loop with
+  buffered rows flushed once the run logger exists; co-evolution
+  instead hands ``{"logger", "env_steps_consumed"}`` to 3-arg
+  ``generation_callback``s so experiment benchmarks write the same
+  schema per side. Analysis loaders merge ``probe.csv`` into
+  ``RunRecord.metrics`` for the Compare page / rliable curves.
+end note
 @enduml
