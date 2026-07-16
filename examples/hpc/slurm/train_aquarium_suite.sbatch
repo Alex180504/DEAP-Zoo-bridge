@@ -1,20 +1,16 @@
 #!/bin/bash
-# Aquarium pursuit-evasion suite on a single GPU node.
+# Aquarium pursuit-evasion suite: GPU cells (MATD3 vs-APF and MATD3 sweeps).
 #
-# One node fits every experiment family: MATD3 (and the coevolution RL
-# sides) train on the GPU while EA / CMA-ES / PSO / MAP-Elites / HyperNEAT
-# candidate evaluation fans out over the node's CPU cores via process
-# workers (--cpus-per-task below is the evaluation parallelism).
 #
 #SBATCH --job-name=aquarium-suite
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60G
+#SBATCH --time=08:00:00
 #SBATCH --output=%x-%j.out
-# #SBATCH --account=<account>
 
 set -euo pipefail
 
@@ -24,8 +20,8 @@ set -euo pipefail
 # node oversubscribe the allocation and degrades the performance).
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-# module load python/3.11 cuda/12.4
-# source /path/to/venv/bin/activate
+module load apps/anaconda3/2024.10/bin libs/nvidia-cuda/12.2.2/bin
+source activate ~/envs/deap
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 SHARED_DIR="${DEAP_HPC_SHARED_DIR:-$REPO_ROOT}"
