@@ -2381,13 +2381,17 @@ CoEvolutionConfig(
     num_workers: int = 1,                 # episode-loop parallelism
     parallel_backend: str = 'process',    # 'process' | 'dask'
     scheduler_address: Optional[str] = None,  # remote Dask scheduler
+    budget_split: str = 'shared',         # 'shared' | 'per_side' (consumed budgeting only)
+    on_side_exhausted: str = 'freeze',    # 'freeze' | 'cutoff' (per_side only)
 )
 ```
 
 Validation (`__post_init__`): disjoint side names, mode-specific
 constraints (`competitive_2pop` / `cooperative` require ≥ 2 sides;
 `self_play_hof` requires ≥ 2 sides **each with its own** `HallOfFame`
-and forces `use_archive_in_opponent_pool=True` on every side).
+and forces `use_archive_in_opponent_pool=True` on every side);
+`budget_split` / `on_side_exhausted` values are checked against
+`VALID_BUDGET_SPLITS` / `VALID_EXHAUSTED_POLICIES`.
 
 ### `@dataclass Side`
 
@@ -2526,6 +2530,9 @@ time for any other type, or a `ValueError` from `train()` if left unset).
   all generations; ≤ `env_steps_nominal` in nominal mode (early episode
   truncation), ≥ `budget_value` after a consumed-budget run.
 
+* `env_steps_consumed_per_side[side_name]` — real env ticks attributed to
+  each side's own evaluations (sums to `env_steps_consumed`).
+
 **Consumed-step budgeting (`budget_on_consumed=True`):** with
 `BudgetMode.ENV_STEPS`, the trainer sums the real per-side
 `GenerationStats.env_steps` after each completed generation (shared pool
@@ -2534,6 +2541,32 @@ All side types report real ticks: EA/CMA/PSO via their evaluator counters;
 RL and RL-HPO sides via per-step counters; NEAT/HyperNEAT/ES-HyperNEAT
 via their fitness-loop `_steps` accumulator; frozen sides contribute 0.
 Overshoot is bounded by one generation's pooled cost.
+
+**Per-side budget split (`budget_split='per_side'`):** opt-in equalization
+of the consumed pool. Each evolving side gets an equal slice
+(`budget_value // n_evolving_sides`) of real consumed steps, so sides with
+very different per-generation evaluation costs (e.g. a QDax archive vs a
+small EA population) end the run with the same experience. Requires
+`budget_on_consumed=True` under `BudgetMode.ENV_STEPS` — `train()` raises
+`ValueError` otherwise. Because per-generation costs differ, one side
+always exhausts its slice first; `on_side_exhausted` picks the endgame:
+
+* `'freeze'` (default) — the exhausted side stops evolving but its final
+  population/archive keeps serving as the opponent pool; the run ends when
+  every evolving side has spent its slice. Every side consumes its full
+  slice (overshoot ≤ one own-generation cost), but the slower-spending
+  side's late generations face a non-adapting opponent.
+* `'cutoff'` — the whole run stops as soon as the *first* side exhausts
+  its slice. The arms race stays adaptive on both sides throughout, but
+  the total consumed budget is under-spent by a pairing-dependent amount
+  (`env_steps_consumed < budget_value`), so total sim cost is no longer
+  equal across pairings.
+
+Both schedules honor the split: `synchronous` skips exhausted sides inside
+the generation (their pools are still snapshotted for opponents);
+`alternating` skips them in the rotation. The run metadata records
+`budget_split`, `on_side_exhausted` (when per-side), and `per_side_budgets`;
+under the default `'shared'` split behaviour is byte-for-byte unchanged.
 
 ### `OpponentPool` Protocol
 

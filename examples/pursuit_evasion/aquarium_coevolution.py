@@ -626,10 +626,11 @@ def _run_scripted_benchmark(
                         ep_catches = max(ep_catches, int(info[info_key]))
                     except (TypeError, ValueError):
                         pass
-        try:
-            bench_env.close()
-        except Exception:
-            pass
+        # Deliberately NOT closed: marl-aquarium's raw close() calls the
+        # process-global pygame.quit(), which permanently kills rendering in
+        # the trainer's cached recording env (videos silently stop after the
+        # first benchmark).  The bench env never renders, so it holds no
+        # pygame resources and plain GC is enough.
         rewards.append(ep_reward)
         catches.append(ep_catches)
 
@@ -773,6 +774,21 @@ def _run_coev(
         budget_value=int(COEV_TOTAL_STEPS if budget is None else budget),
         budget_on_consumed=XC.BUDGET_ON_CONSUMED,
         num_seeds=1,
+        seed=seed,
+        # Run-manifest hyperparams (the trainer ignores these; the logger's
+        # from_config picks them up so Browse/Compare can identify the cell).
+        algorithm_params={
+            "pairing": label,
+            "predator_algo": label.partition("_vs_")[0],
+            "prey_algo": label.partition("_vs_")[2],
+            "action_mode": ACTION_MODE,
+            "k_opponents": K_OPPONENTS,
+            "hof_capacity": HOF_CAPACITY,
+            "archive_mix": ARCHIVE_MIX,
+            "pred_shape_alpha": PRED_REWARD_SHAPE_ALPHA,
+            "prey_shape_alpha": PREY_REWARD_SHAPE_ALPHA,
+            "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
+        },
         coevolution_config=coev_cfg,
         max_steps_per_episode=int(ENV_CONFIG["max_time_steps"]),
         env_config=dict(ENV_CONFIG),
