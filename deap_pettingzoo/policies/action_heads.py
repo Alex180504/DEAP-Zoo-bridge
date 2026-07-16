@@ -286,8 +286,9 @@ class SoftmaxSamplingHead(ActionHead):
     Returns Python ``int`` in ``[0, n)`` from :meth:`decode`.
     """
 
-    def __init__(self, n: int, temperature: float = 1.0,
-                 rng: "np.random.Generator | None" = None) -> None:
+    def __init__(
+        self, n: int, temperature: float = 1.0, rng: "np.random.Generator | None" = None
+    ) -> None:
         if n < 1:
             raise ValueError(f"SoftmaxSamplingHead requires n >= 1, got {n}")
         if temperature <= 0:
@@ -332,8 +333,12 @@ class MultiDiscreteSoftmaxSamplingHead(ActionHead):
     with entry ``i`` in ``[0, nvec[i])``.
     """
 
-    def __init__(self, nvec: Any, temperature: float = 1.0,
-                 rng: "np.random.Generator | None" = None) -> None:
+    def __init__(
+        self,
+        nvec: Any,
+        temperature: float = 1.0,
+        rng: "np.random.Generator | None" = None,
+    ) -> None:
         self.nvec = np.asarray(nvec, dtype=np.int64).ravel()
         if self.nvec.size == 0:
             raise ValueError(
