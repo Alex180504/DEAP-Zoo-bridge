@@ -111,6 +111,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0,
                    help="Evaluation worker processes (0 = all cores).")
     p.add_argument("--record", action="store_true", help="Enable video recording.")
+    p.add_argument(
+        "--archive-runs",
+        action="store_true",
+        help="After completion, pack each run directory into a UI-importable "
+        "ZIP (deap_export_manifest.json + all artifacts) and remove the "
+        "uncompressed source.",
+    )
     p.add_argument("--output-dir", required=True)
     return p.parse_args()
 
@@ -222,6 +229,13 @@ def main() -> None:
         sweep.main()
         summary.update(role=args.role, algorithms=selected,
                        budget=sweep.SWEEP_BUDGET_STEPS)
+
+    if args.archive_runs:
+        from deap_pettingzoo.service.export_import import archive_runs_under
+
+        archives = archive_runs_under(output_dir, remove_source=True)
+        summary["archived_runs"] = [str(p.relative_to(output_dir)) for p in archives]
+        print(f"[archive] {len(archives)} run(s) zipped under {output_dir}", flush=True)
 
     summary["wall_time_s"] = round(time.time() - t0, 1)
     print(json.dumps(summary))

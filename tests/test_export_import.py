@@ -20,6 +20,8 @@ from deap_pettingzoo.service.export_import import (
     EXPORT_MANIFEST_SCHEMA_VERSION,
     ImportValidationError,
     ImportValidationResult,
+    archive_run_dir,
+    archive_runs_under,
     build_export_manifest,
     create_run_export_zip,
     export_filename,
@@ -564,3 +566,83 @@ class TestExperimentExportStreaming:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+class TestArchiveRunDir:
+    """On-disk run archiving (HPC post-run compression) — import-ready ZIPs."""
+
+    def test_creates_import_ready_zip_with_all_artifacts(
+        self, tmp_results_root, sample_run_dir_with_frames
+    ):
+        run_dir = sample_run_dir_with_frames
+        # Checkpoints are excluded from UI downloads but must be archived.
+        ckpt = run_dir / "checkpoints"
+        ckpt.mkdir()
+        (ckpt / "policy.json").write_text('{"weights": []}')
+
+        zip_path = archive_run_dir(run_dir)
+
+        assert zip_path == run_dir.with_name(run_dir.name + ".zip")
+        assert zip_path.is_file()
+        assert run_dir.is_dir()  # remove_source defaults to False
+
+        result = validate_import_zip(zip_path, tmp_results_root)
+        assert result.ok, result.errors
+        assert result.run_count == 1
+
+        with zipfile.ZipFile(zip_path) as zf:
+            names = set(zf.namelist())
+        base = run_dir.name
+        assert f"{base}/manifest.json" in names
+        assert f"{base}/frames/frame_0000.png" in names
+        assert f"{base}/checkpoints/policy.json" in names
+        assert f"{base}/trajectories.parquet" in names
+
+    def test_remove_source_roundtrip(self, tmp_results_root, sample_run_dir):
+        run_dir = sample_run_dir
+        zip_path = archive_run_dir(run_dir, remove_source=True)
+
+        assert zip_path.is_file()
+        assert not run_dir.exists()
+
+        # Round-trip: the archive extracts back into a results root.
+        with tempfile.TemporaryDirectory() as d:
+            new_root = Path(d)
+            extracted = extract_import_zip(zip_path, new_root)
+            assert len(extracted) == 1
+            restored = new_root / run_dir.name
+            assert (restored / "manifest.json").is_file()
+            assert (restored / "metrics.csv").is_file()
+
+    def test_rejects_non_run_dir(self, tmp_results_root):
+        not_a_run = tmp_results_root / "random_dir"
+        not_a_run.mkdir()
+        (not_a_run / "data.txt").write_text("hello")
+        with pytest.raises(ValueError, match="manifest.json"):
+            archive_run_dir(not_a_run)
+        assert not_a_run.is_dir()  # untouched
+
+    def test_archive_runs_under_nested_tree(self, tmp_results_root):
+        # Mimic the HPC layout: <pairing>/<seed>/<run_id>/ plus a flat run.
+        manifest = json.dumps({"run_id": "r", "algorithm": "ea", "schema_version": 1})
+        nested = tmp_results_root / "ea_vs_qdax" / "seed_0" / "run_nested"
+        nested.mkdir(parents=True)
+        (nested / "manifest.json").write_text(manifest)
+        (nested / "metrics.csv").write_text("iteration\n1\n")
+        flat = tmp_results_root / "run_flat"
+        flat.mkdir()
+        (flat / "manifest.json").write_text(manifest)
+
+        zips = archive_runs_under(tmp_results_root, remove_source=True)
+
+        assert sorted(p.name for p in zips) == ["run_flat.zip", "run_nested.zip"]
+        assert not nested.exists()
+        assert not flat.exists()
+        # Archives are siblings of where the run dirs were.
+        assert (tmp_results_root / "ea_vs_qdax" / "seed_0" / "run_nested.zip").is_file()
+        assert (tmp_results_root / "run_flat.zip").is_file()
+        for z in zips:
+            assert validate_import_zip(z, tmp_results_root).ok
+
+    def test_archive_runs_under_empty_tree(self, tmp_results_root):
+        assert archive_runs_under(tmp_results_root) == []

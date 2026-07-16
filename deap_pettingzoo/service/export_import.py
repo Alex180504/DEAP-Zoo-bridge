@@ -215,6 +215,76 @@ def create_run_export_zip(
     return buf.getvalue()
 
 
+def archive_run_dir(run_dir: Path, *, remove_source: bool = False) -> Path:
+    """Archive one completed run directory as an import-ready ZIP on disk.
+
+    Produces ``<run_dir>.zip`` next to the directory, in the same layout the
+    UI import endpoint expects (``deap_export_manifest.json`` at the root
+    plus the run's files under ``<run_dir.name>/``), so the archive can be
+    uploaded straight into Browse -> "Import experiments". Unlike the UI's
+    :func:`create_run_export_zip` (which streams a *selection* of artifacts
+    to a download), this includes **every** file in the run directory —
+    videos, checkpoints, parquet — because the archive is the transport for
+    the whole run (HPC nodes, backups).
+
+    Args:
+        run_dir: A run directory containing ``manifest.json``.
+        remove_source: When ``True``, delete the uncompressed directory
+            after the ZIP has been written successfully. A partially
+            written archive is removed and the source left intact on error.
+
+    Returns:
+        Path of the written ZIP.
+
+    Raises:
+        ValueError: If ``run_dir`` is not a run directory (no
+            ``manifest.json``) — refuses to archive (and delete) arbitrary
+            directories.
+    """
+    run_dir = Path(run_dir)
+    if not (run_dir / "manifest.json").is_file():
+        raise ValueError(
+            f"{run_dir} does not contain manifest.json — not a run directory."
+        )
+    zip_path = run_dir.with_name(run_dir.name + ".zip")
+    manifest = build_export_manifest(
+        exp_id="",
+        label=run_dir.name,
+        run_dirs=[run_dir.name],
+        include_frames=True,
+        include_tb=True,
+        include_trajectories=True,
+    )
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("deap_export_manifest.json", json.dumps(manifest, indent=2))
+            for entry in sorted(run_dir.rglob("*")):
+                if entry.is_file():
+                    rel = str(entry.relative_to(run_dir)).replace("\\", "/")
+                    zf.write(entry, f"{run_dir.name}/{rel}")
+    except BaseException:
+        zip_path.unlink(missing_ok=True)
+        raise
+    if remove_source:
+        shutil.rmtree(run_dir)
+    return zip_path
+
+
+def archive_runs_under(root: Path, *, remove_source: bool = False) -> List[Path]:
+    """Archive every run directory found (recursively) under *root*.
+
+    A run directory is any directory containing ``manifest.json``. Each one
+    becomes a sibling ``<run_dir>.zip`` via :func:`archive_run_dir`.
+
+    Returns the list of written ZIP paths (empty when no runs were found).
+    """
+    root = Path(root)
+    return [
+        archive_run_dir(p.parent, remove_source=remove_source)
+        for p in sorted(root.rglob("manifest.json"))
+    ]
+
+
 # Experiment-level export (streaming)
 
 
