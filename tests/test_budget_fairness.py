@@ -727,6 +727,127 @@ class TestRLHPOReporting:
         assert g1 > evo_every, f"gen1 env_steps={g1} should exceed evo_every={evo_every}"
 
 
+class TestPerSideBudgetSplit:
+    """``CoEvolutionConfig.budget_split='per_side'`` — equal consumed-step
+    slices per evolving side, with ``on_side_exhausted`` deciding whether an
+    exhausted side freezes (run continues) or cuts the whole run off."""
+
+    @staticmethod
+    def _coev_cfg(schedule="synchronous", **kwargs):
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionConfig
+
+        # Asymmetric populations: side "b" evaluates twice as many episodes
+        # per generation as side "a", so it drains its slice ~2x faster.
+        return CoEvolutionConfig(
+            mode="competitive_2pop",
+            schedule=schedule,
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 8}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=11,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _train_cfg(coev_cfg, budget, budget_on_consumed=True):
+        return TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            coevolution_config=coev_cfg,
+            budget_on_consumed=budget_on_consumed,
+        )
+
+    def test_invalid_budget_split_rejected(self):
+        with pytest.raises(ValueError, match="budget_split"):
+            self._coev_cfg(budget_split="equal")
+
+    def test_invalid_exhausted_policy_rejected(self):
+        with pytest.raises(ValueError, match="on_side_exhausted"):
+            self._coev_cfg(budget_split="per_side", on_side_exhausted="stop")
+
+    def test_per_side_requires_consumed_budget(self):
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        coev_cfg = self._coev_cfg(budget_split="per_side")
+        config = self._train_cfg(coev_cfg, budget=1200, budget_on_consumed=False)
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            CoEvolutionTrainer().train(config)
+
+    def test_freeze_equalizes_per_side_consumption(self):
+        """freeze: every side spends its full slice; the fast-draining side
+        realizes fewer generations but the same env steps."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200  # share = 600/side; a ~100/gen, b ~200/gen
+        coev_cfg = self._coev_cfg(budget_split="per_side", on_side_exhausted="freeze")
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        # Both sides spend their slice; overshoot <= one own generation.
+        assert per_side["a"] >= share
+        assert per_side["a"] <= share + 4 * 25
+        assert per_side["b"] >= share
+        assert per_side["b"] <= share + 8 * 25
+        # The fast-draining side froze earlier in generation terms.
+        hist = result.metrics["per_side_history"]
+        assert len(hist["b"]) < len(hist["a"])
+
+    def test_cutoff_stops_at_first_exhausted_side(self):
+        """cutoff: the run ends when the fast-draining side exhausts; the
+        slow side is left under its slice and the pool is under-spent."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200
+        coev_cfg = self._coev_cfg(budget_split="per_side", on_side_exhausted="cutoff")
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        assert per_side["b"] >= share, "fast side must have exhausted its slice"
+        assert per_side["a"] < share, "slow side must be cut off under its slice"
+        assert result.metrics["env_steps_consumed"] < budget
+
+    def test_freeze_alternating_schedule(self):
+        """The alternating schedule honors per-side slices too."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200
+        coev_cfg = self._coev_cfg(
+            schedule="alternating",
+            budget_split="per_side",
+            on_side_exhausted="freeze",
+        )
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        assert per_side["a"] >= share
+        assert per_side["b"] >= share
+        assert per_side["a"] <= share + 4 * 25
+        assert per_side["b"] <= share + 8 * 25
+
+    def test_shared_default_unchanged(self):
+        """Default budget_split='shared' keeps the pooled semantics."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 600
+        coev_cfg = self._coev_cfg()  # defaults: shared
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        # Overshoot <= one pooled generation (a 100 + b 200).
+        assert consumed <= budget + 300
+
+
 class TestNeatRealSteps:
     """NEAT surfaces real consumed steps below the nominal ceiling."""
 

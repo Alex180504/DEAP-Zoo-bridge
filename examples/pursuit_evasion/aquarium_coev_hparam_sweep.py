@@ -356,10 +356,10 @@ def _benchmark_vs_apf(
                         ep_metric = max(ep_metric, int(info[info_key]))
                     except (TypeError, ValueError):
                         continue
-        try:
-            bench_env.close()
-        except Exception:
-            pass
+        # Deliberately NOT closed: marl-aquarium's raw close() calls the
+        # process-global pygame.quit(), which kills rendering in any cached
+        # env for the rest of the process (see aquarium_coevolution.py).
+        # The bench env never renders, so plain GC is enough.
         rewards.append(ep_reward)
         metrics.append(ep_metric)
     if fallback_steps:

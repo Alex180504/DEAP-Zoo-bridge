@@ -73,6 +73,10 @@ note over T
   (sum of all sides' env_steps so far) and breaks once
   the aggregate reaches budget_value. All side types
   report real ticks; overshoot ≤ one generation's cost.
+  With budget_split="per_side" each evolving side instead
+  gets budget/n; _exhausted_sides gates the loop —
+  "freeze": skip spent sides (pools still serve opponents),
+  stop when all spent; "cutoff": stop at the first spent side.
 end note
 T -->> User : TrainingResult(policy, metrics)
 

@@ -40,7 +40,7 @@ import random as _random
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -277,6 +277,8 @@ from deap_pettingzoo.utils.device_check import (
 
 VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
 VALID_SCHEDULES = ("synchronous", "alternating")
+VALID_BUDGET_SPLITS = ("shared", "per_side")
+VALID_EXHAUSTED_POLICIES = ("freeze", "cutoff")
 
 
 @dataclass
@@ -319,6 +321,30 @@ class CoEvolutionConfig:
             ``DEAP_DASK_SCHEDULER`` env var supplies an address. When a
             remote scheduler is in play, ``num_workers`` is advisory
             metadata and the serial fast-path is skipped.
+        budget_split: How the consumed env-step budget is divided across
+            sides — one of :data:`VALID_BUDGET_SPLITS`. ``"shared"``
+            (default) keeps the historical semantics: one pooled budget,
+            drained by whichever side evaluates more (equal *total* sim
+            cost per run, potentially very unequal per-side experience).
+            ``"per_side"`` grants every evolving side an equal slice
+            (``budget_value // n_evolving_sides``) of real consumed
+            steps, so each side gets the same experience. Requires
+            ``TrainingConfig.budget_on_consumed=True`` with
+            ``budget_mode == ENV_STEPS`` (raises ``ValueError`` in
+            ``train()`` otherwise) — per-side accounting only exists on
+            the consumed-step path.
+        on_side_exhausted: Per-side end-of-budget policy, only read when
+            ``budget_split == "per_side"`` — one of
+            :data:`VALID_EXHAUSTED_POLICIES`. ``"freeze"`` (default): a
+            side that has spent its slice stops evolving but keeps
+            serving its final population/archive as the opponent pool;
+            the run ends when every evolving side is exhausted (each
+            side consumes its full slice, but the late generations of
+            slower-spending sides face a non-adapting opponent).
+            ``"cutoff"``: the whole run stops as soon as the *first*
+            side exhausts its slice (the arms race stays two-sided
+            throughout, but the total consumed budget is under-spent by
+            a pairing-dependent amount).
     """
 
     mode: str
@@ -334,6 +360,8 @@ class CoEvolutionConfig:
     num_workers: int = 1
     parallel_backend: str = "process"
     scheduler_address: Optional[str] = None
+    budget_split: str = "shared"
+    on_side_exhausted: str = "freeze"
     generation_callback: Optional[Callable[[int, Dict[str, Any]], None]] = field(
         default=None, repr=False, compare=False
     )
@@ -450,6 +478,16 @@ class CoEvolutionConfig:
                 f"parallel_backend={self.parallel_backend!r} invalid; "
                 f"must be one of {SUPPORTED_BACKENDS}."
             )
+        if self.budget_split not in VALID_BUDGET_SPLITS:
+            raise ValueError(
+                f"budget_split={self.budget_split!r} invalid; "
+                f"must be one of {VALID_BUDGET_SPLITS}."
+            )
+        if self.on_side_exhausted not in VALID_EXHAUSTED_POLICIES:
+            raise ValueError(
+                f"on_side_exhausted={self.on_side_exhausted!r} invalid; "
+                f"must be one of {VALID_EXHAUSTED_POLICIES}."
+            )
         # Empty/whitespace scheduler addresses mean "unset".
         if self.scheduler_address is not None:
             self.scheduler_address = str(self.scheduler_address).strip() or None
@@ -529,6 +567,22 @@ class CoEvolutionTrainer(BaselineTrainer):
         if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
             consumed_budget = int(config.budget_value)
         self._consumed_budget = consumed_budget
+
+        # Per-side budget split: each evolving side gets an equal slice of
+        # the consumed pool. Only meaningful on the consumed-step path —
+        # nominal budgeting has no per-side attribution to split.
+        self._side_budgets: Optional[Dict[str, int]] = None
+        if coev_cfg.budget_split == "per_side":
+            if consumed_budget is None:
+                raise ValueError(
+                    "CoEvolutionConfig.budget_split='per_side' requires "
+                    "TrainingConfig.budget_on_consumed=True with "
+                    "budget_mode == BudgetMode.ENV_STEPS (per-side "
+                    "accounting only exists for real consumed env steps)."
+                )
+            evolving = [s.name for s in coev_cfg.sides if s.optimizer != "frozen"]
+            share = consumed_budget // max(1, len(evolving))
+            self._side_budgets = {name: share for name in evolving}
         # Safety cap: when budget_on_consumed the real stop is the consumed check;
         # max_iters prevents an infinite loop if every episode terminates in 1 step.
         max_iters = (
@@ -675,6 +729,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             },
             "env_steps_nominal": env_steps_nominal,
             "env_steps_consumed": env_steps_consumed,
+            "env_steps_consumed_per_side": {
+                name: self._side_consumed(per_side_history, name)
+                for name in per_side_history
+            },
             "final_best": {
                 name: (
                     None
@@ -694,6 +752,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             "schedule": coev_cfg.schedule,
             "k_opponents": coev_cfg.k_opponents,
             "aggregation": coev_cfg.aggregation,
+            "budget_split": coev_cfg.budget_split,
+            "on_side_exhausted": (
+                coev_cfg.on_side_exhausted
+                if coev_cfg.budget_split == "per_side"
+                else None
+            ),
+            "per_side_budgets": self._side_budgets,
             "reporting_side": coev_cfg.reporting_side,
             "coevolution_num_workers": resolved_workers,
             "coevolution_parallel_backend": coev_cfg.parallel_backend,
@@ -967,10 +1032,18 @@ class CoEvolutionTrainer(BaselineTrainer):
         Returns the number of generations actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
+        side_budgets = self._side_budgets
         realized = 0
         for _g in range(max_iters):
             _gt = time.time()
-            self._run_synchronous_generation(env, states, coev_cfg, history)
+            # Per-side split, "freeze" policy: sides that have spent their
+            # slice stop evolving but keep serving their pool as opponents.
+            skip: Optional[Set[str]] = None
+            if side_budgets is not None and coev_cfg.on_side_exhausted == "freeze":
+                skip = self._exhausted_sides(history, side_budgets)
+            self._run_synchronous_generation(
+                env, states, coev_cfg, history, skip=skip
+            )
             realized = _g + 1
             consumed = self._aggregate_consumed(history)
             # Progress + champion recording happen together in the callback.
@@ -986,7 +1059,10 @@ class CoEvolutionTrainer(BaselineTrainer):
                 f"({time.time()-_gt:.1f}s)",
                 flush=True,
             )
-            if consumed_budget is not None and consumed >= consumed_budget:
+            if side_budgets is not None:
+                if self._per_side_stop(coev_cfg, history, side_budgets):
+                    break
+            elif consumed_budget is not None and consumed >= consumed_budget:
                 break
         return realized
 
@@ -1006,13 +1082,28 @@ class CoEvolutionTrainer(BaselineTrainer):
         Returns the number of side-steps actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
+        side_budgets = self._side_budgets
         total = 0
         rotation = list(states)
         stop = False
         while total < max_iters and not stop:
+            # Guard against a zero-progress rotation (every budgeted side
+            # already exhausted, e.g. a slice smaller than one generation).
+            if side_budgets is not None and len(
+                self._exhausted_sides(history, side_budgets)
+            ) == len(side_budgets):
+                break
             for name in rotation:
                 if stop:
                     break
+                # Per-side split, "freeze": a side whose slice is spent is
+                # skipped in the rotation but keeps serving its pool.
+                if (
+                    side_budgets is not None
+                    and name in side_budgets
+                    and self._side_consumed(history, name) >= side_budgets[name]
+                ):
+                    continue
                 for _inner in range(coev_cfg.alternating_generations):
                     if total >= max_iters or stop:
                         break
@@ -1033,7 +1124,15 @@ class CoEvolutionTrainer(BaselineTrainer):
                         f"({time.time()-_gt:.1f}s)",
                         flush=True,
                     )
-                    if consumed_budget is not None and consumed >= consumed_budget:
+                    if side_budgets is not None:
+                        if self._per_side_stop(coev_cfg, history, side_budgets):
+                            stop = True
+                            break
+                        if self._side_consumed(history, name) >= side_budgets[name]:
+                            # This side's slice is spent ("freeze"): hand the
+                            # rotation to the next side early.
+                            break
+                    elif consumed_budget is not None and consumed >= consumed_budget:
                         stop = True
                         break
         return total
@@ -1208,6 +1307,43 @@ class CoEvolutionTrainer(BaselineTrainer):
     def _aggregate_consumed(history: Dict[str, List[GenerationStats]]) -> int:
         """Sum real per-generation env ticks across all sides and all entries."""
         return int(sum(int(s.env_steps) for hist in history.values() for s in hist))
+
+    @staticmethod
+    def _side_consumed(
+        history: Dict[str, List[GenerationStats]], name: str
+    ) -> int:
+        """Real env ticks consumed by one side's own evaluations so far."""
+        return int(sum(int(s.env_steps) for s in history.get(name, [])))
+
+    @classmethod
+    def _exhausted_sides(
+        cls,
+        history: Dict[str, List[GenerationStats]],
+        side_budgets: Dict[str, int],
+    ) -> Set[str]:
+        """Sides that have consumed at least their per-side budget slice."""
+        return {
+            name
+            for name, budget in side_budgets.items()
+            if cls._side_consumed(history, name) >= budget
+        }
+
+    @classmethod
+    def _per_side_stop(
+        cls,
+        coev_cfg: CoEvolutionConfig,
+        history: Dict[str, List[GenerationStats]],
+        side_budgets: Dict[str, int],
+    ) -> bool:
+        """Stop condition under ``budget_split='per_side'``.
+
+        ``"cutoff"``: stop as soon as *any* evolving side exhausts its
+        slice. ``"freeze"``: stop when *all* evolving sides have.
+        """
+        exhausted = cls._exhausted_sides(history, side_budgets)
+        if coev_cfg.on_side_exhausted == "cutoff":
+            return bool(exhausted)
+        return len(exhausted) == len(side_budgets)
 
     @staticmethod
     def _stats_to_dict(s: GenerationStats) -> Dict[str, Any]:
@@ -1620,6 +1756,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         history: Dict[str, List[GenerationStats]],
+        skip: Optional[Set[str]] = None,
     ) -> None:
         """Advance every non-frozen side by one generation simultaneously.
 
@@ -1636,6 +1773,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             ``snapshot_sync()`` hook is honoured so opponents see a frozen
             pre-learn view consistent with the synchronous-schedule
             contract.
+
+            ``skip`` (per-side budgeting, "freeze" policy): named sides do
+            not step this generation — no evaluation episodes, no stats
+            row — but their pools are still snapshotted above, so other
+            sides keep training against the frozen side's final state.
         """
         pool_snapshot: Dict[str, Any] = {}
         for name, state in states.items():
@@ -1645,6 +1787,8 @@ class CoEvolutionTrainer(BaselineTrainer):
                 pool = snap()
             pool_snapshot[name] = pool
         for name, state in states.items():
+            if skip and name in skip:
+                continue
             self._step_one_side(
                 env,
                 state,
