@@ -171,8 +171,21 @@ class BoxHead(ActionHead):
     def __init__(self, low: np.ndarray, high: np.ndarray): ...
     # decode: tanh(raw) -> rescale into [low, high].
 
+# Stochastic heads for gradient-free search (EA/CMA/PSO/QD): argmax gives a
+# step-function fitness landscape (a small weight change rarely flips the
+# argmax), so search stalls; softmax sampling smooths it. Seed `rng` for
+# common-random-number evaluation. Scored evaluation uses the argmax heads.
+class SoftmaxSamplingHead(ActionHead):
+    def __init__(self, n: int, temperature: float = 1.0, rng=None): ...
+    # decode: sample from softmax(raw / temperature) -> int in [0, n).
+
+class MultiDiscreteSoftmaxSamplingHead(ActionHead):
+    def __init__(self, nvec, temperature: float = 1.0, rng=None): ...
+    # decode: per-chunk softmax sampling -> np.int64 array of shape (len(nvec),).
+
 def required_output_size(space) -> int: ...
-def make_head(space, *, masked: bool = False) -> ActionHead: ...
+def make_head(space, *, masked: bool = False, stochastic: bool = False,
+              temperature: float = 1.0, rng=None) -> ActionHead: ...
 ```
 
 `make_head(space, masked=True)` is the idiomatic factory: it returns
@@ -183,6 +196,15 @@ returns `n` for `Discrete`, `sum(nvec)` for `MultiDiscrete`, and `prod(shape)`
 for `Box`. `SelfPlayEvaluator` calls `make_head` with `masked=True` so
 `infos[agent]["action_mask"]` flows end-to-end (the `masked` flag is a no-op
 for non-`Discrete` spaces).
+
+`make_head(space, stochastic=True, temperature=…, rng=…)` returns the
+softmax-sampling head for the space (`SoftmaxSamplingHead` for `Discrete`,
+`MultiDiscreteSoftmaxSamplingHead` for `MultiDiscrete`) — used by evolved-family
+trainers so gradient-free search sees a smooth fitness landscape instead of the
+argmax step function. It is a no-op for `Box` (already smooth via tanh) and is
+mutually exclusive with `masked` (raises `ValueError`). The aquarium
+experiments' `make_train_head` / `make_eval_head` wrap this: stochastic head for
+search, deterministic argmax head for scored champion evaluation.
 
 ### `@dataclass APFConfig`
 
@@ -382,16 +404,19 @@ Install the optional extra with
 
 Side-effect module `environments/builtin.py` auto-registers every
 available MPE2 env (tagged `{"mpe2", ...}`) and, if installed,
-`aquarium_v0` (tagged `{"aquarium"}`).  The pursuit-evasion contrib
-subpackage registers `"pursuit_evasion"` on import. The
+`aquarium_v0` (tagged `{"aquarium"}`).  The pursuit-evasion prototype
+subpackage registered `"pursuit_evasion"` on import (archived 2026-07-15
+to `archive/2026-07-15_pursuit_evasion_non_campaign/simple_tag/`). The
 `deap_pettingzoo.contrib.openspiel` module is **opt-in** — nothing
 is registered on import; see the "Turn-based games via Shimmy"
 subsection below.
 
 ### `@dataclass PursuitEvasionConfig`
 
-*(Experiment-side research code; lives in
-`examples.pursuit_evasion.simple_tag.env`, not in the library.)*
+*(Experiment-side research code, not in the library; archived 2026-07-15
+to `archive/2026-07-15_pursuit_evasion_non_campaign/simple_tag/` along
+with the `APFConfig` / `APFEvaderPolicy` / `ObsLayout` /
+`PursuitEvasionEnv` classes documented here.)*
 
 Single source of truth for the pursuit-evasion scenario.
 

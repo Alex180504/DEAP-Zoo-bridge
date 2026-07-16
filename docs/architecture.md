@@ -41,9 +41,9 @@ All diagrams are created using PlantUML and located in `docs/UML/`.
 - **Registry / builtin**: `environments.registry` holds the open
   dispatch table; `environments.builtin` auto-registers every installed
   MPE2 env (tagged `mpe2`) and `aquarium_v0` when `marl-aquarium` is
-  available.  Experiment-side research code can register further envs on
-  import (e.g. importing `examples.pursuit_evasion.simple_tag` registers
-  `pursuit_evasion`).
+  available.  Experiment-side research code can register further envs via
+  the same `register_env` call (e.g. the aquarium suite registers its
+  wrapped `aquarium_coevolution_v0` variant).
 - **SeedManager**: Ensures reproducible evaluations
   - Generates deterministic seeds for episodes
   - Manages RNG state
@@ -106,7 +106,20 @@ All diagrams are created using PlantUML and located in `docs/UML/`.
 - **AgileRLPolicyWrapper**: Adapts trained AgileRL algorithms to
   `PolicyProtocol` using a rotation counter over `possible_agents`.
 - **UnifiedEvaluator**: Single evaluator that works with any
-  `PolicyProtocol` implementation.
+  `PolicyProtocol` implementation. Optionally tracks env-info task metrics
+  per episode (`info_keys`, episode-max aggregation) on
+  `EvalResult.info_metrics`.
+- **RecordingController / ProbeController** (`recording.py` / `probing.py`):
+  Cross-cutting champion observers riding the shared
+  `BaselineTrainer._on_progress(callback, event, champion)` hook. The
+  recorder captures rollout videos on an algorithm-agnostic cadence; the
+  prober runs `ProbeConfig.n_episodes` held-out episodes of the frozen
+  champion every `every_n_steps` cumulative env steps — off-budget, on a
+  separate env — and appends rows to `<run_dir>/probe.csv`. Probe rows are
+  merged into `RunRecord.metrics` by the analysis loaders, which is what
+  puts frozen-policy learning curves (`probe_reward_mean` vs `env_steps`)
+  on the Compare page / rliable bridge for every algorithm family on one
+  yardstick.
 - **ComparisonRunner**: Orchestrates matched-budget EA-vs-RL studies.
 
 **Design Patterns Used**:
@@ -263,6 +276,11 @@ Streamlit UI                    FastAPI Service
    - **MultiDiscrete** (`MultiDiscreteHead`): split `sum(nvec)` logits into one
      chunk per sub-action and argmax each -> integer vector
    - **Continuous** (`BoxHead`): apply tanh and rescale to `[low, high]`
+   - **Stochastic (gradient-free search)** (`SoftmaxSamplingHead` /
+     `MultiDiscreteSoftmaxSamplingHead`, via `make_head(..., stochastic=True)`):
+     sample from `softmax(logits / temperature)` instead of argmax, so EA/CMA/PSO/QD
+     see a smooth fitness landscape rather than an argmax step function; scored
+     evaluation switches back to the deterministic argmax heads
 
 **Key Insights**:
 - Genome is passive data structure
@@ -859,5 +877,3 @@ cluster (CPU and GPU variants). These pair with `TrainingConfig.scheduler_addres
 3. **End-to-End Tests**: Full evolutionary runs (small scale)
 4. **Reproducibility Tests**: Same seeds -> same results
 5. **Performance Tests**: Benchmark evaluation throughput
-
----
