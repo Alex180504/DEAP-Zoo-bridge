@@ -57,7 +57,7 @@ the rest.
 | `mode` | `str` | `"env_steps"` | One of `"env_steps"`, `"eval_episodes"`, `"generations"`. Must be supported by every selected algorithm (e.g. `"generations"` is rejected for the step-based AgileRL trainers). |
 | `value` | `int` | `50000` | Budget amount; must be > 0. |
 | `num_seeds` | `int` | `1` | Independent seeds run per algorithm; must be >= 1. |
-| `budget_on_consumed` | `bool` | `false` | Opt-in real-tick budgeting (`env_steps` only). Supported by EA `simple`, CMA-ES, PSO, and co-evolution; rejected for QDax co-evolution sides. |
+| `budget_on_consumed` | `bool` | `false` | Opt-in real-tick budgeting (`env_steps` only). Supported by EA `simple`, CMA-ES, PSO, co-evolution, NEAT/HyperNEAT/ES-HyperNEAT, and QDax on the numpy/PettingZoo scoring path; rejected by EA `mu±lambda` and the QDax JAX-native scoring path. |
 
 ### `fitness` — `FitnessSettings`
 

@@ -5,6 +5,8 @@ from .action_heads import (
     BoxHead,
     DiscreteHead,
     MultiDiscreteHead,
+    MultiDiscreteSoftmaxSamplingHead,
+    SoftmaxSamplingHead,
     make_head,
     required_output_size,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "BoxHead",
     "DiscreteHead",
     "MultiDiscreteHead",
+    "SoftmaxSamplingHead",
+    "MultiDiscreteSoftmaxSamplingHead",
     "make_head",
     "required_output_size",
 ]

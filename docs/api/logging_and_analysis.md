@@ -25,7 +25,6 @@ the Streamlit UI.
 9. [Pairwise comparison](#pairwise-comparison)
 10. [`rliable` bridge](#rliable-bridge)
 11. [Plots & reports](#plots--reports)
-12. [Optional dependencies](#optional-dependencies)
 
 ---
 
@@ -39,6 +38,7 @@ results/exp1/
 └── ea_simple_tag_v3_seed0_2025-...-uuid/
     ├── manifest.json          # RunManifest, schema-versioned
     ├── metrics.csv            # streaming per-iteration scalars
+    ├── probe.csv              # opt-in held-out champion probes (ProbeConfig)
     ├── episodes.csv           # per-episode results (optional)
     ├── trajectories.parquet   # opt-in (pyarrow)
     ├── summary.json           # final scores / wall-time / artifact map
@@ -337,6 +337,65 @@ cluster naturally in the Streamlit Replay page's source filter.
 
 ---
 
+## Held-out champion probe
+
+`deap_pettingzoo.baselines.probing`
+
+Opt-in via `TrainingConfig.probe` — the measurement companion to frame
+recording. Every `every_n_steps` cumulative env steps (plus a baseline
+probe at the first progress event and a guaranteed end-of-run probe), the
+frozen current champion plays `n_episodes` held-out episodes and one row is
+appended to `<run_dir>/probe.csv`:
+
+```text
+iteration, env_steps, probe_reward_mean, probe_reward_std,
+probe_episodes[, probe_<info_key>_mean, probe_<info_key>_std, ...]
+```
+
+```python
+from deap_pettingzoo.baselines.base import ProbeConfig
+
+cfg = TrainingConfig(
+    env_name="simple_spread_v3",
+    budget_mode=BudgetMode.ENV_STEPS, budget_value=1_000_000,
+    output_dir="results/with_probe",
+    probe=ProbeConfig(
+        enabled=True,
+        every_n_steps=50_000,          # required when enabled
+        n_episodes=16,
+        info_keys=("prey_lost_total",),  # env-info task metrics (episode-max)
+        env_name=None,                 # optional held-out env override
+        seed=123,
+    ),
+)
+```
+
+Key properties:
+
+- **Off-budget by construction.** Probe episodes run on the
+  `ProbeController`'s own env instance and are never counted into any
+  trainer's step budget, so equal-budget comparisons stay fair when the
+  probe is enabled with identical cadence/size for every algorithm.
+- **One yardstick for every backend.** RL training returns (on-policy,
+  exploration noise, shaping) and EA fitness are not comparable; the probe
+  gives all trainers the same frozen-policy held-out score on the shared
+  `env_steps` axis — the input `learning_curve_with_ci` / the Compare page
+  and `analysis/rliable_bridge.py` need for cross-algorithm
+  sample-efficiency curves.
+- **Common random numbers.** Episode seeds are fixed within a run, so
+  successive checkpoints differ by policy, not episode draw.
+- **Supported trainers**: AgileRL (MADDPG/MATD3/IPPO/GroupedIPPO), EA
+  `simple`, CMA-ES, NEAT/HyperNEAT/ES-HyperNEAT, and QDax MAP-Elites
+  (buffered, flushed with the run's logger). Co-evolution instead exposes
+  the run logger + pooled consumed steps to three-argument
+  `generation_callback`s so experiment-specific benchmarks (e.g. a
+  scripted-opponent probe) can write the same `probe.csv` schema with a
+  `side` column.
+- **Error isolation** mirrors recording: a failing probe emits one
+  `RuntimeWarning` and never interrupts training.
+
+---
+
 ## Analysis loaders
 
 `deap_pettingzoo.analysis.loaders`
@@ -349,7 +408,7 @@ cluster naturally in the Streamlit Replay page's source filter.
 |---|---|---|
 | `run_dir` | `Path` | constructor |
 | `manifest` | `dict` | `manifest.json` |
-| `metrics` | `pd.DataFrame` | `metrics.csv` (or empty) |
+| `metrics` | `pd.DataFrame` | `metrics.csv`, with any `probe.csv` rows concatenated in (probe rows carry `env_steps` + `probe_*` columns; each column pair `dropna()`s to its own rows downstream) |
 | `episodes` | `pd.DataFrame` | `episodes.csv` (or empty) |
 | `trajectories` | `pd.DataFrame` | `trajectories.parquet` (lazy) |
 | `summary` | `dict` | `summary.json` |
