@@ -1882,12 +1882,17 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + build_export_manifest() -> dict
         + create_run_export_zip(run_dir, flags) -> bytes
         + create_experiment_export_zip_generator(...) -> Generator
+        + archive_run_dir(run_dir, remove_source) -> Path
+        + archive_runs_under(root, remove_source) -> List[Path]
         + validate_import_zip(zip, root) -> ImportValidationResult
         + extract_import_zip(zip, root) -> list
         + restore_experiment_to_db(json, dirs, db) -> str
         ' Restores the archived status (completed/failed/cancelled)
         '   + timestamps/error, not always 'completed'; queued/running ->
         '   failed (the original process no longer exists)
+        ' archive_run_dir: on-disk import-ready ZIP of ONE run
+        '   (ALL artifacts incl. checkpoints/videos), optional
+        '   source removal - post-run HPC compression
     }
 }
 
