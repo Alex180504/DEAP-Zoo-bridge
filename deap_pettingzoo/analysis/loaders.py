@@ -136,6 +136,25 @@ class RunRecord:
         return str(self.manifest.get("env_name", "unknown"))
 
     @property
+    def action_mode(self) -> Optional[str]:
+        """``"continuous"`` / ``"discrete"`` for this run, or ``None``.
+
+        Resolved from the explicit ``action_mode`` hyperparameter when the
+        trainer recorded one, else derived from the env config's
+        ``continuous_actions`` flag (present on every aquarium run). Lets the
+        Browse/Compare tables distinguish otherwise identically-named runs
+        that differ only by action space.
+        """
+        hp = self.manifest.get("hyperparams") or {}
+        mode = hp.get("action_mode")
+        if isinstance(mode, str) and mode:
+            return mode
+        env_config = self.manifest.get("env_config") or {}
+        if "continuous_actions" in env_config:
+            return "continuous" if env_config["continuous_actions"] else "discrete"
+        return None
+
+    @property
     def seed(self) -> Optional[int]:
         s = self.manifest.get("seed")
         try:
@@ -441,8 +460,8 @@ class Experiment:
     def summary_table(self):
         """Return a :class:`pandas.DataFrame` with one row per run.
 
-        Columns: ``run_id``, ``algorithm``, ``env_name``, ``seed``,
-        ``wall_time_s``, ``final_fitness``, plus all keys present in
+        Columns: ``run_id``, ``algorithm``, ``action_mode``, ``env_name``,
+        ``seed``, ``wall_time_s``, ``final_fitness``, plus all keys present in
         ``RunRecord.summary`` (numeric only).
         """
         pd = _lazy_pd()
@@ -451,6 +470,7 @@ class Experiment:
             row: Dict[str, Any] = {
                 "run_id": r.run_id,
                 "algorithm": r.algorithm,
+                "action_mode": r.action_mode,
                 "env_name": r.env_name,
                 "seed": r.seed,
                 "wall_time_s": r.wall_time_s,

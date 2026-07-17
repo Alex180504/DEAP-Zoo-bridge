@@ -33,6 +33,7 @@ class RunSummary:
     seed: Optional[int]
     wall_time_s: Optional[float]
     final_summary: dict
+    action_mode: Optional[str] = field(default=None)
     started_at: Optional[datetime] = field(default=None)
     display_name: Optional[str] = field(default=None)
     experiment_id: Optional[str] = field(default=None)
@@ -113,6 +114,7 @@ def discover_runs(root: Path, max_depth: int = 6) -> List[RunSummary]:
                 seed=rec.seed,
                 wall_time_s=rec.wall_time_s,
                 final_summary=dict(rec.summary or {}),
+                action_mode=rec.action_mode,
                 started_at=started_at,
                 display_name=display_name,
                 experiment_id=exp_id,

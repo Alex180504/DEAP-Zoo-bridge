@@ -349,6 +349,54 @@ def test_per_agent_table_one_row_per_agent():
     assert len(exp_table) == 2
 
 
+def test_action_mode_resolves_from_hyperparam_then_env_config():
+    from deap_pettingzoo.analysis.loaders import RunRecord
+
+    # Explicit hyperparam wins.
+    rec = RunRecord(
+        run_dir=Path("run_0"),
+        manifest={"algorithm": "ea", "env_name": "aq", "seed": 0,
+                  "hyperparams": {"action_mode": "continuous"},
+                  "env_config": {"continuous_actions": False}},
+    )
+    assert rec.action_mode == "continuous"
+
+    # Falls back to env_config.continuous_actions when no hyperparam.
+    disc = RunRecord(
+        run_dir=Path("run_1"),
+        manifest={"algorithm": "pso", "env_name": "aq", "seed": 0,
+                  "env_config": {"continuous_actions": False}},
+    )
+    assert disc.action_mode == "discrete"
+    cont = RunRecord(
+        run_dir=Path("run_2"),
+        manifest={"algorithm": "pso", "env_name": "aq", "seed": 0,
+                  "env_config": {"continuous_actions": True}},
+    )
+    assert cont.action_mode == "continuous"
+
+    # None when neither source is present.
+    unknown = RunRecord(
+        run_dir=Path("run_3"),
+        manifest={"algorithm": "ea", "env_name": "aq", "seed": 0},
+    )
+    assert unknown.action_mode is None
+
+
+def test_summary_table_includes_action_mode(tmp_path: Path):
+    from deap_pettingzoo.analysis.loaders import Experiment, RunRecord
+
+    rec = RunRecord(
+        run_dir=Path("run_0"),
+        manifest={"algorithm": "ea", "env_name": "aq", "seed": 0,
+                  "run_id": "run_0", "env_config": {"continuous_actions": True}},
+        summary={"final_fitness": 1.0},
+    )
+    table = Experiment(root=Path("."), runs=[rec]).summary_table()
+    assert "action_mode" in table.columns
+    assert table["action_mode"].iloc[0] == "continuous"
+
+
 def test_per_agent_table_falls_back_to_held_out_eval():
     # When no trajectories.parquet exists,
     # the per-agent view must still surface the held-out per-agent means that

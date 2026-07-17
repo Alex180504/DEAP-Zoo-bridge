@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover
 # Kind enum (string-valued so the manifest stays json-serialisable).
 KIND_EA_GENOME = "ea_genome_v1"
 KIND_CMA_GENOME = "cma_genome_v1"
+KIND_PSO_GENOME = "pso_genome_v1"
 KIND_AGILERL = "agilerl_v1"
 KIND_QDAX_REPERTOIRE = "qdax_repertoire_v1"
 KIND_COEVOLUTION = "coevolution_v1"
@@ -42,6 +43,7 @@ KNOWN_KINDS = frozenset(
     {
         KIND_EA_GENOME,
         KIND_CMA_GENOME,
+        KIND_PSO_GENOME,
         KIND_AGILERL,
         KIND_QDAX_REPERTOIRE,
         KIND_COEVOLUTION,

@@ -52,6 +52,14 @@ class _NeatWorkerSpec:
     weight_threshold:
         Minimum absolute CPPN output below which phenotype connection
         weights are zeroed.  Default 0.1 (HyperNEAT / ES-HyperNEAT).
+    stochastic_head:
+        When ``True`` and the action space is discrete, evaluate genomes with
+        a softmax-sampling head instead of argmax (smooth gradient-free search
+        landscape; see :class:`~deap_pettingzoo.contrib.neat.hyperneat.HyperNeatPolicy`).
+        The head RNG is seeded from ``seed`` so identical phenotypes produce
+        identical action streams (common-random-number evaluation).
+    head_temperature:
+        Softmax temperature for the stochastic head (``> 0``).
     max_steps:
         Hard cap on env steps per rollout episode, mirrors
         ``TrainingConfig.max_steps_per_episode`` on the driver.
@@ -69,6 +77,8 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    stochastic_head: bool = False
+    head_temperature: float = 1.0
     max_steps: int = 500
     #: Registry snapshot replayed once per worker so Dask workers (and
     #: any worker missing a runtime registration) can resolve ``env_name``.
@@ -162,6 +172,11 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
         )
 
         substrate = _rebuild_substrate(spec)
+        # Seed the (optional) softmax head from the shared spec seed so
+        # identical phenotypes sample identically across the population (CRN).
+        _head_rng = (
+            np.random.default_rng(spec.seed) if spec.stochastic_head else None
+        )
         if spec.es_params is not None:
             policy = ESHyperNeatPolicy(
                 genome,
@@ -169,6 +184,9 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
                 substrate,
                 action_space=action_space,
                 es_params=dict(spec.es_params),
+                stochastic=spec.stochastic_head,
+                temperature=spec.head_temperature,
+                rng=_head_rng,
             )
         else:
             policy = HyperNeatPolicy(
@@ -178,6 +196,9 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
                 action_space=action_space,
                 activation=spec.phenotype_activation,
                 weight_threshold=spec.weight_threshold,
+                stochastic=spec.stochastic_head,
+                temperature=spec.head_temperature,
+                rng=_head_rng,
             )
     else:
         policy = NeatPolicy(genome, neat_cfg, action_space=action_space)

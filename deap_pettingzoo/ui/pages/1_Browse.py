@@ -271,6 +271,7 @@ rows = [
         "name": r.display_name or r.run_id,
         "run_id": r.run_id,
         "algorithm": r.algorithm,
+        "action_mode": r.action_mode,
         "env_name": r.env_name,
         "seed": r.seed,
         "started_at": r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else None,

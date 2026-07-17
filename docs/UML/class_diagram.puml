@@ -550,12 +550,18 @@ package "deap_pettingzoo.baselines" {
         - phi1: float  ' cognitive coefficient
         - phi2: float  ' social coefficient
         - weight: float  ' inertia weight
-        -- 
-        + __init__(hidden_size, population_size, phi1, phi2, weight, smin, smax, activation, weight_range)
+        - eval_episodes: int  ' CRN episodes averaged per particle/gen
+        --
+        + __init__(hidden_size, population_size, phi1, phi2, weight, smin, smax, activation, weight_range, eval_episodes=1)
         + train(config) -> TrainingResult
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
         - _translate_budget(config) -> dict
+        .. note ..
+        eval_episodes>1 scores every particle on one
+        shared per-gen seed set (CRN) then averages,
+        de-noising fitness in stochastic envs.
+        Champion saved as pso_genome_v1.
     }
 
     class NEATTrainer {
@@ -568,7 +574,11 @@ package "deap_pettingzoo.baselines" {
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
         - _budget_to_generations(config, pop_size) -> int
-        - _log(config, best_genome, pop_size, elapsed, algorithm) -> None
+        - _log(config, best_genome, pop_size, elapsed, algorithm, logger=None) -> None
+        .. note ..
+        _log reuses the trainer's single run logger
+        (logger=log) so metrics+summary+frames+probe
+        land in ONE run dir with a finalised manifest.
     }
 
     class _RecordingReporter <<neat.reporting.BaseReporter>> {
@@ -585,6 +595,12 @@ package "deap_pettingzoo.baselines" {
         + get_capabilities() -> dict
         + train(config) -> TrainingResult
         - _substrate_to_spec(substrate) -> dict
+        .. note ..
+        algorithm_params.stochastic_head=True routes
+        training+recording through a softmax head
+        (probe+champion stay argmax) so discrete
+        search gets a smooth landscape and agents
+        steer instead of emitting one constant action.
     }
 
     class ESHyperNEATTrainer {
@@ -949,6 +965,13 @@ package "deap_pettingzoo.contrib.qdax" {
         + algorithm = "map_elites"
         + train(config): TrainingResult
         -- dispatches to jax scoring\n   when env.api == "jax_parallel",\n   numpy fallback otherwise --
+        .. champion re-selection ..
+        algorithm_params.reeval_top_k>0 re-scores the
+        top-K archive cells on fresh CRN batches
+        (numpy path) and keeps the genuinely-best one,
+        so best_fitness is not an archive max-of-noise.
+        repertoire.pkl saved inside the run dir;
+        metrics.csv env_steps advances per iteration.
     }
 
     class CMAMETrainer {
@@ -1408,6 +1431,7 @@ package "deap_pettingzoo.analysis" {
     +trajectories: pd.DataFrame
     +summary: dict
     +algorithm: str
+    +action_mode: Optional[str]
     +env_name: str
     +seed: Optional[int]
     +run_id: str
@@ -1424,6 +1448,10 @@ package "deap_pettingzoo.analysis" {
     comparison_score prefers held-out
     eval_mean_reward; score_provenance tags it
     held_out | training_fitness | training_reward.
+    action_mode resolves from hyperparams then
+    env_config.continuous_actions (works on
+    already-archived runs); surfaced in Browse,
+    summary_table, and the grouped Compare table.
   end note
 
   class Experiment {
