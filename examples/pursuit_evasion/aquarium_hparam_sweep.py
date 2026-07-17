@@ -720,6 +720,10 @@ def run_map_elites_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict
             "parallel_backend": "process",
             "worker_imports": ("examples.pursuit_evasion.aquarium_hparam_sweep",),
             "layer_sizes": None,
+            # Re-select the champion on fresh CRN batches so the config is
+            # ranked on genuine champion quality..
+            "reeval_top_k": XC.QDAX_PARAMS["reeval_top_k"],
+            "reeval_rounds": XC.QDAX_PARAMS["reeval_rounds"],
         },
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
@@ -763,9 +767,9 @@ def run_map_elites_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict
 def run_pso_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, Any]:
     """PSO over the shared evolved-family genome via :class:`PSOTrainer`.
 
-    Library-trainer path: one episode per particle per iteration
-    (:class:`SingleEpisodeEvaluator`), parallel process evaluation, and
-    native consumed-step budgeting.
+    Library-trainer path: ``eval_episodes`` common-random-number episodes per
+    particle per iteration (de-noised fitness, matching the vs-APF campaign),
+    parallel process evaluation, and native consumed-step budgeting.
     """
     name = cfg["name"]
     _subsection(f"PSO :: {name}")
@@ -773,6 +777,7 @@ def run_pso_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, A
     from deap_pettingzoo.baselines.base import BudgetMode, RecordingConfig, TrainingConfig
 
     n_workers = N_WORKERS if N_WORKERS > 0 else (os.cpu_count() or 1)
+    eval_episodes = int(cfg.get("eval_episodes", EVOLUTION_TRAIN_EVAL_EPISODES))
     trainer = PSOTrainer(
         hidden_size=cfg["hidden_size"],
         population_size=cfg["population_size"],
@@ -782,6 +787,7 @@ def run_pso_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, A
         smin=cfg.get("smin"),
         smax=cfg.get("smax"),
         activation=XC.EVOLVED_ACTIVATION,
+        eval_episodes=eval_episodes,
         num_workers=n_workers,
         parallel_backend="process",
     )
@@ -845,6 +851,12 @@ def run_hyperneat_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[
             "pop_size": cfg["population_size"],
             "eval_episodes_per_genome": cfg["eval_episodes_per_genome"],
             "substrate_hidden_layers": cfg["substrate_hidden_layers"],
+            # Match the campaign head convention: tanh phenotype + softmax
+            # search head (argmax over a saturating sigmoid phenotype produced
+            # a constant, non-steering action and a step-function landscape).
+            "phenotype_activation": XC.HYPERNEAT_PARAMS["phenotype_activation"],
+            "stochastic_head": XC.HYPERNEAT_PARAMS["stochastic_head"],
+            "head_temperature": XC.HYPERNEAT_PARAMS["head_temperature"],
         },
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
