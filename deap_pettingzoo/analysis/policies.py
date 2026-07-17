@@ -113,7 +113,7 @@ def load_policy(run_record: "RunRecord", *, action_space: Any = None) -> Any:
     Returns
     -------
     Any
-        For ``ea_genome_v1`` / ``cma_genome_v1``: a
+        For ``ea_genome_v1`` / ``cma_genome_v1`` / ``pso_genome_v1``: a
         :class:`GenomePolicyWrapper`.
         For ``coevolution_v1``: a :class:`CoevolutionPolicyBundle`
         (call :meth:`CoevolutionPolicyBundle.get_side` to pick a side).
@@ -145,7 +145,9 @@ def load_policy(run_record: "RunRecord", *, action_space: Any = None) -> Any:
 
     env_name = run_record.env_name
 
-    if kind in {"ea_genome_v1", "cma_genome_v1"}:
+    if kind in {"ea_genome_v1", "cma_genome_v1", "pso_genome_v1"}:
+        # PSO shares the FixedTopologyGenome representation with EA/CMA, so
+        # its checkpoint rehydrates through the same genome-policy builder.
         data = json.loads(abs_path.read_text(encoding="utf-8"))
         return _build_genome_policy(data, env_name=env_name, action_space=action_space)
 
@@ -169,8 +171,8 @@ def load_policy(run_record: "RunRecord", *, action_space: Any = None) -> Any:
 
     raise ValueError(
         f"Unknown policy artefact kind {kind!r} for run {run_record.run_dir}; "
-        "expected one of: ea_genome_v1, cma_genome_v1, coevolution_v1, "
-        "agilerl_v1, qdax_repertoire_v1."
+        "expected one of: ea_genome_v1, cma_genome_v1, pso_genome_v1, "
+        "coevolution_v1, agilerl_v1, qdax_repertoire_v1."
     )
 
 

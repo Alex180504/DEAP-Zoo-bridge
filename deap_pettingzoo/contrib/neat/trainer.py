@@ -41,6 +41,7 @@ from deap_pettingzoo.baselines.base import (
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
+from deap_pettingzoo.utils.logging import ExperimentLogger
 from deap_pettingzoo.utils.parallel import (
     resolve_num_workers,
     resolve_scheduler_address,
@@ -517,16 +518,18 @@ class NEATTrainer(BaselineTrainer):
         self._recorder.close()
         self._prober.close()
 
+        # Reuse the single run logger so metrics/summary land in the same run
+        # dir the recorder/prober already wrote to (one run, one manifest).
         self._log(
             config,
             best_genome,
             pop_size,
             elapsed,
-            algorithm="NEAT",
+            algorithm="neat",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
+            logger=log,
         )
-        if config.recording.enabled or config.probe.enabled:
-            log.close()
+        log.close()
 
         return TrainingResult(
             algorithm="NEAT",
@@ -562,15 +565,26 @@ class NEATTrainer(BaselineTrainer):
         *,
         algorithm: str = "NEAT",
         nominal_env_steps_per_iteration: int = 0,
+        logger: Optional[ExperimentLogger] = None,
     ) -> None:
-        """Persist fitness history and summary to ``config.output_dir``."""
+        """Persist fitness history and summary to ``config.output_dir``.
+
+        When ``logger`` is provided the metrics/summary are written to that
+        already-open run (the same one the recorder/prober wrote frames and
+        probe rows to), so a single run directory carries every artefact.
+        Passing ``None`` builds a throwaway logger — kept only for callers
+        that do not manage their own logger; it opens a *second* run dir and
+        is closed here.
+        """
         output_dir = config.output_dir
         if output_dir is None:
             return
         output_dir = Path(output_dir)
         if not output_dir.exists():
             output_dir.mkdir(parents=True, exist_ok=True)
-        logger = build_logger(config, algorithm=algorithm)
+        own_logger = logger is None
+        if own_logger:
+            logger = build_logger(config, algorithm=algorithm)
         # Build per-generation entries with real env_steps (cumulative).
         _cumulative = 0
         _entries: list = []
@@ -611,7 +625,13 @@ class NEATTrainer(BaselineTrainer):
                 "pop_size": pop_size,
                 "elapsed_sec": round(elapsed, 2),
             },
+            # Stamp the manifest's wall_time_s: the recorder/prober use the
+            # logger without entering its context, so close() alone would leave
+            # it null.
+            training_time_s=float(elapsed),
         )
+        if own_logger:
+            logger.close()
 
     def _budget_to_generations(self, config: TrainingConfig, pop_size: int) -> int:
         """Translate ``config.budget_mode`` / ``.budget_value`` to generations.

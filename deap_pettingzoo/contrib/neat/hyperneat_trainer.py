@@ -183,9 +183,15 @@ class HyperNEATTrainer(NEATTrainer):
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         activation = params.get("phenotype_activation", "sigmoid")
         weight_threshold = float(params.get("weight_threshold", 0.1))
+        # Opt-in stochastic softmax head for discrete search: argmax over the
+        # phenotype logits collapses to a constant action (idle agent + a
+        # step-function fitness landscape), so training/recording use a
+        # softmax head while the probe and returned champion stay deterministic
+        # argmax for scored comparison (mirrors the EA/CMA head convention).
+        stochastic_head = bool(params.get("stochastic_head", False))
+        head_temperature = float(params.get("head_temperature", 1.0))
 
-        # Recording reporter
-        def _hn_champion(best_genome):
+        def _hn_champion(best_genome, *, stochastic: bool):
             return HyperNeatPolicy(
                 best_genome,
                 neat_config,
@@ -193,6 +199,13 @@ class HyperNEATTrainer(NEATTrainer):
                 action_space=shared_action_space,
                 activation=activation,
                 weight_threshold=weight_threshold,
+                stochastic=stochastic and stochastic_head,
+                temperature=head_temperature,
+                rng=(
+                    np.random.default_rng(seed if seed is not None else 0)
+                    if stochastic and stochastic_head
+                    else None
+                ),
             )
 
         if self._recorder.enabled or self._prober.enabled:
@@ -204,9 +217,14 @@ class HyperNEATTrainer(NEATTrainer):
                     total=n_generations,
                     env_steps=self._live_steps_fn(),
                 )
-                champion = lambda: _hn_champion(best_genome)  # noqa: E731
-                self._recorder.observe(event, champion)
-                self._prober.observe(event, champion)
+                # Video reflects the deployed (softmax) behaviour; the probe
+                # scores the deterministic argmax champion for comparability.
+                self._recorder.observe(
+                    event, lambda: _hn_champion(best_genome, stochastic=True)
+                )
+                self._prober.observe(
+                    event, lambda: _hn_champion(best_genome, stochastic=False)
+                )
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -239,6 +257,8 @@ class HyperNEATTrainer(NEATTrainer):
                 substrate_spec=_substrate_to_spec(substrate),
                 phenotype_activation=activation,
                 weight_threshold=weight_threshold,
+                stochastic_head=stochastic_head,
+                head_temperature=head_temperature,
                 max_steps=max_steps,
                 registry_snapshot=snapshot,
             )
@@ -281,6 +301,11 @@ class HyperNEATTrainer(NEATTrainer):
             def _eval_genomes(genomes_and_ids: list, neat_cfg: neat.Config) -> None:
                 self._generation_num += 1
                 gen_fitnesses: list[float] = []
+                # Fresh seeded head RNG per generation so identical phenotypes
+                # sample identically within the population (CRN).
+                _head_rng = (
+                    np.random.default_rng(_base_seed) if stochastic_head else None
+                )
 
                 for _genome_id, genome in genomes_and_ids:
                     try:
@@ -291,6 +316,9 @@ class HyperNEATTrainer(NEATTrainer):
                             action_space=shared_action_space,
                             activation=activation,
                             weight_threshold=weight_threshold,
+                            stochastic=stochastic_head,
+                            temperature=head_temperature,
+                            rng=_head_rng,
                         )
                         rewards: list[float] = []
                         for ep_i in range(eval_eps):
@@ -353,12 +381,12 @@ class HyperNEATTrainer(NEATTrainer):
         realized_gens = int(self._generation_num)
 
         self._recorder.finalize(
-            lambda: _hn_champion(best_genome),
+            lambda: _hn_champion(best_genome, stochastic=True),
             iteration=realized_gens,
             env_steps=realized_gens * max_steps,
         )
         self._prober.finalize(
-            lambda: _hn_champion(best_genome),
+            lambda: _hn_champion(best_genome, stochastic=False),
             iteration=realized_gens,
             env_steps=int(self._env_steps_consumed),
         )
@@ -370,16 +398,18 @@ class HyperNEATTrainer(NEATTrainer):
         self._recorder.close()
         self._prober.close()
 
+        # Reuse the single run logger so metrics/summary land in the same run
+        # dir the recorder/prober already wrote to (one run, one manifest).
         self._log(
             config,
             best_genome,
             pop_size,
             elapsed,
-            algorithm="HyperNEAT",
+            algorithm="hyperneat",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
+            logger=log,
         )
-        if config.recording.enabled or config.probe.enabled:
-            log.close()
+        log.close()
 
         return TrainingResult(
             algorithm="HyperNEAT",
@@ -666,16 +696,18 @@ class ESHyperNEATTrainer(NEATTrainer):
         self._recorder.close()
         self._prober.close()
 
+        # Reuse the single run logger so metrics/summary land in the same run
+        # dir the recorder/prober already wrote to (one run, one manifest).
         self._log(
             config,
             best_genome,
             pop_size,
             elapsed,
-            algorithm="ES-HyperNEAT",
+            algorithm="es-hyperneat",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
+            logger=log,
         )
-        if config.recording.enabled or config.probe.enabled:
-            log.close()
+        log.close()
 
         return TrainingResult(
             algorithm="ES-HyperNEAT",
