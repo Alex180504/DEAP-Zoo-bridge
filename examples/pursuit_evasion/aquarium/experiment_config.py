@@ -239,7 +239,8 @@ CMA_PARAMS: Dict[str, Any] = {
 }
 
 # PSO searches the same genome family.  Population matched to the EA for
-# budget parity.
+# budget parity.  ``eval_episodes`` matches the EA/CMA per-candidate episode
+# count so PSO fitness is de-noised by the same common-random-number averaging.
 PSO_PARAMS: Dict[str, Any] = {
     "population_size": 48,
     "hidden_size": EVOLVED_HIDDEN_SIZE,
@@ -248,6 +249,7 @@ PSO_PARAMS: Dict[str, Any] = {
     "weight": 0.9,
     "smin": None,
     "smax": None,
+    "eval_episodes": EVOLUTION_TRAIN_EVAL_EPISODES,
 }
 
 # Softmax sampling temperature used by EA/CMA discrete heads during
@@ -295,6 +297,10 @@ QDAX_PARAMS: Dict[str, Any] = {
     "line_sigma": 0.3,
     "init_sigma": 0.2,
     "pool_mode": "uniform",
+    # Re-score the top cells on fresh CRN batches and keep the genuinely-best
+    # one so best_fitness is comparable to the EA/CMA CRN champions.
+    "reeval_top_k": 16,
+    "reeval_rounds": 4,
 }
 
 DESCRIPTOR_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
@@ -376,10 +382,21 @@ def make_state_extractor(role: str, env_config: Dict[str, Any]):
 # hidden layer matches the evolved family's 16-unit width, so the phenotype
 # capacity is comparable to the EA/CMA/PSO/QDax networks.  Per-genome
 # evaluation cost matches the EA's (same episode count).
+#
+# ``phenotype_activation="tanh"`` and ``stochastic_head=True`` bring HyperNEAT
+# to parity with the EA/CMA/PSO head convention: a sigmoid phenotype saturates
+# to (0,1) and, decoded by argmax, collapses to a single constant heading (the
+# agent swims straight and the fitness landscape is a step function). ``tanh``
+# restores signed dynamic range and the softmax head (temperature matched to
+# the EA's) gives gradient-free search a usable signal; the probe and returned
+# champion still score the deterministic argmax policy.
 HYPERNEAT_PARAMS: Dict[str, Any] = {
     "pop_size": 50,
     "substrate_hidden_layers": [EVOLVED_HIDDEN_SIZE],
     "eval_episodes_per_genome": EVOLUTION_TRAIN_EVAL_EPISODES,
+    "phenotype_activation": EVOLVED_ACTIVATION,
+    "stochastic_head": True,
+    "head_temperature": SOFTMAX_TEMPERATURE,
 }
 
 RL_NUM_ENVS: int = 4
