@@ -27,6 +27,7 @@ import numpy as np
 from deap_pettingzoo.baselines._logging_helpers import build_logger
 from deap_pettingzoo.baselines.base import (
     BudgetMode,
+    ProgressCallback,
     ProgressEvent,
     TrainingConfig,
     TrainingResult,
@@ -100,7 +101,12 @@ class HyperNEATTrainer(NEATTrainer):
         caps["algorithm"] = "HyperNEAT"
         return caps
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         t0 = time.perf_counter()
         # Opt-in consumed-step budgeting: run until the real env-tick budget
         # is exhausted instead of the nominal generation count.
@@ -208,7 +214,11 @@ class HyperNEATTrainer(NEATTrainer):
                 ),
             )
 
-        if self._recorder.enabled or self._prober.enabled:
+        if (
+            self._recorder.enabled
+            or self._prober.enabled
+            or progress_callback is not None
+        ):
 
             def _record_champion(gen: int, best_genome) -> None:
                 event = ProgressEvent(
@@ -225,6 +235,7 @@ class HyperNEATTrainer(NEATTrainer):
                 self._prober.observe(
                     event, lambda: _hn_champion(best_genome, stochastic=False)
                 )
+                self._emit_progress(progress_callback, event)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -423,7 +434,13 @@ class HyperNEATTrainer(NEATTrainer):
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
-            metadata={"genome": best_genome, "config": neat_config},
+            metadata={
+                "genome": best_genome,
+                "config": neat_config,
+                "run_dir": (
+                    str(log.run_dir) if config.output_dir is not None else None
+                ),
+            },
             seed=seed,
             training_time=elapsed,
         )
@@ -437,7 +454,12 @@ class ESHyperNEATTrainer(NEATTrainer):
         caps["algorithm"] = "ES-HyperNEAT"
         return caps
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         t0 = time.perf_counter()
         # Opt-in consumed-step budgeting: run until the real env-tick budget
         # is exhausted instead of the nominal generation count.
@@ -524,7 +546,11 @@ class ESHyperNEATTrainer(NEATTrainer):
                 es_params=es_params,
             )
 
-        if self._recorder.enabled or self._prober.enabled:
+        if (
+            self._recorder.enabled
+            or self._prober.enabled
+            or progress_callback is not None
+        ):
 
             def _record_champion(gen: int, best_genome) -> None:
                 event = ProgressEvent(
@@ -536,6 +562,7 @@ class ESHyperNEATTrainer(NEATTrainer):
                 champion = lambda: _esn_champion(best_genome)  # noqa: E731
                 self._recorder.observe(event, champion)
                 self._prober.observe(event, champion)
+                self._emit_progress(progress_callback, event)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
@@ -721,7 +748,13 @@ class ESHyperNEATTrainer(NEATTrainer):
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
-            metadata={"genome": best_genome, "config": neat_config},
+            metadata={
+                "genome": best_genome,
+                "config": neat_config,
+                "run_dir": (
+                    str(log.run_dir) if config.output_dir is not None else None
+                ),
+            },
             seed=seed,
             training_time=elapsed,
         )
