@@ -34,6 +34,7 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
     TrainingConfig,
     TrainingResult,
     derive_generations,
@@ -687,7 +688,12 @@ class MAPElitesTrainer(BaselineTrainer):
             "produces_repertoire": True,
         }
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         _require_qdax()
 
         import jax
@@ -836,17 +842,19 @@ class MAPElitesTrainer(BaselineTrainer):
                     getattr(scoring_fn, "_env_steps_consumed", None)
                 )
                 realized_iters = iter_idx
+                event = ProgressEvent(
+                    unit="generation",
+                    current=iter_idx,
+                    total=num_iters,
+                    env_steps=_probe_env_steps(iter_idx),
+                )
                 self._prober.observe(
-                    ProgressEvent(
-                        unit="generation",
-                        current=iter_idx,
-                        total=num_iters,
-                        env_steps=_probe_env_steps(iter_idx),
-                    ),
+                    event,
                     lambda _rep=repertoire: _extract_champion(
                         _rep, module, action_space=_probe_action_space
                     )[0],
                 )
+                self._emit_progress(progress_callback, event)
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -943,7 +951,7 @@ class MAPElitesTrainer(BaselineTrainer):
             "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
-        _persist_qdax_results(
+        metadata["run_dir"] = _persist_qdax_results(
             config,
             algorithm="map_elites",
             history=history,
@@ -1173,7 +1181,7 @@ class CMAMETrainer(BaselineTrainer):
             "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
-        _persist_qdax_results(
+        metadata["run_dir"] = _persist_qdax_results(
             config,
             algorithm="cma_me",
             history=history,
@@ -1264,8 +1272,12 @@ def _persist_qdax_results(
     env_steps_consumed: Optional[int] = None,
     env_steps_per_row: Optional[list] = None,
     prober: Optional[Any] = None,
-) -> None:
+) -> Optional[str]:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
+
+    Returns the run directory path (as ``str``) so callers can expose it in
+    ``TrainingResult.metadata["run_dir"]`` like the other baseline trainers;
+    ``None`` when ``config.output_dir`` is ``None``.
 
     ``prober``, when given, is the trainer's buffered
     :class:`~deap_pettingzoo.baselines.probing.ProbeController`; its rows are
@@ -1369,3 +1381,4 @@ def _persist_qdax_results(
                 extra={"algorithm": algorithm},
             )
         write_summary(log, full_summary, training_time_s=training_time)
+        return str(log.run_dir) if config.output_dir is not None else None
