@@ -27,13 +27,14 @@ hyperparameters, and QDax descriptor ranges come from
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
 import traceback
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 # Headless rendering — must be set before pygame ever calls init().
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -81,6 +82,12 @@ from examples.pursuit_evasion.aquarium.heads import (
 from examples.pursuit_evasion.aquarium.observation_features import (
     AquariumObservationFeatureWrapper,
 )
+from examples.pursuit_evasion.aquarium.curriculum import (
+    CurriculumController,
+    default_phase_file,
+    phase_env_overrides,
+    register_curriculum_scripted_predator_aquarium,
+)
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
     DictResetEnv,
     register_scripted_predator_aquarium,
@@ -109,6 +116,16 @@ RUN_FINAL_ANALYSIS: bool = True
 
 ACTION_MODE: str = os.environ.get("AQUARIUM_ACTION_MODE", "discrete")   # "discrete" | "continuous"
 
+# Optional opponent-speed curriculum (AQUARIUM_CURRICULUM=1): scripted
+# predator speed annealed along XC.CURRICULUM_OPPONENT_SPEEDS at the
+# configured consumed-budget fractions.  Training runs on TRAIN_ENV_NAME;
+# probes and final champion evaluations always run on the canonical
+# ENV_NAME env, so curriculum runs stay directly comparable.
+CURRICULUM: bool = (
+    os.environ.get("AQUARIUM_CURRICULUM", "0").strip().lower()
+    in ("1", "true", "yes")
+)
+
 # ---- Reproducibility / hardware ------------------------------------------------
 
 SEED_BASE: int = 0
@@ -133,6 +150,7 @@ PROBE_SEED_OFFSET: int = 77_000        # probe episode seeds, distinct from eval
 # ---- Env / opponent --------------------------------------------------------------
 
 ENV_NAME: str = "aquarium_evader_training_v0"
+TRAIN_ENV_NAME: str = ENV_NAME + "_curriculum" if CURRICULUM else ENV_NAME
 ENV_CONFIG: Dict[str, Any] = XC.make_env_config(ACTION_MODE)
 APF_CONFIG = XC.APF_PURSUER_CONFIG
 PREY_REWARD_SHAPE_ALPHA: float = XC.VS_APF_PREY_SHAPE_ALPHA
@@ -209,6 +227,34 @@ register_scripted_predator_aquarium(
     overwrite=True,
 )
 
+# Optional curriculum train env under its own name (ENV_NAME stays the
+# canonical probe/eval env).
+_CURRICULUM_PHASE_FILE = default_phase_file("evader") if CURRICULUM else None
+_CURRICULUM_CTRL: "CurriculumController | None" = None
+if CURRICULUM:
+    register_curriculum_scripted_predator_aquarium(
+        TRAIN_ENV_NAME,
+        ENV_CONFIG,
+        phase_env_overrides("evader"),
+        _CURRICULUM_PHASE_FILE,
+        apf_config=APF_CONFIG,
+        reward_shape_alpha=PREY_REWARD_SHAPE_ALPHA,
+        close_range_penalty=CLOSE_RANGE_PENALTY,
+        close_range_sigma2=CLOSE_RANGE_SIGMA2,
+        wrappers=(AquariumObservationFeatureWrapper,),
+    )
+
+
+def _curriculum_update(env_steps: int) -> None:
+    """Advance the curriculum phase from a consumed-step count (no-op when off)."""
+    if _CURRICULUM_CTRL is not None:
+        _CURRICULUM_CTRL.update(env_steps)
+
+
+def _curriculum_progress_callback():
+    """ProgressCallback for the library trainers (None when curriculum off)."""
+    return _CURRICULUM_CTRL.progress_callback if _CURRICULUM_CTRL is not None else None
+
 
 # ===========================================================================
 # Helpers
@@ -230,8 +276,13 @@ def _ea_generations_for_budget(pop_size: int, eval_eps: int) -> int:
 
 
 def _evaluator_env_factory():
-    """Env with reset() shimmed to the dict-only contract of MixedPolicyEvaluator."""
-    return DictResetEnv(build_env(ENV_NAME))
+    """Training env with reset() shimmed to MixedPolicyEvaluator's contract.
+
+    Builds TRAIN_ENV_NAME (== ENV_NAME unless the curriculum is on); the
+    worker-side module import recomputes the same name from the inherited
+    AQUARIUM_CURRICULUM environment variable.
+    """
+    return DictResetEnv(build_env(TRAIN_ENV_NAME))
 
 
 def _empty_scripted_factory(env) -> Dict[str, Any]:
@@ -525,6 +576,7 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             "cxpb": EA_CXPB,
             "action_mode": ACTION_MODE,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
+            "curriculum": CURRICULUM,
         },
     )
     recorder = (
@@ -610,6 +662,7 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             n_gens, TOTAL_ENV_STEPS, consumed, _episode_steps_per_episode()
         ):
             realized_gens = gen
+            _curriculum_update(consumed[0])
             gen_seed_holder["seed"] = seed * 10_000 + gen
 
             # True CRN: elites re-evaluated on the current generation's seed.
@@ -646,6 +699,7 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
         )
         logger.summary({
             "final_fitness": float(eval_stats["mean"]),
+            "eval_mean_reward": float(eval_stats["mean"]),
             "best_fitness": float(best.fitness.values[0]),
             "training_time_s": float(train_time),
             "num_generations": int(realized_gens),
@@ -720,6 +774,7 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
             "dimension": dimension,
             "action_mode": ACTION_MODE,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
+            "curriculum": CURRICULUM,
         },
     )
     recorder = (
@@ -768,6 +823,7 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
             n_gens, TOTAL_ENV_STEPS, consumed, _episode_steps_per_episode()
         ):
             realized_gens = gen
+            _curriculum_update(consumed[0])
             gen_seed_holder["seed"] = seed * 10_000 + gen
             population = toolbox.generate()
             for ind, fit in zip(population, toolbox.map(toolbox.evaluate, population)):
@@ -813,6 +869,7 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
         )
         logger.summary({
             "final_fitness": float(eval_stats["mean"]),
+            "eval_mean_reward": float(eval_stats["mean"]),
             "best_fitness": float(best.fitness.values[0]),
             "training_time_s": float(train_time),
             "num_generations": int(realized_gens),
@@ -852,7 +909,7 @@ def run_hyperneat(seed: int, run_dir: Path) -> Dict[str, Any]:
     # NEAT-family trainers honour budget_on_consumed by stepping the
     # population n=1 generations until the real env-tick budget is exhausted.
     cfg = TrainingConfig(
-        env_name=ENV_NAME,
+        env_name=TRAIN_ENV_NAME,
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=TOTAL_ENV_STEPS,
         budget_on_consumed=XC.BUDGET_ON_CONSUMED,
@@ -870,10 +927,13 @@ def run_hyperneat(seed: int, run_dir: Path) -> Dict[str, Any]:
         },
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
+        # Probes stay on the canonical env so curves are comparable across
+        # curriculum and flat-difficulty runs.
         probe=ProbeConfig(
             enabled=True,
             every_n_steps=PROBE_EVERY_N_STEPS,
             n_episodes=PROBE_EPISODES,
+            env_name=ENV_NAME,
             info_keys=("prey_lost_total",),
             seed=PROBE_SEED_OFFSET + seed,
         ),
@@ -893,10 +953,13 @@ def run_hyperneat(seed: int, run_dir: Path) -> Dict[str, Any]:
         f"eval_eps={HYPERNEAT_PARAMS['eval_episodes_per_genome']} budget={TOTAL_ENV_STEPS:,}"
     )
     t0 = time.time()
-    result = HyperNEATTrainer().train(cfg)
+    result = HyperNEATTrainer().train(
+        cfg, progress_callback=_curriculum_progress_callback()
+    )
     return {
         "policy": result.policy,
         "metrics": result.metrics,
+        "run_dir": result.metadata.get("run_dir"),
         "training_time_s": time.time() - t0,
         "seed": seed,
     }
@@ -931,7 +994,7 @@ def run_pso(seed: int, run_dir: Path) -> Dict[str, Any]:
         parallel_backend="process",
     )
     cfg = TrainingConfig(
-        env_name=ENV_NAME,
+        env_name=TRAIN_ENV_NAME,
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=TOTAL_ENV_STEPS,
         budget_on_consumed=XC.BUDGET_ON_CONSUMED,
@@ -950,10 +1013,13 @@ def run_pso(seed: int, run_dir: Path) -> Dict[str, Any]:
         },
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
+        # Probes stay on the canonical env so curves are comparable across
+        # curriculum and flat-difficulty runs.
         probe=ProbeConfig(
             enabled=True,
             every_n_steps=PROBE_EVERY_N_STEPS,
             n_episodes=PROBE_EPISODES,
+            env_name=ENV_NAME,
             info_keys=("prey_lost_total",),
             seed=PROBE_SEED_OFFSET + seed,
         ),
@@ -973,10 +1039,11 @@ def run_pso(seed: int, run_dir: Path) -> Dict[str, Any]:
         f"budget={TOTAL_ENV_STEPS:,}"
     )
     t0 = time.time()
-    result = trainer.train(cfg)
+    result = trainer.train(cfg, progress_callback=_curriculum_progress_callback())
     return {
         "policy": result.policy,
         "metrics": result.metrics,
+        "run_dir": result.metadata.get("run_dir"),
         "training_time_s": time.time() - t0,
         "seed": seed,
     }
@@ -999,7 +1066,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
 
     # RL trainers budget on real consumed env steps by construction.
     cfg = TrainingConfig(
-        env_name=ENV_NAME,
+        env_name=TRAIN_ENV_NAME,
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=TOTAL_ENV_STEPS,
         num_seeds=1,
@@ -1015,6 +1082,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
             enabled=True,
             every_n_steps=PROBE_EVERY_N_STEPS,
             n_episodes=PROBE_EPISODES,
+            env_name=ENV_NAME,
             info_keys=("prey_lost_total",),
             seed=PROBE_SEED_OFFSET + seed,
         ),
@@ -1031,10 +1099,11 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
     )
     trainer = MATD3Trainer(device=DEVICE, verbose=True)
     t0 = time.time()
-    result = trainer.train(cfg)
+    result = trainer.train(cfg, progress_callback=_curriculum_progress_callback())
     return {
         "policy": result.policy,
         "metrics": result.metrics,
+        "run_dir": result.metadata.get("run_dir"),
         "training_time_s": time.time() - t0,
         "seed": seed,
     }
@@ -1068,7 +1137,7 @@ def run_map_elites(seed: int, run_dir: Path) -> Dict[str, Any]:
     # function's real tick counter. Overshoot is at most one batch's real
     # cost — negligible at the suite budgets.
     cfg = TrainingConfig(
-        env_name=ENV_NAME,
+        env_name=TRAIN_ENV_NAME,
         budget_mode=BudgetMode.ENV_STEPS,
         budget_value=TOTAL_ENV_STEPS,
         budget_on_consumed=XC.BUDGET_ON_CONSUMED,
@@ -1100,10 +1169,13 @@ def run_map_elites(seed: int, run_dir: Path) -> Dict[str, Any]:
         },
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
+        # Probes stay on the canonical env so curves are comparable across
+        # curriculum and flat-difficulty runs.
         probe=ProbeConfig(
             enabled=True,
             every_n_steps=PROBE_EVERY_N_STEPS,
             n_episodes=PROBE_EPISODES,
+            env_name=ENV_NAME,
             info_keys=("prey_lost_total",),
             seed=PROBE_SEED_OFFSET + seed,
         ),
@@ -1124,7 +1196,7 @@ def run_map_elites(seed: int, run_dir: Path) -> Dict[str, Any]:
     )
     trainer = MAPElitesTrainer()
     t0 = time.time()
-    result = trainer.train(cfg)
+    result = trainer.train(cfg, progress_callback=_curriculum_progress_callback())
     train_time = time.time() - t0
 
     champion = result.policy
@@ -1141,6 +1213,7 @@ def run_map_elites(seed: int, run_dir: Path) -> Dict[str, Any]:
         "policy": champion,
         "metrics": result.metrics,
         "eval": eval_stats,
+        "run_dir": result.metadata.get("run_dir"),
         "best_fitness": float(result.metrics.get("best_fitness", float("nan"))),
         "training_time_s": train_time,
         "seed": seed,
@@ -1183,6 +1256,54 @@ def _evaluate_rl_policy(policy, n_episodes: int, seed_base: int) -> Dict[str, fl
         rewards.append(float(r))
         losses.append(int(lost))
     return _summarize_episode_stats(rewards, losses)
+
+
+def _patch_run_summary(run_dir: Optional[str], updates: Mapping[str, Any]) -> None:
+    """Merge *updates* into a finished run's summary.json and manifest.
+
+    The library trainers (PSO, MAP-Elites, HyperNEAT, MATD3) close their run
+    logger before returning, so the held-out champion evaluation has to be
+    written post hoc. The analysis loader reads ``manifest.json``'s
+    ``final_summary`` first and falls back to ``summary.json``, so both are
+    patched. ``run_dir=None`` is a silent no-op: the EA/CMA-ES loops persist
+    their eval through the still-open logger instead.
+    """
+    if not run_dir:
+        return
+    run_path = Path(run_dir)
+    summary_path = run_path / "summary.json"
+    try:
+        data = (
+            json.loads(summary_path.read_text(encoding="utf-8"))
+            if summary_path.is_file()
+            else {}
+        )
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data.update(updates)
+    try:
+        summary_path.write_text(
+            json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        traceback.print_exc()
+        return
+    manifest_path = run_path / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # Keep final_summary a superset of summary.json — the loader prefers
+        # it wholesale, so a partial dict here would shadow the other keys.
+        manifest["final_summary"] = {
+            **(manifest.get("final_summary") or {}),
+            **data,
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except (OSError, json.JSONDecodeError):
+        traceback.print_exc()
 
 
 def _final_analysis(root: Path) -> None:
@@ -1237,11 +1358,25 @@ def main() -> None:
         f"  toggles      : EA={RUN_EA}  CMA-ES={RUN_CMAES}  PSO={RUN_PSO}  "
         f"MAP-Elites={RUN_MAP_ELITES}  HyperNEAT={RUN_HYPERNEAT}  MATD3={RUN_MATD3}"
     )
+    print(
+        f"  curriculum   : {CURRICULUM}"
+        + (
+            f"  (opponent speeds {XC.CURRICULUM_OPPONENT_SPEEDS} at "
+            f"fractions {XC.CURRICULUM_PHASE_FRACS})"
+            if CURRICULUM else ""
+        )
+    )
     print(f"  output_dir   : {OUTPUT_DIR}")
 
     if PROBE_ENV:
         _probe_env()
         return
+
+    global _CURRICULUM_CTRL
+    if CURRICULUM:
+        _CURRICULUM_CTRL = CurriculumController(
+            _CURRICULUM_PHASE_FILE, TOTAL_ENV_STEPS
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     overall_t0 = time.time()
@@ -1251,17 +1386,40 @@ def main() -> None:
     }
 
     def _try(label: str, fn, seed: int, rl_policy: bool = True) -> None:
+        """Run one algorithm and record its champion evaluation.
+
+        The held-out evaluation is also persisted into the run's summary
+        (``eval_mean_reward`` + ``eval_*``) so every algorithm's reported
+        score carries ``held_out`` provenance; a failed evaluation tags the
+        run ``eval_failed`` so the analysis excludes it instead of falling
+        back to an incomparable training metric.
+        """
+        _curriculum_update(0)  # Each run restarts at the easiest phase.
         try:
             res = fn(seed, OUTPUT_DIR / label)
+        except Exception:
+            traceback.print_exc()
+            return
+        try:
             if "eval" in res:
-                summary[label].append({"seed": seed, **res["eval"]})
+                eval_stats = res["eval"]
             elif rl_policy:
                 eval_stats = _evaluate_rl_policy(
                     res["policy"], n_episodes=EVAL_EPISODES, seed_base=10_000 * seed
                 )
-                summary[label].append({"seed": seed, **eval_stats})
+            else:
+                return
         except Exception:
             traceback.print_exc()
+            _patch_run_summary(
+                res.get("run_dir"), {"eval_metric_provenance": "eval_failed"}
+            )
+            return
+        summary[label].append({"seed": seed, **eval_stats})
+        _patch_run_summary(res.get("run_dir"), {
+            "eval_mean_reward": float(eval_stats["mean"]),
+            **{f"eval_{k}": v for k, v in eval_stats.items()},
+        })
 
     for seed_idx in range(NUM_SEEDS):
         seed = SEED_BASE + seed_idx
