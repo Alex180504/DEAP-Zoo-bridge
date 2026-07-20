@@ -84,7 +84,7 @@ BALANCED_ENV_CONFIG: Dict[str, Any] = {
     "keep_prey_count_constant": False,
     "width": 1500,
     "height": 1500,
-    "draw_view_cones": False,
+    "draw_view_cones": True,
     "draw_action_vectors": False,
 }
 
@@ -164,7 +164,9 @@ VS_APF_BUDGET_STEPS: int = 2_500_000    # per (algorithm, seed) final run
 COEV_BUDGET_STEPS: int = 5_000_000      # per (pairing, seed) final run
 
 EVAL_EPISODES: int = 30                 # post-training champion evaluation
-EVOLUTION_TRAIN_EVAL_EPISODES: int = 5  # per-candidate fitness episodes (EA/CMA/QDax)
+
+# Per-candidate fitness episodes for every population-based trainer.
+EVOLUTION_TRAIN_EVAL_EPISODES: int = 10
 
 # Held-out champion probe: every PROBE_EVERY_N_STEPS consumed env steps the
 # current champion plays PROBE_EPISODES episodes against the scripted APF
@@ -179,6 +181,15 @@ PROBE_EVERY_N_STEPS: int = 125_000      # ~20 checkpoints per 2.5M vs-APF run
 # evolutionary algorithms relative to the RL learners, which always
 # consume exactly budget_value real steps.
 BUDGET_ON_CONSUMED: bool = True
+
+# ===========================================================================
+# Optional opponent-speed curriculum (vs-APF suites, AQUARIUM_CURRICULUM=1)
+# ===========================================================================
+
+# Anneal the scripted opponent's max velocity toward the symmetric 12.0 at
+# these consumed-budget fractions.
+CURRICULUM_PHASE_FRACS: Tuple[float, ...] = (0.0, 0.4, 0.7)
+CURRICULUM_OPPONENT_SPEEDS: Tuple[float, ...] = (9.0, 10.5, 12.0)
 
 
 def budget_generations(nominal_gens: int, budget_steps: int, step_counter, max_steps: int):
@@ -221,11 +232,11 @@ EVOLVED_ACTIVATION: str = "tanh"
 EVOLVED_OUTPUT_ACTIVATION: str = "linear"
 
 EA_PARAMS: Dict[str, Any] = {
-    "population_size": 48,
+    "population_size": 24,
     "hidden_size": EVOLVED_HIDDEN_SIZE,
     "mut_sigma": 0.2,
     "mut_indpb": 0.3,
-    "cxpb": 0.3,
+    "cxpb": 0.7,
     "elite_size": 3,
     "tournament_size": 3,
     "crossover_alpha": 0.5,
@@ -233,7 +244,7 @@ EA_PARAMS: Dict[str, Any] = {
 }
 
 CMA_PARAMS: Dict[str, Any] = {
-    "population_size": 48,
+    "population_size": 24,
     "hidden_size": EVOLVED_HIDDEN_SIZE,
     "sigma0": 0.2,
 }
@@ -241,8 +252,10 @@ CMA_PARAMS: Dict[str, Any] = {
 # PSO searches the same genome family.  Population matched to the EA for
 # budget parity.  ``eval_episodes`` matches the EA/CMA per-candidate episode
 # count so PSO fitness is de-noised by the same common-random-number averaging.
+# The velocity constants are per-action-mode (MODE_BEST_OVERRIDES): the base
+# dict carries the continuous-mode values.
 PSO_PARAMS: Dict[str, Any] = {
-    "population_size": 48,
+    "population_size": 24,
     "hidden_size": EVOLVED_HIDDEN_SIZE,
     "phi1": 2.0,
     "phi2": 2.0,
@@ -255,10 +268,11 @@ PSO_PARAMS: Dict[str, Any] = {
 # Softmax sampling temperature used by EA/CMA discrete heads during
 # training (smooth fitness landscape; argmax is a step function).
 SOFTMAX_TEMPERATURE: float = 0.3
+
 MODE_BEST_OVERRIDES: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "cma": {
-        "discrete": {"sigma0": 0.4},
-        "continuous": {"sigma0": 0.2},
+    "pso": {
+        "discrete": {"phi1": 1.49618, "phi2": 1.49618, "weight": 0.7298},
+        "continuous": {"phi1": 2.0, "phi2": 2.0, "weight": 0.9},
     },
 }
 
@@ -291,10 +305,10 @@ def params_for(algo: str, action_mode: str) -> Dict[str, Any]:
 
 QDAX_PARAMS: Dict[str, Any] = {
     "hidden_size": EVOLVED_HIDDEN_SIZE,
-    "batch_size": 32,
+    "batch_size": 16,
     "grid_shape": (8, 8),
-    "iso_sigma": 0.15,
-    "line_sigma": 0.3,
+    "iso_sigma": 0.05,
+    "line_sigma": 0.1,
     "init_sigma": 0.2,
     "pool_mode": "uniform",
     # Re-score the top cells on fresh CRN batches and keep the genuinely-best
@@ -382,14 +396,6 @@ def make_state_extractor(role: str, env_config: Dict[str, Any]):
 # hidden layer matches the evolved family's 16-unit width, so the phenotype
 # capacity is comparable to the EA/CMA/PSO/QDax networks.  Per-genome
 # evaluation cost matches the EA's (same episode count).
-#
-# ``phenotype_activation="tanh"`` and ``stochastic_head=True`` bring HyperNEAT
-# to parity with the EA/CMA/PSO head convention: a sigmoid phenotype saturates
-# to (0,1) and, decoded by argmax, collapses to a single constant heading (the
-# agent swims straight and the fitness landscape is a step function). ``tanh``
-# restores signed dynamic range and the softmax head (temperature matched to
-# the EA's) gives gradient-free search a usable signal; the probe and returned
-# champion still score the deterministic argmax policy.
 HYPERNEAT_PARAMS: Dict[str, Any] = {
     "pop_size": 50,
     "substrate_hidden_layers": [EVOLVED_HIDDEN_SIZE],
@@ -443,9 +449,8 @@ RL_COEV_PARAMS: Dict[str, Any] = {
 # Coevolution loop
 # ===========================================================================
 
-# Episodes per candidate-vs-opponent fitness estimate: the dominant
-# variance-reduction knob (each catch swings fitness by ±20).
-K_OPPONENTS: int = 8
+# Episodes per candidate-vs-opponent fitness estimate.
+K_OPPONENTS: int = 16
 # Past-champion snapshots kept per side for archive-based opponent sampling.
 HOF_CAPACITY: int = 10
 ARCHIVE_MIX: float = 0.5

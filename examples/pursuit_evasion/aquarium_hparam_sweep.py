@@ -188,7 +188,7 @@ else:
 
 _H = XC.EVOLVED_HIDDEN_SIZE
 
-# Shipped canonical: cxpb 0.3 (= ea_low_cx; won both action modes vs-APF).
+# Shipped canonical: ea_center 
 EA_CONFIGS: List[Dict[str, Any]] = [
     {"name": "ea_center", "population_size": 48, "hidden_size": _H,
      "mut_sigma": 0.2, "mut_indpb": 0.3, "cxpb": 0.7, "elite_size": 3},
@@ -204,7 +204,7 @@ EA_CONFIGS: List[Dict[str, Any]] = [
      "mut_sigma": 0.2, "mut_indpb": 0.3, "cxpb": 0.3, "elite_size": 3},
 ]
 
-# Shipped canonical: sigma0 0.4 discrete / 0.2 continuous (mode flip).
+# Shipped canonical: cmaes_center 
 CMAES_CONFIGS: List[Dict[str, Any]] = [
     {"name": "cmaes_center", "population_size": 48, "hidden_size": _H, "sigma0": 0.2},
     {"name": "cmaes_low_sigma", "population_size": 48, "hidden_size": _H, "sigma0": 0.1},
@@ -212,10 +212,9 @@ CMAES_CONFIGS: List[Dict[str, Any]] = [
     {"name": "cmaes_small_pop", "population_size": 24, "hidden_size": _H, "sigma0": 0.2},
 ]
 
-# PSO grid: shipped canonical = w 0.9 (= pso_high_inertia; best or
-# tied-best in all four regime x mode cells of SWEEP-SYM).  The grid keeps
-# the trainer-default inertia, the textbook Clerc constriction pair, and
-# the generations-vs-samples population trade as challengers.
+# PSO grid: shipped canonical is per-mode — pso_constriction for discrete, pso_high_inertia (w 0.9) for
+# continuous.  The grid keeps the trainer-default inertia and the
+# generations-vs-samples population trade as challengers.
 PSO_CONFIGS: List[Dict[str, Any]] = [
     {"name": "pso_center", "population_size": 48, "hidden_size": _H,
      "phi1": 2.0, "phi2": 2.0, "weight": 0.7298},
@@ -227,7 +226,7 @@ PSO_CONFIGS: List[Dict[str, Any]] = [
      "phi1": 2.0, "phi2": 2.0, "weight": 0.7298},
 ]
 
-# Shipped canonical: iso/line 0.15/0.3 (= me_high_iso; won both modes).
+# Shipped canonical: me_center 
 MAP_ELITES_CONFIGS: List[Dict[str, Any]] = [
     {"name": "me_center", "hidden_size": _H, "iso_sigma": 0.05, "line_sigma": 0.1,
      "batch_size": 32, "init_sigma": 0.2},
@@ -240,7 +239,8 @@ MAP_ELITES_CONFIGS: List[Dict[str, Any]] = [
 ]
 
 # HyperNEAT grid: substrate width matched to the evolved family (16) vs the
-# trainer-default small substrate, plus the population trade.
+# trainer-default small substrate, plus the population trade.  Shipped
+# canonical: hyperneat_large_pop
 HYPERNEAT_CONFIGS: List[Dict[str, Any]] = [
     {"name": "hyperneat_center", "population_size": 50,
      "substrate_hidden_layers": [_H],

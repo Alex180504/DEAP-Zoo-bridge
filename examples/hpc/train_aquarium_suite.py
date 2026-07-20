@@ -101,6 +101,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--action-mode", default="discrete", choices=("discrete", "continuous"))
     p.add_argument("--role", default="pursuer", choices=("pursuer", "evader"),
                    help="Sweep only: which side learns.")
+    p.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="Anneal the scripted opponent's speed toward the symmetric value "
+        "(pursuer/evader experiments only; exported as AQUARIUM_CURRICULUM "
+        "before the experiment-module import — ignored by coevolution and "
+        "sweep).",
+    )
     p.add_argument("--device", default="cuda")
     p.add_argument(
         "--require-cuda",
@@ -158,6 +166,7 @@ def main() -> None:
     # Variant selection must precede the experiment-module import.
     os.environ["AQUARIUM_ACTION_MODE"] = args.action_mode
     os.environ["AQUARIUM_ROLE"] = args.role
+    os.environ["AQUARIUM_CURRICULUM"] = "1" if args.curriculum else "0"
 
     cuda_available = _check_cuda(args)
     output_dir = Path(args.output_dir)
@@ -166,6 +175,7 @@ def main() -> None:
     summary: dict = {
         "experiment": args.experiment,
         "action_mode": args.action_mode,
+        "curriculum": bool(args.curriculum),
         "hostname": socket.gethostname(),
         "cuda_available": cuda_available,
         "output_dir": str(output_dir),
