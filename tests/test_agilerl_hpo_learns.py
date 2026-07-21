@@ -168,6 +168,43 @@ class TestHPOStoresAndLearns:
         )
         assert result.policy is not None
 
+    def test_hpo_hall_of_fame_top_n_export(self, tmp_path):
+        """hof_size>1 retains the top-N, exports checkpoints, and the summary is
+        ordered by the clean final re-score (rank 1 == returned champion == max)."""
+        config = _hpo_config(
+            seed=0,
+            budget=300,
+            evo_every=50,
+            batch_size=2,
+            memory_size=500,
+            learning_delay=0,
+            learn_step=1,
+        )
+        config.algorithm_params["population_size"] = 3
+        config.algorithm_params["hof_size"] = 3
+        config.algorithm_params["final_eval_episodes"] = 3
+        object.__setattr__(config, "output_dir", tmp_path)
+
+        trainer = MADDPGHPOTrainer(population_size=3, device="cpu")
+        result = trainer.train(config)
+
+        # In-memory top-N, best first; [0] is the returned champion.
+        assert result.hall_of_fame is not None
+        assert len(result.hall_of_fame) == 3
+        assert result.hall_of_fame[0] is result.policy
+
+        # Summary ranked 1..3 with fitness descending under the final re-score,
+        # and final_fitness is the top (this is the finding-1 regression guard).
+        summary = result.metrics["hall_of_fame"]
+        assert [row["rank"] for row in summary] == [1, 2, 3]
+        fits = [row["fitness"] for row in summary]
+        assert fits == sorted(fits, reverse=True)
+        assert result.metrics["final_fitness"] == pytest.approx(fits[0])
+
+        # Disk: champion agent.pt + hof_02.pt + hof_03.pt.
+        ckpts = {p.name for p in tmp_path.glob("**/checkpoints/*.pt")}
+        assert {"agent.pt", "hof_02.pt", "hof_03.pt"} <= ckpts
+
     def test_hpo_champion_improves(self):
         """Peak champion fitness across generations does not fall below gen-1.
 

@@ -116,6 +116,75 @@ class TestHyperparameterOverlay:
         assert specs["eval_episodes"].default == 3
         assert specs["final_eval_episodes"].default == 5
 
+    def test_surfaces_hof_size_knob(self):
+        specs = {p.name: p for p in EvolveHPOTrainer.describe_hyperparameters()}
+        assert "hof_size" in specs, "hall-of-fame size not surfaced"
+        # Default 1 keeps the single-champion behaviour unchanged.
+        assert specs["hof_size"].default == 1
+        assert specs["hof_size"].minimum == 1
+
+
+class TestAgentHallOfFame:
+    """Unit tests for the best-N hall-of-fame (no agilerl needed)."""
+
+    class _FakeAgent:
+        """Minimal stand-in exposing the ``.clone()`` the HOF relies on."""
+
+        def __init__(self, tag):
+            self.tag = tag
+
+        def clone(self):
+            return TestAgentHallOfFame._FakeAgent(self.tag)
+
+    def _pop(self, tags):
+        return [self._FakeAgent(t) for t in tags]
+
+    def test_size_one_keeps_single_best(self):
+        from deap_pettingzoo.baselines.agilerl_hpo_trainer import _AgentHallOfFame
+
+        hof = _AgentHallOfFame(1)
+        hof.update(self._pop(["a", "b", "c"]), [1.0, 3.0, 2.0])
+        assert len(hof) == 1
+        assert hof.champion.tag == "b"
+        assert hof.fitnesses == [3.0]
+
+    def test_keeps_top_n_best_first(self):
+        from deap_pettingzoo.baselines.agilerl_hpo_trainer import _AgentHallOfFame
+
+        hof = _AgentHallOfFame(3)
+        hof.update(self._pop(["a", "b", "c", "d", "e"]), [1.0, 5.0, 2.0, 4.0, 3.0])
+        assert [m.tag for m in hof.items] == ["b", "d", "e"]
+        assert hof.fitnesses == [5.0, 4.0, 3.0]
+
+    def test_best_ever_survives_a_worse_generation(self):
+        from deap_pettingzoo.baselines.agilerl_hpo_trainer import _AgentHallOfFame
+
+        hof = _AgentHallOfFame(2)
+        hof.update(self._pop(["hi", "mid"]), [10.0, 6.0])
+        # A later, uniformly-worse generation must not evict the earlier best.
+        hof.update(self._pop(["lo1", "lo2"]), [1.0, 2.0])
+        assert [m.tag for m in hof.items] == ["hi", "mid"]
+        assert hof.fitnesses == [10.0, 6.0]
+
+    def test_clones_only_qualifying_candidates(self):
+        from deap_pettingzoo.baselines.agilerl_hpo_trainer import _AgentHallOfFame
+
+        clones = {"n": 0}
+
+        class _CountingAgent:
+            def __init__(self, tag):
+                self.tag = tag
+
+            def clone(self):
+                clones["n"] += 1
+                return _CountingAgent(self.tag)
+
+        hof = _AgentHallOfFame(1)
+        pop = [_CountingAgent(t) for t in ("a", "b", "c")]
+        hof.update(pop, [1.0, 3.0, 2.0])
+        # Size-1 HOF over a 3-agent generation clones exactly once (the best).
+        assert clones["n"] == 1
+
     def test_mutation_probs_from_flat_keys(self):
         t = EvolveHPOTrainer()
         probs = t._assemble_mutation_probs(

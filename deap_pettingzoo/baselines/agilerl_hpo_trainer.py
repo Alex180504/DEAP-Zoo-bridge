@@ -49,6 +49,57 @@ _MUTATION_PROB_KEYS = (
 _MUT_GROUP = "HPO / Mutation"
 
 
+class _AgentHallOfFame:
+    """Best-N hall-of-fame for AgileRL agents.
+
+    AgileRL agents are not DEAP individuals (they have no ``fitness.wvalues``
+    or comparison operators that :class:`deap.tools.HallOfFame` relies on), so
+    this mirrors that class's semantics for the HPO population: it keeps up to
+    ``maxsize`` cloned snapshots of the best-ever agents by fitness, best
+    first. Cloning (like ``HallOfFame``'s deepcopy) freezes each snapshot so
+    the subsequent tournament/mutation cannot alter it.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = max(1, int(maxsize))
+        self.items: List[Any] = []  # agent clones, best-first
+        self.fitnesses: List[float] = []  # aligned with items, descending
+
+    def update(self, population: List[Any], fitnesses: List[float]) -> None:
+        """Insert this generation's qualifying agents (cloned, best-first).
+
+        Candidates are considered best-first so only agents that actually enter
+        the hall-of-fame are cloned; the descending scan stops as soon as a
+        candidate cannot beat the current worst member.
+        """
+        order = sorted(
+            range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True
+        )
+        for i in order:
+            fit = float(fitnesses[i])
+            if len(self.items) >= self.maxsize and fit <= self.fitnesses[-1]:
+                break
+            snapshot = population[i].clone()
+            pos = len(self.fitnesses)
+            for j, existing in enumerate(self.fitnesses):
+                if fit > existing:
+                    pos = j
+                    break
+            self.items.insert(pos, snapshot)
+            self.fitnesses.insert(pos, fit)
+            if len(self.items) > self.maxsize:
+                self.items.pop()
+                self.fitnesses.pop()
+
+    @property
+    def champion(self) -> Optional[Any]:
+        """The best-ever agent, or ``None`` before any update."""
+        return self.items[0] if self.items else None
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+
 class EvolveHPOTrainer(AgileRLTrainer):
     """AgileRL trainer with evolutionary HPO (population-level mutations).
 
@@ -180,6 +231,22 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 ),
             ),
             ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="HPO",
+                advanced=True,
+                help=(
+                    "Number of best-ever agents kept in the hall-of-fame. The "
+                    "champion is always hof[0]; with hof_size > 1 the top-N are "
+                    "also checkpointed (hof_NN.pt) and returned in "
+                    "TrainingResult.hall_of_fame."
+                ),
+            ),
+            ParamSpec(
                 "mutation_sd",
                 F,
                 0.1,
@@ -308,19 +375,26 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 * ``eval_episodes`` — episodes used to score each agent per
                   generation (drives tournament selection; default 3).
                 * ``final_eval_episodes`` — episodes used to re-score the
-                  best-ever champion for the reported fitness (default 5).
+                  hall-of-fame members for the reported fitness (default 5).
+                * ``hof_size`` — number of best-ever agents to keep in the
+                  hall-of-fame (default 1). ``hof[0]`` is always the returned
+                  champion; ``hof_size > 1`` additionally checkpoints the top-N
+                  (``hof_NN.pt``) and returns them in
+                  :attr:`~deap_pettingzoo.baselines.base.TrainingResult.hall_of_fame`.
 
                 ``config.seed`` (first-class field) seeds the run; see
                 :class:`~deap_pettingzoo.baselines.base.TrainingConfig`.
 
         The returned champion is the **best-ever** agent across all
-        generations (a size-1 hall-of-fame mirroring
+        generations (a hall-of-fame mirroring
         :class:`~deap_pettingzoo.baselines.ea_trainer.EATrainer`'s
-        ``tools.HallOfFame(1)``), not merely the best of the final
-        post-mutation population.
+        ``tools.HallOfFame``), not merely the best of the final post-mutation
+        population.
 
         Returns:
-            :class:`TrainingResult` with champion policy and metrics.
+            :class:`TrainingResult` with champion policy and metrics. When
+            ``hof_size > 1`` the ``hall_of_fame`` field holds the top-N
+            policies (best first; ``hall_of_fame[0]`` is ``policy``).
         """
         start_time = time.time()
 
@@ -362,6 +436,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         final_eval_episodes = max(
             1, int(config.algorithm_params.get("final_eval_episodes", 5))
         )
+        hof_size = max(1, int(config.algorithm_params.get("hof_size", 1)))
         seed = config.seed
         if seed is not None:
             self._seed_everything(int(seed))
@@ -469,16 +544,15 @@ class EvolveHPOTrainer(AgileRLTrainer):
             def _champion():
                 return _champion_policy
 
-            # Best-ever hall-of-fame (size 1), mirroring EATrainer's
-            # tools.HallOfFame(1): AgileRL clones the population every
-            # generation via tournament/mutation, so re-selecting only from the
-            # final post-mutation population can return a champion worse than one
-            # seen mid-run. Snapshot (clone, like HallOfFame's deepcopy) the
-            # best agent whenever a generation's best fitness beats the
-            # incumbent, and use it for the recorder/probe champion and the
-            # final returned policy.
-            _hof_agent: Any = None
-            _hof_fitness: float = float("-inf")
+            # Best-ever hall-of-fame, mirroring EATrainer's tools.HallOfFame:
+            # AgileRL clones the population every generation via
+            # tournament/mutation, so re-selecting only from the final
+            # post-mutation population can return a champion worse than one seen
+            # mid-run. Snapshot (clone, like HallOfFame's deepcopy) the best
+            # agents each generation; hof[0] drives the recorder/probe champion
+            # and the final returned policy, and hof_size > 1 additionally
+            # retains and exports the top-N.
+            hof = _AgentHallOfFame(hof_size)
 
             self._recorder = RecordingController(
                 config,
@@ -580,15 +654,12 @@ class EvolveHPOTrainer(AgileRLTrainer):
                         fit
                     )  # append fitness to agent's history for AgileRL's tournament/selection
 
-                # Update the best-ever hall-of-fame from this generation's best
+                # Update the best-ever hall-of-fame from this generation
                 # (pre-mutation, while gen_fitnesses still line up with the
-                # trained population). Clone to freeze a snapshot the subsequent
+                # trained population). Clones freeze snapshots the subsequent
                 # tournament/mutation cannot alter — mirrors HallOfFame's deepcopy.
                 if gen_fitnesses:
-                    gen_best_idx = int(np.argmax(gen_fitnesses))
-                    if gen_fitnesses[gen_best_idx] > _hof_fitness:
-                        _hof_fitness = gen_fitnesses[gen_best_idx]
-                        _hof_agent = population[gen_best_idx].clone()
+                    hof.update(population, gen_fitnesses)
 
                 # Record stats.
                 best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
@@ -634,10 +705,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 population = mutations.mutation(population)
 
                 # Point the recorder/probe champion at the best-ever agent (the
-                # hall-of-fame member), not an index into the freshly-mutated
+                # hall-of-fame leader), not an index into the freshly-mutated
                 # population, so the recorded/probed champion never regresses.
-                if _hof_agent is not None:
-                    _champion_agent = _hof_agent
+                if hof.champion is not None:
+                    _champion_agent = hof.champion
                     _champion_policy = AgileRLPolicyWrapper(
                         _champion_agent,
                         agent_ids,
@@ -657,22 +728,14 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     champion=_champion,
                 )
 
-            # Champion = best-ever hall-of-fame member (mirrors EATrainer's
-            # tools.HallOfFame(1)), re-scored with the configured final eval
-            # budget for a clean reported fitness. Fall back to the final
-            # population's best only if no generation ever completed (e.g. a
-            # zero-progress break on generation 1 left the HOF empty).
-            if _hof_agent is not None:
-                champion = _hof_agent
-                final_fitness = self._evaluate_agent(
-                    champion,
-                    env,
-                    agent_ids,
-                    max_steps,
-                    seed,
-                    rng,
-                    num_episodes=final_eval_episodes,
-                )
+            # Champion = best-ever hall-of-fame leader (mirrors EATrainer's
+            # tools.HallOfFame), with the whole hall-of-fame re-scored under the
+            # configured final eval budget for clean reported fitnesses. Fall
+            # back to the final population's best only if no generation ever
+            # completed (e.g. a zero-progress break on generation 1 left the
+            # hall-of-fame empty).
+            if len(hof):
+                hof_members = list(hof.items)  # best-first
             else:
                 champ_fits = [
                     self._evaluate_agent(
@@ -686,20 +749,40 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     )
                     for a in population
                 ]
-                champ_idx = int(np.argmax(champ_fits)) if champ_fits else 0
-                champion = population[champ_idx] if population else None
-                final_fitness = champ_fits[champ_idx] if champ_fits else 0.0
+                best = int(np.argmax(champ_fits)) if champ_fits else 0
+                hof_members = [population[best]] if population else []
 
-            policy = (
-                AgileRLPolicyWrapper(
-                    champion,
-                    agent_ids,
-                    algorithm_name=algo_tag,
+            hof_scores = [
+                self._evaluate_agent(
+                    m, env, agent_ids, max_steps, seed, rng,
+                    num_episodes=final_eval_episodes,
                 )
-                if champion is not None
-                else None
+                for m in hof_members
+            ]
+            # Re-order the export by the clean final re-score (descending). The
+            # hall-of-fame is filled under the noisier per-generation eval, so
+            # re-scoring under final_eval_episodes can re-rank members; sorting
+            # here keeps rank 1 / final_fitness / the returned champion the
+            # genuinely best member and the summary monotonically descending.
+            score_order = sorted(
+                range(len(hof_members)), key=lambda i: hof_scores[i], reverse=True
             )
+            hof_members = [hof_members[i] for i in score_order]
+            hof_scores = [hof_scores[i] for i in score_order]
+            final_fitness = hof_scores[0] if hof_scores else 0.0
+
+            # Top-N export policies (best first); [0] is the returned champion.
+            hof_policies = [
+                AgileRLPolicyWrapper(m, agent_ids, algorithm_name=algo_tag)
+                for m in hof_members
+            ]
+            policy = hof_policies[0] if hof_policies else None
             training_time = time.time() - start_time
+
+            # Finalize the recorder/probe on the actually-returned champion (also
+            # covers the zero-progress fallback, where the loop never set it).
+            if policy is not None:
+                _champion_policy = policy
 
             self._recorder.finalize(
                 _champion, iteration=generation, env_steps=steps_done
@@ -710,18 +793,31 @@ class EvolveHPOTrainer(AgileRLTrainer):
             )
             self._prober.close()
 
-            if champion is not None:
+            # Checkpoint the hall-of-fame: the champion as ``agent.pt`` (rank 1,
+            # unchanged) and any additional members as ``hof_NN.pt`` (rank 2..N).
+            for rank, (member, score) in enumerate(
+                zip(hof_members, hof_scores), start=1
+            ):
                 save_agilerl_agent(
                     log,
-                    champion,
+                    member,
+                    filename="agent.pt" if rank == 1 else f"hof_{rank:02d}.pt",
                     extra={
                         "algorithm": algo_tag,
                         "env_name": config.env_name,
                         "agent_ids": list(agent_ids),
                         "num_generations": generation,
                         "population_size": pop_size,
+                        "hof_rank": rank,
+                        "hof_fitness": float(score),
                     },
                 )
+            # JSON-safe hall-of-fame summary (fitnesses only; policies/agents
+            # travel via disk checkpoints and TrainingResult.hall_of_fame).
+            hall_of_fame_summary = [
+                {"rank": rank, "fitness": float(score)}
+                for rank, score in enumerate(hof_scores, start=1)
+            ]
             write_summary(
                 log,
                 {
@@ -729,6 +825,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     "num_generations": generation,
                     "population_size": pop_size,
                     "final_fitness": final_fitness,
+                    "hof_size": len(hof_members),
+                    "hall_of_fame": hall_of_fame_summary,
                     "total_env_steps": steps_done,
                     "mutation_probs": mut_probs,
                 },
@@ -741,6 +839,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             metrics={
                 "fitness_history": fitness_history,
                 "final_fitness": final_fitness,
+                "hall_of_fame": hall_of_fame_summary,
                 "num_generations": generation,
                 "population_size": pop_size,
                 "total_env_steps": steps_done,
@@ -751,6 +850,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 "mutation_probs": mut_probs,
             },
             training_time=training_time,
+            hall_of_fame=hof_policies or None,
         )
 
     # BaselineTrainer — capabilities

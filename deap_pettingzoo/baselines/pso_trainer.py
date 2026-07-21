@@ -7,7 +7,7 @@ Drives a particle swarm over the flat weight vector of a
 """
 
 import time
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import numpy as np
 from deap import tools
@@ -105,6 +105,22 @@ class PSOTrainer(BaselineTrainer):
                 help="Episodes averaged per particle per generation (shared "
                 "common-random-number seeds). >1 de-noises fitness in "
                 "stochastic environments.",
+            ),
+            ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                advanced=True,
+                help=(
+                    "Number of best-ever particles kept in the hall-of-fame. "
+                    "The champion is always hof[0]; with hof_size > 1 the top-N "
+                    "are also checkpointed (hof_NN.json) and returned in "
+                    "TrainingResult.hall_of_fame."
+                ),
             ),
             ParamSpec(
                 "phi1",
@@ -221,6 +237,7 @@ class PSOTrainer(BaselineTrainer):
         activation: str = "tanh",
         weight_range: tuple = (-1.0, 1.0),
         eval_episodes: int = 1,
+        hof_size: int = 1,
         num_workers: int = 1,
         parallel_backend: str = "process",
         scheduler_address: Optional[str] = None,
@@ -242,6 +259,9 @@ class PSOTrainer(BaselineTrainer):
         # fitness a lottery — gbest/pbest then latch onto lucky draws and the
         # swarm chases noise; averaging K CRN episodes restores a real signal.
         self.eval_episodes = int(eval_episodes)
+        if hof_size < 1:
+            raise ValueError(f"hof_size must be >= 1, got {hof_size}.")
+        self.hof_size = int(hof_size)
 
         if num_workers < 0:
             raise ValueError(f"num_workers must be >= 0, got {num_workers}.")
@@ -322,7 +342,7 @@ class PSOTrainer(BaselineTrainer):
         toolbox = register_pso_toolbox(pso_state, ind_init, evaluator)
 
         stats = make_pso_stats()
-        hof = tools.HallOfFame(1)
+        hof = tools.HallOfFame(self.hof_size)
         fitness_history: list = []
 
         log = build_logger(config, algorithm="pso")
@@ -533,6 +553,10 @@ class PSOTrainer(BaselineTrainer):
         policy = GenomePolicyWrapper(
             best_genome, config.env_name, action_space=action_space
         )
+        # Best-N hall-of-fame export (top-N when hof_size > 1); populated inside
+        # the logging block, so default to None in case that block is skipped.
+        hof_policies: Optional[List[Any]] = None
+        hall_of_fame_summary: Optional[List[Dict[str, Any]]] = None
 
         try:
             with log:
@@ -557,6 +581,24 @@ class PSOTrainer(BaselineTrainer):
                         "env_name": config.env_name,
                     },
                 )
+                from deap_pettingzoo.baselines.ea_trainer import (
+                    build_genome_hall_of_fame_export,
+                )
+
+                hof_policies, hall_of_fame_summary = (
+                    build_genome_hall_of_fame_export(
+                        hof,
+                        env_name=config.env_name,
+                        action_space=action_space,
+                        logger=log,
+                        save_genome=save_ea_genome,
+                        kind=KIND_PSO_GENOME,
+                        base_extra={"env_name": config.env_name},
+                    )
+                )
+                # Reuse the champion wrapper so hall_of_fame[0] is policy.
+                if hof_policies:
+                    hof_policies[0] = policy
                 write_summary(
                     log,
                     {
@@ -565,6 +607,8 @@ class PSOTrainer(BaselineTrainer):
                         "num_generations": num_generations,
                         "population_size": self.population_size,
                         "dimension": dimension,
+                        "hof_size": len(hall_of_fame_summary),
+                        "hall_of_fame": hall_of_fame_summary,
                     },
                     training_time_s=training_time,
                 )
@@ -598,6 +642,7 @@ class PSOTrainer(BaselineTrainer):
                 "env_steps_consumed": (
                     int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 ),
+                "hall_of_fame": hall_of_fame_summary,
             },
             metadata={
                 "genome_config": genome_config,
@@ -617,6 +662,7 @@ class PSOTrainer(BaselineTrainer):
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
+            hall_of_fame=hof_policies,
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:

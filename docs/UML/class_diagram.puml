@@ -460,6 +460,8 @@ package "deap_pettingzoo.baselines" {
         + metadata: dict
         + seed: int
         + training_time: float
+        + pareto_front: Optional[list]  ' MO runs (NSGA-II / SPEA2)
+        + hall_of_fame: Optional[list]  ' best-N policies, best first; [0] == policy
     }
 
     class EvalResult <<dataclass>> {
@@ -616,7 +618,7 @@ package "deap_pettingzoo.baselines" {
         # _hpo_memories: list  # persistent replay buffer per slot
         # _hpo_transitions: list[int]  # per-slot warm-up/learn counter
         # _prober: ProbeController  # held-out champion probe
-        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.\nSupports the held-out champion probe.\nReturns the best-ever champion via a\nsize-1 hall-of-fame (like EATrainer's\ntools.HallOfFame(1)); eval_episodes /\nfinal_eval_episodes are configurable.
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.\nSupports the held-out champion probe.\nReturns the best-ever champion via a\nhall-of-fame (like EATrainer's\ntools.HallOfFame); eval_episodes /\nfinal_eval_episodes / hof_size are\nconfigurable; hof_size > 1 exports top-N.
         + train(config, *, progress_callback) -> TrainingResult
         + describe_hyperparameters() : adds HPO + mutation knobs
         # _build_replay_buffer(agent_ids) : persistent per-slot buffer

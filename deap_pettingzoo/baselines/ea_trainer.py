@@ -146,6 +146,48 @@ class GenomePolicyWrapper:
         return self._genome
 
 
+def build_genome_hall_of_fame_export(
+    hof: Any,
+    *,
+    env_name: str,
+    action_space: Any,
+    logger: Any,
+    save_genome: Any,
+    kind: str,
+    base_extra: Optional[Dict[str, Any]] = None,
+    skip_champion_checkpoint: bool = True,
+) -> "tuple[List[Any], List[Dict[str, Any]]]":
+    """Export a DEAP ``HallOfFame`` of genome individuals for the shared
+    genome-based trainers (EA / CMA-ES / PSO).
+
+    Wraps each member (best first) as a :class:`GenomePolicyWrapper` and returns
+    ``(policies, summary)`` where ``summary`` is a JSON-safe
+    ``[{"rank", "fitness"}]`` list for ``metrics`` / ``summary.json``. Members
+    with rank >= 2 are checkpointed as ``hof_NN.json``; the champion (rank 1) is
+    skipped by default because the caller already writes it as ``policy.json``
+    (set ``skip_champion_checkpoint=False`` to write it here too).
+    """
+    base_extra = dict(base_extra or {})
+    policies: List[Any] = []
+    summary: List[Dict[str, Any]] = []
+    for rank, ind in enumerate(hof, start=1):  # HallOfFame iterates best-first
+        fitness = float(ind.fitness.values[0])
+        policies.append(
+            GenomePolicyWrapper(ind.genome, env_name, action_space=action_space)
+        )
+        summary.append({"rank": rank, "fitness": fitness})
+        if rank == 1 and skip_champion_checkpoint:
+            continue
+        save_genome(
+            logger,
+            ind.genome,
+            filename=f"hof_{rank:02d}.json",
+            kind=kind,
+            extra={**base_extra, "hof_rank": rank, "final_fitness": fitness},
+        )
+    return policies, summary
+
+
 class EATrainer(BaselineTrainer):
     """Evolutionary Algorithm trainer using DEAP.
 
@@ -197,6 +239,23 @@ class EATrainer(BaselineTrainer):
                 target=TR,
                 group="Population",
                 help="Number of individuals evaluated per generation.",
+            ),
+            ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                advanced=True,
+                help=(
+                    "Number of best-ever individuals kept in the hall-of-fame. "
+                    "The champion is always hof[0]; with hof_size > 1 the top-N "
+                    "are also checkpointed (hof_NN.json) and returned in "
+                    "TrainingResult.hall_of_fame. Ignored for multi-objective "
+                    "runs (which export the full Pareto front instead)."
+                ),
             ),
             ParamSpec(
                 "strategy",
@@ -384,6 +443,7 @@ class EATrainer(BaselineTrainer):
         self,
         hidden_size: int = 64,
         population_size: int = 50,
+        hof_size: int = 1,
         tournament_size: int = 3,
         crossover_alpha: float = 0.5,
         mutation_sigma: float = 0.2,
@@ -468,6 +528,9 @@ class EATrainer(BaselineTrainer):
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
+        if hof_size < 1:
+            raise ValueError(f"hof_size must be >= 1, got {hof_size}.")
+        self.hof_size = int(hof_size)
         self.tournament_size = tournament_size
         self.crossover_alpha = crossover_alpha
         self.mutation_sigma = mutation_sigma
@@ -680,7 +743,7 @@ class EATrainer(BaselineTrainer):
         if self._is_multiobjective:
             hof = tools.ParetoFront()
         else:
-            hof = tools.HallOfFame(1)
+            hof = tools.HallOfFame(self.hof_size)
 
         # Setup random number generator
         rng = np.random.default_rng(seed)
@@ -1027,8 +1090,12 @@ class EATrainer(BaselineTrainer):
             best_genome, config.env_name, action_space=action_space
         )
 
-        # For multi-objective runs, record the full Pareto front.
+        # For multi-objective runs, record the full Pareto front. For
+        # single-objective runs, export the best-N hall-of-fame (top-N when
+        # hof_size > 1); hof_policies[0] is the same policy as ``policy``.
         pareto_front: Optional[List[Any]] = None
+        hof_policies: Optional[List[Any]] = None
+        hall_of_fame_summary: Optional[List[Dict[str, Any]]] = None
         if isinstance(hof, tools.ParetoFront):
             pareto_front = list(hof.items)
 
@@ -1056,6 +1123,21 @@ class EATrainer(BaselineTrainer):
                         "env_name": config.env_name,
                     },
                 )
+                if pareto_front is None:
+                    hof_policies, hall_of_fame_summary = (
+                        build_genome_hall_of_fame_export(
+                            hof,
+                            env_name=config.env_name,
+                            action_space=action_space,
+                            logger=log,
+                            save_genome=save_ea_genome,
+                            kind=KIND_EA_GENOME,
+                            base_extra={"env_name": config.env_name},
+                        )
+                    )
+                    # Reuse the champion wrapper so hall_of_fame[0] is policy.
+                    if hof_policies:
+                        hof_policies[0] = policy
                 write_summary(
                     log,
                     {
@@ -1064,6 +1146,12 @@ class EATrainer(BaselineTrainer):
                         "num_generations": realized_generations,
                         "population_size": self.population_size,
                         "strategy": self.strategy,
+                        "hof_size": (
+                            len(hall_of_fame_summary)
+                            if hall_of_fame_summary is not None
+                            else None
+                        ),
+                        "hall_of_fame": hall_of_fame_summary,
                     },
                     training_time_s=training_time,
                 )
@@ -1092,6 +1180,7 @@ class EATrainer(BaselineTrainer):
                 "population_size": self.population_size,
                 "env_steps_nominal": nominal_env_steps,
                 "env_steps_consumed": real_env_steps,
+                "hall_of_fame": hall_of_fame_summary,
             },
             metadata={
                 "genome_config": genome_config,
@@ -1119,6 +1208,7 @@ class EATrainer(BaselineTrainer):
             },
             training_time=training_time,
             pareto_front=pareto_front,
+            hall_of_fame=hof_policies,
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
