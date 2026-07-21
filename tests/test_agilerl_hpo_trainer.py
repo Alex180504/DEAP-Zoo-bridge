@@ -108,6 +108,14 @@ class TestHyperparameterOverlay:
         assert "seed" in names
         assert "batch_size" in names
 
+    def test_surfaces_eval_episode_knobs(self):
+        specs = {p.name: p for p in EvolveHPOTrainer.describe_hyperparameters()}
+        assert "eval_episodes" in specs, "per-generation eval count not surfaced"
+        assert "final_eval_episodes" in specs, "final eval count not surfaced"
+        # Defaults match the historical hardcoded values (3 per-gen, 5 final).
+        assert specs["eval_episodes"].default == 3
+        assert specs["final_eval_episodes"].default == 5
+
     def test_mutation_probs_from_flat_keys(self):
         t = EvolveHPOTrainer()
         probs = t._assemble_mutation_probs(
