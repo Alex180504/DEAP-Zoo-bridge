@@ -9,12 +9,7 @@ constants and small pure helpers, so every entry point stays reproducible.
 Where the numbers come from
 ---------------------------
 * **Env config** — perfectly symmetric agent abilities (equal speed, view,
-  FOV, acceleration/steer for both teams) on the bounded rectangle, per the
-  2026-07-14 methodology revision: no calibration handicap, so any later
-  performance gap is attributable to the learner, not to an ability edge.
-  The residual APF-vs-APF imbalance this accepts is documented in
-  ``docs/aquarium_experiment_methodology.md``.  The torus topology was
-  dropped from the campaign entirely.
+  FOV, acceleration/steer for both teams) on the bounded rectangle.
 * **Algorithm hyperparameters** — per-action-mode best values from the
   hyperparameter sweeps.
 * **QDax descriptor ranges** — measured by
