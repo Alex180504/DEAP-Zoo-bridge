@@ -15,7 +15,7 @@ from deap_pettingzoo.baselines.agilerl_hpo_trainer import (
     IPPOHPOTrainer,
     MATD3HPOTrainer,
 )
-from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
+from deap_pettingzoo.baselines.base import BudgetMode, ProbeConfig, TrainingConfig
 
 
 def _tiny_config(seed: int = 0) -> TrainingConfig:
@@ -43,6 +43,57 @@ class TestMATD3HPOLive:
         assert result.policy is not None
         history = result.metrics["fitness_history"]
         assert len(history) >= 1
+
+
+class TestHPOProbe:
+    """The HPO trainer supports the held-out champion probe like other trainers."""
+
+    def test_probe_writes_csv(self, tmp_path):
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=200,
+            num_seeds=1,
+            seed=0,
+            output_dir=tmp_path,
+            algorithm_params={
+                "max_steps_per_episode": 10,
+                "population_size": 2,
+                "evo_every_n_steps": 50,
+                "learn_step": 50,
+            },
+            env_config={"max_cycles": 10},
+            probe=ProbeConfig(
+                enabled=True,
+                every_n_steps=50,
+                n_episodes=2,
+                seed=0,
+            ),
+        )
+        trainer = MATD3HPOTrainer(population_size=2, device="cpu")
+        result = trainer.train(config)
+
+        assert result.policy is not None
+        assert trainer._prober.enabled is True
+
+        probe_files = list(tmp_path.glob("**/probe.csv"))
+        assert probe_files, "probe.csv was not written under the run directory"
+
+        import csv
+
+        with open(probe_files[0], newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        assert len(rows) >= 1, "probe.csv has no data rows"
+        expected = {
+            "iteration",
+            "env_steps",
+            "probe_reward_mean",
+            "probe_reward_std",
+            "probe_episodes",
+        }
+        assert expected.issubset(rows[0].keys()), (
+            f"probe.csv missing expected columns; got {list(rows[0].keys())}"
+        )
 
 
 class TestIPPOHPOLive:

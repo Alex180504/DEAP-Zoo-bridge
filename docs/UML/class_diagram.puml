@@ -613,10 +613,14 @@ package "deap_pettingzoo.baselines" {
         # _hpo_population_size: int
         # _evo_every_n_steps: int
         # _mutation_probs: dict
-        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
+        # _hpo_memories: list  # persistent replay buffer per slot
+        # _hpo_transitions: list[int]  # per-slot warm-up/learn counter
+        # _prober: ProbeController  # held-out champion probe
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.\nSupports the held-out champion probe.\nReturns the best-ever champion via a\nsize-1 hall-of-fame (like EATrainer's\ntools.HallOfFame(1)); eval_episodes /\nfinal_eval_episodes are configurable.
         + train(config, *, progress_callback) -> TrainingResult
         + describe_hyperparameters() : adds HPO + mutation knobs
-        # _train_one_agent(...) : off-policy replay loop
+        # _build_replay_buffer(agent_ids) : persistent per-slot buffer
+        # _train_one_agent(..., memory, total_transitions) : off-policy\n  replay loop on the persistent per-slot buffer\n  -> (steps, total_transitions)
         # _train_one_agent_on_policy(...) : shared IPPO rollout
         # _prepare_population_build(...) : grouping hook
         # _build_hp_config(spec) -> HyperparameterConfig
@@ -1112,9 +1116,13 @@ package "deap_pettingzoo.baselines.coevolution" {
       -- AgileRL HPO champion-as-opponent
       optimizer = "rl_hpo"
       +is_rl_side: bool = True
+      # _replay_slots: list  ' persistent off-policy buffer per slot
+      # _slot_transitions: list[int]  ' per-slot warm-up/learn counter
       + current_pool(): RLPolicyPool
       ' current_pool() returns RLPolicyPool(champion_wrapper) — single policy,
       ' not a list.  No-champion branch returns FrozenPolicyPool([]).
+      ' Off-policy replay buffers persist per population slot across
+      ' generations (owned here, not on the cloned agents).
   }
   class NeatSideState {
       -- optimizer = "neat"

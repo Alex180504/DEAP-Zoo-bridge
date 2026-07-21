@@ -7,6 +7,7 @@ participant "EvolveHPOTrainer\n(MADDPG/MATD3/IPPO/GroupedIPPO HPO)" as Trainer
 participant "agilerl.hpo" as HPO
 participant "PettingZooWrapper" as Env
 participant "ExperimentLogger" as Log
+participant "ProbeController" as Probe
 participant "AgileRLPolicyWrapper" as Policy
 
 User -> Trainer: train(config, *, progress_callback)
@@ -27,24 +28,36 @@ note right
     architecture + hyperparameter set.
 end note
 
+Trainer -> Trainer: ProbeController(config, log) + per-slot replay buffers
+note right
+    Off-policy: one persistent MultiAgentReplayBuffer\nper population slot (owned by the trainer, keyed\nby slot — AgileRL clone() strips underscore attrs),\nreused across generations. ProbeController is\nno-op unless config.probe.enabled.
+end note
+
 loop ep_cycle (until env-step budget)
     loop for each agent in population
         alt ON_POLICY (IPPO / grouped IPPO)
             Trainer -> Env: _train_one_agent_on_policy(...)
             note right: Shared agilerl_onpolicy.train_agent_on_policy:\ncollect rollouts -> agent.learn() (GAE)
         else off-policy (MADDPG / MATD3)
-            Trainer -> Env: _train_one_agent(...)
+            Trainer -> Env: _train_one_agent(..., memory=slot_buffer, total_transitions)
             note right
-                Replay-buffer rollout:\n1. MultiAgentReplayBuffer built per agent\n   (memory_size, agent_ids, device)\n2. save_to_memory(obs, raw_actions, reward,\n   next_obs, done) once per transition\n   using agent-keyed dicts\n3. agent.learn(memory.sample(batch_size))\n   gated on len(buffer)>=batch_size\n   and learning_delay/learn_step cadence
+                Replay-buffer rollout on the slot's\n**persistent** MultiAgentReplayBuffer:\n1. buffer reused across generations\n   (built once per slot, not per call)\n2. save_to_memory(obs, raw_actions, reward,\n   next_obs, done) once per transition\n   using agent-keyed dicts\n3. agent.learn(memory.sample(batch_size))\n   gated on len(buffer)>=batch_size\n   and learning_delay/learn_step cadence\n4. returns (steps, total_transitions) so the\n   trainer persists the slot's counter
             end note
         end
     end
 
-    Trainer -> Env: evaluate each agent (k episodes)
+    Trainer -> Env: evaluate each agent (eval_episodes episodes)
     Trainer -> Trainer: fitnesses = [mean(ep_rewards) for each agent]
+    Trainer -> Trainer: hall-of-fame update (best-ever, size 1)
+    note right
+        Mirrors EATrainer's tools.HallOfFame(1):\nclone this generation's best agent (pre-mutation)\nif it beats the incumbent. Champion for the\nrecorder/probe and the final policy comes from\nhere, so a mutation-degraded agent never replaces\na better one seen earlier.
+    end note
     Trainer -> Log: row("metrics", {generation, env_steps, mean, max, ...})
     Trainer -> User: progress_callback(ProgressEvent)
     note right: Per-generation live UI feed.
+
+    Trainer -> Probe: observe(event, champion)
+    note right: Off-budget held-out probe when due\n(every_n_steps). Rolls the frozen champion\nand appends one probe.csv row. No-op if\nconfig.probe.enabled is false.
 
     Trainer -> HPO: TournamentSelection.select(population)
     activate HPO
@@ -65,8 +78,13 @@ loop ep_cycle (until env-step budget)
     deactivate HPO
 end
 
+Trainer -> Probe: finalize(champion) + close()
+note right: Guarantees an end-of-run probe row.
+
+Trainer -> Env: re-score hall-of-fame champion (final_eval_episodes)
 Trainer -> Log: save_agilerl_agent(champion) + write_summary(...)
-Trainer -> Policy: AgileRLPolicyWrapper(best_agent, agent_ids)
+Trainer -> Policy: AgileRLPolicyWrapper(hall_of_fame_best, agent_ids)
+note right: Champion = best-ever HOF member, not the\nbest of the final post-mutation population.
 Trainer --> User: TrainingResult(algorithm="<algo>-hpo", policy=champion)
 deactivate Trainer
 
