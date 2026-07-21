@@ -167,10 +167,11 @@ class RLEvolveHPOSideState(SideState):
             self._maybe_apply_grouping_patch()
         else:
             # One persistent replay buffer + transition counter per population
-            # slot. Slot order is preserved across generations (tournament +
-            # mutation keep length), so buffers accumulate experience from the
-            # successive policies occupying each slot — the correct semantics
-            # for an off-policy replay buffer.
+            # slot, reused across generations so off-policy experience is never
+            # discarded. step_generation reorders these with the same fitness
+            # permutation it applies to the population, so each buffer stays with
+            # its agent (elites keep their own history; mutated children inherit
+            # their parent's).
             self._replay_slots = [
                 self._build_replay_buffer(self._learner_ids)
                 for _ in range(self.population_size)
@@ -257,25 +258,33 @@ class RLEvolveHPOSideState(SideState):
             rand_seed=self.seed,
             device=self.device,
         )
-        # Select by fitness: keep top 1/4 elites, mutate the rest.
-        ranked = sorted(
-            zip(self._population, fitnesses),
-            key=lambda x: x[1],
-            reverse=True,
+        # Select by fitness (indices, so the per-slot buffers can be reordered
+        # with the same permutation): keep top 1/4 elites, mutate the rest.
+        order = sorted(
+            range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True
         )
+        ranked_agents = [self._population[i] for i in order]
         elite_count = max(1, self.population_size // 4)
-        elites = [a for a, _ in ranked[:elite_count]]
-        others = [a for a, _ in ranked[elite_count:]]
+        elites = ranked_agents[:elite_count]
+        others = ranked_agents[elite_count:]
         mutated = mutations.mutation(others)
+        # Keep each persistent replay buffer with its agent: the new population
+        # (elites + mutated) is built in `order`, so new slot k corresponds to
+        # old slot order[k]. Elites retain their own accumulated history and
+        # mutated children inherit their parent's (off-policy warm-start),
+        # instead of buffers staying anchored to a fixed position.
+        if self._replay_slots:
+            self._replay_slots = [self._replay_slots[i] for i in order]
+            self._slot_transitions = [self._slot_transitions[i] for i in order]
         self._population = elites + mutated
 
         best = max(fitnesses)
         mean = float(np.mean(fitnesses))
         self.best_fitness = max(self.best_fitness, best)
 
-        # Champion = best pre-mutation elite (fitnesses are pre-mutation;
-        # using ranked[0][0] avoids pairing stale fitnesses with mutated agents).
-        best_agent = ranked[0][0]
+        # Champion = best pre-mutation agent (fitnesses are pre-mutation, so
+        # ranked_agents[0] avoids pairing stale fitnesses with mutated agents).
+        best_agent = ranked_agents[0]
         self._champion_wrapper = AgileRLPolicyWrapper(
             best_agent,
             self._learner_ids,

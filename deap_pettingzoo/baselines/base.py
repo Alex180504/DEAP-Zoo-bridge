@@ -551,6 +551,14 @@ class TrainingResult:
         pareto_front: For multi-objective runs (NSGA-II / SPEA2), the
             nondominated individuals from the final population.
             ``None`` for single-objective runs.
+        hall_of_fame: Best-ever policies, best first, from the hall-of-fame
+            trainers (EA, CMA-ES, PSO, ``EvolveHPOTrainer``). Length is
+            ``hof_size`` (default 1, so a single-element ``[policy]``);
+            ``hall_of_fame[0] is policy``. ``None`` for trainers that keep no
+            hall-of-fame (non-HPO AgileRL, NEAT, QDax, co-evolution) and for
+            multi-objective EA runs (which export ``pareto_front`` instead).
+            In-memory only (not serialized); disk checkpoints of the top-N
+            members are written to the run directory.
     """
 
     algorithm: str
@@ -560,6 +568,7 @@ class TrainingResult:
     seed: Optional[int] = None
     training_time: Optional[float] = None
     pareto_front: Optional[List[Any]] = None
+    hall_of_fame: Optional[List[PolicyProtocol]] = None
 
     @property
     def best_policy(self) -> PolicyProtocol:
