@@ -11,9 +11,10 @@ available for either role:
   the calibrated behavioural descriptor, so the QD grid genuinely fills.
 * ``hyperneat``      — CPPN population painting weights onto a fixed
   substrate matched to the evolved-family width.
-* ``matd3``          — live AgileRL learner (:class:`RLSideState`,
-  off-policy) collecting rollouts against the current opponent pool every
-  generation.
+* ``matd3``          — AgileRL MATD3 evolutionary-HPO population
+  (:class:`RLEvolveHPOSideState`, off-policy): a population evolved by
+  tournament + mutation against the current opponent pool, with persistent
+  per-slot replay buffers.
 
 Enable/disable pairings in the ``PAIRINGS`` dict; any ``"<a>_vs_<b>"`` key
 with side types from ``SIDE_BUILDERS`` works.  ``ACTION_MODE`` selects the
@@ -519,21 +520,37 @@ def _make_qdax_side(name: str, role_prefix: str, seed: int) -> Side:
 
 
 def _make_matd3_side(name: str, role_prefix: str, seed: int) -> Side:
-    """Live off-policy MATD3 side (:class:`RLSideState`)."""
+    """MATD3 evolutionary-HPO side (:class:`RLEvolveHPOSideState`).
+
+    The campaign's MATD3 slot runs the population-HPO variant in every
+    regime; here it evolves an AgileRL MATD3 population against the live
+    coevolutionary opponents, with persistent per-slot replay buffers.
+    """
     return Side(
         name=name,
         role_prefixes=(role_prefix,),
-        optimizer="rl",
+        optimizer="rl_hpo",
         optimizer_config={
-            "algorithm": "matd3",
-            **XC.RL_COEV_PARAMS,
+            "algorithm": "matd3_hpo",
+            "population_size": XC.MATD3_HPO_PARAMS["population_size"],
+            # Coevolution generations are shorter than standalone HPO.
+            "evo_every_n_steps": 20_000,
             "device": DEVICE,
             "seed": seed,
+            # Only constructor knobs may go here (RLEvolveHPOSideState forwards
+            # agent_ctor_kwargs verbatim; memory_size/learning_delay are not
+            # accepted by the AgileRL ctor).
             "agent_ctor_kwargs": {
                 **XC.rl_exploration_kwargs(ACTION_MODE),
+                "batch_size": XC.RL_COEV_PARAMS["batch_size"],
                 "lr_actor": XC.MATD3_PARAMS["lr_actor"],
                 "lr_critic": XC.MATD3_PARAMS["lr_critic"],
                 "gamma": XC.MATD3_PARAMS["gamma"],
+            },
+            "net_config": XC.MATD3_PARAMS["net_config"],
+            "hp_config": {
+                "lr_actor": [1e-5, 1e-3],
+                "lr_critic": [1e-4, 1e-2],
             },
         },
     )
@@ -766,6 +783,16 @@ def _run_coev(
         # on-policy rollout collection itself stays serial.
         num_workers=N_WORKERS,
         parallel_backend="process",
+        # Per-side budget with the "freeze" policy: each side gets an equal
+        # slice of the consumed-step pool, and the side that exhausts its
+        # slice first stops evolving (keeps serving its final pool as the
+        # opponent) while the other keeps training to its own slice. This
+        # equalises real per-side experience across pairings whose sides have
+        # very different per-generation costs (e.g. an EA population vs a
+        # single MATD3 learner), instead of letting the cheaper-to-evaluate
+        # side drain a shared pool. Requires budget_on_consumed=True below.
+        budget_split="per_side",
+        on_side_exhausted="freeze",
         generation_callback=generation_callback,
     )
     train_cfg = TrainingConfig(
@@ -788,6 +815,8 @@ def _run_coev(
             "pred_shape_alpha": PRED_REWARD_SHAPE_ALPHA,
             "prey_shape_alpha": PREY_REWARD_SHAPE_ALPHA,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
+            "budget_split": "per_side",
+            "on_side_exhausted": "freeze",
         },
         coevolution_config=coev_cfg,
         max_steps_per_episode=int(ENV_CONFIG["max_time_steps"]),

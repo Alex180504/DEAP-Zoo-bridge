@@ -244,25 +244,35 @@ def _make_hyperneat_side(cfg: Dict[str, Any], name: str, role_prefix: str, seed:
 
 
 def _make_rl_side(cfg: Dict[str, Any], name: str, role_prefix: str, seed: int) -> Side:
-    rl_params = dict(XC.RL_COEV_PARAMS)
-    for key in ("learning_steps_per_gen", "rollout_episodes_per_gen"):
-        if key in cfg:
-            rl_params[key] = cfg[key]
+    """MATD3 evolutionary-HPO side (:class:`RLEvolveHPOSideState`).
+
+    The swept lr/noise knobs seed the population's base RL settings. Note the
+    RLSideState-only rollout knobs (``learning_steps_per_gen`` /
+    ``rollout_episodes_per_gen``) do not apply to the HPO side, whose per-slot
+    generation length is ``evo_every_n_steps``.
+    """
     return Side(
         name=name,
         role_prefixes=(role_prefix,),
-        optimizer="rl",
+        optimizer="rl_hpo",
         optimizer_config={
-            "algorithm": cfg["algo"],
-            **rl_params,
+            "algorithm": f"{cfg['algo']}_hpo",
+            "population_size": XC.MATD3_HPO_PARAMS["population_size"],
+            "evo_every_n_steps": 20_000,
             "device": DEVICE,
             "seed": seed,
             "agent_ctor_kwargs": {
                 "expl_noise": cfg["expl_noise"],
                 "O_U_noise": False,
+                "batch_size": XC.RL_COEV_PARAMS["batch_size"],
                 "lr_actor": cfg["lr_actor"],
                 "lr_critic": cfg["lr_critic"],
                 "gamma": XC.MATD3_PARAMS["gamma"],
+            },
+            "net_config": XC.MATD3_PARAMS["net_config"],
+            "hp_config": {
+                "lr_actor": [1e-5, 1e-3],
+                "lr_critic": [1e-4, 1e-2],
             },
         },
     )
@@ -431,6 +441,14 @@ def run_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, Any]:
         seed=seed,
         num_workers=N_WORKERS,
         parallel_backend="process",
+        # Per-side budget + "freeze": each side gets an equal slice of the
+        # consumed-step pool; the side that spends its slice first stops
+        # evolving (still served as the frozen opponent) while the other
+        # trains on to its own slice. Equalises per-side experience across
+        # pairings with asymmetric per-generation costs. Needs
+        # budget_on_consumed=True (set on the TrainingConfig below).
+        budget_split="per_side",
+        on_side_exhausted="freeze",
         generation_callback=_make_bench_callback("predators", "prey", ENV_CFG, bench_log),
     )
     train_cfg = TrainingConfig(

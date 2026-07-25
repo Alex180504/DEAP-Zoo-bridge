@@ -48,13 +48,16 @@ def ensure_utf8_stdout() -> None:
 # Environment
 # ===========================================================================
 
-# Ability-symmetric 3-pursuer / 6-evader setup on a bounded 1500x1500
-# rectangle.  APF-vs-APF catch fraction: 0.432 (discrete) / 0.495
-# (continuous) at 128 episodes/mode; see
-# results/aquarium_env_balance/balance_report.json.
+# Ability-symmetric, equal-size 5-pursuer / 5-evader setup on a bounded
+# 1500x1500 rectangle.  The env is kept perfectly symmetric (no ability
+# handicap); with equal team sizes any residual APF-vs-APF imbalance is
+# reported as a caveat rather than calibrated away.  NOTE: the previously
+# documented catch fractions (0.432 discrete / 0.495 continuous) were
+# measured on the earlier 3-pursuer / 6-evader config and no longer apply —
+# re-run aquarium_env_balance.py to remeasure on 5v5.
 BALANCED_ENV_CONFIG: Dict[str, Any] = {
-    "predator_count": 3,
-    "prey_count": 6,
+    "predator_count": 5,
+    "prey_count": 5,
     "max_time_steps": 250,
     "predator_max_velocity": 12.0,
     "prey_max_velocity": 12.0,
@@ -312,13 +315,15 @@ QDAX_PARAMS: Dict[str, Any] = {
     "reeval_rounds": 4,
 }
 
+# Measured on the symmetric 5v5 config by aquarium_descriptor_calibration.py
+# (P5-P95 across scripted + random behaviours).
 DESCRIPTOR_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     # Two-team descriptor (formation spread, mean distance to opponents).
-    "predator": {"spread": (0.167, 0.509), "dist": (0.394, 0.728)},
-    "prey": {"spread": (0.187, 0.357), "dist": (0.394, 0.728)},
+    "predator": {"spread": (0.191, 0.565), "dist": (0.393, 0.709)},
+    "prey": {"spread": (0.185, 0.423), "dist": (0.393, 0.709)},
     # Single-team descriptor (centroid spread, mean pairwise distance).
-    "predator_single": {"spread": (0.167, 0.509), "pair": (0.292, 0.886)},
-    "prey_single": {"spread": (0.187, 0.357), "pair": (0.306, 0.595)},
+    "predator_single": {"spread": (0.191, 0.565), "pair": (0.3, 0.85)},
+    "prey_single": {"spread": (0.185, 0.423), "pair": (0.321, 0.641)},
 }
 
 
@@ -430,6 +435,50 @@ def rl_exploration_kwargs(action_mode: str) -> Dict[str, Any]:
     """
     del action_mode  # Same exploration setting in both modes.
     return {"expl_noise": 0.2, "O_U_noise": False}
+
+
+# The campaign's MATD3 slot runs the evolutionary-HPO variant
+# (:class:`~deap_pettingzoo.baselines.agilerl_hpo_trainer.MATD3HPOTrainer`):
+# a population of MATD3 agents evolved by tournament selection + mutation
+# (weights, architecture, RL hyperparameters), with a persistent per-slot
+# replay buffer and a best-ever hall-of-fame re-scored under a clean final
+# eval budget.  These knobs sit on top of the base MATD3_PARAMS RL settings.
+MATD3_HPO_PARAMS: Dict[str, Any] = {
+    "population_size": 6,
+    # Env steps each agent trains between generations.  At the 2.5M vs-APF
+    # budget this is ~8 generations (budget / (population * evo_every)).
+    "evo_every_n_steps": 50_000,
+    # Best-ever hall-of-fame kept + re-scored; hof[0] is the returned champion.
+    "hof_size": 5,
+    "eval_episodes": 8,          # per-generation tournament scoring
+    "final_eval_episodes": 32,   # clean HOF re-score for the returned champion
+    "tournament_size": 2,
+    "mutation_sd": 0.1,
+    # RL-hyperparameter mutation search ranges.
+    "hp_config": {
+        "lr_actor": [1e-5, 1e-3],
+        "lr_critic": [1e-4, 1e-2],
+        "batch_size": [256, 2048],
+    },
+}
+
+
+def matd3_hpo_algorithm_params(action_mode: str) -> Dict[str, Any]:
+    """``algorithm_params`` for the MATD3 evolutionary-HPO trainer.
+
+    Combines the base MATD3 RL knobs (network / lr / batch / replay buffer)
+    with the population-level HPO knobs.  Consumed selectively by
+    :meth:`~deap_pettingzoo.baselines.agilerl_hpo_trainer.EvolveHPOTrainer.train`
+    (population / evo cadence / HOF / eval-episode counts are read by name;
+    only the base RL keys reach the AgileRL agent constructor), so — unlike
+    the plain trainer — extra keys here are not forwarded to the algorithm
+    ``__init__``.  ``num_envs`` is intentionally omitted: the HPO rollout
+    loop always uses a single (non-vectorised) env.
+    """
+    params = dict(MATD3_PARAMS)
+    params.update(rl_exploration_kwargs(action_mode))
+    params.update(MATD3_HPO_PARAMS)
+    return params
 
 
 RL_COEV_PARAMS: Dict[str, Any] = {

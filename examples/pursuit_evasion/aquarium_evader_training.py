@@ -1055,8 +1055,8 @@ def run_pso(seed: int, run_dir: Path) -> Dict[str, Any]:
 
 
 def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
-    _section(f"MATD3 | seed={seed}")
-    from deap_pettingzoo.baselines.agilerl_trainer import MATD3Trainer
+    _section(f"MATD3 (evolutionary HPO) | seed={seed}")
+    from deap_pettingzoo.baselines.agilerl_hpo_trainer import MATD3HPOTrainer
     from deap_pettingzoo.baselines.base import (
         BudgetMode,
         ProbeConfig,
@@ -1064,6 +1064,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
         TrainingConfig,
     )
 
+    # The campaign's MATD3 slot runs the evolutionary-HPO variant.
     # RL trainers budget on real consumed env steps by construction.
     cfg = TrainingConfig(
         env_name=TRAIN_ENV_NAME,
@@ -1072,10 +1073,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
         num_seeds=1,
         seed=int(seed),
         max_steps_per_episode=_episode_steps_per_episode(),
-        algorithm_params={
-            **MATD3_PARAMS,
-            "num_envs": RL_NUM_ENVS,
-        },
+        algorithm_params=XC.matd3_hpo_algorithm_params(ACTION_MODE),
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
         probe=ProbeConfig(
@@ -1097,7 +1095,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
             episode_prefix="matd3_",
         ),
     )
-    trainer = MATD3Trainer(device=DEVICE, verbose=True)
+    trainer = MATD3HPOTrainer(device=DEVICE, verbose=True)
     t0 = time.time()
     result = trainer.train(cfg, progress_callback=_curriculum_progress_callback())
     return {
