@@ -1,0 +1,131 @@
+@startuml db_schema
+!theme plain
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowFontSize 10
+
+title DEAP-bridge — Service Database Schema (SQLite, _service.db)
+
+entity "experiments" as experiments {
+  * **id** : TEXT <<PK>>
+  ..
+  * label : TEXT NOT NULL DEFAULT ''
+  * spec_json : TEXT NOT NULL <<JSON>>
+  * status : TEXT NOT NULL DEFAULT 'queued'
+  ..
+  * created_at : REAL NOT NULL <<unix epoch>>
+  started_at : REAL
+  finished_at : REAL
+  ..
+  run_dirs_json : TEXT <<JSON array>>
+  progress_json : TEXT <<JSON>>
+  error : TEXT
+  pid : INTEGER
+  ..
+  * enqueue_seq : INTEGER NOT NULL DEFAULT 0
+  * origin : TEXT NOT NULL DEFAULT 'ui'
+  ..
+  <b>CHECK</b> status IN
+    (queued, running, completed,
+     failed, cancelled)
+  <b>CHECK</b> origin IN (ui, cli, import)
+  ..
+  <b>INDEX</b> idx_status (status)
+  <b>INDEX</b> idx_enqueue_seq (enqueue_seq)
+}
+
+entity "queue_state" as queue_state {
+  * **id** : INTEGER <<PK>>
+  ..
+  * paused : INTEGER NOT NULL DEFAULT 0 <<bool>>
+  * worker_limit : INTEGER NOT NULL DEFAULT 1
+  ..
+  <b>CHECK</b> id = 1  <i>(singleton row)</i>
+}
+
+package "Results store (filesystem, not the database)" as FS {
+  class "experiments/{id}/" as ExpDir <<artifact>> {
+    _spec.json
+    _stdout.log
+    _progress.json
+    _result.json
+  }
+  class "{run_dir}/" as RunDir <<artifact>> {
+    manifest.json
+    metrics.csv
+    summary.json
+    probe.csv
+    checkpoints/
+    frames/
+  }
+}
+
+queue_state ||..o{ experiments : gates dispatch
+
+experiments ||-down-|| ExpDir
+experiments ||-down-o{ RunDir
+
+note right of experiments
+  <b>Status state machine</b>
+  queued -> running -> completed | failed | cancelled
+
+  <i>queued -> running</i> is a single atomic
+  <i>UPDATE ... RETURNING</i> gated on the queue being
+  unpaused and no row already running, so no two
+  dispatch polls can claim the same experiment.
+
+  The terminal states are write-once: later updates
+  are guarded by a <i>WHERE status NOT IN (...)</i> clause
+  naming the three terminal states.
+
+  On restart, rows left in <i>running</i> are re-queued
+  rather than failed — a stale row means the server
+  stopped, not that the experiment did.
+end note
+
+note bottom of queue_state
+  A single-row table rather than a
+  configuration file, so pausing the
+  queue and the queue contents commit
+  in the same transactional store.
+
+  <i>paused</i> is read inside the dispatch
+  claim itself, so a pause takes effect
+  atomically rather than racing the next
+  poll. <i>worker_limit</i> is persisted as a seam
+  for future concurrency; the claim
+  currently hard-gates on no experiment
+  already running.
+end note
+
+note bottom of FS
+  <b>Deliberate split.</b> The database holds only
+  what must be queried and mutated transactionally
+  — queue order and lifecycle state. Experiment
+  results are immutable, large and heterogeneous
+  (CSV, JSON, checkpoints, video), so they stay on
+  the shared volume and are referenced by path.
+
+  This keeps the schema stable while result
+  artefacts evolve, and lets the frontend read
+  results directly from a read-only mount instead
+  of streaming them through the API.
+
+  One experiment owns exactly one experiment
+  directory (keyed by <i>id</i>) and zero or more run
+  directories — one per sub-run, i.e. per
+  algorithm x seed — whose paths are held
+  denormalised in <i>run_dirs_json</i>.
+end note
+
+note left of experiments::spec_json
+  Stored as a JSON document rather than
+  normalised into tables: the experiment
+  spec is an open, plugin-extensible
+  structure whose hyperparameter set is
+  defined by the catalog, not by the
+  database. It is validated by Pydantic
+  at the API boundary before insertion.
+end note
+
+@enduml
