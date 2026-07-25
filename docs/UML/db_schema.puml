@@ -79,8 +79,7 @@ note right of experiments
   naming the three terminal states.
 
   On restart, rows left in <i>running</i> are re-queued
-  rather than failed — a stale row means the server
-  stopped, not that the experiment did.
+  rather than failed.
 end note
 
 note bottom of queue_state
@@ -88,18 +87,10 @@ note bottom of queue_state
   configuration file, so pausing the
   queue and the queue contents commit
   in the same transactional store.
-
-  <i>paused</i> is read inside the dispatch
-  claim itself, so a pause takes effect
-  atomically rather than racing the next
-  poll. <i>worker_limit</i> is persisted as a seam
-  for future concurrency; the claim
-  currently hard-gates on no experiment
-  already running.
 end note
 
 note bottom of FS
-  <b>Deliberate split.</b> The database holds only
+  <b>Split.</b> The database holds only
   what must be queried and mutated transactionally
   — queue order and lifecycle state. Experiment
   results are immutable, large and heterogeneous
@@ -110,12 +101,6 @@ note bottom of FS
   artefacts evolve, and lets the frontend read
   results directly from a read-only mount instead
   of streaming them through the API.
-
-  One experiment owns exactly one experiment
-  directory (keyed by <i>id</i>) and zero or more run
-  directories — one per sub-run, i.e. per
-  algorithm x seed — whose paths are held
-  denormalised in <i>run_dirs_json</i>.
 end note
 
 note left of experiments::spec_json
