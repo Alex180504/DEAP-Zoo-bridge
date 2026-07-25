@@ -890,15 +890,15 @@ def run_hyperneat_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[
 def run_matd3_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, Any]:
     name = cfg["name"]
     _subsection(f"MATD3 :: {name}")
-    from deap_pettingzoo.baselines.agilerl_trainer import MATD3Trainer
+    from deap_pettingzoo.baselines.agilerl_hpo_trainer import MATD3HPOTrainer
     from deap_pettingzoo.baselines.base import BudgetMode, RecordingConfig, TrainingConfig
 
-    # Every non-name config key overrides the canonical base params, so
-    # grids can sweep any trainer knob (batch_size, learn_step, ...).
+    # The MATD3 slot sweeps the evolutionary-HPO variant; every non-name
+    # config key overrides the base RL params, which seed the HPO population
+    # (mutation then searches around them).
     cfg_overrides = {k: v for k, v in cfg.items() if k != "name"}
     params = {
-        **XC.MATD3_PARAMS,
-        "num_envs": RL_NUM_ENVS,
+        **XC.matd3_hpo_algorithm_params(ACTION_MODE),
         **cfg_overrides,
         "O_U_noise": False,
     }
@@ -916,7 +916,7 @@ def run_matd3_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str,
     )
     print(f"  lr_actor={cfg['lr_actor']} expl_noise={cfg['expl_noise']}")
 
-    trainer = MATD3Trainer(device=DEVICE, verbose=True)
+    trainer = MATD3HPOTrainer(device=DEVICE, verbose=True)
     t0 = time.time()
     result = trainer.train(train_cfg)
     train_time = time.time() - t0
