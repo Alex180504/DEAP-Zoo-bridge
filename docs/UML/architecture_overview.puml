@@ -1,0 +1,93 @@
+@startuml architecture_overview
+!theme plain
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam ArrowFontSize 10
+skinparam PackageFontStyle bold
+skinparam DefaultTextAlignment center
+skinparam nodesep 25
+skinparam ranksep 40
+
+title High-Level Architecture (component view)
+
+actor "Researcher\n(browser)" as User
+
+package "Frontend process — deap_pettingzoo.ui" as UIProc <<no ML dependencies>> {
+  component "Streamlit app + ApiClient (httpx)\nSetup | Queue | Browse | Compare |\nInspect | Replay | Report" as UIApp
+}
+
+package "Backend process — deap_pettingzoo.service" as SvcProc {
+  component "FastAPI app\nREST surface, Pydantic\nrequest/response models" as Api
+  component "Dispatcher\nasync queue loop, process-group\nspawn, per-experiment timeout" as Dispatcher
+  database "SQLite\nexperiment queue (WAL)" as DB
+}
+
+package "Runner subprocess (one per experiment)" as RunnerProc {
+  component "runner.py\nspec -> build_configs -> train ->\n_progress.json / _result.json" as Runner
+}
+
+actor "Researcher\n(Python script)" as Scripter
+
+package "Core library — deap_pettingzoo" as Core {
+
+  component "Catalog\nalgorithm / environment / co-evolution\nspecs + compatibility matrix" as Catalog <<dependency-free>>
+
+  component "Unified training API\nTrainingConfig | TrainingResult |\nBudgetMode | PolicyProtocol" as UnifiedApi
+
+  component "Experiment orchestration\ncompare_baselines (matched budget) |\nCoEvolutionTrainer (opponent pools,\nhall-of-fame archives)" as Orchestration
+
+  component "Algorithm backends (open registry)\nEA | CMA-ES | PSO — <i>DEAP</i>\nNEAT | HyperNEAT | ES-HyperNEAT — <i>neat-python</i>\nMADDPG | MATD3 | IPPO (+ evolutionary HPO) — <i>AgileRL</i>\nMAP-Elites — <i>QDax (optional)</i>" as Backends
+
+  component "Evaluation domain\nUnifiedEvaluator | SingleEpisode |\nSelfPlay | MixedPolicy evaluators\ngenome -> MLP policy + action head" as Evaluator
+
+  component "Environment abstraction\nregistry: env id -> factory + EnvApi\nwrapper: AEC | parallel | JAX\n-> one parallel-shaped facade" as EnvLayer
+
+  component "Execution backend\nmake_executor:\nserial | process pool | Dask" as Executor
+
+  component "ExperimentLogger\n+ recording / probe controllers" as Logger
+
+  component "Analysis & reporting\naggregate | rliable | significance\ntests | plots | build_report" as AnalysisC <<no ML dependencies>>
+}
+
+component "Environments\nPettingZoo / MPE2 | Aquarium |\ncontrib: JaxMARL, OpenSpiel" as Envs
+
+node "Compute backends\nlocal worker processes |\nDask cluster (local or Slurm allocation)" as Compute
+
+folder "Results store (shared volume)\n{run_dir}/ metrics.csv, summary.json,\ncheckpoints, probe.csv, frames/, report/" as Results
+
+' --- Frontend / backend boundary
+User -down-> UIApp
+UIApp -down-> Api : HTTP / JSON —\nthe only coupling\nbetween the processes
+
+' --- Service internals
+Api -down-> DB : submit, list, cancel
+Dispatcher -down-> DB : atomic claim of\nnext queued row
+Dispatcher -down-> Runner : spawn
+Runner -down-> UnifiedApi
+
+DB -[hidden]down- Runner
+
+' --- Library entry point
+Scripter -down-> UnifiedApi : direct import\n(library use)
+
+' --- Core wiring
+Api .down.> Catalog : serves catalog as JSON
+Catalog .right.> UnifiedApi : resolves trainer,\nvalidates hyperparameters
+Orchestration -down-> UnifiedApi
+UnifiedApi -down-> Backends
+Backends -down-> Evaluator
+Backends -right-> Executor
+Backends -right-> Logger
+Evaluator -down-> EnvLayer
+EnvLayer -down-> Envs
+Executor -down-> Compute
+
+Executor -[hidden]down- Logger
+
+' --- Persistence and analysis
+Logger -down-> Results : writes
+AnalysisC -down-> Results : reads\n(read-only mount)
+UIApp .down.> AnalysisC : in-process import
+Api -down-> Results : streams artefacts,\nexport archives
+
+@enduml
