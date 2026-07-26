@@ -25,7 +25,6 @@ from ..evaluators import BaseEvaluator
 from ..genomes import FixedTopologyGenome
 from .deap_integration import evaluate_individual, setup_deap_creators
 
-
 # Creator management
 
 
