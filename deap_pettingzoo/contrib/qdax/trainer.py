@@ -825,9 +825,7 @@ class MAPElitesTrainer(BaselineTrainer):
             # Real cumulative consumed steps snapshotted per history row so the
             # metrics.csv env_steps axis advances (None on the JAX-native path,
             # where there is no Python-side per-tick counter).
-            env_steps_history: list = [
-                getattr(scoring_fn, "_env_steps_consumed", None)
-            ]
+            env_steps_history: list = [getattr(scoring_fn, "_env_steps_consumed", None)]
             start = time.time()
             realized_iters = 0
             for iter_idx in _budget_iterations(
@@ -887,8 +885,7 @@ class MAPElitesTrainer(BaselineTrainer):
                 except Exception:  # noqa: BLE001 - refinement must not abort run
                     warnings.warn(
                         "MAP-Elites champion re-evaluation failed; falling back "
-                        "to the archive-argmax champion.\n"
-                        + traceback.format_exc(),
+                        "to the archive-argmax champion.\n" + traceback.format_exc(),
                         RuntimeWarning,
                         stacklevel=2,
                     )
@@ -1339,9 +1336,7 @@ def _persist_qdax_results(
             )
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": (
-                    int(_row_real) if _row_real is not None else _nominal
-                ),
+                "env_steps": (int(_row_real) if _row_real is not None else _nominal),
                 "nominal_env_steps": _nominal,
                 "wall_time": 0.0,
             }

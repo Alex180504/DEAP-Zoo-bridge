@@ -174,9 +174,7 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
         substrate = _rebuild_substrate(spec)
         # Seed the (optional) softmax head from the shared spec seed so
         # identical phenotypes sample identically across the population (CRN).
-        _head_rng = (
-            np.random.default_rng(spec.seed) if spec.stochastic_head else None
-        )
+        _head_rng = np.random.default_rng(spec.seed) if spec.stochastic_head else None
         if spec.es_params is not None:
             policy = ESHyperNeatPolicy(
                 genome,

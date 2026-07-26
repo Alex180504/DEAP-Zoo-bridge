@@ -577,19 +577,17 @@ class CMAESTrainer(BaselineTrainer):
                     build_genome_hall_of_fame_export,
                 )
 
-                hof_policies, hall_of_fame_summary = (
-                    build_genome_hall_of_fame_export(
-                        hof,
-                        env_name=config.env_name,
-                        action_space=action_space,
-                        logger=log,
-                        save_genome=save_ea_genome,
-                        kind=KIND_CMA_GENOME,
-                        base_extra={
-                            "env_name": config.env_name,
-                            "variant": self.variant,
-                        },
-                    )
+                hof_policies, hall_of_fame_summary = build_genome_hall_of_fame_export(
+                    hof,
+                    env_name=config.env_name,
+                    action_space=action_space,
+                    logger=log,
+                    save_genome=save_ea_genome,
+                    kind=KIND_CMA_GENOME,
+                    base_extra={
+                        "env_name": config.env_name,
+                        "variant": self.variant,
+                    },
                 )
                 # Reuse the champion wrapper so hall_of_fame[0] is policy.
                 if hof_policies:
