@@ -20,7 +20,6 @@ from deap_pettingzoo.catalog.schema import (
 
 from .registry import is_registered, register_env
 
-
 # MPE2 registration metadata.
 
 # MPE2 is currently a required dependency in deap-bridge's ``pyproject.toml``,
