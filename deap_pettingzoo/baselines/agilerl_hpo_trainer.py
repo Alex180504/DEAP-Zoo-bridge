@@ -72,9 +72,7 @@ class _AgentHallOfFame:
         the hall-of-fame are cloned; the descending scan stops as soon as a
         candidate cannot beat the current worst member.
         """
-        order = sorted(
-            range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True
-        )
+        order = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
         for i in order:
             fit = float(fitnesses[i])
             if len(self.items) >= self.maxsize and fit <= self.fitnesses[-1]:
@@ -605,19 +603,17 @@ class EvolveHPOTrainer(AgileRLTrainer):
                             self._hpo_memories[slot] = self._build_replay_buffer(
                                 agent_ids
                             )
-                        gen_steps, self._hpo_transitions[slot] = (
-                            self._train_one_agent(
-                                agent,
-                                env,
-                                agent_ids,
-                                is_vec,
-                                max_steps,
-                                evo_every,
-                                seed,
-                                rng,
-                                memory=self._hpo_memories[slot],
-                                total_transitions=self._hpo_transitions[slot],
-                            )
+                        gen_steps, self._hpo_transitions[slot] = self._train_one_agent(
+                            agent,
+                            env,
+                            agent_ids,
+                            is_vec,
+                            max_steps,
+                            evo_every,
+                            seed,
+                            rng,
+                            memory=self._hpo_memories[slot],
+                            total_transitions=self._hpo_transitions[slot],
                         )
                     steps_done += gen_steps
                     gen_progress += gen_steps
@@ -754,7 +750,12 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
             hof_scores = [
                 self._evaluate_agent(
-                    m, env, agent_ids, max_steps, seed, rng,
+                    m,
+                    env,
+                    agent_ids,
+                    max_steps,
+                    seed,
+                    rng,
                     num_episodes=final_eval_episodes,
                 )
                 for m in hof_members
@@ -788,9 +789,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 _champion, iteration=generation, env_steps=steps_done
             )
             self._recorder.close()
-            self._prober.finalize(
-                _champion, iteration=generation, env_steps=steps_done
-            )
+            self._prober.finalize(_champion, iteration=generation, env_steps=steps_done)
             self._prober.close()
 
             # Checkpoint the hall-of-fame: the champion as ``agent.pt`` (rank 1,

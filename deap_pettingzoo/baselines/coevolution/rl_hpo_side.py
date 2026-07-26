@@ -260,9 +260,7 @@ class RLEvolveHPOSideState(SideState):
         )
         # Select by fitness (indices, so the per-slot buffers can be reordered
         # with the same permutation): keep top 1/4 elites, mutate the rest.
-        order = sorted(
-            range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True
-        )
+        order = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
         ranked_agents = [self._population[i] for i in order]
         elite_count = max(1, self.population_size // 4)
         elites = ranked_agents[:elite_count]

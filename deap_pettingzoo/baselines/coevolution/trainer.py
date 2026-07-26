@@ -1041,9 +1041,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             skip: Optional[Set[str]] = None
             if side_budgets is not None and coev_cfg.on_side_exhausted == "freeze":
                 skip = self._exhausted_sides(history, side_budgets)
-            self._run_synchronous_generation(
-                env, states, coev_cfg, history, skip=skip
-            )
+            self._run_synchronous_generation(env, states, coev_cfg, history, skip=skip)
             realized = _g + 1
             consumed = self._aggregate_consumed(history)
             # Progress + champion recording happen together in the callback.
@@ -1309,9 +1307,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         return int(sum(int(s.env_steps) for hist in history.values() for s in hist))
 
     @staticmethod
-    def _side_consumed(
-        history: Dict[str, List[GenerationStats]], name: str
-    ) -> int:
+    def _side_consumed(history: Dict[str, List[GenerationStats]], name: str) -> int:
         """Real env ticks consumed by one side's own evaluations so far."""
         return int(sum(int(s.env_steps) for s in history.get(name, [])))
 
