@@ -30,7 +30,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from deap_pettingzoo.service.logtail import read_tail
 
@@ -53,6 +53,14 @@ class InstallValidationError(ValueError):
 
 # job_id -> record dict
 _JOBS: Dict[str, Dict] = {}
+
+# Strong references to the in-flight completion watchers. The event loop keeps
+# only a weak reference to a task, so a watcher whose sole reference was the
+# discarded return value of create_task() may be garbage-collected while still
+# awaiting the subprocess -- leaving its job stuck at "running" forever, since
+# install jobs have no database row and no startup reconciliation to recover
+# them. Entries remove themselves on completion via the done callback below.
+_BACKGROUND_TASKS: Set["asyncio.Task[None]"] = set()
 
 
 def _installs_root() -> Path:
@@ -168,7 +176,9 @@ async def start_install(manager: str, action: str, args: List[str]) -> str:
             rec["returncode"] = rc
             rec["status"] = "completed" if rc == 0 else "failed"
 
-    asyncio.create_task(_await_proc())
+    task = asyncio.create_task(_await_proc())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return job_id
 
 

@@ -169,6 +169,13 @@ addopts = [
     "--cov-report=html",
 ]
 
+[tool.coverage.run]
+# Emit paths relative to the repo root rather than absolute ones. Without this
+# the XML report names files relative to an absolute <source> that does not
+# exist inside the SonarScanner container, so every coverage measure is
+# discarded ("Cannot resolve N file paths").
+relative_files = true
+
 [tool.black]
 line-length = 88
 # py311-formatted code stays valid on 3.12.
