@@ -485,6 +485,13 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
                 UserWarning,
                 stacklevel=2,
             )
+        # Mirrors the guard in registry.build_env_from_spec: a factory may also
+        # be a module exposing .parallel_env, which this path cannot use.
+        if not callable(spec.factory):
+            raise TypeError(
+                f"Env {config.env_name!r} registered with api='jax_parallel' "
+                "but factory is not callable."
+            )
         raw_jax_env = spec.factory(**(config.env_config or {}))
         # The JAX env may have heterogeneous agents (e.g. simple_tag has
         # adversaries with obs_size=16 and a good agent with obs_size=14).

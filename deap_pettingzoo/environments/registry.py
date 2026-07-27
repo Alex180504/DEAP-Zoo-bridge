@@ -29,19 +29,29 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from types import ModuleType
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from deap_pettingzoo.catalog.schema import ParamSpec, TeamSpec
 
-
-class EnvFactory:
-    """Factory for constructing PettingZoo environments.
-
-    Can be either:
-      - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
-        ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
-      - A callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
-    """
+# Factory for constructing PettingZoo environments. Can be either:
+#   - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
+#     ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
+#   - A callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
+# Spelled as a union rather than an empty marker class so that the callable
+# form is actually callable to a type checker; the marker class had no
+# ``__call__``, which made every ``spec.factory(...)`` site look invalid.
+EnvFactory = Union[ModuleType, Callable[..., Any]]
 
 
 EnvApi = Literal[
