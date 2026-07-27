@@ -797,17 +797,26 @@ def _register_routes(app: FastAPI) -> None:
     ):
         import tempfile
 
+        from starlette.concurrency import run_in_threadpool
+
         from deap_pettingzoo.service.export_import import (
             extract_import_zip,
             restore_experiment_to_db,
             validate_import_zip,
         )
 
-        # Stream upload to a temp file.
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        # Stream upload to a temp file. Opening and writing happen on a worker
+        # thread: at 8 MiB a chunk, writing inline would block the event loop
+        # for the duration of every write and stall every other request.
+        tmp = await run_in_threadpool(
+            tempfile.NamedTemporaryFile, suffix=".zip", delete=False
+        )
+        try:
             while chunk := await file.read(8 * 1024 * 1024):  # 8 MiB chunks
-                tmp.write(chunk)
-            tmp_path = Path(tmp.name)
+                await run_in_threadpool(tmp.write, chunk)
+        finally:
+            await run_in_threadpool(tmp.close)
+        tmp_path = Path(tmp.name)
 
         try:
             results_root = Path(os.environ.get("DEAP_RESULTS_ROOT", "results"))
