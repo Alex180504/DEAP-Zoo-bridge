@@ -1,0 +1,65 @@
+@startuml coevolution_sides_base
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Co-evolution side abstraction
+
+package "deap_pettingzoo.baselines.coevolution" {
+  class "Side <<dataclass>>" as Side {
+    +name: str
+    +role_prefixes: Tuple[str, ...]
+    +optimizer: str
+    +optimizer_config: dict
+    +hof: Optional[HallOfFame]
+    +use_archive_in_opponent_pool: bool
+    +archive_mix: float
+    +opponent_sampler: Sampler
+    +archive_sampler: Sampler
+    +frozen_policies: Optional[Sequence]
+  }
+  abstract class SideState {
+    +side: Side
+    +is_rl_side: bool = False
+    +resolved_device: str = "cpu"
+    +{abstract} initialise(env, evaluator, rng)
+    +{abstract} step_generation(evaluator, rng)
+    +{abstract} current_pool(): OpponentPool
+    +{abstract} best_policy(): PolicyProtocol
+    +snapshot_best()
+    ' Trainer detectors use getattr(s, "is_rl_side", False) instead of
+    ' isinstance(RLSideState) so rl_hpo sides trigger the same guards.
+  }
+  class "sides <<module>>" as CoevSidesModule {
+    ' Open side-state registry: token -> zero-arg loader -> SideState
+    ' subclass. Each loader owns any lazy optional-extra import + friendly error.
+    - _SIDE_STATE_FACTORIES: dict[str, () -> type[SideState]]
+    + make_side_state(side) -> SideState  ' one-line _SIDE_STATE_FACTORIES lookup
+    + register_side_state(token, loader_or_class, *, overwrite=False)
+    ' Side.__post_init__ validates optimizer against set(_SIDE_STATE_FACTORIES),
+    ' so a registered token is automatically a valid Side.optimizer.
+  }
+  class EASideState
+  class CMAESSideState
+  class PSOSideState
+  class FrozenSideState
+}
+
+  CoevSidesModule ..> SideState : builds
+  CoevSidesModule ..> Side : validates optimizer
+  SideState <|-- EASideState
+  SideState <|-- CMAESSideState
+  SideState <|-- FrozenSideState
+  SideState <|-- PSOSideState
+  SideState o-- Side
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

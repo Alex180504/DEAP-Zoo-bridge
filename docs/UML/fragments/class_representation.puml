@@ -1,0 +1,102 @@
+@startuml representation
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Genome, policy and action heads
+
+package "deap_pettingzoo.genomes" {
+    class FixedTopologyGenome {
+        + layer_sizes: List[int]
+        + activation: str
+        + output_activation: str
+        + input_size: int
+        + output_size: int
+        + hidden_layers: List[int]
+        + weight_range: tuple[float, float]
+        .. supported activations ..
+        + SUPPORTED_ACTIVATIONS: {relu, tanh, sigmoid, linear, identity}
+        + _ACTIVATION_ALIASES: {identity -> linear}
+        --
+        + __init__(layer_sizes, activation, output_activation, weight_range, random_seed)
+        + get_weight_count() -> int
+        + get_weight_ranges() -> List[tuple]
+        + get_weights() -> np.ndarray
+        + set_weights(weights: np.ndarray)
+        + validate() -> bool
+        + clone() -> FixedTopologyGenome
+        + to_dict() -> dict
+        + {static} from_dict(data: dict) -> FixedTopologyGenome
+        + mutate(mutation_rate: float, mutation_std: float)
+    }
+
+note bottom of FixedTopologyGenome
+  Genome is a flat vector of weights
+  for a fixed MLP architecture.
+end note
+}
+
+package "deap_pettingzoo.policies" {
+    class FeedforwardNeuralPolicy {
+        - genome: FixedTopologyGenome
+        - layers: List[np.ndarray]
+        - biases: List[np.ndarray]
+        - hidden_activation_fn: callable
+        - output_activation_fn: callable
+        - head: Optional[ActionHead]
+        --
+        + __init__(genome, action_space=None, head=None)
+        + get_action(observation, deterministic=True) -> action
+        + reset() -> None
+        + forward(x: np.ndarray) -> np.ndarray
+    }
+    abstract class ActionHead {
+        + {abstract} decode(raw_output) -> Any
+        + {abstract} output_size: int
+    }
+    class DiscreteHead {
+        + n: int
+        + decode(raw) -> int  (argmax)
+    }
+    class MaskedDiscreteHead {
+        + n: int
+        + decode(raw, action_mask=None) -> int
+        -- mask illegal logits to -inf before argmax --
+    }
+    class MultiDiscreteHead {
+        + nvec: np.ndarray
+        + decode(raw) -> np.int64[len(nvec)]
+        -- per-sub-action argmax over sum(nvec) logits --
+    }
+    class BoxHead {
+        + low, high: np.ndarray
+        .. single-squash contract ..
+        + decode(raw) -> np.ndarray
+        .. decode: tanh(raw) -> rescale to [low, high] ..
+        .. requires genome.output_activation="linear" so ..
+        .. tanh is applied exactly once (not twice) ..
+    }
+
+    note right of FeedforwardNeuralPolicy
+      Hidden layers use genome.activation.
+      The final layer uses genome.output_activation.
+    end note
+}
+
+    DiscreteHead --|> ActionHead
+    MaskedDiscreteHead --|> DiscreteHead
+    MultiDiscreteHead --|> ActionHead
+    BoxHead --|> ActionHead
+    FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
+    FeedforwardNeuralPolicy --> ActionHead : optional head
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

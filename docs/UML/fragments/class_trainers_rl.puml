@@ -1,0 +1,96 @@
+@startuml trainers_rl
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 170
+
+title Reinforcement-learning trainers and policy adapters
+
+package "deap_pettingzoo.baselines" {
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
+    }
+    abstract class AgileRLTrainer {
+        # ALGORITHM_NAME: str
+        # ALGORITHM_IMPORT: tuple[str, str]
+        # ON_POLICY: bool
+        # DEFAULT_PARAMS: dict
+        --
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + {abstract} get_capabilities() -> dict
+        # _import_algorithm() -> type
+        # _build_agent(obs_spaces, act_spaces, agent_ids, kwargs)
+        # _run_off_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per emit interval)
+        # _run_on_policy(env, agent, ...) -> dict\n   (accumulates metrics_history per rollout cycle)
+        -- Both loops: logger.warning(exc_info=True)\n   on learn() failure + warnings.warn()
+    }
+    class MADDPGTrainer {
+        # ALGORITHM_NAME = "maddpg"
+        # ON_POLICY = False
+    }
+    class MATD3Trainer {
+        # ALGORITHM_NAME = "matd3"
+        # ON_POLICY = False
+    }
+    class IPPOTrainer {
+        # ALGORITHM_NAME = "ippo"
+        # ON_POLICY = True
+    }
+    class GroupedIPPOTrainer {
+        # ALGORITHM_NAME = "ippo-grouped"
+        # ON_POLICY = True
+        --
+        + {static} _group_prefix(agent_id) -> str
+        + {static} _validate_grouping(agent_ids, obs, act) -> dict
+        - _build_agent(...) : applies AgileRL grouping patch lazily
+    }
+    class AgileRLPolicyWrapper {
+        - _agent: agilerl.EvolvableAlgorithm
+        - _agent_ids: list[str]
+        - _call_index: int
+        --
+        + get_action(obs) -> Any
+        + reset() -> None
+        + make_frozen_cpu_snapshot() -> FrozenRLPolicyWrapper\n   (rebuilds actors via init_dict + state_dict,\n    not copy.deepcopy -> works for IPPO\n    StochasticActor; carries grouped actor map)
+    }
+    class FrozenRLPolicyWrapper {
+        - _actors: list[nn.Module]
+        - _agent_ids: list[str]
+        - _full_roster: list[str]
+        - _algorithm_name: str
+        - _is_discrete: bool
+        - _md_nvecs: list | None
+        - _actor_idx_map: list[int] | None
+        - _call_index: int
+        - _obs_cache: dict
+        --
+        + get_action(obs, **kwargs) -> Any
+        + reset() -> None
+        + __getstate__/__setstate__ : state_dict serialization\n   (no cloudpickle for AgileRL actors)
+        + agent_ids: list[str]
+        + algorithm_name: str
+        + is_discrete: bool
+    }
+}
+
+    BaselineTrainer <|-- AgileRLTrainer
+    AgileRLTrainer <|-- MADDPGTrainer
+    AgileRLTrainer <|-- MATD3Trainer
+    AgileRLTrainer <|-- IPPOTrainer
+    IPPOTrainer <|-- GroupedIPPOTrainer
+    AgileRLTrainer --> AgileRLPolicyWrapper : produces
+    AgileRLPolicyWrapper --> FrozenRLPolicyWrapper : make_frozen_cpu_snapshot()
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

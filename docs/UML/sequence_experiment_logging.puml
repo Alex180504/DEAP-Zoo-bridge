@@ -1,4 +1,9 @@
 @startuml sequence_experiment_logging
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Experiment (Results / Metrics) Logging Pipeline – Trainer -> Sinks -> Disk
 
 ' NOTE: This is the *experiment-results* pipeline (metrics / checkpoints /

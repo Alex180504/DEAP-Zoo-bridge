@@ -1,0 +1,74 @@
+@startuml eshyperneat_training_sequential
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title ES-HyperNEAT training (2/3) — sequential evaluation and phenotype construction
+
+participant "ESHyperNEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "PettingZooWrapper" as Env
+participant "ESHyperNeatPolicy" as Policy
+participant "ESNetwork" as ESN
+
+group effective_workers == 1 (sequential)
+    loop n_generations
+        Trainer -> Pop: run(eval_function, n=1)
+
+        loop for each genome
+            Pop -> Trainer: eval_function(genomes, config)
+            Trainer -> Policy: ESHyperNeatPolicy(genome, config, substrate, es_params)
+            activate Policy
+
+            Policy -> Policy: neat.nn.FeedForwardNetwork.create(genome, config)
+            note right: CPPN (5 inputs, 1 output weight)
+            Policy -> ESN: ESNetwork(substrate, cppn, params)
+            activate ESN
+            ESN -> ESN: es_hyperneat()
+            note right
+                Quadtree variance analysis:
+                1. division_initialization from each input
+                2. pruning_extraction (band-threshold)
+                3. iterate from hidden nodes
+                4. explore to outputs
+                5. clean_net (dead-end removal)
+            end note
+            ESN -> ESN: create_phenotype_network()
+            note right
+                Map discovered hidden coords to IDs.
+                Build node_evals from connections.
+                Return RecurrentNetwork.
+            end note
+            Policy <-- ESN: phenotype RecurrentNetwork
+            deactivate ESN
+
+            Trainer -> Policy: get_action(obs)
+            Policy -> Policy: _network.reset()
+            loop activation_steps = 2^max_depth + 1
+                Policy -> Policy: _network.activate(obs)
+                note right
+                    RecurrentNetwork buffer propagates
+                    across hidden-node paths each tick.
+                    Single-tick would miss hidden-layer
+                    contributions -> constant heading.
+                end note
+            end
+            Policy -> Policy: head.decode(raw_output)
+            Trainer <-- Policy: action
+            deactivate Policy
+
+            Trainer -> Env: reset / step loop
+            Trainer -> Trainer: genome.fitness = mean(rewards)
+        end
+
+        Pop -> Pop: reproduce / speciate
+    end
+end
+
+note over Trainer
+  Fragment of <i>sequence_eshyperneat_training.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

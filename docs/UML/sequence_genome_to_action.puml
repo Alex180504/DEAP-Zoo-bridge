@@ -1,5 +1,7 @@
 @startuml sequence_genome_to_action
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Sequence Diagram: Genome -> Policy -> Action Flow
 
 actor "Evolution\nAlgorithm" as EA
@@ -13,7 +15,7 @@ participant "Agent" as Agent
 
 EA -> Ind : create individual
 activate Ind
-Ind -> Genome : __init__(architecture)
+Ind -> Genome : ~__init~__(architecture)
 activate Genome
 Genome -> Genome : validate architecture
 Genome -> Genome : initialize weight vector
@@ -24,7 +26,7 @@ deactivate Ind
 
 == Policy Creation Phase ==
 
-EA -> Policy : __init__(genome, env_spec)
+EA -> Policy : ~__init~__(genome, env_spec)
 activate Policy
 Policy -> Genome : get_weights()
 activate Genome

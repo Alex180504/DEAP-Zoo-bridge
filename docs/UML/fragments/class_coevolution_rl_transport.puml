@@ -1,0 +1,55 @@
+@startuml coevolution_rl_transport
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title Co-evolution: picklable rollout transport
+
+package "deap_pettingzoo.baselines.coevolution" {
+  class "_RLDriverContext\n(dataclass)" as RLDriverContext {
+    + env_wrapper: PettingZooWrapper
+    + learner_role_prefixes: tuple
+    + opponent_sides: list
+    + max_steps: int
+    + rng: np.random.Generator
+    + executor: Optional[Executor]
+    + env_name: Optional[str]
+    + env_config: Optional[dict]
+  }
+  class "_RLRolloutPayload\n(dataclass, picklable)" as RLRolloutPayload {
+    + env_name: str
+    + env_config: Optional[dict]
+    + max_steps: int
+    + episode_seed: int
+    + frozen_rl_snapshot: FrozenRLPolicyWrapper
+    + rl_agent_ids: list[str]
+    + rl_role_prefixes: tuple
+    + opponent_snapshots: dict
+    + side_role_prefixes: dict
+  }
+  class "_RLTrajectory\n(dataclass)" as RLTrajectory {
+    + steps: list[_RLStepData]
+    + episode_return: float
+  }
+  class "_RLStepData\n(dataclass)" as RLStepData {
+    + obs: dict
+    + actions: dict
+    + rewards: dict
+    + next_obs: dict
+    + done: dict
+  }
+}
+
+  RLDriverContext --> RLRolloutPayload : builds (parallel path)
+  RLRolloutPayload --> RLTrajectory : worker returns
+  RLTrajectory *-- RLStepData : steps
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

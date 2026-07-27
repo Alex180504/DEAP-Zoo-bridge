@@ -1,0 +1,99 @@
+@startuml instrumentation
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Recording and held-out probe instrumentation
+
+package "deap_pettingzoo.baselines" {
+    class RecordingConfig <<dataclass>> {
+        + enabled: bool
+        + mode: RecordingMode
+        + every_n_steps: Optional[int]
+        + max_recordings: Optional[int]
+        + fps: int
+        + fmt: str
+        + max_frames_per_episode: Optional[int]
+        + max_dim: Optional[int]
+        + episode_prefix: str
+    }
+    enum RecordingMode {
+        COUNT
+        EVERY
+        INTERVAL
+        FINAL
+    }
+    class RecordingController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        --
+        Algorithm-agnostic cadence: decides per
+        RecordingMode whether a ProgressEvent
+        warrants a champion-rollout recording via
+        UnifiedEvaluator (single or per-agent policy_map).
+    }
+    class ProbeConfig <<dataclass>> {
+        + enabled: bool
+        + every_n_steps: Optional[int]
+        + n_episodes: int
+        + env_name: Optional[str]
+        + env_config: Optional[Dict]
+        + info_keys: tuple
+        + seed: Optional[int]
+        -- held-out champion probe: off-budget measurement,\n   env-step cadence only (the algorithm-agnostic axis);\n   rows -> <run_dir>/probe.csv --
+    }
+    class ProbeController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        + flush_to(experiment_logger)
+        --
+        Rides the same _on_progress champion hook as
+        RecordingController. Rolls n_episodes held-out
+        episodes via UnifiedEvaluator (info_keys tracked),
+        writes one probe.csv row per checkpoint; buffers
+        rows when the logger is built late (QDax).
+        Fixed episode seeds per run (CRN across checkpoints).
+    }
+    class UnifiedEvaluator {
+        - max_steps: int
+        - env_cache: dict
+        - aggregation: str
+        - score_agents: Optional[set[str]]
+        - info_keys: tuple
+        --
+        + __init__(max_steps, *, aggregation="sum", score_agents=None, info_keys=None)
+        + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+        - _aggregate_reward(agent_rewards) -> float
+        - _run_episode(policy, env, seed) -> (agent_rewards, length, info_metrics)
+        - _track_info_metrics(acc, step_infos)
+        + close()
+    }
+
+    note bottom of UnifiedEvaluator
+      aggregation ("sum"|"mean") + score_agents are
+      an OPT-IN team/per-side scalar for zero-sum
+      competitive envs; the default
+      comparison path still scores team-sum, callers
+      opt in. Per-agent rewards are always surfaced
+      on EvalResult.agent_rewards.
+    end note
+}
+
+    RecordingConfig *-- RecordingMode : mode
+    RecordingController ..> RecordingConfig : reads
+    RecordingController ..> UnifiedEvaluator : drives
+    ProbeController ..> ProbeConfig : reads
+    ProbeController ..> UnifiedEvaluator : drives
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

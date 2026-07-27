@@ -1,4 +1,9 @@
 @startuml sequence_ui_browse_compare
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 220
+skinparam wrapWidth 280
 title Streamlit UI – Browse -> Compare
 
 actor "User" as U

@@ -1,4 +1,9 @@
 @startuml sequence_multitask_aggregation
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Multi-task Aggregation — collect -> normalise -> rliable forest
 
 actor "Researcher" as R

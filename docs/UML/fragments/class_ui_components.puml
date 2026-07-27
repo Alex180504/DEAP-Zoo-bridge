@@ -1,0 +1,63 @@
+@startuml ui_components
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Frontend: API client and form components
+
+package "deap_pettingzoo.ui (components v0.2+)" {
+    class ApiClient {
+        - _client: httpx.Client
+        - _base_url: str
+        --
+        + get_catalog() -> dict
+        + get_algorithms() -> list
+        + get_environment(name) -> dict
+        + get_compatibility(env, algos) -> dict
+        + validate(spec) -> ValidationReportModel
+        + submit(spec) -> SubmitResponse
+        + list_experiments() -> list[ExperimentRecord]
+        + get_experiment(id) -> ExperimentRecord
+        + get_progress(id) -> ProgressSnapshot
+        + get_stdout(id, offset, limit) -> dict
+        + get_experiment_spec(id) -> dict
+        + build_experiment_export_url(id, flags) -> str
+        + build_run_export_url(dirs, flags) -> str
+        + import_experiments(zip, overwrite) -> dict
+        + get_queue() -> QueueState
+        + pause_queue() / resume_queue()
+        + cancel_experiment(id) / delete_experiment(id)
+        + get_health() -> dict  ' advanced_enabled
+        + start_install(manager, action, args) / get_install(job_id)
+        + validate_script(src) / submit_script(src, label)
+    }
+    class param_widgets <<module>> {
+        + coerce_param(value, spec) -> Any
+        + render_param(spec, key) -> value  (thin Streamlit wrapper)
+    }
+    class forms <<module>> {
+        + build_env_form(catalog) -> (values, touched)
+        + build_algo_form(catalog, env) -> (values, touched)
+        + build_fitness_form(env_spec) -> (values, touched)
+    }
+    class validation_view <<module>> {
+        + group_issues_by_tab(report) -> dict
+        + render_validation_report(report)
+    }
+    class spec_utils <<module>> {
+        + spec_to_form_defaults(spec) -> dict
+        + extract_loaded_spec(setup_config) -> dict | None
+    }
+}
+
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

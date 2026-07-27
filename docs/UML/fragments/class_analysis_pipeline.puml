@@ -1,0 +1,101 @@
+@startuml analysis_pipeline
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 170
+
+title Analysis: aggregation, comparison and reporting stages
+
+package "deap_pettingzoo.analysis" {
+  class Experiment {
+    +root: Path
+    +runs: list[RunRecord]
+    +filter(*, algorithm, env, seed): Experiment
+    +by_algorithm(): dict[str, list[RunRecord]]
+    +by_env(): dict[str, list[RunRecord]]
+    +summary_table(): pd.DataFrame
+    +final_scores(metric): dict[str, ndarray]
+    +score_provenances(metric): dict[str, set]
+    +per_agent_table(): pd.DataFrame
+    +to_frame(metric, *, include_config): pd.DataFrame
+    +export(path, *, fmt, metric, include_config): Path
+  }
+  class aggregate <<module>> {
+    +iqm(scores): float
+    +bootstrap_ci(scores, *, statistic, n_resamples, ci, seed)
+    +mean_with_ci(scores, **kw)
+    +iqm_with_ci(scores, **kw)
+    +resolve_y_col(runs, *, x_col, candidates): Optional[str]
+    +learning_curve_with_ci(runs, *, x_col, y_col=auto, statistic)
+    +aggregate_summary(score_groups, *, require_equal_n): pd.DataFrame
+  }
+  class compare <<module>> {
+    +cohens_d(a, b): float
+    +cliffs_delta(a, b): float
+    +mann_whitney(a, b, alternative)
+    +welch_t(a, b, alternative)
+    +pairwise_table(experiment, *, metric, test): pd.DataFrame
+  }
+  class rliable_bridge <<module>> {
+    +aggregate_metrics_table(score_groups, *, reps, include_optimality_gap=auto)
+    +performance_profile(score_groups, *, taus, reps)
+    +probability_of_improvement(score_groups, *, reps)
+    +sample_efficiency_curve(runs_by_algo, *, x_col, y_col=auto, x_grid, reps)
+  }
+  class plots <<module>> {
+    +plot_learning_curves(runs_by_algo, ...)
+    +plot_eval_distribution(score_groups, ...)
+    +plot_performance_profile(score_groups, *, taus, ...)
+    +plot_pi_matrix(score_groups, ...)
+  }
+  class report <<module>> {
+    +build_report(experiment, output_dir, *, metric, fmt, include_figures, title): Path
+  }
+
+  note bottom of Experiment
+    final_scores(metric="final_fitness") resolves
+    via comparison_score (held-out preferred);
+    score_provenances() exposes per-group
+    provenance so a mixed comparison is blocked.
+    per_agent_table() decomposes trajectories;
+    to_frame/export emit per-(algo,env,seed) rows
+    with score+seed+budget+git_sha+hyperparams.
+  end note
+
+note bottom of rliable_bridge
+  Lazy-imports rliable; raises
+  ImportError("install with .[analysis]")
+  if missing. iqm() count-trims 25% per end
+  (scipy.stats.trim_mean), matching
+  rliable.metrics.aggregate_iqm even on ties.
+  optimality_gap dropped from the raw
+  single-task table (meaningless un-normalised).
+end note
+
+note bottom of report
+  Renders Markdown or HTML via jinja2
+  with summary_table, aggregate_summary,
+  pairwise_table, plus optional
+  fig_eval_distribution.png and
+  fig_learning_curves.png. The
+  forthcoming Streamlit UI consumes the
+  same surfaces — no new public API.
+end note
+}
+
+compare ..> Experiment : reads .final_scores()
+rliable_bridge ..> Experiment : "score_groups input"
+plots ..> aggregate
+report ..> aggregate
+report ..> compare
+report ..> plots
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

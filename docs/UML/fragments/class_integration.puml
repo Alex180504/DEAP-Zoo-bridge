@@ -1,0 +1,55 @@
+@startuml integration
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title DEAP integration and parallel evaluation
+
+package "deap_pettingzoo.integration" {
+    class "deap_integration (module)" as deap_integration_mod <<module>> {
+        + setup_deap_creators() -> None
+        + create_deap_individual(genome_config) -> Individual
+        + evaluate_individual(individual, evaluator) -> tuple
+        + create_toolbox(genome_config, evaluator, **kwargs) -> Toolbox
+        + crossover_blend(ind1, ind2, alpha) -> tuple
+        + mutate_gaussian(individual, mu, sigma, indpb) -> tuple
+        + clone_individual(individual) -> Individual
+        + make_parallel_evaluate_map(executor,
+            worker_spec, *, step_sink=None) -> Callable
+        + evaluate_population_parallel(individuals, *,
+            executor, spec, eval_seeds=None,
+            step_sink=None) -> list
+        + make_mixed_parallel_evaluate_map(executor,
+            evaluator, *, eval_episodes=1,
+            step_sink=None) -> Callable
+        -- _EvalWorkerSpec / _MixedWorkerSpec carry
+           qualnames + a registry_snapshot; picklable
+           across spawn workers. Workers replay the
+           snapshot via replay_registry_snapshot_once
+           so Dask (no initializer hook) gets
+           custom envs too --
+        -- _worker_evaluate and
+           _mixed_worker_evaluate_with_steps return
+           (fitness, steps_delta); the pmap factories sum the
+           deltas into the optional step_sink accumulator and
+           return fitness-only --
+    }
+    class "cma_integration (module)" as cma_integration_mod <<module>> {
+        + setup_cma_strategy(genome_config, sigma0, population_size, centroid) -> (Strategy, dim)
+        + make_cma_ind_init(genome_config) -> callable
+        + register_cma_toolbox(strategy, ind_init, evaluator) -> Toolbox
+        + make_cma_stats() -> tools.Statistics
+        - _setup_cma_creators() -> None
+    }
+}
+
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

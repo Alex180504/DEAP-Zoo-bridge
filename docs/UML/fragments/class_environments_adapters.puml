@@ -1,0 +1,72 @@
+@startuml environments_adapters
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title Environment API adapters
+
+package "deap_pettingzoo.environments" {
+    abstract class TurnBasedAdapter {
+        + possible_agents: List[str]
+        + metadata: dict
+        + reset(seed) -> observations
+        + step(actions) -> tuple
+    }
+    class MaskedSimultaneousAdapter {
+        parallel-shaped facade over AEC;\nevery active agent appears each step;\nonly current player's action executes;\ninfos[agent]["action_mask"] threaded.
+        .. termination contract ..
+        terminated agents absent from obs_dict/infos;\nstill present in rewards/terminations.
+    }
+    class SequentialTurnAdapter {
+        single-agent-per-step dicts;\npreserves true turn semantics.
+        .. termination contract ..
+        drains terminated agent_selection\nwith step(None) before returning\nnext live agent obs (mirrors aec_to_parallel).
+    }
+    interface "JaxEnvProtocol <<Protocol>>" as JaxEnvProtocol {
+        + agents: List[str]
+        + reset(key) -> (obs, state)
+        + step(key, state, actions) -> (obs, state, rew, done, info)
+        + observation_space(agent): Space
+        + action_space(agent): Space
+    }
+    class JaxEnvToPettingZooAdapter {
+        per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
+        .. termination contract ..
+        dones["__truncated__"] -> truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
+    }
+}
+
+package "deap_pettingzoo.contrib.jaxmarl" {
+    class jaxmarl <<module>> {
+        + {static} register_jaxmarl_env(name, env_id, *,\n         default_episode_len=25, tags=None,\n         **jaxmarl_kwargs) -> EnvSpec
+        -- opt-in; lazy-imports jaxmarl.make;\n   registers with api="jax_parallel" --
+    }
+}
+
+package "deap_pettingzoo.contrib.openspiel" {
+    class openspiel <<module>> {
+        + {static} register_openspiel_game(name, *, game_name, api="aec_masked",\n         default_episode_len=50, wrappers=(), **reg_kwargs) -> EnvSpec
+        -- thin Shimmy bridge to OpenSpiel\n   turn-based board / card games --
+    }
+
+    note bottom of openspiel
+      Opt-in; nothing registered on import.
+      Requires `pip install deap-pettingzoo[shimmy]`.
+      Wraps shimmy.OpenSpielCompatibilityV0
+      for OpenSpiel turn-based games.
+    end note
+}
+
+    TurnBasedAdapter <|-- MaskedSimultaneousAdapter
+    TurnBasedAdapter <|-- SequentialTurnAdapter
+    JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

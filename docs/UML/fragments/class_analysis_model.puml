@@ -1,0 +1,98 @@
+@startuml analysis_model
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title Analysis: run and experiment model
+
+package "deap_pettingzoo.analysis" {
+  class "RunRecord <<dataclass>>" as RunRecord {
+    +run_dir: Path
+    +manifest: dict
+    +metrics: pd.DataFrame
+    +episodes: pd.DataFrame
+    +trajectories: pd.DataFrame
+    +summary: dict
+    +algorithm: str
+    +action_mode: Optional[str]
+    +env_name: str
+    +seed: Optional[int]
+    +run_id: str
+    +wall_time_s: Optional[float]
+    +final_fitness: Optional[float]
+    +eval_mean_reward: Optional[float]
+    +comparison_score: Optional[float]
+    +score_provenance: str
+  }
+  class Experiment {
+    +root: Path
+    +runs: list[RunRecord]
+    +filter(*, algorithm, env, seed): Experiment
+    +by_algorithm(): dict[str, list[RunRecord]]
+    +by_env(): dict[str, list[RunRecord]]
+    +summary_table(): pd.DataFrame
+    +final_scores(metric): dict[str, ndarray]
+    +score_provenances(metric): dict[str, set]
+    +per_agent_table(): pd.DataFrame
+    +to_frame(metric, *, include_config): pd.DataFrame
+    +export(path, *, fmt, metric, include_config): Path
+  }
+  class loaders <<module>> {
+    +load_run(run_dir): RunRecord
+    +load_experiment(root, pattern): Experiment
+    +per_agent_table(runs): pd.DataFrame
+  }
+
+  note bottom of RunRecord
+    final_fitness = genuine optimiser objective
+    (final_fitness/best_fitness/coevolution),
+    no longer coalesces mean_episode_reward.
+    comparison_score prefers held-out
+    eval_mean_reward; score_provenance tags it
+    held_out | training_fitness | training_reward.
+    action_mode resolves from hyperparams then
+    env_config.continuous_actions (works on
+    already-archived runs); surfaced in Browse,
+    summary_table, and the grouped Compare table.
+  end note
+
+  note bottom of Experiment
+    final_scores(metric="final_fitness") resolves
+    via comparison_score (held-out preferred);
+    score_provenances() exposes per-group
+    provenance so a mixed comparison is blocked.
+    per_agent_table() decomposes trajectories;
+    to_frame/export emit per-(algo,env,seed) rows
+    with score+seed+budget+git_sha+hyperparams.
+  end note
+}
+
+package "deap_pettingzoo.analysis.policies" {
+    class PolicyReloadUnavailable <<RuntimeError>>
+    class CoevolutionPolicyBundle {
+        + reporting_side: str
+        + sides: dict[str, Any]
+        + env_name: str | None
+        --
+        + side_names() -> list[str]
+        + get_side(name, *, action_space=None) -> Policy
+    }
+    class policies <<module>> {
+        + load_policy(run_record, *, action_space=None) -> Policy | CoevolutionPolicyBundle
+    }
+}
+
+Experiment "1" *-- "*" RunRecord
+loaders ..> Experiment : returns
+loaders ..> RunRecord : returns
+policies ..> RunRecord : "reads .manifest"
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

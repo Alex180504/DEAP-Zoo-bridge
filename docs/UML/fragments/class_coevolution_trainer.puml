@@ -1,0 +1,96 @@
+@startuml coevolution_trainer
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Co-evolution trainer
+
+package "deap_pettingzoo.baselines.coevolution" {
+  class "CoEvolutionConfig <<dataclass>>" as CoEvolutionConfig {
+    +mode: str
+    +sides: List[Side]
+    +schedule: str
+    +alternating_generations: int
+    +k_opponents: int
+    +aggregation: str
+    +snapshot_every: int
+    +reporting_side: Optional[str]
+    +max_steps_per_episode: int
+    +seed: Optional[int]
+    +num_workers: int = 1
+    +parallel_backend: str = "process"
+    +scheduler_address: Optional[str] = None
+    +budget_split: str = "shared"
+    +on_side_exhausted: str = "freeze"
+  }
+  class CoEvolutionEvaluator {
+    -env_wrapper: PettingZooWrapper
+    -learner_role_prefixes: Tuple[str, ...]
+    -learner_factory: Callable
+    -opponent_sides: List[(name, prefixes, pool)]
+    -k_opponents: int
+    -aggregation: str
+    -max_steps: int
+    +__init__(env_wrapper, learner_role_prefixes, learner_factory,\n  opponent_sides, k_opponents, aggregation,\n  max_steps, flatten_obs, masked)
+    +evaluate(individual, seed, rng)
+  }
+  class CoEvolutionTrainer {
+    +train(config): TrainingResult
+    -- decomposed orchestration (review S1): --
+    -_initialize_sides(env, coev_cfg, workers): Dict[str, SideState]
+    -_run_synchronous_loop(...): None
+    -_run_alternating_loop(...): None
+    -_step_one_side(env, state, states, coev_cfg, history, pool_snapshot=None): None
+    -_setup_recording(config): int
+    -_record_champion_if_due(...): None
+    -_invoke_generation_callback(...): None
+  }
+  class "Side <<dataclass>>" as Side {
+    +name: str
+    +role_prefixes: Tuple[str, ...]
+    +optimizer: str
+    +optimizer_config: dict
+    +hof: Optional[HallOfFame]
+    +use_archive_in_opponent_pool: bool
+    +archive_mix: float
+    +opponent_sampler: Sampler
+    +archive_sampler: Sampler
+    +frozen_policies: Optional[Sequence]
+  }
+
+note bottom of CoEvolutionTrainer
+  Registered as "coevolution". Three modes:
+  competitive_2pop, self_play_hof, cooperative.
+  Schedule: synchronous | alternating.
+  Reports reporting_side's best policy.
+  train() is a slim orchestrator: validate ->
+  _initialize_sides -> with executor: bootstrap
+  -> _run_synchronous_loop | _run_alternating_loop
+  -> persist. _step_one_side is the shared per-side
+  body for both schedules (review S1).
+  Honors budget_on_consumed=True (ENV_STEPS): stops when
+  the summed per-side real env ticks reach budget_value
+  (shared aggregate pool; finish-generation-then-stop).
+  budget_split="per_side" (requires budget_on_consumed)
+  grants each evolving side budget/n slice instead;
+  on_side_exhausted: "freeze" = exhausted side stops
+  evolving but keeps serving its pool (run ends when all
+  slices spent) | "cutoff" = whole run stops at the first
+  exhausted side (pool under-spent).
+end note
+}
+
+  CoEvolutionConfig *-- "1..*" Side
+  CoEvolutionTrainer ..> CoEvolutionConfig : "consumes via config.coevolution_config"
+  CoEvolutionTrainer ..> CoEvolutionEvaluator : uses
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

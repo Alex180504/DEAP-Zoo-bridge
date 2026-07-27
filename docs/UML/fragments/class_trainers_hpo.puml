@@ -1,0 +1,59 @@
+@startuml trainers_hpo
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title Evolutionary hyperparameter-optimising trainers
+
+package "deap_pettingzoo.baselines" {
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
+    }
+    class EvolveHPOTrainer {
+        # _hpo_population_size: int
+        # _evo_every_n_steps: int
+        # _mutation_probs: dict
+        # _hpo_memories: list  # persistent replay buffer per slot
+        # _hpo_transitions: list[int]  # per-slot warm-up/learn counter
+        # _prober: ProbeController  # held-out champion probe
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.\nSupports the held-out champion probe.\nReturns the best-ever champion via a\nhall-of-fame (like EATrainer's\ntools.HallOfFame); eval_episodes /\nfinal_eval_episodes / hof_size are\nconfigurable; hof_size > 1 exports top-N.
+        + train(config, *, progress_callback) -> TrainingResult
+        + describe_hyperparameters() : adds HPO + mutation knobs
+        # _build_replay_buffer(agent_ids) : persistent per-slot buffer
+        # _train_one_agent(..., memory, total_transitions) : off-policy\n  replay loop on the persistent per-slot buffer\n  -> (steps, total_transitions)
+        # _train_one_agent_on_policy(...) : shared IPPO rollout
+        # _prepare_population_build(...) : grouping hook
+        # _build_hp_config(spec) -> HyperparameterConfig
+        # _build_population(...) -> list
+    }
+    class MADDPGHPOTrainer {
+        -- MADDPG HPO (off-policy)
+    }
+    class MATD3HPOTrainer {
+        -- MATD3 HPO (off-policy)
+    }
+    class IPPOHPOTrainer {
+        -- IPPO HPO (on-policy)
+    }
+    class GroupedIPPOHPOTrainer {
+        -- Prefix-grouped IPPO HPO (on-policy).\nValidates grouping + applies patch.
+    }
+}
+
+    MADDPGHPOTrainer --|> EvolveHPOTrainer
+    MATD3HPOTrainer --|> EvolveHPOTrainer
+    IPPOHPOTrainer --|> EvolveHPOTrainer
+    GroupedIPPOHPOTrainer --|> IPPOHPOTrainer
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

@@ -1,5 +1,9 @@
 @startuml sequence_eshyperneat_training
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title ES-HyperNEAT Training Sequence (with parallel eval + recording)
 
 actor User
@@ -56,7 +60,7 @@ alt effective_workers > 1
         Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)
         Pop -> Pop: reproduce / speciate
     end
-    Trainer -> Executor: executor.__exit__()
+    Trainer -> Executor: executor.~__exit~__()
 else effective_workers == 1 (sequential)
     loop n_generations
         Trainer -> Pop: run(eval_function, n=1)

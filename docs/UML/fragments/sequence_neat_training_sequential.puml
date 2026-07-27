@@ -1,0 +1,48 @@
+@startuml neat_training_sequential
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title NEAT training (2/3) — sequential (single-worker) evaluation
+
+participant "NEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "PettingZooWrapper" as Env
+participant "NeatPolicy" as Policy
+
+group effective_workers == 1 (sequential)
+    loop n_generations
+        Trainer -> Pop: run(eval_function, n=1)
+        activate Pop
+
+        loop for each genome in population
+            Pop -> Trainer: eval_function(genomes, config)
+            Trainer -> Policy: NeatPolicy(genome, config, action_space)
+            activate Policy
+            Trainer -> Policy: get_action(obs)
+            Policy -> Policy: network.activate(obs)
+            Policy -> Policy: head.decode(raw_output)
+            Trainer <-- Policy: action
+            deactivate Policy
+
+            Trainer -> Env: reset(seed)
+            loop episode steps
+                Trainer -> Env: step(actions_dict)
+                Env --> Trainer: observations, rewards, dones, truncateds, infos
+                Trainer -> Trainer: self._env_steps_consumed += 1
+            end
+            Trainer -> Trainer: genome.fitness = mean(rewards)
+        end
+
+        Pop -> Pop: reproduce / speciate
+        deactivate Pop
+    end
+end
+
+note over Trainer
+  Fragment of <i>sequence_neat_training.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

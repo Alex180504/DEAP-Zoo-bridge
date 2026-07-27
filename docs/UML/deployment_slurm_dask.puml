@@ -1,72 +1,68 @@
 @startuml
 title Slurm + Dask Deployment (single sbatch allocation)
 
+' Compact layout: edge labels are hand-wrapped and the driver note is anchored
+' sideways so the figure stays close to square -- see README, 'Layout'.
 skinparam componentStyle rectangle
+skinparam nodesep 15
+skinparam ranksep 30
 
-node "Slurm Allocation\n(examples/hpc/slurm/train_dask.sbatch)" {
+actor "Cluster scheduler\n(slurmctld / slurmd)" as Slurm
+
+node "Slurm allocation\n(examples/hpc/slurm/train_dask.sbatch)" {
   node "Batch step (node 0)" as Batch {
-    component "Driver process\n(examples/hpc/train_ea_dask.py\nor any make_executor caller)" as Driver
+    component "Driver process\n(examples/hpc/train_ea_dask.py,\nor any make_executor caller)" as Driver
   }
 
-  node "srun --overlap step 1\n(node 0)" as SchedStep {
+  node "srun --overlap step 1 (node 0)" as SchedStep {
     component "dask scheduler\n--scheduler-file $SCHED_FILE" as Scheduler
   }
 
-  node "srun --overlap step 2\n(--ntasks=$SLURM_JOB_NUM_NODES)" {
-    node "Worker task (node 0)" as WNode0 {
-      component "dask worker(s)\n--nthreads 1\n--nworkers $SLURM_CPUS_PER_TASK" as W0
-    }
-    node "Worker task (node 1..N)" as WNodeN {
-      component "dask worker(s)\n--nthreads 1\n--nworkers $SLURM_CPUS_PER_TASK" as WN
-    }
+  node "srun --overlap step 2\n(--ntasks=$SLURM_JOB_NUM_NODES)" as WorkStep {
+    component "dask worker(s), one task per node\n--nthreads 1\n--nworkers $SLURM_CPUS_PER_TASK\n(node 0's task shares the node\nwith the scheduler and driver)" as W
   }
 }
 
 database "Shared filesystem\n($SHARED_DIR)" as FS {
-  artifact "$SCHED_FILE\n(scheduler connection info)" as SchedFile
-  artifact "TrainingConfig.output_dir\n(metrics.csv, summary.json)" as Results
+  artifact "$SCHED_FILE\n(connection info)" as SchedFile
+  artifact "TrainingConfig\n.output_dir" as Results
 }
 
-actor "Cluster scheduler\n(slurmctld / slurmd)" as Slurm
+Slurm -> Batch : allocates nodes,\nlaunches sbatch
+Batch -> SchedStep : srun --overlap\n(shares CPUs)
+Batch -> WorkStep : srun --overlap\n(shares CPUs)
 
-Slurm -> Batch : allocates nodes,\nlaunches sbatch script
-Batch -> SchedStep : srun --overlap\n(shares allocation's CPUs)
-Batch -> WNode0 : srun --overlap\n(shares allocation's CPUs)
-Batch -> WNodeN : srun --overlap\n(shares allocation's CPUs)
+Scheduler -> SchedFile : writes address\n+ ports on bind
+Driver -> SchedFile : polls up to 60s,\nthen reads
+W --> SchedFile : reads to locate\nscheduler
 
-Scheduler -> SchedFile : writes address/ports\non bind
-Driver -> SchedFile : polls for file\n(up to 60s), then reads
-Driver ..> Scheduler : DEAP_DASK_SCHEDULER=$SCHED_FILE\n-> make_executor resolves via\nresolve_scheduler_address\n-> Client(scheduler_file=...)
+Driver ..> Scheduler : DEAP_DASK_SCHEDULER holds\n$SCHED_FILE -> make_executor\n-> resolve_scheduler_address\n-> Client(scheduler_file=...)
+W ..> Scheduler : registers\nas worker
 
-W0 --> SchedFile : reads to locate scheduler
-WN --> SchedFile : reads to locate scheduler
-W0 ..> Scheduler : registers as worker
-WN ..> Scheduler : registers as worker
+Driver -> Scheduler : client.map(\n_worker_evaluate,\npayloads)
+Scheduler --> W : task
+W --> Scheduler : (fitness,\nsteps_delta)
+Scheduler --> Driver : gathered results\n(ordered; retries=2\non worker death)
 
-Driver -> Scheduler : client.map(_worker_evaluate, payloads)\n(dispatch via registered workers)
-Scheduler --> W0 : task
-Scheduler --> WN : task
-W0 --> Scheduler : (fitness, steps_delta)
-WN --> Scheduler : (fitness, steps_delta)
-Scheduler --> Driver : gathered results\n(ordered; retries=2 on worker death)
+Driver -> Results : metrics.csv,\nsummary.json,\ncheckpoint -- sole\nwriter (ExperimentLogger)
 
-Driver -> Results : write metrics.csv,\nsummary.json, checkpoint\n(single writer -- ExperimentLogger)
-
-note bottom of Driver
-  Real-cluster deltas vs the Docker Slurm rig
-  (docker/slurm-cluster/, tests/hpc/test_slurm_rig.py)
-  are only partition/account sbatch headers and
-  node counts -- the same .sbatch file is submitted
-  in both places.
+note left of Driver
+  Real-cluster deltas vs the
+  Docker Slurm rig (docker/slurm-cluster/,
+  tests/hpc/test_slurm_rig.py) are only
+  partition/account sbatch headers and
+  node counts -- the same .sbatch file
+  is submitted in both.
 end note
 
 note bottom of FS
-  Scheduler-file handshake is the canonical
-  dask-on-Slurm pattern: the scheduler's
-  hostname/port are not known ahead of the
-  allocation, so workers and the driver discover
-  them via a shared-FS file instead of a fixed
-  tcp:// address (used by the Docker Dask rig,
-  docker/dask-cluster/, instead).
+  The scheduler-file handshake is the
+  canonical dask-on-Slurm pattern: the
+  scheduler's host/port are unknown
+  before the allocation, so driver and
+  workers discover them through a
+  shared-FS file rather than a fixed
+  tcp:// address (which the Docker Dask
+  rig, docker/dask-cluster/, uses).
 end note
 @enduml

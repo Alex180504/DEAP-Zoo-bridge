@@ -3,6 +3,8 @@
 skinparam classAttributeIconSize 0
 skinparam groupInheritance 2
 
+left to right direction
+
 title DEAP-PettingZoo Bridge - Class Diagram
 
 package "deap_pettingzoo.genomes" {

@@ -1,0 +1,150 @@
+@startuml sequence_qdax_numpy
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title QD algorithm training over a PettingZoo Env (numpy boundary)
+
+actor "User" as User
+participant "MAPElitesTrainer" as Trainer
+participant "registry" as Registry
+participant "PettingZooWrapper\n(driver copy)" as DriverEnv
+participant "scoring_numpy\nmake_numpy_scoring_function" as Scoring
+participant "make_executor\n(process / dask)" as Executor
+participant "_numpy_rollout\n(worker process)" as Worker
+participant "PettingZooWrapper\n+ Flax MLP (worker cache)" as WorkerEnv
+participant "qdax.MAPElites" as QDax
+participant "MapElites\nRepertoire" as Repertoire
+participant "FlaxPolicy\nAdapter" as Policy
+
+== Setup ==
+
+User -> Trainer : train(TrainingConfig(\n  env_name="mpe2_simple_spread",\n  algorithm_params={"descriptor_fn": <caller-supplied callable>,\n                    "grid_shape": (20,20), "num_workers": 8, ...}))
+activate Trainer
+
+Trainer -> Registry : get_env_spec(env_name)
+Registry --> Trainer : spec (api != "jax_parallel")
+
+Trainer -> Registry : build_env(env_name, env_config)
+Registry -> DriverEnv : PettingZooWrapper(...)
+activate DriverEnv
+DriverEnv --> Trainer : wrapper
+
+Trainer -> DriverEnv : action_space(possible_agents[0])
+DriverEnv --> Trainer : space -> _resolve_action_decoding(...)\n-> (action_type, nvec)
+
+Trainer -> Scoring : make_numpy_scoring_function(\n  env_name, layer_sizes, episode_length,\n  descriptor_fn, action_type, nvec,\n  state_extractor, num_workers,\n  parallel_backend, eval_episodes, worker_imports)
+activate Scoring
+Scoring -> Registry : get_registry_snapshot(target_remote)
+Registry --> Scoring : snapshot of runtime-registered envs
+Scoring --> Trainer : scoring_fn (.close(), ._env_steps_consumed)\nholding a _RolloutSpec of picklable metadata only —\nno live env, module or JAX arrays
+
+note over Trainer, Scoring
+  CMAMETrainer follows this same flow. Both QDax trainers obtain their
+  scoring function from the shared _build_env_and_scoring helper, so the
+  numpy/JAX dispatch, the UserWarning and the budget_on_consumed rule are
+  identical. CMA-ME differs only at the boundary: its emitter operates on
+  flat arrays, so _flat_scoring rebuilds a pytree per row on the host
+  before calling scoring_fn — which this path immediately re-flattens.
+end note
+
+Trainer -> Trainer : make_flax_mlp(layer_sizes, activation)\ninit_flax_mlp_params(module, seed)
+
+== Repertoire initialisation ==
+
+Trainer -> QDax : MAPElites(scoring_fn, emitter, metrics_fn)
+activate QDax
+Trainer -> QDax : init(init_genotypes, centroids, key)
+QDax -> Scoring : scoring_fn(genotypes, key)
+
+Scoring -> Scoring : jax.random.randint -> one seed per genotype;\npytree_to_flat(...) per individual
+
+alt num_workers > 1 or remote scheduler
+  Scoring -> Executor : make_executor(...) — lazy, once,\nreused across every QD iteration
+  activate Executor
+  Scoring -> Executor : map(_numpy_rollout,\n  [(spec, flat_params, seed), ...])
+  Executor -> Worker : one payload per genotype
+else serial (num_workers <= 1)
+  Scoring -> Worker : _local_rollout(flat_params, seed)\nin-process, no executor overhead
+end
+
+activate Worker
+Worker -> WorkerEnv : _ensure_worker_context(spec) — first task only:\nreplay_registry_snapshot_once(...), make_flax_mlp(...),\nPettingZooWrapper(env_name, env_config)
+activate WorkerEnv
+WorkerEnv --> Worker : cached (env, module, extractor)
+
+loop eval_episodes per genotype
+  Worker -> WorkerEnv : reset(seed + episode_idx)
+  WorkerEnv --> Worker : obs
+  Worker -> Worker : state_extractor(obs, agents)\n-> (positions, velocities)
+
+  loop until all done or episode_length reached
+    Worker -> Worker : module.apply({"params": params}, obs[a]) per live agent;\ndecode action — argmax / per-chunk argmax / tanh
+    Worker -> WorkerEnv : step(actions)
+    WorkerEnv --> Worker : obs, rewards, terms, truncs
+    Worker -> Worker : accumulate reward;\nextract + pad agent state
+  end
+
+  note right of Worker
+    Short trajectories are padded by repeating the last
+    live frame, mirroring the JAX path's
+    jnp.where(alive, ...) freeze inside lax.scan.
+  end note
+
+  Worker -> Worker : descriptor_fn(trajectory)\nnumpy stacks converted to jnp arrays
+end
+
+Worker --> Scoring : (fitness, descriptor, steps)\naveraged over eval_episodes
+deactivate WorkerEnv
+deactivate Worker
+
+Scoring -> Scoring : _env_steps_consumed += sum(steps)\n(real env ticks — the JAX path\nhas no equivalent counter)
+Scoring --> QDax : (fitness, descriptor, {})\nconverted back to jnp arrays
+
+QDax -> Repertoire : MapElitesRepertoire.init(...)
+activate Repertoire
+Repertoire --> QDax : repertoire
+QDax --> Trainer : (repertoire, emitter_state, init_metrics)
+
+== QD loop ==
+
+loop _budget_iterations(num_iterations, consumed_budget, ...)
+    Trainer -> QDax : update(repertoire, emitter_state, key)
+    QDax -> QDax : emitter.emit(repertoire, ...)
+    QDax -> Scoring : scoring_fn(offspring, key)
+    Scoring -> Worker : map(_numpy_rollout, payloads) through the same\nexecutor — pool and per-worker env caches reused
+    Worker --> Scoring : (fitness, descriptor, steps) per genotype
+    Scoring --> QDax : (fitness, descriptor, {})
+    QDax -> Repertoire : add(offspring, descriptor, fitness)
+    Repertoire --> QDax : updated repertoire
+    QDax --> Trainer : (repertoire, emitter_state, metrics)
+    Trainer -> Trainer : nominal budget: iteration count;\nbudget_on_consumed: stop once\nscoring_fn._env_steps_consumed >= budget
+end
+
+== Finalisation ==
+
+Trainer -> Repertoire : select best genotype
+Repertoire --> Trainer : best_params (flat pytree)
+
+Trainer -> Policy : FlaxPolicyAdapter(module, best_params, masked=...)
+activate Policy
+Policy --> Trainer : policy
+deactivate Policy
+
+alt save_repertoire
+  Trainer -> Repertoire : pickle.dump(repertoire,\n  output_dir/repertoire.pkl)
+end
+
+Trainer -> Scoring : close_scoring_function(scoring_fn)\ncalled from a try / finally
+Scoring -> Executor : ~__exit~__ — tear down the pool
+deactivate Executor
+deactivate Scoring
+
+Trainer --> User : TrainingResult(policy,\n  metrics={env_steps_consumed: real ticks},\n  metadata={grid_shape, descriptor,\n            num_iterations, repertoire_path})
+deactivate Repertoire
+deactivate QDax
+deactivate DriverEnv
+deactivate Trainer
+
+@enduml

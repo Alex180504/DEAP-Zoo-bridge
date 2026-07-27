@@ -1,4 +1,9 @@
 @startuml
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title HPC Dask Evaluation Sequence (remote scheduler)
 
 actor Driver as User
@@ -38,11 +43,11 @@ ME --> T: executor
 
 == Dispatch population ==
 T -> R: get_registry_snapshot(target_remote=True)
-R --> T: snapshot (custom envs; warns + drops\nnon-picklable / __main__ factories)
+R --> T: snapshot (custom envs; warns + drops\nnon-picklable / ~__main~__ factories)
 T -> T: build _EvalWorkerSpec(..., registry_snapshot)
 T -> DE: executor.map(_worker_evaluate, payloads, retries=2)
-alt worker fn resolves to __main__
-  DE -> DE: raise immediately\n(fn.__module__ == "__main__")
+alt worker fn resolves to ~__main~__
+  DE -> DE: raise immediately\n(fn.~__module~__ == "~__main~__")
 else fn resolvable
   DE -> C: client.map(_worker_evaluate, payloads, retries=2)
   C -> WK: dispatch payload

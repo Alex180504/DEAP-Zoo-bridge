@@ -4,7 +4,7 @@ skinparam shadowing false
 skinparam linetype ortho
 skinparam ArrowFontSize 10
 
-title DEAP-bridge — Service Database Schema (SQLite, _service.db)
+title Service Database Schema (SQLite, _service.db)
 
 entity "experiments" as experiments {
   * **id** : TEXT <<PK>>

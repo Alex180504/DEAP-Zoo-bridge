@@ -1,5 +1,9 @@
 @startuml sequence_neat_training
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title NEAT Training Sequence (with parallel eval + recording)
 
 actor User
@@ -60,7 +64,7 @@ alt effective_workers > 1
 
         Pop -> Pop: reproduce / speciate
     end
-    Trainer -> Executor: executor.__exit__()
+    Trainer -> Executor: executor.~__exit~__()
     Trainer -> Trainer: self._env_steps_consumed += step_sink[0]
 else effective_workers == 1 (sequential)
     loop n_generations

@@ -1,0 +1,80 @@
+@startuml trainers_ea
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 170
+
+title Genetic-algorithm trainer
+
+package "deap_pettingzoo.baselines" {
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
+    }
+    class EATrainer {
+        - hidden_size: int
+        - population_size: int
+        - mutation_rate: float
+        - crossover_rate: float
+        - strategy: str  ' simple | mu_plus_lambda | mu_comma_lambda
+        - mu: int
+        - lambda_: int
+        - selection_method: str
+        - crossover_method: str
+        - mutation_method: str
+        --
+        + __init__(hidden_size, population_size, ..., strategy, mu, lambda_, selection_method, crossover_method, mutation_method, selection_params, crossover_params, mutation_params)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _run_simple(...) -> None
+        - _translate_budget(config) -> dict
+    }
+    class GenomePolicyWrapper {
+        - genome: FixedTopologyGenome
+        - env_name: str
+        - _policies: dict
+        --
+        + __init__(genome, env_name)
+        + get_action(observation) -> action
+        + reset() -> None
+        + genome() -> FixedTopologyGenome
+    }
+
+note bottom of EATrainer
+  Uniform env-step metric contract — every
+  population trainer (EA, CMA-ES, PSO,
+  co-evolution, NEAT/HyperNEAT) emits
+  TrainingResult.metrics["env_steps_nominal"]
+  and ["env_steps_consumed"]. Consumed is the
+  real tick count (aggregated across workers on
+  the parallel path); below nominal when episodes
+  truncate early. QDax reports it on the numpy
+  scoring path, None on the JAX-native path.
+  budget_on_consumed=True makes EA simple / CMA-ES / PSO /
+  NEAT+HyperNEAT / QDax (numpy path) run until the real
+  ENV_STEPS budget is spent.
+end note
+
+note bottom of GenomePolicyWrapper
+  Shared adapter used by both EATrainer
+  and CMAESTrainer to expose a trained
+  genome as a PolicyProtocol for
+  UnifiedEvaluator.
+end note
+}
+
+    BaselineTrainer <|-- EATrainer
+    EATrainer ..> GenomePolicyWrapper : produces
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

@@ -1,5 +1,7 @@
 @startuml sequence_baseline_comparison
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 
 title Baseline Comparison Workflow (EA vs AgileRL)
 
