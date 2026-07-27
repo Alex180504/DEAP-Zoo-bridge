@@ -1,6 +1,10 @@
 @startuml sequence_logging_pipeline
 !theme plain
-title Diagnostic Logging Pipeline – configure_logging → handlers → retrieval
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title Diagnostic Logging Pipeline – configure_logging -> handlers -> retrieval
 
 ' NOTE: This is backend *diagnostic* logging (exceptions, warnings, lifecycle,
 ' component activation).  For the *experiment-results* pipeline (metrics /
@@ -17,7 +21,7 @@ participant "FastAPI\n/app.py" as API
 participant "Filesystem /\nDocker" as FS
 
 == App process startup ==
-Op -> Run: python -m deap_pettingzoo.service [--verbose|--log-level|--log-format]
+Op -> Run: python -m deap_pettingzoo.service [~--verbose|~--log-level|~--log-format]
 Run -> Run: resolve_level / resolve_format\nexport DEAP_LOG_LEVEL + DEAP_LOG_FORMAT (env)
 note right of Run: env is inherited by the\nrunner subprocess later
 Run -> Cfg: configure_logging(log_file=<DEAP_LOG_DIR>/service.log)

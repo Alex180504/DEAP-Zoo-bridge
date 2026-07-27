@@ -1,0 +1,94 @@
+# 2-node Slurm simulation rig: slurmctld + compute nodes c1/c2, all from one
+# image (FROM deap-hpc-base:latest — build that first, see
+# scripts/hpc_validate.* or the tests/hpc/conftest.py fixture).
+#
+# Service name == container hostname == Slurm NodeName, so slurm.conf's
+# c[1-2] resolve over the compose network's DNS with no extra aliases.
+#
+# The named volume mounted at /shared plays the cluster's shared filesystem:
+# jobs are submitted with --chdir=/shared, the scheduler-file handshake and
+# all results live there (no Windows bind mounts — code is baked into the
+# image).
+x-slurm-node: &slurm-node
+  build:
+    context: ../..
+    dockerfile: docker/slurm-cluster/Dockerfile
+  image: deap-slurm-node:latest
+
+services:
+  slurmctld:
+    <<: *slurm-node
+    hostname: slurmctld
+    command: ["slurmctld"]
+    healthcheck:
+      # sinfo succeeding proves slurmctld is answering RPCs and munge auth
+      # works; node registration is polled separately by the test fixture.
+      test: ["CMD", "sinfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    volumes:
+      - shared:/shared
+
+  c1:
+    <<: *slurm-node
+    hostname: c1
+    command: ["slurmd"]
+    depends_on:
+      # service_started, NOT service_healthy: slurmctld's startup blocks on
+      # resolving c1/c2 (compose DNS entries only exist once their
+      # containers run), so gating nodes on controller health deadlock-ish
+      # stalls the whole rig. slurmd retries registration on its own until
+      # the controller answers, so plain start ordering is enough.
+      slurmctld:
+        condition: service_started
+    volumes:
+      - shared:/shared
+
+  c2:
+    <<: *slurm-node
+    hostname: c2
+    command: ["slurmd"]
+    depends_on:
+      # service_started, NOT service_healthy: slurmctld's startup blocks on
+      # resolving c1/c2 (compose DNS entries only exist once their
+      # containers run), so gating nodes on controller health deadlock-ish
+      # stalls the whole rig. slurmd retries registration on its own until
+      # the controller answers, so plain start ordering is enough.
+      slurmctld:
+        condition: service_started
+    volumes:
+      - shared:/shared
+
+  # Opt-in GPU node for AgileRL jobs: `docker compose --profile gpu up`
+  # (the test fixture enables it via DEAP_HPC_GPU=1). Needs an NVIDIA GPU
+  # passed through by Docker Desktop; without the profile, slurm.conf's g1
+  # just shows as down* and the CPU partition is unaffected.
+  g1:
+    build:
+      context: ../..
+      dockerfile: docker/slurm-cluster/Dockerfile.gpu
+    image: deap-slurm-node-gpu:latest
+    profiles: ["gpu"]
+    hostname: g1
+    command: ["slurmd"]
+    depends_on:
+      # service_started, NOT service_healthy: slurmctld's startup blocks on
+      # resolving c1/c2 (compose DNS entries only exist once their
+      # containers run), so gating nodes on controller health deadlock-ish
+      # stalls the whole rig. slurmd retries registration on its own until
+      # the controller answers, so plain start ordering is enough.
+      slurmctld:
+        condition: service_started
+    volumes:
+      - shared:/shared
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  shared:

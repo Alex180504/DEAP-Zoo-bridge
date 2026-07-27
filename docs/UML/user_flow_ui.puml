@@ -17,10 +17,10 @@ Home --> Browse : root selected
 
 state "Experiment group" as ExpGroup {
     state Setup {
-        Setup : Select env → compatible algos auto-highlighted
+        Setup : Select env -> compatible algos auto-highlighted
         Setup : Configure hyperparams / budget / fitness
         Setup : Optional coevolution + recording
-        Setup : Validate → Submit → enqueue
+        Setup : Validate -> Submit -> enqueue
     }
     state Queue {
         Queue : Active experiment: progress bar + stdout
@@ -31,7 +31,7 @@ state "Experiment group" as ExpGroup {
 
 Home --> Setup : configure new experiment
 Setup --> Queue : submitted successfully
-Queue --> Browse : completed → inspect results
+Queue --> Browse : completed -> inspect results
 Browse --> Setup : re-run (load spec from UI-origin experiment)
 
 state Browse {

@@ -7,7 +7,7 @@ A *position extractor* is any callable with the signature::
 It is called once per environment step (before :meth:`env.step`) with the
 current observation dict and the :class:`PettingZooWrapper`.  It should return
 an ``(N, 2)`` float32 array where ``N`` is the total number of agents
-(pursuers first, then evaders) and each row is the ``(x, y)`` world position
+and each row is the ``(x, y)`` world position
 of one agent, or ``None`` to skip this timestep.
 
 The extracted positions are stacked across steps into a ``(T, N, 2)`` array
@@ -34,9 +34,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
 # Generic obs-based extractor
-# ---------------------------------------------------------------------------
 
 
 def obs_first_two(
@@ -52,7 +50,7 @@ def obs_first_two(
     .. note::
         For MPE environments the raw world position is typically at
         ``obs[2:4]`` (after ``vel_x, vel_y``).  If that is the case for
-        your env, use :func:`obs_indices` instead::
+        a given env, use :func:`obs_indices` instead::
 
             from deap_pettingzoo.contrib.qdax.position_extractors import obs_indices
             extractor = obs_indices(2, 4)
@@ -107,7 +105,7 @@ class _ObsIndicesExtractor:
 def obs_indices(start: int, stop: int) -> "_ObsIndicesExtractor":
     """Return a picklable extractor that reads ``obs[start:stop]`` as ``(x, y)``.
 
-    Example -- MPE positions at indices 2-3::
+    Example: MPE positions at indices 2-3:
 
         extractor = obs_indices(2, 4)
         Side(optimizer_config={"position_extractor": extractor})

@@ -136,7 +136,6 @@ SUPPORTED_SELECTION_METHODS = (
     "best",
     "random",
     "sus",
-    "double_tournament",
     "lexicase",
     "epsilon_lexicase",
     "nsga2",
@@ -168,24 +167,31 @@ def create_toolbox(
 
     Args:
         genome_config: Configuration for genome creation
+
             - layer_sizes: List[int] - Network architecture
             - activation: str (optional) - Hidden-layer activation function
             - output_activation: str (optional) - Output-layer activation
             - weight_range: tuple (optional) - Weight initialization range
             - random_seed: int (optional) - Seed for reproducibility
+
         evaluator: Evaluator for fitness calculation
         selection_config: Selection operator configuration
+
             - method: str (default: 'tournament') - one of
               ``'tournament'``, ``'roulette'``, ``'best'``, ``'random'``
             - tournament_size: int (default: 3, only for 'tournament')
+
         crossover_config: Crossover operator configuration
+
             - method: str (default: 'blend') - one of
               ``'blend'``, ``'one_point'``, ``'two_point'``, ``'uniform'``,
               ``'sbx'`` (simulated-binary-bounded), ``'es_blend'``
             - alpha: float (default: 0.5) - blend/BLX-α parameter
             - indpb: float (default: 0.5) - per-gene swap prob for 'uniform'
             - eta: float (default: 15.0) - SBX distribution index
+
         mutation_config: Mutation operator configuration
+
             - method: str (default: 'gaussian') - one of
               ``'gaussian'``, ``'polynomial_bounded'``
             - mu: float (default: 0.0) - Gaussian mean
@@ -277,14 +283,11 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
 
     Exceptions:
 
-    * ``"double_tournament"`` uses ``genome.get_weight_count()`` as the
-      parsimony (size) key because the project's individuals are plain
-      objects, not sequences, and therefore lack ``__len__``.
     * ``"lexicase"`` / ``"epsilon_lexicase"`` require multi-dimensional
       fitness vectors (one test-case per position).  They are a no-op
       for single-objective evaluators but work correctly with
       :class:`~deap_pettingzoo.integration.objectives.FitnessSpec`
-      lexicase modes set up in Phase 1.1.
+      lexicase modes.
     """
     method = cfg.get("method", "tournament")
     if method == "tournament":
@@ -315,14 +318,6 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
         toolbox.register("select", tools.selRandom)
     elif method == "sus":
         toolbox.register("select", tools.selStochasticUniversalSampling)
-    elif method == "double_tournament":
-        toolbox.register(
-            "select",
-            _sel_double_tournament_adapter,
-            fitness_size=cfg.get("fitness_size", 2),
-            parsimony_size=cfg.get("parsimony_size", 3),
-            fitness_first=cfg.get("fitness_first", True),
-        )
     elif method == "lexicase":
         toolbox.register("select", tools.selLexicase)
     elif method == "epsilon_lexicase":
@@ -336,85 +331,6 @@ def _register_selection(toolbox: base.Toolbox, cfg: Dict[str, Any]) -> None:
             f"Unknown selection method {method!r}. "
             f"Supported: {SUPPORTED_SELECTION_METHODS}"
         )
-
-
-def _sel_double_tournament_adapter(
-    individuals: list,
-    k: int,
-    fitness_size: int = 2,
-    parsimony_size: int = 3,
-    fitness_first: bool = True,
-) -> list:
-    """Double-tournament selection using genome weight count as parsimony.
-
-    DEAP's :func:`~deap.tools.selDoubleTournament` uses ``len(ind)`` as
-    the size measure, but the project's ``creator.Individual`` is a plain
-    object — not a sequence — so ``len()`` is undefined.  This adapter
-    reimplements the same two-stage tournament logic while reading the
-    genome's weight count via :meth:`~FixedTopologyGenome.get_weight_count`.
-
-    Args:
-        individuals: Population of individuals with ``.genome`` and
-            ``.fitness`` attributes.
-        k: Number of individuals to select.
-        fitness_size: Number of candidates compared on fitness in the
-            first-stage tournament.
-        parsimony_size: Number of candidates compared on size in the
-            second-stage tournament.
-        fitness_first: If ``True``, first tournament is on fitness and
-            second on size (favours fit, then small).  If ``False``,
-            first tournament is on size and second on fitness (favours
-            small, then fit).
-
-    Returns:
-        List of *k* selected individuals.
-    """
-    import random
-
-    def _genome_size(ind):
-        """Return the parsimony measure (weight count) for an individual."""
-        try:
-            return ind.genome.get_weight_count()
-        except AttributeError:
-            return 0  # fallback — shouldn't happen in normal use
-
-    def _fitness_key(ind):
-        """Higher-is-better fitness key (DEAP FitnessMax convention)."""
-        return ind.fitness.values[0] if ind.fitness.wvalues else 0.0
-
-    def _tournament(pool, n_candidates, key_fn, reverse=True):
-        """Select one winner from *n_candidates* random aspirants."""
-        aspirants = random.choices(pool, k=n_candidates)
-        return sorted(aspirants, key=key_fn, reverse=reverse)[0]
-        # Note: random.choices samples WITH replacement — intentional,
-        # matching DEAP's selTournament behaviour.
-
-    chosen = []
-    for _ in range(k):
-        if fitness_first:
-            # Stage 1: fitness tournament → `fitness_size` candidates
-            stage1 = _tournament(individuals, fitness_size, _fitness_key)
-            # Stage 2: parsimony tournament among those candidates
-            # (lower weight count = better, so reverse=False)
-            stage1_candidates = [stage1]  # Only got one from stage1
-            # Actually DEAP's logic is: for each of parsimony_size, pick
-            # a random individual, then do fitness tournament to get
-            # fitness_size candidates, then pick the smallest among them.
-            # Let me replicate: draw parsimony_size aspirants, each
-            # aspirant is the winner of a fitness_size tournament.
-            candidate_pool = [
-                _tournament(individuals, fitness_size, _fitness_key)
-                for _ in range(parsimony_size)
-            ]
-            winner = min(candidate_pool, key=_genome_size)
-        else:
-            candidate_pool = [
-                _tournament(individuals, parsimony_size, _genome_size, reverse=False)
-                for _ in range(fitness_size)
-            ]
-            winner = max(candidate_pool, key=_fitness_key)
-        chosen.append(winner)
-    return chosen
 
 
 def _register_crossover(
@@ -638,9 +554,7 @@ def clone_individual(individual: Any) -> Any:
     return cloned
 
 
-# --------------------------------------------------------------------------
 # Process-pool parallel evaluation plumbing
-# --------------------------------------------------------------------------
 
 
 @dataclass
@@ -698,7 +612,7 @@ def _ensure_worker_evaluator(spec: _EvalWorkerSpec) -> Any:
     if evaluator is not None and cached_spec == spec:
         return evaluator
 
-    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # Re-register custom envs so Dask workers (no initializer hook) can
     # build them; no-op on repeat calls and for built-in-only snapshots.
     from deap_pettingzoo.environments.registry import (
         replay_registry_snapshot_once,
@@ -745,7 +659,7 @@ def _worker_evaluate(
     Args:
         payload_and_spec: ``(_GenomePayload, _EvalWorkerSpec)`` tuple.
             We pack both so every call carries enough context to
-            rebuild the evaluator — necessary because SCOOP / Dask do
+            rebuild the evaluator — necessary because Dask does
             not expose an init hook.
 
     Returns:
@@ -754,7 +668,7 @@ def _worker_evaluate(
         ``steps_delta`` is the real number of env ticks this single
         evaluation consumed. The delta is measured around the evaluate
         call so it is robust to the per-process cached evaluator (and to
-        SCOOP / Dask in-process fallbacks) to prevent double counting regardless
+        Dask's in-process fallback) to prevent double counting regardless
         of backend.
     """
     payload, spec = payload_and_spec
@@ -899,8 +813,7 @@ class _MixedWorkerSpec:
     :func:`_resolve_callable`.
 
     Attributes:
-        env_factory_qualname: Fully-qualified name of the env factory
-            (e.g. ``"examples.pursuit_evasion.ea_vs_apf.build_env"``).
+        env_factory_qualname: Fully-qualified name of the env factory.
         scripted_factory_qualname: Fully-qualified name of the scripted-
             policy factory.
         learner_factory_qualname: Fully-qualified name of the learner-
@@ -954,14 +867,19 @@ def _resolve_callable(qualname: str) -> Any:
     return getattr(mod, attr)
 
 
-def _mixed_worker_evaluate(
+def _mixed_worker_run(
     payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
-) -> tuple:
-    """Top-level worker for MixedPolicyEvaluator parallel evaluation.
+) -> Tuple[tuple, int]:
+    """Shared body for the MixedPolicyEvaluator parallel workers.
 
     Resolves all factories from their qualified names, builds a fresh
     :class:`~deap_pettingzoo.evaluators.MixedPolicyEvaluator`, and
     evaluates the genome over ``spec.eval_episodes`` episodes.
+
+    Returns:
+        ``((mean_fitness,), env_steps)`` where ``env_steps`` is the real
+        env-tick delta this call consumed on the worker-local evaluator
+        (the counter itself never crosses back from the subprocess).
 
     This function is module-level and therefore picklable on all
     platforms (including Windows spawn).
@@ -973,7 +891,7 @@ def _mixed_worker_evaluate(
 
     payload, spec = payload_and_spec
 
-    # Re-register custom envs so SCOOP/Dask workers (no initializer hook) can
+    # Re-register custom envs so Dask workers (no initializer hook) can
     # resolve the env factory; no-op on repeat calls.
     replay_registry_snapshot_once(spec.registry_snapshot)
 
@@ -988,7 +906,8 @@ def _mixed_worker_evaluate(
     genome.set_weights(np.asarray(payload.weights, dtype=float))
 
     # Resolve factories and build the evaluator once per worker process.
-    # The cache key includes all fields that influence evaluator construction so that a single worker correctly handles spec changes across runs.
+    # The cache key includes all fields that influence evaluator construction so that
+    # a single worker correctly handles spec changes across runs.
     cache_key = (
         spec.env_factory_qualname,
         spec.scripted_factory_qualname,
@@ -1021,11 +940,34 @@ def _mixed_worker_evaluate(
             self.genome = g
 
     ind = _Ind(genome)
+    # getattr-guarded: tests may inject stub evaluators without the counter.
+    before = int(getattr(evaluator, "env_steps_consumed", 0))
     total = sum(
         evaluator.run_episode(ind, seed=payload.seed).fitness
         for _ in range(spec.eval_episodes)
     )
-    return (total / spec.eval_episodes,)
+    steps = int(getattr(evaluator, "env_steps_consumed", before)) - before
+    return (total / spec.eval_episodes,), steps
+
+
+def _mixed_worker_evaluate(
+    payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
+) -> tuple:
+    """Fitness-only MixedPolicyEvaluator worker (``toolbox.map`` contract)."""
+    fitness, _ = _mixed_worker_run(payload_and_spec)
+    return fitness
+
+
+def _mixed_worker_evaluate_with_steps(
+    payload_and_spec: Tuple["_GenomePayload", "_MixedWorkerSpec"],
+) -> Tuple[tuple, int]:
+    """MixedPolicyEvaluator worker returning ``(fitness_tuple, env_steps)``.
+
+    The step count is the real env-tick delta consumed by this call,
+    enabling consumed-step (``budget_on_consumed``) budgeting in driver
+    loops that dispatch through an executor.
+    """
+    return _mixed_worker_run(payload_and_spec)
 
 
 def make_mixed_parallel_evaluate_map(
@@ -1033,6 +975,7 @@ def make_mixed_parallel_evaluate_map(
     evaluator: Any,
     *,
     eval_episodes: int = 1,
+    step_sink: Optional[List[int]] = None,
 ) -> Any:
     """Build a ``map``-shaped callable for parallel :class:`MixedPolicyEvaluator` eval.
 
@@ -1066,6 +1009,11 @@ def make_mixed_parallel_evaluate_map(
         evaluator: A :class:`MixedPolicyEvaluator` built with the factory
             path.
         eval_episodes: Episodes averaged per genome per worker call.
+        step_sink: Optional 1-element mutable list. When provided, the
+            real per-task env-step deltas returned by each worker are
+            summed into ``step_sink[0]`` so the driver can aggregate a
+            worker-side counter that never crosses back from the
+            subprocess (consumed-step budgeting).
 
     Returns:
         ``pmap`` callable compatible with ``toolbox.register("map", pmap)``.
@@ -1126,7 +1074,7 @@ def make_mixed_parallel_evaluate_map(
 
     from deap_pettingzoo.environments.registry import get_registry_snapshot
 
-    # Snapshot custom env registrations once so SCOOP/Dask workers (no
+    # Snapshot custom env registrations once so Dask workers (no
     # initializer hook) can resolve the env factory.
     registry_snapshot = get_registry_snapshot()
 
@@ -1163,6 +1111,10 @@ def make_mixed_parallel_evaluate_map(
                 registry_snapshot=spec.registry_snapshot,
             )
             payloads.append((_individual_to_payload(ind), per_ind_spec))
+        if step_sink is not None:
+            results = list(executor.map(_mixed_worker_evaluate_with_steps, payloads))
+            step_sink[0] += sum(int(steps) for _, steps in results)
+            return [fitness for fitness, _ in results]
         return list(executor.map(_mixed_worker_evaluate, payloads))
 
     return _pmap

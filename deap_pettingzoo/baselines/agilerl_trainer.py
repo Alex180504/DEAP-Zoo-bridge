@@ -62,11 +62,11 @@ logger = logging.getLogger(__name__)
 # functions with *different* memory layouts:
 #
 #   • ``vectorize_experiences_by_agent(rewards/log_probs/dones/values, dim=1)``
-#     stacks agents on dim-1 then flattens ⟹ order (T, A, E) ⟹ flat index
+#     stacks agents on dim-1 then flattens => order (T, A, E) => flat index
 #     k = t·(A·E) + a·E + e   (time outermost)
 #
 #   • ``concatenate_experiences_into_batches(states/actions)``
-#     does ``torch.cat(dim=0)`` ⟹ order (A, T, E, obs) ⟹ flat index
+#     does ``torch.cat(dim=0)`` => order (A, T, E, obs) => flat index
 #     k = a·(T·E) + t·E + e   (agent outermost)
 #
 # Example: with A=5 agents the two orderings agree only for the first E=8
@@ -74,14 +74,12 @@ logger = logging.getLogger(__name__)
 # The policy gradient is pure noise and the agent cannot learn.
 #
 # Fix: replace ``concatenate_experiences_into_batches`` with a version that
-# uses ``torch.stack(dim=1)`` → reshape, matching the advantage layout.
+# uses ``torch.stack(dim=1)`` -> reshape, matching the advantage layout.
 # The patch is applied **lazily** the first time a ``GroupedIPPOTrainer`` is
 # built (see ``_build_agent``), not at import time, and it fails loudly if the
-# AgileRL function it targets has been renamed or re-signatured by a version
-# bump — so a drifting dependency surfaces immediately instead of silently
-# letting grouped IPPO train without the fix.
+# AgileRL function it targets has been renamed or re-signatured by a version bump.
 
-#: Name of the AgileRL function we monkey-patch.
+#: Name of the AgileRL function to monkey-patch.
 _AGILERL_TARGET_NAME = "concatenate_experiences_into_batches"
 #: Expected leading positional parameter names of that function. Verified
 #: against AgileRL 2.6.1; a mismatch raises (and the regression test in
@@ -122,7 +120,7 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
                     for i in range(len(tlist[0]))
                 )
             # tlist: A tensors of shape (T, E?, *features)
-            # stack dim=1 → (T, A, E?, *features), matching advantage layout.
+            # stack dim=1 -> (T, A, E?, *features), matching advantage layout.
             stacked = torch.stack(tlist, dim=1)
             reshaped = stacked.reshape(-1, *sp.shape)
             for squeeze_dim in [0, -1]:
@@ -134,8 +132,7 @@ def _patched_concatenate_experiences_into_batches(experiences, space, actions=Fa
     except Exception as exc:
         # Runtime safety net: never crash a long training run if the
         # corrected flattening hits an unexpected layout. Emit a loud,
-        # *capturable* warning (not a bare print) so the degraded state is
-        # visible in logs/tests; grouped IPPO may not learn this update.
+        # capturable warning so the degraded state is visible in logs/tests.
         warnings.warn(
             "AgileRL grouping patch failed at run time "
             f"({type(exc).__name__}: {exc}); falling back to the original "
@@ -210,9 +207,7 @@ def _apply_agilerl_grouping_patch() -> None:
     _au._grouping_patch_applied = True
 
 
-# ---------------------------------------------------------------------------
 # Abstract base
-# ---------------------------------------------------------------------------
 
 
 class AgileRLTrainer(BaselineTrainer):
@@ -571,6 +566,16 @@ class AgileRLTrainer(BaselineTrainer):
                 max_steps=_rec_max_steps,
                 seed=seed,
             )
+            from deap_pettingzoo.baselines.probing import ProbeController
+
+            # Periodic held-out champion probe on the same env-step axis
+            # (never counted into the budget).
+            self._prober = ProbeController(
+                config,
+                log,
+                max_steps=_rec_max_steps,
+                seed=seed,
+            )
 
             def _champion():
                 return policy
@@ -614,6 +619,10 @@ class AgileRLTrainer(BaselineTrainer):
                 _champion, iteration=budget_steps, env_steps=budget_steps
             )
             self._recorder.close()
+            self._prober.finalize(
+                _champion, iteration=budget_steps, env_steps=budget_steps
+            )
+            self._prober.close()
 
             ep_rewards = list(metrics.get("episode_rewards", []) or [])
             for idx, r in enumerate(ep_rewards):
@@ -1436,7 +1445,7 @@ class AgileRLTrainer(BaselineTrainer):
                 + loss_str
             )
 
-            # Fire the unified progress+recording hook on every learn-iteration
+            # Fire the unified progress + recording hook on every learn-iteration
             # boundary, independent of whether a progress_callback is set
             # (recording must still happen on a headless run). _on_progress
             # no-ops the emit when the callback is None.

@@ -1,0 +1,104 @@
+@startuml evaluators
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+skinparam wrapWidth 170
+
+title Genome evaluators
+
+package "deap_pettingzoo.evaluators" {
+    abstract class BaseEvaluator {
+        + {abstract} evaluate(individual) -> fitness
+    }
+    class SingleEpisodeEvaluator {
+        - env_wrapper: PettingZooWrapper
+        - max_steps: int
+        + env_steps_consumed: int
+        --
+        + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        - _create_policies(genome, observations) -> dict
+        - _aggregate_fitness(rewards: dict) -> float
+        - _aggregate_team_fitness(rewards: dict) -> float
+        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
+        -- 'team' aggregation: exactly two teams,\n   ordered by sorted team name\n   (first - second); 1 team / no mapping\n   -> sum; >=3 teams -> ValueError (review S3) --
+    }
+    class MultiEpisodeEvaluator {
+        - single_evaluator: SingleEpisodeEvaluator
+        - num_episodes: int
+        - aggregation: str
+        - base_seed: int
+        --
+        + __init__(env_wrapper, genome_config, num_episodes, aggregation, base_seed, ...)
+        + evaluate(individual, seed=None) -> tuple
+        + evaluate_with_stats(individual) -> tuple[mean, std, min, max]
+    }
+    class SelfPlayEvaluator {
+        - env_wrapper: PettingZooWrapper
+        - max_steps: int
+        - aggregation: str
+        - team_mapping: Dict[str, str]
+        - team: Optional[str]
+        - masked: bool
+        - flatten_obs: bool
+        --
+        + __init__(env_wrapper, max_steps, aggregation, team_mapping, team, masked, flatten_obs)
+        + evaluate(individual, seed=None) -> Tuple[float]
+        -- one shared-weights policy plays\n   every role in a turn-based env;\n   aggregation ∈ {sum, mean,\n     first_agent, team_mapping} --
+    }
+    class MixedPolicyEvaluator {
+        - max_steps: int
+        - learner_agent_prefixes: List[str]
+        - learner_factory: LearnerPolicyFactory
+        + env_wrapper: Optional[PettingZooWrapper]
+        + env_factory: Optional[EnvFactory]
+        + scripted_policy_factory: Optional[ScriptedPolicyFactory]
+        + learner_agents: List[str]
+        + scripted_agents: List[str]
+        --
+        + __init__(learner_agent_prefixes, learner_factory,
+          max_steps=500,
+          env_wrapper=None, scripted_policies=None,
+          env_factory=None, scripted_policy_factory=None)
+        .. live-object path OR factory path; not both ..
+        + evaluate(individual, seed=None) -> Tuple[float]
+        + run_episode(individual, seed=None) -> MixedPolicyEvalResult
+        - _build_episode_context() -> (env, scripted)
+        - _validate_agent_coverage() -> None
+    }
+
+note bottom of MixedPolicyEvaluator
+  Two construction paths:
+  * Live-object path (env_wrapper=...) —
+    backward-compatible; not picklable.
+  * Factory path (env_factory=...,
+    scripted_policy_factory=...) —
+    required for parallel evaluation;
+    factories must be module-level callables.
+  Use make_mixed_parallel_evaluate_map
+  to integrate with DEAP toolbox.map.
+end note
+
+note bottom of SelfPlayEvaluator
+  Canonical EA evaluator for
+  strictly turn-based AEC games
+  (api='aec_masked' / 'aec_sequential').
+  Installs a MaskedDiscreteHead so
+  infos[agent]["action_mask"] is honoured.
+end note
+}
+
+    BaseEvaluator <|-- SingleEpisodeEvaluator
+    BaseEvaluator <|-- MultiEpisodeEvaluator
+    BaseEvaluator <|-- MixedPolicyEvaluator
+    BaseEvaluator <|-- SelfPlayEvaluator
+    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

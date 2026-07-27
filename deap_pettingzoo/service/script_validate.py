@@ -6,6 +6,7 @@ cannot prove the script trains correctly — only actually running it can. The U
 states this caveat next to the Validate button.
 
 Checks:
+
 * ``ast.parse`` — a ``SyntaxError`` becomes a blocking error with its line number.
 * Structure — a warning if neither ``if __name__ == "__main__"`` nor a top-level
   ``main()`` is present (the script may not do anything when executed).

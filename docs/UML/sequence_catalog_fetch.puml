@@ -1,5 +1,7 @@
 @startuml sequence_catalog_fetch
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Catalog Fetch – UI Dynamic Form Construction
 
 participant "Setup Page\n(Streamlit)" as Setup
@@ -20,7 +22,7 @@ Setup -> Setup: cache in st.session_state
 Setup -> Setup: render Environment tab\n(selectbox: env names from catalog)
 note right of Setup: show availability badges\n(missing extras greyed out)
 
-== Env selection → compatibility check ==
+== Env selection -> compatibility check ==
 
 Setup -> Setup: user selects environment
 
@@ -32,7 +34,7 @@ API --> Client: 200 JSON
 Client --> Setup: compatibility matrix
 Setup -> Setup: render Algorithm tab\n(compatible highlighted, incompatible disabled)
 
-== Algo selection → param rendering ==
+== Algo selection -> param rendering ==
 
 Setup -> Setup: user selects algorithms
 

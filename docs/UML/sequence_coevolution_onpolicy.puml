@@ -1,5 +1,9 @@
 @startuml sequence_coevolution_onpolicy
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Co-evolution — one generation, EA side vs on-policy IPPO RL side
 
 actor User

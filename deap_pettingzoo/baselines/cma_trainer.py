@@ -10,7 +10,7 @@ is drop-in compatible with :class:`UnifiedEvaluator` and
 """
 
 import time
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import numpy as np
 from deap import tools
@@ -52,7 +52,11 @@ from deap_pettingzoo.integration.deap_integration import (
     evaluate_population_parallel,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 class CMAESTrainer(BaselineTrainer):
@@ -101,6 +105,22 @@ class CMAESTrainer(BaselineTrainer):
                 help="lambda - samples drawn per generation.",
             ),
             ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                advanced=True,
+                help=(
+                    "Number of best-ever individuals kept in the hall-of-fame. "
+                    "The champion is always hof[0]; with hof_size > 1 the top-N "
+                    "are also checkpointed (hof_NN.json) and returned in "
+                    "TrainingResult.hall_of_fame."
+                ),
+            ),
+            ParamSpec(
                 "sigma0",
                 F,
                 0.3,
@@ -146,7 +166,7 @@ class CMAESTrainer(BaselineTrainer):
                 target=TR,
                 group="Parallelism",
                 advanced=True,
-                choices=("process", "scoop", "dask"),
+                choices=("process", "dask"),
                 help="Parallel executor backend.",
             ),
             ParamSpec(
@@ -180,8 +200,10 @@ class CMAESTrainer(BaselineTrainer):
         activation: str = "tanh",
         weight_range: tuple = (-1.0, 1.0),
         variant: str = "mu_mu_lambda",
+        hof_size: int = 1,
         num_workers: int = 1,
         parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
     ):
         """Initialise the CMA-ES trainer.
 
@@ -203,6 +225,14 @@ class CMAESTrainer(BaselineTrainer):
                 :class:`deap.cma.StrategyOnePlusLambda` — a single-parent
                 elitist variant that is typically more sample-efficient
                 on unimodal objectives.
+            num_workers: Parallel evaluation workers (1 = serial); the
+                ``TrainingConfig`` field wins unless left at its default.
+            parallel_backend: Executor backend (``"process"`` / ``"dask"``);
+                the ``TrainingConfig`` field wins unless left at its default.
+            scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+                scheduler-file path); requires ``parallel_backend='dask'``.
+                The ``TrainingConfig`` field wins unless left at ``None``;
+                the ``DEAP_DASK_SCHEDULER`` env var is the final fallback.
 
         Raises:
             ValueError: If ``variant`` is not ``'mu_mu_lambda'`` or
@@ -210,6 +240,8 @@ class CMAESTrainer(BaselineTrainer):
             ValueError: If ``num_workers`` is negative.
             ValueError: If ``parallel_backend`` is not in
                 :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
+            ValueError: If ``scheduler_address`` is set with a non-Dask
+                ``parallel_backend``.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -222,6 +254,9 @@ class CMAESTrainer(BaselineTrainer):
                 "Expected 'mu_mu_lambda' or 'one_plus_lambda'."
             )
         self.variant = variant
+        if hof_size < 1:
+            raise ValueError(f"hof_size must be >= 1, got {hof_size}.")
+        self.hof_size = int(hof_size)
 
         if num_workers < 0:
             raise ValueError(
@@ -234,8 +269,14 @@ class CMAESTrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     def train(
         self,
@@ -309,7 +350,7 @@ class CMAESTrainer(BaselineTrainer):
         toolbox = register_cma_toolbox(strategy, ind_init, evaluator)
 
         stats = make_cma_stats()
-        hof = tools.HallOfFame(1)
+        hof = tools.HallOfFame(self.hof_size)
 
         fitness_history = []
 
@@ -317,6 +358,15 @@ class CMAESTrainer(BaselineTrainer):
         log = build_logger(config, algorithm="cma-es")
         env_steps_per_iteration = self.population_size * max_steps_per_episode
         self._recorder = RecordingController(
+            config,
+            log,
+            max_steps=max_steps_per_episode,
+            seed=seed,
+        )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        self._prober = ProbeController(
             config,
             log,
             max_steps=max_steps_per_episode,
@@ -330,19 +380,33 @@ class CMAESTrainer(BaselineTrainer):
                 hof[0].genome, config.env_name, action_space=action_space
             )
 
-        # Parallel evaluation setup. num_workers / parallel_backend are
-        # first-class TrainingConfig fields; the trainer-constructor value is
-        # the fallback used only when the config leaves them at their defaults.
+        # Parallel evaluation setup. num_workers / parallel_backend /
+        # scheduler_address are first-class TrainingConfig fields; the
+        # trainer-constructor value is the fallback used only when the config
+        # leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
+        # live elsewhere, so skip the driver CPU cap and force the parallel
+        # dispatch path even for num_workers <= 1 (advisory there).
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address) if backend == "dask" else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
-        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        # the worker spec so Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -352,11 +416,15 @@ class CMAESTrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             base_eval_seed = seed
             _eval_counter = [0]
@@ -384,7 +452,7 @@ class CMAESTrainer(BaselineTrainer):
             while gen < max_iters:
                 population = toolbox.generate()
                 seeds = _next_seeds(len(population))
-                if effective_workers > 1:
+                if use_parallel:
                     fitnesses = evaluate_population_parallel(
                         population,
                         executor=executor,
@@ -447,6 +515,10 @@ class CMAESTrainer(BaselineTrainer):
                         champion=_cma_champion,
                     )
 
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
+
         # Realized generation count (== num_generations on the nominal path).
         num_generations = gen
         env.close()
@@ -456,6 +528,12 @@ class CMAESTrainer(BaselineTrainer):
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
+        self._prober.finalize(
+            _cma_champion,
+            iteration=num_generations,
+            env_steps=num_generations * env_steps_per_iteration,
+        )
+        self._prober.close()
         training_time = time.time() - start_time
 
         best_individual = hof[0]
@@ -463,6 +541,10 @@ class CMAESTrainer(BaselineTrainer):
         policy = GenomePolicyWrapper(
             best_genome, config.env_name, action_space=action_space
         )
+        # Best-N hall-of-fame export (top-N when hof_size > 1); populated inside
+        # the logging block, so default to None in case that block is skipped.
+        hof_policies: Optional[List[Any]] = None
+        hall_of_fame_summary: Optional[List[Dict[str, Any]]] = None
 
         # Persist results via the logger
         try:
@@ -491,6 +573,25 @@ class CMAESTrainer(BaselineTrainer):
                         "variant": self.variant,
                     },
                 )
+                from deap_pettingzoo.baselines.ea_trainer import (
+                    build_genome_hall_of_fame_export,
+                )
+
+                hof_policies, hall_of_fame_summary = build_genome_hall_of_fame_export(
+                    hof,
+                    env_name=config.env_name,
+                    action_space=action_space,
+                    logger=log,
+                    save_genome=save_ea_genome,
+                    kind=KIND_CMA_GENOME,
+                    base_extra={
+                        "env_name": config.env_name,
+                        "variant": self.variant,
+                    },
+                )
+                # Reuse the champion wrapper so hall_of_fame[0] is policy.
+                if hof_policies:
+                    hof_policies[0] = policy
                 write_summary(
                     log,
                     {
@@ -500,6 +601,8 @@ class CMAESTrainer(BaselineTrainer):
                         "population_size": self.population_size,
                         "dimension": dimension,
                         "variant": self.variant,
+                        "hof_size": len(hall_of_fame_summary),
+                        "hall_of_fame": hall_of_fame_summary,
                     },
                     training_time_s=training_time,
                 )
@@ -522,6 +625,7 @@ class CMAESTrainer(BaselineTrainer):
                 "env_steps_consumed": (
                     int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 ),
+                "hall_of_fame": hall_of_fame_summary,
             },
             metadata={
                 "genome_config": genome_config,
@@ -535,9 +639,12 @@ class CMAESTrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
+            hall_of_fame=hof_policies,
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:

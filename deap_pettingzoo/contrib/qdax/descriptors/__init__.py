@@ -1,8 +1,9 @@
 """Behavioural-descriptor primitives for QDax scoring functions.
 
 A descriptor is a pure function mapping a *trajectory summary* (a dict
-of ``jnp.ndarray``\u200bs produced inside :func:`~scoring_jax.make_jax_scoring_function`
-or :func:`~scoring_numpy.make_numpy_scoring_function`) to a 1-D
+of ``jnp.ndarray`` values produced inside
+:func:`~scoring_jax.make_jax_scoring_function` or
+:func:`~scoring_numpy.make_numpy_scoring_function`) to a 1-D
 :class:`jnp.ndarray` of fixed shape.
 
 Descriptor functions must be **pure** and :func:`jit`-compatible (no
@@ -11,11 +12,11 @@ embedded inside the JAX rollout.
 
 The trajectory summary dict conventionally carries:
 
-* ``positions``: shape ``(T, N, 2)`` \u2014 per-step positions of all
+* ``positions``: shape ``(T, N, 2)`` — per-step positions of all
   agents (pursuers first, then evaders).
-* ``velocities``: shape ``(T, N, 2)`` \u2014 per-step velocities.
-* ``rewards``: shape ``(T, N)`` \u2014 per-step rewards.
-* ``captures``: shape ``(T,)`` or ``(T, n_evaders)`` \u2014 boolean or
+* ``velocities``: shape ``(T, N, 2)`` — per-step velocities.
+* ``rewards``: shape ``(T, N)`` — per-step rewards.
+* ``captures``: shape ``(T,)`` or ``(T, n_evaders)`` — boolean or
   integer indicators of capture events (env-specific).
 
 Concrete descriptor implementations are *experiment-side* code and live

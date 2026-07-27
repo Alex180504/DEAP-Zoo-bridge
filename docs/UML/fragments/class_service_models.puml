@@ -1,0 +1,74 @@
+@startuml service_models
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Backend service: request and response models
+
+package "deap_pettingzoo.service (v0.2+)" {
+    class ExperimentSpecModel <<pydantic>> {
+        + env_name: str
+        + algorithms: list[str]
+        + hyperparameters: dict
+        + budget: BudgetSpecModel
+        + fitness: FitnessSettingsModel
+        + recording: RecordingSettingsModel
+        + coevolution: CoevolutionSettingsModel | None
+        + parallelism: ParallelismSettingsModel
+        + raw_config: str | None
+        + num_seeds: int
+        + label: str
+        --
+        + to_dataclass() -> ExperimentSpec
+    }
+    class SubmitResponse <<pydantic>> {
+        + id: str
+        + status: str
+        + position: int
+    }
+    class ExperimentRecord <<pydantic>> {
+        + id: str
+        + label: str
+        + status: str
+        + created_at: float
+        + started_at: float | None
+        + finished_at: float | None
+        + run_dirs: list[str] | None
+        + error: str | None
+        + origin: str = "ui"
+    }
+    class ProgressSnapshot <<pydantic>> {
+        + run_index: int
+        + total_runs: int
+        + algo: str
+        + seed: int
+        + unit: str
+        + current: int
+        + total: int
+        + best_fitness: float | None
+        + mean_fitness: float | None
+        + wall_time_s: float
+    }
+    class InstallRequest <<pydantic>> {
+        + manager: str  ' pip | git
+        + action: str   ' install | uninstall | clone
+        + args: list[str]
+    }
+    class ScriptSubmitModel <<pydantic>> {
+        + script: str
+        + label: str
+        + entry: str = "script"
+    }
+}
+
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

@@ -70,24 +70,9 @@ def _patch_fixed_cam_range(wrapper: "PettingZooWrapper") -> None:
     base.draw = _fixed_draw
 
 
-class _SupportedEnvsDescriptor:
-    """Descriptor backing ``PettingZooWrapper.SUPPORTED_ENVS``.
-
-    Returns a fresh dict view over the live env registry on each access,
-    so callers see envs registered after class definition.  Retained as a
-    backwards-compat surface — new code should use
-    :func:`deap_pettingzoo.environments.registry.list_envs` instead.
-    """
-
-    def __get__(self, obj, objtype=None):
-        from .registry import _REGISTRY  # noqa: WPS437 - private but stable
-
-        return {name: spec.factory for name, spec in _REGISTRY.items()}
-
-
 class PettingZooWrapper:
     """
-    Wrapper for PettingZoo environments compatible with DEAP.
+    Wrapper for PettingZoo environments.
 
     Provides a unified interface for PettingZoo multi-agent environments,
     handling agent coordination, observation/action space management,
@@ -109,9 +94,6 @@ class PettingZooWrapper:
         episode_length: Current episode step count
         cumulative_rewards: Dict of cumulative rewards per agent
     """
-
-    #: Backwards-compatible view of the env registry; prefer :func:`deap_pettingzoo.environments.registry.list_envs`.
-    SUPPORTED_ENVS = _SupportedEnvsDescriptor()
 
     @classmethod
     def supported_envs(cls) -> List[str]:

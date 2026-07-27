@@ -35,6 +35,31 @@ from ._pureples.hyperneat import create_phenotype_network
 from ._pureples.substrate import Substrate
 
 
+def _build_phenotype_head(
+    action_space: Any,
+    *,
+    masked: bool,
+    stochastic: bool,
+    temperature: float,
+    rng: Any,
+) -> Optional[ActionHead]:
+    """Build the action head for a HyperNEAT phenotype.
+
+    Mirrors the EA/CMA/PSO convention: a stochastic softmax head for
+    discrete search (smooth landscape, non-idle behaviour), the deterministic
+    argmax/Box head otherwise. ``stochastic`` and ``masked`` are mutually
+    exclusive at the :func:`make_head` layer, so masking wins when both are
+    requested (turn-based envs never use gradient-free softmax sampling).
+    """
+    if action_space is None:
+        return None
+    if stochastic and not masked:
+        return make_head(
+            action_space, stochastic=True, temperature=temperature, rng=rng
+        )
+    return make_head(action_space, masked=masked)
+
+
 class HyperNeatPolicy(PolicyProtocol):
     """Policy backed by a HyperNEAT phenotype network.
 
@@ -60,6 +85,19 @@ class HyperNeatPolicy(PolicyProtocol):
         Minimum absolute CPPN output below which phenotype weights are
         zeroed.  Lower values let through more connections at the cost
         of noise.  Default 0.1.
+    stochastic:
+        When ``True`` and the action space is discrete, decode via a
+        :class:`~deap_pettingzoo.policies.action_heads.SoftmaxSamplingHead`
+        instead of argmax.  Argmax collapses near-tied phenotype logits to a
+        single constant action, which both flattens the gradient-free search
+        landscape and makes a trained agent look idle; softmax sampling
+        restores a usable search signal and lets the agent steer.  Ignored
+        for continuous (Box) spaces, whose ``BoxHead`` is already smooth.
+    temperature:
+        Softmax temperature for the stochastic head (``> 0``).
+    rng:
+        Optional :class:`numpy.random.Generator` for the stochastic head
+        (seed it for reproducible common-random-number evaluation).
     """
 
     def __init__(
@@ -72,6 +110,9 @@ class HyperNeatPolicy(PolicyProtocol):
         masked: bool = False,
         activation: str = "sigmoid",
         weight_threshold: float = 0.1,
+        stochastic: bool = False,
+        temperature: float = 1.0,
+        rng: Any = None,
     ) -> None:
         self._genome = genome
         self._config = config
@@ -92,22 +133,26 @@ class HyperNeatPolicy(PolicyProtocol):
             1, len(getattr(substrate, "hidden_coordinates", []) or []) + 1
         )
 
-        self._head: Optional[ActionHead] = (
-            make_head(action_space, masked=self._masked)
-            if action_space is not None
-            else None
+        self._head: Optional[ActionHead] = _build_phenotype_head(
+            action_space,
+            masked=self._masked,
+            stochastic=stochastic,
+            temperature=temperature,
+            rng=rng,
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        # Heads are deterministic decoders; the kwarg exists for
+        # PolicyProtocol compatibility (benchmark probes pass it).
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         self._network.reset()
         raw = None
@@ -158,6 +203,14 @@ class ESHyperNeatPolicy(PolicyProtocol):
     es_params:
         ES-HyperNEAT parameter dict.  See
         :data:`~._pureples.es_hyperneat.ES_HYPERNEAT_PARAMS_DEFAULTS`.
+    stochastic:
+        When ``True`` and discrete, decode via a
+        :class:`~deap_pettingzoo.policies.action_heads.SoftmaxSamplingHead`
+        instead of argmax (see :class:`HyperNeatPolicy`).
+    temperature:
+        Softmax temperature for the stochastic head (``> 0``).
+    rng:
+        Optional :class:`numpy.random.Generator` for the stochastic head.
     """
 
     def __init__(
@@ -169,6 +222,9 @@ class ESHyperNeatPolicy(PolicyProtocol):
         action_space: Any = None,
         masked: bool = False,
         es_params: Optional[dict] = None,
+        stochastic: bool = False,
+        temperature: float = 1.0,
+        rng: Any = None,
     ) -> None:
         self._genome = genome
         self._config = config
@@ -183,22 +239,26 @@ class ESHyperNeatPolicy(PolicyProtocol):
         self._network = es_network.create_phenotype_network()
         self._activation_steps = max(1, int(es_network.activations))
 
-        self._head: Optional[ActionHead] = (
-            make_head(action_space, masked=self._masked)
-            if action_space is not None
-            else None
+        self._head: Optional[ActionHead] = _build_phenotype_head(
+            action_space,
+            masked=self._masked,
+            stochastic=stochastic,
+            temperature=temperature,
+            rng=rng,
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        # Heads are deterministic decoders; the kwarg exists for
+        # PolicyProtocol compatibility (benchmark probes pass it).
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         self._network.reset()
         raw = None

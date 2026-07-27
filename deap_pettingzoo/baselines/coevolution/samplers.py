@@ -13,8 +13,7 @@ reproducible under a fixed seed.
 
 Samplers are intentionally state-free and source-agnostic: they do not
 know whether the items came from a DEAP population, a Hall-of-Fame,
-or a future QDax repertoire. The pool calling them is responsible for
-any bookkeeping.
+a QDax repertoire etc. The pool calling them is responsible for tracking.
 """
 
 from __future__ import annotations

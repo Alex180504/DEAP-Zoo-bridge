@@ -51,6 +51,37 @@ class TestHyperNEATTrainer:
         assert isinstance(action, (int, np.integer))
         assert 0 <= action < 5
 
+    def test_stochastic_head_diversifies_actions(self, tmp_path):
+        """With a stochastic softmax head the champion samples varied actions
+        across observations instead of collapsing to a single argmax heading."""
+        from deap_pettingzoo.contrib.neat.config import build_cppn_config
+        from deap_pettingzoo.contrib.neat.hyperneat import HyperNeatPolicy
+        from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
+
+        cfg = build_cppn_config(input_size=5, output_size=1, pop_size=20, seed=0)
+        substrate = substrate_for_env(24, 16, layout="uniform", hidden_layers=[16])
+        pop = neat.Population(cfg, seed=0)
+        import gymnasium.spaces as spaces
+
+        act_space = spaces.Discrete(16)
+        rng = np.random.default_rng(0)
+        obs_batch = rng.normal(size=(48, 24)).astype(np.float64)
+        # Aggregate unique actions across several genomes to avoid depending on
+        # any single random phenotype.
+        argmax_actions, softmax_actions = set(), set()
+        for genome in list(pop.population.values())[:5]:
+            argmax = HyperNeatPolicy(genome, cfg, substrate, action_space=act_space,
+                                     activation="tanh", weight_threshold=0.1)
+            softmax = HyperNeatPolicy(genome, cfg, substrate, action_space=act_space,
+                                      activation="tanh", weight_threshold=0.1,
+                                      stochastic=True, temperature=0.3,
+                                      rng=np.random.default_rng(0))
+            argmax_actions.update(int(argmax.get_action(o)) for o in obs_batch)
+            softmax_actions.update(int(softmax.get_action(o)) for o in obs_batch)
+        # The softmax head must explore at least as many distinct actions.
+        assert len(softmax_actions) >= len(argmax_actions)
+        assert len(softmax_actions) >= 4
+
     def test_train_parallel_updates_fitness_history_and_generation(self, tmp_path):
         """TrainingConfig.num_workers must actually
         route through parallel evaluation, even when the trainer was

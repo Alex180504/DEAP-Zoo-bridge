@@ -26,14 +26,11 @@ from .pools import FrozenPolicyPool, OpponentPool, RLPolicyPool
 from .sides import GenerationStats, Side, SideState
 
 SUPPORTED_HPO_RL_ALGORITHMS: Dict[str, Tuple[str, str, bool]] = {
-    # Underscore keys (historical / programmatic).
+    # Underscore keys.
     "maddpg_hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3_hpo": ("agilerl.algorithms.matd3", "MATD3", False),
     "ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
     "grouped_ippo_hpo": ("agilerl.algorithms.ippo", "IPPO", True),
-    # Hyphenated catalog names (injected into ``optimizer_config['algorithm']``
-    # by ``experiment_spec._build_coevolution_plan``). Mirrors the dual-key
-    # pattern ``rl_side.SUPPORTED_RL_ALGORITHMS`` uses for grouped IPPO.
     "maddpg-hpo": ("agilerl.algorithms.maddpg", "MADDPG", False),
     "matd3-hpo": ("agilerl.algorithms.matd3", "MATD3", False),
     "ippo-hpo": ("agilerl.algorithms.ippo", "IPPO", True),
@@ -94,13 +91,17 @@ class RLEvolveHPOSideState(SideState):
         # Mirror the public name RLSideState uses so the trainer's on-policy detector fires.
         self.is_on_policy: bool = self._on_policy
         self._population: List[Any] = []
+        # Persistent per-slot off-policy replay buffers + transition counters,
+        # owned here (not on the agents: AgileRL clone() strips underscore
+        # attributes). Populated in initialise() for off-policy algorithms and
+        # reused across generations so replay experience is never discarded.
+        self._replay_slots: List[Any] = []
+        self._slot_transitions: List[int] = []
         self._champion_wrapper: Optional[AgileRLPolicyWrapper] = None
         self._action_space: Any = None
         self._rng: np.random.Generator = np.random.default_rng()
 
-    # ------------------------------------------------------------------
     # SideState protocol
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -124,7 +125,7 @@ class RLEvolveHPOSideState(SideState):
             )
         self._action_space = env.action_space(self._learner_ids[0])
 
-        # Build HPO population.
+        # Build the HPO population.
         try:
             import importlib
 
@@ -164,6 +165,18 @@ class RLEvolveHPOSideState(SideState):
         self._population = pop
         if self._on_policy:
             self._maybe_apply_grouping_patch()
+        else:
+            # One persistent replay buffer + transition counter per population
+            # slot, reused across generations so off-policy experience is never
+            # discarded. step_generation reorders these with the same fitness
+            # permutation it applies to the population, so each buffer stays with
+            # its agent (elites keep their own history; mutated children inherit
+            # their parent's).
+            self._replay_slots = [
+                self._build_replay_buffer(self._learner_ids)
+                for _ in range(self.population_size)
+            ]
+            self._slot_transitions = [0] * self.population_size
         self._champion_wrapper = AgileRLPolicyWrapper(
             self._population[0],
             self._learner_ids,
@@ -185,7 +198,7 @@ class RLEvolveHPOSideState(SideState):
 
         # Sample one policy per opponent side for non-learner agents.
         # CoEvolutionEvaluator exposes .opponent_sides (list of
-        # (name, prefixes, pool) triples) and .side_agents (name → agent list).
+        # (name, prefixes, pool) triples) and .side_agents (name -> agent list).
         learner_id_set = set(self._learner_ids)
         opponent_policies: Dict[str, Any] = {}
         for side_name, _prefixes, pool in getattr(evaluator, "opponent_sides", []):
@@ -195,7 +208,7 @@ class RLEvolveHPOSideState(SideState):
                     opponent_policies[opp_agent] = opp_policy
 
         gen_steps = 0
-        for agent in self._population:
+        for slot, agent in enumerate(self._population):
             if self._on_policy:
                 gen_steps += self._train_agent_on_policy(
                     agent=agent,
@@ -204,13 +217,16 @@ class RLEvolveHPOSideState(SideState):
                     target_steps=self.evo_every,
                 )
             else:
-                gen_steps += self._train_agent(
+                steps, self._slot_transitions[slot] = self._train_agent(
                     agent=agent,
                     env=env,
                     learner_ids=self._learner_ids,
                     target_steps=self.evo_every,
                     opponent_policies=opponent_policies,
+                    memory=self._replay_slots[slot],
+                    total_transitions=self._slot_transitions[slot],
                 )
+                gen_steps += steps
 
         # 2. Evaluate fitnesses.
         fitnesses: List[float] = []
@@ -242,25 +258,31 @@ class RLEvolveHPOSideState(SideState):
             rand_seed=self.seed,
             device=self.device,
         )
-        # Select by fitness: keep top 1/4 elites, mutate the rest.
-        ranked = sorted(
-            zip(self._population, fitnesses),
-            key=lambda x: x[1],
-            reverse=True,
-        )
+        # Select by fitness (indices, so the per-slot buffers can be reordered
+        # with the same permutation): keep top 1/4 elites, mutate the rest.
+        order = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+        ranked_agents = [self._population[i] for i in order]
         elite_count = max(1, self.population_size // 4)
-        elites = [a for a, _ in ranked[:elite_count]]
-        others = [a for a, _ in ranked[elite_count:]]
+        elites = ranked_agents[:elite_count]
+        others = ranked_agents[elite_count:]
         mutated = mutations.mutation(others)
+        # Keep each persistent replay buffer with its agent: the new population
+        # (elites + mutated) is built in `order`, so new slot k corresponds to
+        # old slot order[k]. Elites retain their own accumulated history and
+        # mutated children inherit their parent's (off-policy warm-start),
+        # instead of buffers staying anchored to a fixed position.
+        if self._replay_slots:
+            self._replay_slots = [self._replay_slots[i] for i in order]
+            self._slot_transitions = [self._slot_transitions[i] for i in order]
         self._population = elites + mutated
 
         best = max(fitnesses)
         mean = float(np.mean(fitnesses))
         self.best_fitness = max(self.best_fitness, best)
 
-        # Champion = best pre-mutation elite (fitnesses are pre-mutation;
-        # using ranked[0][0] avoids pairing stale fitnesses with mutated agents).
-        best_agent = ranked[0][0]
+        # Champion = best pre-mutation agent (fitnesses are pre-mutation, so
+        # ranked_agents[0] avoids pairing stale fitnesses with mutated agents).
+        best_agent = ranked_agents[0]
         self._champion_wrapper = AgileRLPolicyWrapper(
             best_agent,
             self._learner_ids,
@@ -296,9 +318,7 @@ class RLEvolveHPOSideState(SideState):
         assert self._champion_wrapper is not None
         return self._champion_wrapper.make_frozen_cpu_snapshot()
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_hp_config(hp_config_spec: dict) -> Any:
@@ -371,6 +391,28 @@ class RLEvolveHPOSideState(SideState):
                 pop.append(agent)
             return pop
 
+    def _build_replay_buffer(self, learner_ids: List[str]) -> Any:
+        """Build a persistent off-policy replay buffer for one population slot.
+
+        Owned by the side (not the agents) so it survives AgileRL's
+        tournament/mutation ``clone()``, which strips underscore-prefixed
+        attributes. All population members share the same spaces, so a buffer
+        built once is valid for whichever policy occupies the slot.
+        """
+        from agilerl.components.multi_agent_replay_buffer import (
+            MultiAgentReplayBuffer,
+        )
+
+        memory_size = 100_000
+        if self._population:
+            memory_size = int(getattr(self._population[0], "memory_size", 100_000))
+        return MultiAgentReplayBuffer(
+            memory_size=memory_size,
+            field_names=["obs", "action", "reward", "next_obs", "done"],
+            agent_ids=list(learner_ids),
+            device=self.resolved_device,
+        )
+
     @staticmethod
     def _train_agent(
         agent: Any,
@@ -378,37 +420,42 @@ class RLEvolveHPOSideState(SideState):
         learner_ids: List[str],
         target_steps: int,
         opponent_policies: Optional[Dict[str, Any]] = None,
-    ) -> int:
+        memory: Any = None,
+        total_transitions: int = 0,
+    ) -> Tuple[int, int]:
         """Off-policy rollout-and-learn for one population member.
 
-        AgileRL agents do not expose ``agent.memory``, so this builds a
-        dedicated :class:`~agilerl.components.multi_agent_replay_buffer.MultiAgentReplayBuffer`
-        per call, stores one agent-keyed transition per env step, and gates
-        ``agent.learn`` on the real buffer. The co-evolution env
-        is a single, non-vectorised parallel env, so ``is_vectorised=False``.
+        ``memory`` is the persistent per-slot replay buffer (owned by the side
+        and reused across generations); ``total_transitions`` is that slot's
+        running transition count driving the warm-up / learn-cadence gate. When
+        ``memory is None`` (direct/unit-test calls) a throwaway buffer is built
+        for this call only. Stores one agent-keyed transition per env step and
+        gates ``agent.learn`` on the real buffer. The co-evolution env is a
+        single, non-vectorised parallel env, so ``is_vectorised=False``. Returns
+        ``(steps_consumed, total_transitions)``.
         """
-        from agilerl.components.multi_agent_replay_buffer import (
-            MultiAgentReplayBuffer,
-        )
-
         from deap_pettingzoo.baselines.agilerl_trainer import AgileRLTrainer
 
         steps = 0
         learn_step = max(1, int(getattr(agent, "learn_step", 100)))
         batch_size = int(getattr(agent, "batch_size", 64))
         # Default to 0: co-evolution generations are short and total_transitions
-        # persists across generations (written back below), so warm-up accrues.
+        # persists across generations (per slot), so warm-up accrues.
         learning_delay = int(getattr(agent, "learning_delay", 0))
-        total_transitions = int(getattr(agent, "_total_transitions", 0))
         discrete = bool(getattr(agent, "discrete_actions", False))
         learner_id_set = set(learner_ids)
 
-        memory = MultiAgentReplayBuffer(
-            memory_size=int(getattr(agent, "memory_size", 100_000)),
-            field_names=["obs", "action", "reward", "next_obs", "done"],
-            agent_ids=list(learner_ids),
-            device=getattr(agent, "device", "cpu"),
-        )
+        if memory is None:
+            from agilerl.components.multi_agent_replay_buffer import (
+                MultiAgentReplayBuffer,
+            )
+
+            memory = MultiAgentReplayBuffer(
+                memory_size=int(getattr(agent, "memory_size", 100_000)),
+                field_names=["obs", "action", "reward", "next_obs", "done"],
+                agent_ids=list(learner_ids),
+                device=getattr(agent, "device", "cpu"),
+            )
 
         # Precompute NaN placeholders once (dict.get defaults are eager).
         obs_placeholders = {
@@ -536,9 +583,7 @@ class RLEvolveHPOSideState(SideState):
                 ):
                     break
 
-        if hasattr(agent, "_total_transitions"):
-            object.__setattr__(agent, "_total_transitions", total_transitions)
-        return steps
+        return steps, total_transitions
 
     def _maybe_apply_grouping_patch(self) -> None:
         """Install AgileRL's grouped-IPPO advantage/state flattening fix.

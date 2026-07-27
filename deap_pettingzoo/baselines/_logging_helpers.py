@@ -64,9 +64,9 @@ def dump_fitness_history(
     The ``gen_offset`` parameter aligns the x-axis across indexing schemes:
 
     * EA / NEAT are 0-indexed (gen 0 = initial population) — use
-      ``gen_offset=0`` (default) so gen 0 → env_steps 0, nominal = 1×N.
+      ``gen_offset=0`` (default) so gen 0 -> env_steps 0, nominal = 1×N.
     * CMA-ES / PSO are 1-indexed (gen 1 = first update) — use
-      ``gen_offset=-1`` so gen 1 → env_steps 0, nominal = 1×N.
+      ``gen_offset=-1`` so gen 1 -> env_steps 0, nominal = 1×N.
 
     No-op when ``logger`` is a :class:`NoOpLogger`.
     """
@@ -116,7 +116,8 @@ def write_summary(
     payload = dict(summary)
     if training_time_s is not None and "training_time_s" not in payload:
         payload["training_time_s"] = float(training_time_s)
-    # Override the manifest's wall_time_s to reflect *training* duration rather than the time spent inside the logging context manager.
+    # Override the manifest's wall_time_s to reflect *training* duration
+    # rather than the time spent inside the logging context manager.
     if training_time_s is not None and not isinstance(logger, NoOpLogger):
         try:
             logger.manifest.wall_time_s = float(training_time_s)

@@ -4,17 +4,17 @@ CMA-ES integration utilities.
 This module mirrors :mod:`deap_pettingzoo.integration.deap_integration` but
 wires the `FixedTopologyGenome` flat weight vector into DEAP's built-in
 CMA-ES implementation (:class:`deap.cma.Strategy`) instead of the
-classical GA toolbox.
+classical EA toolbox.
 
-Design notes:
+Design notes
+------------
 
-* CMA-ES samples **real-valued vectors** of length ``N =
-  FixedTopologyGenome(...).get_weight_count()``. Each sample is therefore
-  represented as a list-typed DEAP individual (``creator.CMAIndividual``,
+* CMA-ES samples **real-valued vectors** of length ``N = FixedTopologyGenome(...).get_weight_count()``.
+  Each sample is therefore represented as a list-typed DEAP individual (``creator.CMAIndividual``,
   a subclass of ``list``) so that :meth:`deap.cma.Strategy.update` can
   rebuild the sample matrix via ``numpy.array(population)``.
-* The project's evaluators contract (``individual.genome`` → fitness
-  tuple) is preserved by attaching a transient :class:`FixedTopologyGenome`
+* The project's evaluators contract (``individual.genome`` -> fitness tuple)
+  is preserved by attaching a transient :class:`FixedTopologyGenome`
   to each sampled individual via ``ind_init`` before evaluation.
 * Fitness weights stay ``(1.0,)`` (maximisation) — ``deap.cma.Strategy``
   honours the sign via the underlying :class:`deap.base.Fitness` ordering.
@@ -163,9 +163,9 @@ def register_cma_toolbox(
 
     Registers:
 
-    * ``toolbox.generate`` → ``strategy.generate(ind_init)``
-    * ``toolbox.update`` → ``strategy.update``
-    * ``toolbox.evaluate`` → :func:`evaluate_individual` bound to ``evaluator``
+    * ``toolbox.generate`` -> ``strategy.generate(ind_init)``
+    * ``toolbox.update`` -> ``strategy.update``
+    * ``toolbox.evaluate`` -> :func:`evaluate_individual` bound to ``evaluator``
 
     Args:
         strategy: The CMA strategy returned by :func:`setup_cma_strategy`.

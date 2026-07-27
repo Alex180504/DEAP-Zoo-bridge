@@ -3,7 +3,7 @@
 An *action head* converts the raw output of a feedforward network into a
 value that is valid for a given :mod:`gymnasium.spaces` action space.
 
-Three heads are provided:
+Deterministic heads:
 
 - :class:`DiscreteHead` — argmax over ``n`` logits, returns a Python ``int``.
 - :class:`BoxHead` — tanh-squash raw output to ``[-1, 1]`` then rescale to
@@ -12,10 +12,21 @@ Three heads are provided:
   sub-action and argmax each, returns a ``np.int64`` array of shape
   ``(len(nvec),)``.
 
-:class:`Tuple` and :class:`Dict` action spaces remain **not supported** for
+Stochastic heads (for gradient-free search — argmax gives EA/CMA/PSO/QD a
+step-function fitness landscape; softmax sampling smooths it):
+
+- :class:`SoftmaxSamplingHead` — sample from ``softmax(logits / temperature)``
+  over ``n`` logits, returns a Python ``int``.
+- :class:`MultiDiscreteSoftmaxSamplingHead` — per-sub-action softmax sampling,
+  returns a ``np.int64`` array of shape ``(len(nvec),)``.
+
+:func:`make_head` selects a stochastic head via ``stochastic=True``.
+
+:class:`Tuple` and :class:`Dict` action spaces are **not supported** for
 EA-driven policies.  :func:`make_head` raises :class:`NotImplementedError`
 with a message pointing callers at the AgileRL trainers, which handle those
-spaces natively.
+spaces natively (relevant for custom enviroments only,
+the native PettingZoo envs never use them).
 """
 
 from __future__ import annotations
@@ -79,7 +90,7 @@ class MaskedDiscreteHead(DiscreteHead):
     actions can be selected. When ``action_mask`` is ``None`` the head
     behaves identically to :class:`DiscreteHead`.
 
-    If the mask is entirely zero (no legal action — e.g. a "waiting"
+    If the mask is entirely zero (no legal action, e.g. a "waiting"
     agent on the other side of a turn-based board under the masked
     adapter), :meth:`decode` returns ``0`` by convention; the adapter
     discards the action anyway.
@@ -242,6 +253,131 @@ class MultiDiscreteHead(ActionHead):
         )
 
 
+def _softmax(logits: np.ndarray, temperature: float) -> np.ndarray:
+    """Numerically-stable ``softmax(logits / temperature)``."""
+    scaled = logits / temperature
+    scaled -= scaled.max()
+    exp = np.exp(scaled)
+    return exp / exp.sum()
+
+
+class SoftmaxSamplingHead(ActionHead):
+    """Stochastic softmax-sampling head for :class:`Discrete` spaces.
+
+    The deterministic :class:`DiscreteHead` decodes with ``argmax``, which
+    hands gradient-free search (EA / CMA-ES / PSO / MAP-Elites) a
+    step-function fitness landscape: a small weight perturbation almost never
+    flips the argmax, so most of the population shares a fitness and selection
+    has no signal to follow.  Sampling from ``softmax(raw / temperature)``
+    instead makes the *expected* action — and hence expected fitness — a
+    smooth function of the logits, restoring a usable search gradient.
+    Scored evaluation typically switches back to the deterministic
+    :class:`DiscreteHead`.
+
+    Args:
+        n: Number of discrete actions (size of the output vector).
+        temperature: Softmax temperature (> 0).  Lower sharpens toward argmax;
+            higher flattens toward uniform.  Defaults to ``1.0``.
+        rng: Optional :class:`numpy.random.Generator`.  Seed it
+            deterministically (e.g. per agent id) to keep common-random-number
+            evaluation reproducible; when ``None`` a fresh default generator
+            is used.
+
+    Returns Python ``int`` in ``[0, n)`` from :meth:`decode`.
+    """
+
+    def __init__(
+        self, n: int, temperature: float = 1.0, rng: "np.random.Generator | None" = None
+    ) -> None:
+        if n < 1:
+            raise ValueError(f"SoftmaxSamplingHead requires n >= 1, got {n}")
+        if temperature <= 0:
+            raise ValueError(
+                f"SoftmaxSamplingHead requires temperature > 0, got {temperature}"
+            )
+        self.n = int(n)
+        self.temperature = float(temperature)
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+    @property
+    def output_size(self) -> int:
+        return self.n
+
+    def decode(self, raw_output: np.ndarray) -> int:
+        arr = np.asarray(raw_output, dtype=np.float64).ravel()
+        if arr.size != self.n:
+            raise ValueError(
+                f"SoftmaxSamplingHead expected output of size {self.n}, "
+                f"got size {arr.size}"
+            )
+        probs = _softmax(arr, self.temperature)
+        return int(self.rng.choice(self.n, p=probs))
+
+
+class MultiDiscreteSoftmaxSamplingHead(ActionHead):
+    """Stochastic per-sub-action softmax-sampling head for :class:`MultiDiscrete`.
+
+    The stochastic counterpart of :class:`MultiDiscreteHead`: each sub-action's
+    contiguous logit chunk is turned into a ``softmax(chunk / temperature)``
+    distribution and sampled independently, so gradient-free search sees a
+    smooth landscape on every sub-action (see :class:`SoftmaxSamplingHead` for
+    the rationale).
+
+    Args:
+        nvec: Per-sub-action choice counts (array-like of ints, all >= 1).
+        temperature: Softmax temperature (> 0).  Defaults to ``1.0``.
+        rng: Optional :class:`numpy.random.Generator` (see
+            :class:`SoftmaxSamplingHead`).
+
+    Returns a ``np.int64`` array of shape ``(len(nvec),)`` from :meth:`decode`,
+    with entry ``i`` in ``[0, nvec[i])``.
+    """
+
+    def __init__(
+        self,
+        nvec: Any,
+        temperature: float = 1.0,
+        rng: "np.random.Generator | None" = None,
+    ) -> None:
+        self.nvec = np.asarray(nvec, dtype=np.int64).ravel()
+        if self.nvec.size == 0:
+            raise ValueError(
+                "MultiDiscreteSoftmaxSamplingHead requires a non-empty nvec."
+            )
+        if np.any(self.nvec < 1):
+            raise ValueError(
+                "MultiDiscreteSoftmaxSamplingHead requires every nvec entry >= 1, "
+                f"got {self.nvec.tolist()}"
+            )
+        if temperature <= 0:
+            raise ValueError(
+                "MultiDiscreteSoftmaxSamplingHead requires temperature > 0, "
+                f"got {temperature}"
+            )
+        self.temperature = float(temperature)
+        self.rng = rng if rng is not None else np.random.default_rng()
+        # Chunk boundaries into the flat logit vector: offsets[i]:offsets[i+1].
+        self._offsets = np.concatenate(([0], np.cumsum(self.nvec))).astype(np.int64)
+
+    @property
+    def output_size(self) -> int:
+        return int(self.nvec.sum())
+
+    def decode(self, raw_output: np.ndarray) -> np.ndarray:
+        arr = np.asarray(raw_output, dtype=np.float64).ravel()
+        if arr.size != self.output_size:
+            raise ValueError(
+                "MultiDiscreteSoftmaxSamplingHead expected output of size "
+                f"{self.output_size}, got size {arr.size}"
+            )
+        out = np.empty(self.nvec.size, dtype=np.int64)
+        for i in range(self.nvec.size):
+            chunk = arr[self._offsets[i] : self._offsets[i + 1]]
+            probs = _softmax(chunk, self.temperature)
+            out[i] = int(self.rng.choice(chunk.size, p=probs))
+        return out
+
+
 def required_output_size(action_space: Any) -> int:
     """Return the number of network output units required for ``action_space``.
 
@@ -290,7 +426,14 @@ def required_output_size(action_space: Any) -> int:
     )
 
 
-def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
+def make_head(
+    action_space: Any,
+    *,
+    masked: bool = False,
+    stochastic: bool = False,
+    temperature: float = 1.0,
+    rng: "np.random.Generator | None" = None,
+) -> ActionHead:
     """Construct the :class:`ActionHead` appropriate for ``action_space``.
 
     Args:
@@ -300,8 +443,20 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
             :class:`DiscreteHead` so the caller can supply an
             ``action_mask`` to :meth:`ActionHead.decode`.  Ignored for
             non-Discrete spaces (MPE2 MultiDiscrete envs are not turn-based).
+        stochastic: If ``True``, return the softmax-sampling head for the
+            space — :class:`SoftmaxSamplingHead` for :class:`Discrete`,
+            :class:`MultiDiscreteSoftmaxSamplingHead` for
+            :class:`MultiDiscrete` — which smooths the argmax fitness
+            landscape for gradient-free search.  Ignored for :class:`Box`
+            (already smooth).  Mutually exclusive with ``masked``.
+        temperature: Softmax temperature for the stochastic heads (> 0).
+            Ignored when ``stochastic=False``.
+        rng: Optional :class:`numpy.random.Generator` for the stochastic
+            heads (seed it for reproducible common-random-number evaluation).
 
     Returns:
+        :class:`SoftmaxSamplingHead` / :class:`MultiDiscreteSoftmaxSamplingHead`
+        when ``stochastic=True`` (Discrete / MultiDiscrete); otherwise
         :class:`DiscreteHead` (or :class:`MaskedDiscreteHead` when
         ``masked=True``) for :class:`Discrete`,
         :class:`MultiDiscreteHead` for :class:`MultiDiscrete`,
@@ -312,15 +467,30 @@ def make_head(action_space: Any, *, masked: bool = False) -> ActionHead:
             other unsupported space type.  The message points callers at
             the AgileRL trainers.
         TypeError: If ``action_space`` is ``None``.
+        ValueError: If both ``masked`` and ``stochastic`` are requested.
     """
     if action_space is None:
         raise TypeError("make_head requires a gymnasium Space, got None.")
+    if masked and stochastic:
+        raise ValueError(
+            "make_head: masked and stochastic are mutually exclusive — masking "
+            "is for turn-based argmax, stochastic sampling is for gradient-free "
+            "search."
+        )
 
-    # Use duck-typing so we don't force a hard gymnasium import here.
+    # Use duck-typing so to avoid a hard gymnasium import here.
     if hasattr(action_space, "n") and not hasattr(action_space, "nvec"):
+        if stochastic:
+            return SoftmaxSamplingHead(
+                int(action_space.n), temperature=temperature, rng=rng
+            )
         cls = MaskedDiscreteHead if masked else DiscreteHead
         return cls(int(action_space.n))
     if hasattr(action_space, "nvec"):
+        if stochastic:
+            return MultiDiscreteSoftmaxSamplingHead(
+                action_space.nvec, temperature=temperature, rng=rng
+            )
         return MultiDiscreteHead(action_space.nvec)
     if (
         hasattr(action_space, "low")
@@ -345,6 +515,8 @@ __all__ = [
     "MaskedDiscreteHead",
     "BoxHead",
     "MultiDiscreteHead",
+    "SoftmaxSamplingHead",
+    "MultiDiscreteSoftmaxSamplingHead",
     "make_head",
     "required_output_size",
 ]

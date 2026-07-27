@@ -7,16 +7,16 @@ The public contract:
   :class:`~deap_pettingzoo.genomes.FixedTopologyGenome`. For a genome
   with ``layer_sizes = [n_0, n_1, ..., n_L]`` there are ``L`` Dense
   layers with sizes ``n_1, ..., n_L`` and activations applied between
-  the hidden layers (not the output) \u2014 matching ``FixedTopologyGenome``
+  the hidden layers (not the output) — matching ``FixedTopologyGenome``
   semantics.
-* :func:`flat_to_pytree` / :func:`pytree_to_flat` \u2014 bijection between
+* :func:`flat_to_pytree` / :func:`pytree_to_flat` — bijection between
   flat weight vectors (DEAP's native representation) and Flax pytrees.
   Concatenation order is ``(W_0, b_0, W_1, b_1, ..., W_{L-1}, b_{L-1})``
   to match ``FixedTopologyGenome``'s layout.
-* :class:`FlaxPolicyAdapter` \u2014 satisfies
+* :class:`FlaxPolicyAdapter` — satisfies
   :class:`~deap_pettingzoo.baselines.base.PolicyProtocol`
   (``get_action(obs, action_mask=None) -> np.ndarray | int``) and
-  marshals numpy \u2194 JAX at the boundary. Used in numpy-boundary
+  marshals numpy <-> JAX at the boundary. Used in numpy-boundary
   scoring and by :class:`QDaxRepertoirePool` when sampling an opponent
   from a repertoire cell.
 
@@ -201,15 +201,23 @@ class FlaxPolicyAdapter:
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: Optional[bool] = None,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
+        """Decode an action; ``deterministic`` is accepted for protocol
+        compatibility (decoding is already deterministic)."""
+        del deterministic
         import jax.numpy as jnp
 
         obs = jnp.asarray(np.asarray(observation, dtype=np.float32))
         raw = np.asarray(self._module.apply({"params": self._params}, obs))
         if self._head is not None:
-            return self._head.decode(raw, action_mask=action_mask)
+            # Only mask-aware heads (supports_mask) take the kwarg; BoxHead
+            # and plain DiscreteHead do not.
+            if getattr(self._head, "supports_mask", False):
+                return self._head.decode(raw, action_mask=action_mask)
+            return self._head.decode(raw)
         return raw
 
 

@@ -1,4 +1,4 @@
-"""Co-evolution trainer — orchestrates multi-side generational evolution.
+"""Co-evolution trainer: orchestrates multi-side generational evolution.
 
 :class:`CoEvolutionTrainer` is a :class:`BaselineTrainer` subclass that
 handles three modes via one config-driven entry point:
@@ -40,7 +40,7 @@ import random as _random
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -52,7 +52,6 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax.progress import format_qdax_progress_fields
 from deap_pettingzoo.environments.pettingzoo_wrapper import PettingZooWrapper
@@ -64,6 +63,7 @@ from deap_pettingzoo.utils.parallel import (
     SUPPORTED_BACKENDS,
     make_executor,
     resolve_num_workers,
+    resolve_scheduler_address,
 )
 from deap_pettingzoo.utils.rng import seed_everything
 
@@ -97,6 +97,31 @@ def _prewarm_and_replay(snapshot) -> None:  # type: ignore[type-arg]
     from deap_pettingzoo.environments.registry import replay_registry_snapshot
 
     replay_registry_snapshot(snapshot)
+
+
+def _callback_accepts_context(callback: Callable) -> bool:
+    """True when ``callback`` can take a third positional ``context`` arg.
+
+    Uses signature inspection so the legacy two-arg ``(gen, states)``
+    contract keeps working unchanged. Callables whose signature cannot be
+    inspected are treated as legacy two-arg.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return positional >= 3
 
 
 def _format_progress_entry(stats: GenerationStats) -> str:
@@ -252,6 +277,8 @@ from deap_pettingzoo.utils.device_check import (
 
 VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
 VALID_SCHEDULES = ("synchronous", "alternating")
+VALID_BUDGET_SPLITS = ("shared", "per_side")
+VALID_EXHAUSTED_POLICIES = ("freeze", "cutoff")
 
 
 @dataclass
@@ -286,6 +313,38 @@ class CoEvolutionConfig:
             Default ``200``.
         seed: Base seed for trainer RNG (controls opponent sampling
             and EA RNGs for reproducibility).
+        num_workers: Parallel evaluation workers (1 = serial).
+        parallel_backend: Executor backend — ``"process"`` / ``"dask"``.
+        scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+            scheduler-file path); requires ``parallel_backend == "dask"``.
+            ``None`` auto-builds a local cluster unless the
+            ``DEAP_DASK_SCHEDULER`` env var supplies an address. When a
+            remote scheduler is in play, ``num_workers`` is advisory
+            metadata and the serial fast-path is skipped.
+        budget_split: How the consumed env-step budget is divided across
+            sides — one of :data:`VALID_BUDGET_SPLITS`. ``"shared"``
+            (default) keeps the historical semantics: one pooled budget,
+            drained by whichever side evaluates more (equal *total* sim
+            cost per run, potentially very unequal per-side experience).
+            ``"per_side"`` grants every evolving side an equal slice
+            (``budget_value // n_evolving_sides``) of real consumed
+            steps, so each side gets the same experience. Requires
+            ``TrainingConfig.budget_on_consumed=True`` with
+            ``budget_mode == ENV_STEPS`` (raises ``ValueError`` in
+            ``train()`` otherwise) — per-side accounting only exists on
+            the consumed-step path.
+        on_side_exhausted: Per-side end-of-budget policy, only read when
+            ``budget_split == "per_side"`` — one of
+            :data:`VALID_EXHAUSTED_POLICIES`. ``"freeze"`` (default): a
+            side that has spent its slice stops evolving but keeps
+            serving its final population/archive as the opponent pool;
+            the run ends when every evolving side is exhausted (each
+            side consumes its full slice, but the late generations of
+            slower-spending sides face a non-adapting opponent).
+            ``"cutoff"``: the whole run stops as soon as the *first*
+            side exhausts its slice (the arms race stays two-sided
+            throughout, but the total consumed budget is under-spent by
+            a pairing-dependent amount).
     """
 
     mode: str
@@ -300,6 +359,9 @@ class CoEvolutionConfig:
     seed: Optional[int] = None
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
+    budget_split: str = "shared"
+    on_side_exhausted: str = "freeze"
     generation_callback: Optional[Callable[[int, Dict[str, Any]], None]] = field(
         default=None, repr=False, compare=False
     )
@@ -311,6 +373,13 @@ class CoEvolutionConfig:
     the current champion for each side.  Exceptions raised by the
     callback are silently swallowed (a ``RuntimeWarning`` is emitted)
     so they cannot interrupt training.
+
+    A callback accepting a third positional parameter is instead invoked
+    with ``(gen, states, context)`` where ``context`` is a dict carrying
+    ``"logger"`` (the run's live :class:`ExperimentLogger`, e.g. for
+    ``logger.row("probe", ...)`` benchmark rows that must land in the run
+    directory) and ``"env_steps_consumed"`` (the pooled real env-tick count
+    at this generation, ``None`` when unavailable).
     """
 
     def __post_init__(self) -> None:
@@ -409,6 +478,24 @@ class CoEvolutionConfig:
                 f"parallel_backend={self.parallel_backend!r} invalid; "
                 f"must be one of {SUPPORTED_BACKENDS}."
             )
+        if self.budget_split not in VALID_BUDGET_SPLITS:
+            raise ValueError(
+                f"budget_split={self.budget_split!r} invalid; "
+                f"must be one of {VALID_BUDGET_SPLITS}."
+            )
+        if self.on_side_exhausted not in VALID_EXHAUSTED_POLICIES:
+            raise ValueError(
+                f"on_side_exhausted={self.on_side_exhausted!r} invalid; "
+                f"must be one of {VALID_EXHAUSTED_POLICIES}."
+            )
+        # Empty/whitespace scheduler addresses mean "unset".
+        if self.scheduler_address is not None:
+            self.scheduler_address = str(self.scheduler_address).strip() or None
+        if self.scheduler_address is not None and self.parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={self.scheduler_address!r} requires "
+                f"parallel_backend='dask', got {self.parallel_backend!r}."
+            )
 
 
 class CoEvolutionTrainer(BaselineTrainer):
@@ -420,9 +507,7 @@ class CoEvolutionTrainer(BaselineTrainer):
     the designated :attr:`CoEvolutionConfig.reporting_side`.
 
     The trainer is registered in :mod:`comparison` as ``"coevolution"``
-    so it plugs into :func:`compare_baselines` — but note that a
-    meaningful co-evolution head-to-head against plain :class:`EATrainer`
-    requires matching env / budget configuration by hand.
+    so it plugs into :func:`compare_baselines`.
     """
 
     def train(
@@ -433,7 +518,8 @@ class CoEvolutionTrainer(BaselineTrainer):
     ) -> TrainingResult:
         """Execute the co-evolution training loop.
 
-        Note:
+        Note
+        ----
             Seeding order: ``np.random.seed`` and the per-trainer
             ``default_rng`` are set *before* any side's ``initialise()``
             so results are reproducible regardless of side-iteration order.
@@ -443,15 +529,23 @@ class CoEvolutionTrainer(BaselineTrainer):
 
             GPU/RL contention: if any RL side resolved CUDA *and* JAX has
             GPU access a ``RuntimeWarning`` is emitted. Parallel
-            co-evolution (``num_workers > 1``) is not supported alongside
-            RL sides (torch state does not pickle across spawn) and falls
-            back to serial automatically.
+            co-evolution (``num_workers > 1`` or a remote Dask scheduler)
+            works alongside RL sides: EA/CMA generations are dispatched
+            population-wide (see :meth:`_make_batch_eval_fn`) with the live
+            RL opponent shipped to workers as a per-generation
+            ``FrozenRLPolicyWrapper`` CPU actor snapshot, and off-policy RL
+            sides collect their rollouts through the same executor. RL
+            *learning* always stays on the driver. The one serial path is
+            on-policy rollout collection (IPPO/GroupedIPPO): the live
+            actor+critic must produce the log_prob/value that an actor-only
+            snapshot cannot. Workers must be able to unpickle the snapshot,
+            i.e. torch + AgileRL installed wherever they run.
 
             Bootstrap: the initial population of every evolving side is
             evaluated against the other sides' initial state so fitnesses
             exist before the first ``step_generation`` call. Evaluator
             construction happens inside the ``make_executor`` context so
-            EA/CMA sides share the worker pool for ``k_opponents`` episode
+            EA/CMA sides share the worker pool for population-batch
             dispatch.
 
             Frame recording is best-effort and handled by the unified
@@ -473,6 +567,22 @@ class CoEvolutionTrainer(BaselineTrainer):
         if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
             consumed_budget = int(config.budget_value)
         self._consumed_budget = consumed_budget
+
+        # Per-side budget split: each evolving side gets an equal slice of
+        # the consumed pool. Only meaningful on the consumed-step path —
+        # nominal budgeting has no per-side attribution to split.
+        self._side_budgets: Optional[Dict[str, int]] = None
+        if coev_cfg.budget_split == "per_side":
+            if consumed_budget is None:
+                raise ValueError(
+                    "CoEvolutionConfig.budget_split='per_side' requires "
+                    "TrainingConfig.budget_on_consumed=True with "
+                    "budget_mode == BudgetMode.ENV_STEPS (per-side "
+                    "accounting only exists for real consumed env steps)."
+                )
+            evolving = [s.name for s in coev_cfg.sides if s.optimizer != "frozen"]
+            share = consumed_budget // max(1, len(evolving))
+            self._side_budgets = {name: share for name in evolving}
         # Safety cap: when budget_on_consumed the real stop is the consumed check;
         # max_iters prevents an infinite loop if every episode terminates in 1 step.
         max_iters = (
@@ -488,33 +598,41 @@ class CoEvolutionTrainer(BaselineTrainer):
         self._env_name: str = config.env_name
         self._env_config: Optional[Dict[str, Any]] = config.env_config
 
-        # Resolve the executor up front so we can size pools sanely
-        # and emit one warning if num_workers > 1 with k_opponents == 1.
-        resolved_workers = resolve_num_workers(coev_cfg.num_workers)
-        if resolved_workers > 1 and coev_cfg.k_opponents == 1:
-            warnings.warn(
-                "CoEvolutionConfig: num_workers="
-                f"{coev_cfg.num_workers} but k_opponents=1; "
-                "parallelism is a no-op and the serial path will be used.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # Resolve the executor up front so we can size pools sanely.
+        # Remote scheduler (config field or DEAP_DASK_SCHEDULER env var): the
+        # workers live elsewhere, so skip the driver CPU cap and force the
+        # parallel dispatch path even for num_workers <= 1 (advisory there).
+        # k_opponents does not gate parallelism: the population-level batch
+        # path (_make_batch_eval_fn) fans out N x k episodes even at k=1.
+        effective_scheduler = (
+            resolve_scheduler_address(coev_cfg.scheduler_address)
+            if coev_cfg.parallel_backend == "dask"
+            else None
+        )
+        remote = effective_scheduler is not None
+        resolved_workers = resolve_num_workers(
+            coev_cfg.num_workers, cap_to_cpu=not remote
+        )
+        use_parallel = resolved_workers > 1 or remote
         self._resolved_workers = resolved_workers
+        self._use_parallel = use_parallel
 
         # One snapshot, reused for the process-pool initializer and shipped on
-        # episode payloads so SCOOP/Dask workers can re-register custom envs too.
-        self._registry_snapshot = get_registry_snapshot()
+        # episode payloads so Dask workers can re-register custom envs too.
+        self._registry_snapshot = get_registry_snapshot(target_remote=remote)
+        dask_workers: Optional[list] = None
         with make_executor(
             resolved_workers,
             backend=coev_cfg.parallel_backend,
             initializer=_prewarm_and_replay,
             initargs=(self._registry_snapshot,),
+            scheduler_address=coev_cfg.scheduler_address,
         ) as executor:
             self._executor = executor
             # Keep side initialisation inside the executor scope. This
             # preserves the last known-good ordering for QDax-backed
             # coevolution on Windows.
-            states = self._initialize_sides(env, coev_cfg, resolved_workers)
+            states = self._initialize_sides(env, coev_cfg)
             print(
                 f"[CoEv] bootstrapping {len(states)} sides "
                 f"({sum(1 for s in states.values() if s.side.optimizer != 'frozen')} active)",
@@ -591,6 +709,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             reporting = states[coev_cfg.reporting_side]
             policy = reporting.best_policy(env)
 
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
+
         env.close()
         self._recorder.close()
         self._rec_env = None
@@ -607,6 +729,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             },
             "env_steps_nominal": env_steps_nominal,
             "env_steps_consumed": env_steps_consumed,
+            "env_steps_consumed_per_side": {
+                name: self._side_consumed(per_side_history, name)
+                for name in per_side_history
+            },
             "final_best": {
                 name: (
                     None
@@ -626,9 +752,18 @@ class CoEvolutionTrainer(BaselineTrainer):
             "schedule": coev_cfg.schedule,
             "k_opponents": coev_cfg.k_opponents,
             "aggregation": coev_cfg.aggregation,
+            "budget_split": coev_cfg.budget_split,
+            "on_side_exhausted": (
+                coev_cfg.on_side_exhausted
+                if coev_cfg.budget_split == "per_side"
+                else None
+            ),
+            "per_side_budgets": self._side_budgets,
             "reporting_side": coev_cfg.reporting_side,
             "coevolution_num_workers": resolved_workers,
             "coevolution_parallel_backend": coev_cfg.parallel_backend,
+            "coevolution_scheduler_address": effective_scheduler,
+            "coevolution_dask_workers": dask_workers,
             "run_dir": (
                 str(self._recording_log.run_dir)
                 if config.output_dir is not None
@@ -670,7 +805,6 @@ class CoEvolutionTrainer(BaselineTrainer):
         self,
         env: PettingZooWrapper,
         coev_cfg: CoEvolutionConfig,
-        resolved_workers: int,
     ) -> Dict[str, SideState]:
         """Seed RNGs and construct/initialise every side's state.
 
@@ -719,7 +853,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         warn_on_gpu_contention(rl_cuda_sides, qdax_sides)
 
         has_rl_side = any(getattr(s, "is_rl_side", False) for s in states.values())
-        if has_rl_side and resolved_workers > 1:
+        if has_rl_side and self._use_parallel:
             has_onpolicy_rl = any(
                 getattr(s, "is_rl_side", False) and getattr(s, "is_on_policy", False)
                 for s in states.values()
@@ -755,8 +889,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         from deap_pettingzoo.baselines.recording import RecordingController
 
         self._recording_log = build_logger(config, algorithm="coevolution")
-        # Use the env's natural episode length, not
-        # CoEvolutionConfig.max_steps_per_episode.
+        # Use the env's natural episode length, not CoEvolutionConfig.max_steps_per_episode.
         _env_cfg = config.env_config or {}
         self._recording_max_steps: int = int(
             config.recording.max_frames_per_episode
@@ -814,7 +947,14 @@ class CoEvolutionTrainer(BaselineTrainer):
         """
         if coev_cfg.generation_callback is not None:
             try:
-                coev_cfg.generation_callback(gen, states)
+                if _callback_accepts_context(coev_cfg.generation_callback):
+                    context = {
+                        "logger": getattr(self, "_recording_log", None),
+                        "env_steps_consumed": consumed,
+                    }
+                    coev_cfg.generation_callback(gen, states, context)
+                else:
+                    coev_cfg.generation_callback(gen, states)
             except Exception as _cb_exc:
                 warnings.warn(
                     f"[CoEvolution] generation_callback failed at gen {gen}: "
@@ -892,10 +1032,16 @@ class CoEvolutionTrainer(BaselineTrainer):
         Returns the number of generations actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
+        side_budgets = self._side_budgets
         realized = 0
         for _g in range(max_iters):
             _gt = time.time()
-            self._run_synchronous_generation(env, states, coev_cfg, history)
+            # Per-side split, "freeze" policy: sides that have spent their
+            # slice stop evolving but keep serving their pool as opponents.
+            skip: Optional[Set[str]] = None
+            if side_budgets is not None and coev_cfg.on_side_exhausted == "freeze":
+                skip = self._exhausted_sides(history, side_budgets)
+            self._run_synchronous_generation(env, states, coev_cfg, history, skip=skip)
             realized = _g + 1
             consumed = self._aggregate_consumed(history)
             # Progress + champion recording happen together in the callback.
@@ -911,7 +1057,10 @@ class CoEvolutionTrainer(BaselineTrainer):
                 f"({time.time()-_gt:.1f}s)",
                 flush=True,
             )
-            if consumed_budget is not None and consumed >= consumed_budget:
+            if side_budgets is not None:
+                if self._per_side_stop(coev_cfg, history, side_budgets):
+                    break
+            elif consumed_budget is not None and consumed >= consumed_budget:
                 break
         return realized
 
@@ -931,13 +1080,28 @@ class CoEvolutionTrainer(BaselineTrainer):
         Returns the number of side-steps actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
+        side_budgets = self._side_budgets
         total = 0
         rotation = list(states)
         stop = False
         while total < max_iters and not stop:
+            # Guard against a zero-progress rotation (every budgeted side
+            # already exhausted, e.g. a slice smaller than one generation).
+            if side_budgets is not None and len(
+                self._exhausted_sides(history, side_budgets)
+            ) == len(side_budgets):
+                break
             for name in rotation:
                 if stop:
                     break
+                # Per-side split, "freeze": a side whose slice is spent is
+                # skipped in the rotation but keeps serving its pool.
+                if (
+                    side_budgets is not None
+                    and name in side_budgets
+                    and self._side_consumed(history, name) >= side_budgets[name]
+                ):
+                    continue
                 for _inner in range(coev_cfg.alternating_generations):
                     if total >= max_iters or stop:
                         break
@@ -958,7 +1122,15 @@ class CoEvolutionTrainer(BaselineTrainer):
                         f"({time.time()-_gt:.1f}s)",
                         flush=True,
                     )
-                    if consumed_budget is not None and consumed >= consumed_budget:
+                    if side_budgets is not None:
+                        if self._per_side_stop(coev_cfg, history, side_budgets):
+                            stop = True
+                            break
+                        if self._side_consumed(history, name) >= side_budgets[name]:
+                            # This side's slice is spent ("freeze"): hand the
+                            # rotation to the next side early.
+                            break
+                    elif consumed_budget is not None and consumed >= consumed_budget:
                         stop = True
                         break
         return total
@@ -983,8 +1155,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         Note:
             Reuses the logger built in ``train()`` (so frame recording and
             metrics share a single run directory). Falls back to building a
-            fresh one if the trainer is used outside ``train()``
-            (defensive).
+            fresh one if the trainer is used outside ``train()`` (defensive).
         """
         from deap_pettingzoo.baselines._logging_helpers import (
             build_logger,
@@ -1136,6 +1307,41 @@ class CoEvolutionTrainer(BaselineTrainer):
         return int(sum(int(s.env_steps) for hist in history.values() for s in hist))
 
     @staticmethod
+    def _side_consumed(history: Dict[str, List[GenerationStats]], name: str) -> int:
+        """Real env ticks consumed by one side's own evaluations so far."""
+        return int(sum(int(s.env_steps) for s in history.get(name, [])))
+
+    @classmethod
+    def _exhausted_sides(
+        cls,
+        history: Dict[str, List[GenerationStats]],
+        side_budgets: Dict[str, int],
+    ) -> Set[str]:
+        """Sides that have consumed at least their per-side budget slice."""
+        return {
+            name
+            for name, budget in side_budgets.items()
+            if cls._side_consumed(history, name) >= budget
+        }
+
+    @classmethod
+    def _per_side_stop(
+        cls,
+        coev_cfg: CoEvolutionConfig,
+        history: Dict[str, List[GenerationStats]],
+        side_budgets: Dict[str, int],
+    ) -> bool:
+        """Stop condition under ``budget_split='per_side'``.
+
+        ``"cutoff"``: stop as soon as *any* evolving side exhausts its
+        slice. ``"freeze"``: stop when *all* evolving sides have.
+        """
+        exhausted = cls._exhausted_sides(history, side_budgets)
+        if coev_cfg.on_side_exhausted == "cutoff":
+            return bool(exhausted)
+        return len(exhausted) == len(side_budgets)
+
+    @staticmethod
     def _stats_to_dict(s: GenerationStats) -> Dict[str, Any]:
         return {
             "generation": s.generation,
@@ -1271,7 +1477,7 @@ class CoEvolutionTrainer(BaselineTrainer):
     def _make_batch_eval_fn(self, evaluator: Any) -> Optional[Any]:
         """Return a population-level parallel batch-evaluation function.
 
-        When ``self._resolved_workers <= 1`` or the evaluator is not a
+        When the run is serial (``self._use_parallel`` is falsy) or the evaluator is not a
         :class:`CoEvolutionEvaluator`, returns ``None`` so callers fall
         back to the serial ``toolbox.evaluate`` path.
 
@@ -1286,7 +1492,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         """
         from .evaluator import CoEvolutionEvaluator, _episode_rollout, _EpisodePayload
 
-        if self._resolved_workers <= 1:
+        if not self._use_parallel:
             return None
         if not isinstance(evaluator, CoEvolutionEvaluator):
             return None
@@ -1434,11 +1640,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             pool_snapshot=pool_snapshot,
         )
         if learner_state.side.optimizer == "rl":
-            # Phase-2: pass executor + env identity so RLSideState can
-            # dispatch rollout episodes to worker processes in parallel.
-            # The executor is only handed over when resolved_workers > 1;
-            # for serial runs None keeps the existing _collect_episode path.
-            rl_executor = self._executor if self._resolved_workers > 1 else None
+            rl_executor = self._executor if self._use_parallel else None
             return _RLDriverContext(
                 env_wrapper=env,
                 learner_role_prefixes=learner_state.side.role_prefixes,
@@ -1455,12 +1657,13 @@ class CoEvolutionTrainer(BaselineTrainer):
         ), "frozen sides never become learners."
         learner_optimizer = learner_state.side.optimizer
         # Hand the executor to EA/CMA/QDax evaluators whose parallel path is
-        # implemented.  The resolved_workers > 1 guard avoids handing a
-        # _SerialExecutor wrapper when the user set num_workers=1.
+        # implemented.  The _use_parallel guard avoids handing a
+        # _SerialExecutor wrapper on serial runs (workers <= 1, no remote
+        # Dask scheduler).
         executor_for_side = (
             self._executor
             if learner_optimizer in {"ea", "cma", "qdax_map_elites", "qdax_cma_me"}
-            and self._resolved_workers > 1
+            and self._use_parallel
             else None
         )
 
@@ -1549,6 +1752,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, SideState],
         coev_cfg: CoEvolutionConfig,
         history: Dict[str, List[GenerationStats]],
+        skip: Optional[Set[str]] = None,
     ) -> None:
         """Advance every non-frozen side by one generation simultaneously.
 
@@ -1565,6 +1769,11 @@ class CoEvolutionTrainer(BaselineTrainer):
             ``snapshot_sync()`` hook is honoured so opponents see a frozen
             pre-learn view consistent with the synchronous-schedule
             contract.
+
+            ``skip`` (per-side budgeting, "freeze" policy): named sides do
+            not step this generation — no evaluation episodes, no stats
+            row — but their pools are still snapshotted above, so other
+            sides keep training against the frozen side's final state.
         """
         pool_snapshot: Dict[str, Any] = {}
         for name, state in states.items():
@@ -1574,6 +1783,8 @@ class CoEvolutionTrainer(BaselineTrainer):
                 pool = snap()
             pool_snapshot[name] = pool
         for name, state in states.items():
+            if skip and name in skip:
+                continue
             self._step_one_side(
                 env,
                 state,

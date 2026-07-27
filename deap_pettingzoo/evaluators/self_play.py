@@ -2,7 +2,7 @@
 
 Drives **every** agent in the environment with a *single shared-weights*
 policy produced from one genome. This is the canonical EA-evaluator for
-symmetric turn-based games (e.g. tic-tac-toe, connect-four) paired with
+symmetric turn-based games (e.g. tic-tac-toe) paired with
 :class:`~deap_pettingzoo.environments.MaskedSimultaneousAdapter` or
 :class:`~deap_pettingzoo.environments.SequentialTurnAdapter`.
 
@@ -49,7 +49,7 @@ class SelfPlayEvaluator(BaseEvaluator):
             * ``'team_mapping'`` — sum rewards for agents whose
               ``team_mapping[agent]`` matches ``team``. Requires
               ``team_mapping`` and ``team`` to be supplied.
-        team_mapping: Maps ``agent_id`` → team name. Required when
+        team_mapping: Maps ``agent_id`` -> team name. Required when
             ``aggregation='team_mapping'``.
         team: Team name to sum rewards for. Required when
             ``aggregation='team_mapping'``.

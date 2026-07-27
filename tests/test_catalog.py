@@ -1,4 +1,4 @@
-"""Tests for the unified catalog (Phase 0 of the UI overhaul).
+"""Tests for the unified catalog.
 
 Covers the dependency-free schema primitives, hybrid hyperparameter discovery,
 algorithm / environment / co-evolution enumeration, availability degradation,

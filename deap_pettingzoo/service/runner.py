@@ -79,9 +79,7 @@ class ProgressWriter:
             pass  # best-effort
 
 
-# ---------------------------------------------------------------------------
 # Runner helpers
-# ---------------------------------------------------------------------------
 
 
 def _load_spec(spec_file: Path) -> Any:
@@ -140,7 +138,7 @@ def _persist_eval_metrics(
 
     :attr:`RunRecord.summary` prefers ``manifest.json``'s ``final_summary``
     (written by the trainer before the runner regains control) and only falls
-    back to ``summary.json``, so the eval keys are merged into **both** to keep
+    back to ``summary.json``, so the eval keys are merged into both to keep
     the analysis/UI layers consistent regardless of which a loader reads.
 
     Best-effort: a persistence failure is logged but never raised, so it cannot
@@ -417,7 +415,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     run_experiment(args.spec_file, args.experiment_dir)
 
 
-# Eager import (below the functions to avoid circular issues with catalog).
+# Eager import (below the functions to avoid circular import issues with catalog).
 from deap_pettingzoo.baselines.experiment_spec import build_configs  # noqa: E402
 
 if __name__ == "__main__":

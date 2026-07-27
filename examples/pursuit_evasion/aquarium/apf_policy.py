@@ -1,10 +1,7 @@
 """APF (Artificial Potential Field) evader policy for ``marl_aquarium.aquarium_v0``.
 
 The policy is a deterministic, scripted prey ("fish") controller that
-flees from observed predators ("sharks").  It mirrors the MPE APF
-controller in :mod:`examples.pursuit_evasion.simple_tag.apf_policy`
-but is rewritten against the aquarium observation layout, which differs
-in slice shape and field semantics.
+flees from observed predators ("sharks").
 
 Aquarium observation layout (introspected from
 ``marl_aquarium/env/aquarium.py``):
@@ -12,7 +9,7 @@ Aquarium observation layout (introspected from
 * For a prey agent (``prey_K``) the observation vector has length
   ``5 + predator_observe_count * 6 + prey_observe_count * 6``::
 
-      [ self_block (5)        ] [ predator_block (P*6) ] [ prey_block (Q*6) ]
+      [ self_block (5) ] [ predator_block (P*6) ] [ prey_block (Q*6) ]
 
   where:
 
@@ -25,11 +22,11 @@ Aquarium observation layout (introspected from
     flat run of ``6 * count`` floats; each entry is
     ``[type, sx, sy, sdistance, sdirection, sspeed]``, where:
 
-    * ``type=0`` → predator (shark), ``type=1`` → prey (fish);
+    * ``type=0`` -> predator (shark), ``type=1`` -> prey (fish);
     * ``sx, sy`` is the target's *absolute* position scaled to ``[0, 1]``;
     * ``sdistance`` is the in-torus distance from observer to target,
       scaled by the observer's view-distance to ``[0, 1]``;
-    * ``sdirection`` is the direction angle (degrees, observer→target,
+    * ``sdirection`` is the direction angle (degrees, observer->target,
       torus-aware) in ``[-180, 180]`` mapped via ``(d + 180) / 360`` to
     ``[0, 1]``.  Encoded by ``get_angle_from_vector`` = ``−atan2(vy, vx)``:
     ``0°`` = right (east), ``+90°`` = screen-up (north), ``−90°`` =
@@ -38,7 +35,7 @@ Aquarium observation layout (introspected from
     * ``sspeed`` is the target's speed in ``[0, 1]``.
 
 Aquarium action mapping
-(``raw_env.get_desired_velocity_from_action`` →
+(``raw_env.get_desired_velocity_from_action`` ->
 ``utils.get_vector_from_action``)::
 
     angle_deg = (360 / action_count) * action
@@ -90,7 +87,7 @@ class AquariumAPFConfig:
     """Gain on inverse-distance repulsion from nearby walls.  Lower than
     ``k_predator`` so predator avoidance always takes priority.  Uses 1/d
     (not 1/d²) falloff so the force is strong right at the wall but fades
-    quickly — a "get unstuck" nudge, not a persistent steering force."""
+    quickly."""
 
     wall_threshold: float = 0.3
     """Normalised distance (``[0,1]``, 0=at wall) below which wall
@@ -101,7 +98,7 @@ class AquariumAPFConfig:
     """Maximum magnitude of the prey-separation force as a fraction of the
     predator-flee force magnitude.  Without this cap, coincident teammates
     (``sdistance ≈ 0`` saturating the inverse-square term to
-    ``1/softening``) produce a separation force ≫ the predator-flee force,
+    ``1/softening``) produce a separation force greater than the predator-flee force,
     and prey end up fleeing each other instead of the predator.  With this
     cap, separation is at most a heading nudge that prevents flock collapse,
     never the dominant force."""
@@ -173,14 +170,31 @@ def _action_for_heading(target_x: float, target_y: float, action_count: int) -> 
 
     Uses the env's heading convention::
 
-        action k → (sin(2π k / N), -cos(2π k / N))
+        action k -> (sin(2π k / N), -cos(2π k / N))
     """
     angle_rad = math.atan2(target_x, -target_y)  # inverse of (sin, -cos)
-    # Map atan2 result (-π, π] → [0, 2π) then quantise to nearest action bin.
+    # Map atan2 result (-π, π] -> [0, 2π) then quantise to nearest action bin.
     if angle_rad < 0:
         angle_rad += 2.0 * math.pi
     bin_size = 2.0 * math.pi / action_count
     return int(round(angle_rad / bin_size)) % int(action_count)
+
+
+def continuous_action_for_heading(target_x: float, target_y: float) -> np.ndarray:
+    """Return the Box(-1, 1, (2,)) action matching the target direction.
+
+    In continuous mode (``continuous_actions=True``, marl-aquarium >= 0.1.12)
+    the env interprets the action as a desired-velocity vector scaled by the
+    entity's max velocity.  Normalising to unit length requests full speed
+    along the heading — the exact analogue of the discrete headings, which
+    are always full-speed.
+    """
+    magnitude = math.hypot(target_x, target_y)
+    if magnitude < 1e-12:
+        return np.zeros(2, dtype=np.float32)
+    return np.asarray(
+        [target_x / magnitude, target_y / magnitude], dtype=np.float32
+    )
 
 
 class AquariumAPFEvaderPolicy:
@@ -197,9 +211,12 @@ class AquariumAPFEvaderPolicy:
             prey block.
         action_count: Env kwarg ``action_count`` (default 16).  Quantises
             the resultant force vector onto one of these evenly spaced
-            heading directions.
+            heading directions (discrete mode only).
         config: :class:`AquariumAPFConfig` instance (default values used
             if omitted).
+        continuous: Emit ``Box(-1, 1, (2,))`` desired-velocity actions
+            instead of discrete heading indices (requires the env to be
+            built with ``continuous_actions=True``).
     """
 
     def __init__(
@@ -209,6 +226,7 @@ class AquariumAPFEvaderPolicy:
         action_count: int = 16,
         config: Optional[AquariumAPFConfig] = None,
         wall_features: int = 0,
+        continuous: bool = False,
     ) -> None:
         self.predator_observe_count = int(predator_observe_count)
         self.prey_observe_count = int(prey_observe_count)
@@ -219,48 +237,56 @@ class AquariumAPFEvaderPolicy:
             wall_features=wall_features,
         )
         self._wall_features = int(wall_features)
+        self.continuous = bool(continuous)
         self._turn_sign: int = 1  # randomised on each reset()
 
-    # PolicyProtocol -------------------------------------------------------
+    # PolicyProtocol
 
     def reset(self) -> None:
         self._turn_sign = random.choice((-1, 1))
 
-    def get_action(self, observation, deterministic: bool = True) -> int:
+    def _emit(self, heading_x: float, heading_y: float):
+        """Encode a target heading in the policy's configured action space."""
+        if self.continuous:
+            return continuous_action_for_heading(heading_x, heading_y)
+        return _action_for_heading(heading_x, heading_y, self.action_count)
+
+    def get_action(self, observation, deterministic: bool = True):
         del deterministic  # APF is deterministic by construction.
         obs = np.asarray(observation, dtype=np.float64).ravel()
         # Aquarium pads observation with zeros when fewer than P / Q
         # nearby entities are present (see ``raw_env.*_observations``).
-        # A zero entry has type=0, distance=0 → would look like a
-        # collocated predator without a guard.  We use the (type, x, y,
+        # A zero entry has type=0, distance=0 -> would look like a
+        # collocated predator without a guard.  Therefore use the (type, x, y,
         # distance) tuple to discriminate "real" entries: a *real*
         # nearby entry has distance > 0 OR a non-zero position.  The
         # observer-self field (``type, sx, sy, sdir, sspd``) is always
-        # populated, so we don't need the same guard there.
+        # populated, so this guard is not needed there.
         force_x, force_y, any_visible = self._compute_force(obs)
         magnitude = math.hypot(force_x, force_y)
 
         if magnitude < self.config.no_op_threshold and not any_visible:
-            # Genuinely no predators in view → keep current heading.  Fall
-            # back to action 0 if no self-direction is available.  When a
-            # predator IS visible but forces cancel, _compute_force has
-            # already substituted a pure radial flee from the closest
-            # threat, so we never want the heading-keep branch in that case.
+            # Genuinely no predators in view -> keep current heading.  Fall
+            # back to the "up" heading (action 0) if no self-direction is
+            # available.  When a predator IS visible but forces cancel,
+            # _compute_force has already substituted a pure radial flee from
+            # the closest threat, so we never want the heading-keep branch
+            # in that case.
             self_block = obs[self._layout["self"]]
             if self_block.size >= 4:
                 heading_x, heading_y = _direction_to_unit_vector(self_block[3])
-                return _action_for_heading(heading_x, heading_y, self.action_count)
-            return 0
+                return self._emit(heading_x, heading_y)
+            return self._emit(0.0, -1.0)
 
-        # Quantise the resultant *flee* force onto a discrete heading.
-        return _action_for_heading(force_x, force_y, self.action_count)
+        # Encode the resultant *flee* force as an action.
+        return self._emit(force_x, force_y)
 
-    # Internals ------------------------------------------------------------
+    # Internal logic
 
     def _compute_force(self, obs: np.ndarray) -> Tuple[float, float, bool]:
         cfg = self.config
         # Accumulate predator (flee + tangential) and separation forces
-        # separately so we can cap the latter relative to the former.
+        # separately to can cap the latter relative to the former.
         pred_fx = 0.0
         pred_fy = 0.0
         any_predator_visible = False
@@ -280,7 +306,7 @@ class AquariumAPFEvaderPolicy:
             ux, uy = _direction_to_unit_vector(sdirection)
             if closest is None or sdistance < closest[0]:
                 closest = (sdistance, ux, uy)
-            # ``sdirection`` points observer → predator.  Flee = -unit.
+            # ``sdirection`` points observer -> predator.  Flee = -unit.
             inv_sq = 1.0 / (sdistance * sdistance + cfg.softening)
             pred_fx -= cfg.k_predator * ux * inv_sq
             pred_fy -= cfg.k_predator * uy * inv_sq
@@ -389,30 +415,152 @@ class AquariumAPFEvaderPolicy:
 
     @staticmethod
     def _iter_entries(block: np.ndarray, expected_type: int) -> List[Optional[Tuple[float, float]]]:
-        """Yield ``(sdistance, sdirection)`` for non-padding entries in *block*.
+        return _iter_entries(block, expected_type)
 
-        Entries are 6-tuples ``[type, sx, sy, sdistance, sdirection, sspeed]``.
-        Padding (no entity present) is all-zeros, so ``(sx, sy, sdistance)
-        == (0, 0, 0)`` is filtered out.
-        """
-        out: List[Optional[Tuple[float, float]]] = []
-        n = block.size // 6
-        for i in range(n):
-            base = i * 6
-            entry_type = block[base]
-            sx = block[base + 1]
-            sy = block[base + 2]
-            sdistance = block[base + 3]
-            sdirection = block[base + 4]
-            # Padding heuristic: all of (sx, sy, sdistance) zero.
-            if abs(sx) < 1e-9 and abs(sy) < 1e-9 and abs(sdistance) < 1e-9:
-                out.append(None)
+
+def _iter_entries(block: np.ndarray, expected_type: int) -> List[Optional[Tuple[float, float]]]:
+    """Yield ``(sdistance, sdirection)`` for non-padding entries in *block*.
+
+    Entries are 6-tuples ``[type, sx, sy, sdistance, sdirection, sspeed]``.
+    Padding (no entity present) is all-zeros, so ``(sx, sy, sdistance)
+    == (0, 0, 0)`` is filtered out.
+    """
+    out: List[Optional[Tuple[float, float]]] = []
+    n = block.size // 6
+    for i in range(n):
+        base = i * 6
+        entry_type = block[base]
+        sx = block[base + 1]
+        sy = block[base + 2]
+        sdistance = block[base + 3]
+        sdirection = block[base + 4]
+        # Padding heuristic: all of (sx, sy, sdistance) zero.
+        if abs(sx) < 1e-9 and abs(sy) < 1e-9 and abs(sdistance) < 1e-9:
+            out.append(None)
+            continue
+        # Type-mismatch defensive guard (should never trip in practice).
+        if expected_type is not None and int(round(float(entry_type))) != int(expected_type):
+            # Entry does not match expected type — skip rather than
+            # silently mis-classify.
+            out.append(None)
+            continue
+        out.append((float(sdistance), float(sdirection)))
+    return out
+
+
+class AquariumAPFPursuerPolicy:
+    """Scripted predator policy: chase the nearest visible prey.
+
+    Mirror of :class:`AquariumAPFEvaderPolicy` driving *predators*
+    (sharks).  The predator obs layout matches the prey layout in shape
+    (``[self] + [predator_block] + [prey_block]``) so
+    :func:`aquarium_obs_layout` works unchanged; semantically the
+    ``predators`` block lists teammates and the ``prey`` block lists
+    targets.
+
+    Force model (per visible prey, ``r`` = unit vector observer->target)::
+
+        F = sum_p k_predator * r_p / (|d_p|^2 + softening)
+
+    plus optional wall avoidance.  No tangential term — pursuers do not
+    need to break force-cancellation symmetry; with several prey in view
+    the resultant simply favours the nearest.  Stateless; :meth:`reset`
+    is a no-op.
+
+    Args:
+        predator_observe_count: Env kwarg — sizes the teammate block.
+        prey_observe_count: Env kwarg — sizes the target block.
+        action_count: Env kwarg ``action_count`` (discrete mode only).
+        config: :class:`AquariumAPFConfig`; ``k_predator`` is reused as
+            the attraction gain.
+        wall_features: 4 when ``observable_walls=True``, 0 otherwise.
+        continuous: Emit ``Box(-1, 1, (2,))`` desired-velocity actions.
+    """
+
+    def __init__(
+        self,
+        predator_observe_count: int,
+        prey_observe_count: int,
+        action_count: int = 16,
+        config: Optional[AquariumAPFConfig] = None,
+        wall_features: int = 0,
+        continuous: bool = False,
+    ) -> None:
+        self.predator_observe_count = int(predator_observe_count)
+        self.prey_observe_count = int(prey_observe_count)
+        self.action_count = int(action_count)
+        self.config = config or AquariumAPFConfig()
+        self._layout = aquarium_obs_layout(
+            self.predator_observe_count, self.prey_observe_count,
+            wall_features=wall_features,
+        )
+        self._wall_features = int(wall_features)
+        self.continuous = bool(continuous)
+
+    def reset(self) -> None:
+        return None
+
+    def _emit(self, heading_x: float, heading_y: float):
+        """Encode a target heading in the policy's configured action space."""
+        if self.continuous:
+            return continuous_action_for_heading(heading_x, heading_y)
+        return _action_for_heading(heading_x, heading_y, self.action_count)
+
+    def get_action(self, observation, deterministic: bool = True):
+        del deterministic
+        obs = np.asarray(observation, dtype=np.float64).ravel()
+        force_x, force_y, any_visible = self._compute_force(obs)
+        magnitude = math.hypot(force_x, force_y)
+        if magnitude < self.config.no_op_threshold and not any_visible:
+            # No prey in view -> keep the current heading (patrol).
+            self_block = obs[self._layout["self"]]
+            if self_block.size >= 4:
+                heading_x, heading_y = _direction_to_unit_vector(self_block[3])
+                return self._emit(heading_x, heading_y)
+            return self._emit(0.0, -1.0)
+        return self._emit(force_x, force_y)
+
+    def _compute_force(self, obs: np.ndarray) -> Tuple[float, float, bool]:
+        cfg = self.config
+        fx = 0.0
+        fy = 0.0
+        any_visible = False
+        prey_block = obs[self._layout["prey"]]
+        for entry in _iter_entries(prey_block, expected_type=1):
+            if entry is None:
                 continue
-            # Type-mismatch defensive guard (should never trip in practice).
-            if expected_type is not None and int(round(float(entry_type))) != int(expected_type):
-                # Entry does not match expected type — skip rather than
-                # silently mis-classify.
-                out.append(None)
-                continue
-            out.append((float(sdistance), float(sdirection)))
-        return out
+            any_visible = True
+            sdistance, sdirection = entry
+            ux, uy = _direction_to_unit_vector(sdirection)
+            inv_sq = 1.0 / (sdistance * sdistance + cfg.softening)
+            # Attractive: pull toward prey.
+            fx += cfg.k_predator * ux * inv_sq
+            fy += cfg.k_predator * uy * inv_sq
+
+        if cfg.k_wall > 0.0 and self._wall_features > 0:
+            wfx, wfy = self._compute_wall_avoidance(obs)
+            fx += wfx
+            fy += wfy
+
+        return fx, fy, any_visible
+
+    def _compute_wall_avoidance(self, obs: np.ndarray) -> Tuple[float, float]:
+        """Return a repulsive force away from nearby walls (1/d falloff)."""
+        cfg = self.config
+        self_block = obs[self._layout["self"]]
+        # Wall features: [left, right, top, bottom], 0=at wall, 1=far.
+        left = float(self_block[5])
+        right = float(self_block[6])
+        top = float(self_block[7])
+        bottom = float(self_block[8])
+        fx, fy = 0.0, 0.0
+        thresh = cfg.wall_threshold
+        if left < thresh:
+            fx += cfg.k_wall / max(left, cfg.softening)
+        if right < thresh:
+            fx -= cfg.k_wall / max(right, cfg.softening)
+        if top < thresh:
+            fy += cfg.k_wall / max(top, cfg.softening)
+        if bottom < thresh:
+            fy -= cfg.k_wall / max(bottom, cfg.softening)
+        return fx, fy

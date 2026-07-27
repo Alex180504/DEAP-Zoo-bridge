@@ -1,5 +1,10 @@
 @startuml sequence_ui_browse_compare
-title Streamlit UI – Browse → Compare
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 220
+skinparam wrapWidth 280
+title Streamlit UI – Browse -> Compare
 
 actor "User" as U
 participant "Streamlit\nBrowse page" as B
@@ -22,16 +27,16 @@ U -> B: choose sort column + order
 B -> B: filter + sort filtered list in memory
 B --> U: render table with name / started_at columns
 
-U -> B: tick checkboxes → select N runs
+U -> B: tick checkboxes -> select N runs
 B -> B: session_state["selected_run_ids"] = [...]
 
 == Manage selected runs ==
-U -> B: enter display name → click Rename
+U -> B: enter display name -> click Rename
 B -> MGT: rename_run(run_dir, display_name)
 note right of MGT: atomic .tmp-then-replace\nwrites display_name into manifest.json
 B -> B: st.cache_resource.clear() + st.rerun()
 
-U -> B: click Delete → confirm dialog
+U -> B: click Delete -> confirm dialog
 B --> U: st.warning with Confirm / Cancel buttons
 U -> B: click Confirm
 B -> MGT: delete_run(run_dir) for each selected
@@ -39,10 +44,10 @@ note right of MGT: requires manifest.json\nshutil.rmtree(run_dir)
 B -> B: clear selection, clear cache, st.rerun()
 
 == Directory management (sidebar) ==
-U -> B: enter folder name → click Create
+U -> B: enter folder name -> click Create
 B -> MGT: create_folder(root, name)
 note right of MGT: rejects unsafe names\nmkdir(exist_ok=True)
-U -> B: select target folder → click Move
+U -> B: select target folder -> click Move
 B -> MGT: move_run(run_dir, target_dir) for each selected
 note right of MGT: requires manifest.json\nshutil.move()
 B -> B: clear selection, clear cache, st.rerun()

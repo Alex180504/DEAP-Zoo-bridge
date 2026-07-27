@@ -1,0 +1,6 @@
+# Force LF line endings for files that run inside Linux containers / Slurm
+# jobs. A CRLF checkout on Windows breaks shebangs and shell parsing there.
+docker/** text eol=lf
+examples/hpc/** text eol=lf
+*.sh text eol=lf
+*.sbatch text eol=lf

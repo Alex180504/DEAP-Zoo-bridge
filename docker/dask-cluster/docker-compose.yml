@@ -1,0 +1,49 @@
+x-hpc-image: &hpc-image
+  build:
+    context: ../..
+    dockerfile: docker/hpc-base/Dockerfile
+  image: deap-hpc-base:latest
+
+services:
+  scheduler:
+    <<: *hpc-image
+    command: ["dask", "scheduler", "--host", "0.0.0.0", "--port", "8786", "--dashboard-address", ":8787"]
+    ports:
+      # Dashboard on the Windows host at http://localhost:8787 while the
+      # rig runs (task stream / worker views). Tests never depend on it --
+      # observation aid only.
+      - "8787:8787"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8786), timeout=2).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  worker:
+    <<: *hpc-image
+    command: ["dask", "worker", "tcp://scheduler:8786", "--nthreads", "1", "--nworkers", "1", "--memory-limit", "0", "--no-dashboard"]
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    volumes:
+      - shared:/shared
+
+  driver:
+    <<: *hpc-image
+    # Long-lived and idle: tests exec into this one container repeatedly
+    # (docker compose exec), which is what lets the reproducibility test run
+    # serial-vs-distributed comparisons "inside the same driver container".
+    command: ["sleep", "infinity"]
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    environment:
+      DEAP_DASK_SCHEDULER: "tcp://scheduler:8786"
+    volumes:
+      - shared:/shared
+    working_dir: /app
+
+volumes:
+  shared:

@@ -1,0 +1,71 @@
+@startuml logging_sinks
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Result logging: sinks and checkpoints
+
+package "deap_pettingzoo.utils.logging" {
+  interface Sink <<Protocol>> {
+    +open(run_dir: Path)
+    +log_row(table: str, row: Mapping)
+    +log_scalar(name: str, value: float, step: int)
+    +flush()
+    +close()
+  }
+  class NoOpSink
+  class JsonManifestSink {
+    -tables: tuple[str, ...]
+    +DEFAULT_TABLES = ("summary",)
+  }
+  class CsvScalarSink {
+    -writers: dict[str, DictWriter]
+    -headers: dict[str, list[str]]
+  }
+  class ParquetTrajectorySink
+  class TensorBoardSink
+  class MultiSink {
+    -sinks: list[Sink]
+  }
+}
+
+package "deap_pettingzoo.utils.logging.checkpoints" {
+    class PolicyCheckpointEntry <<dataclass, frozen>> {
+        + kind: str
+        + path: str
+        + extra: dict
+        --
+        + {static} from_manifest_entry(entry: dict) -> PolicyCheckpointEntry
+    }
+    class checkpoints <<module>> {
+        + KIND_EA_GENOME = "ea_genome_v1"
+        + KIND_CMA_GENOME = "cma_genome_v1"
+        + KIND_AGILERL = "agilerl_v1"
+        + KIND_QDAX_REPERTOIRE = "qdax_repertoire_v1"
+        + KIND_COEVOLUTION = "coevolution_v1"
+        + KNOWN_KINDS: frozenset[str]
+        --
+        + save_ea_genome(logger, genome, *, filename, kind, extra) -> Path | None
+        + save_agilerl_agent(logger, agent, *, filename, extra) -> Path | None
+        + register_existing_artifact(logger, *, kind, path, extra) -> Path | None
+    }
+}
+
+MultiSink o-- "*" Sink
+NoOpSink         ..|> Sink
+JsonManifestSink ..|> Sink
+CsvScalarSink    ..|> Sink
+ParquetTrajectorySink ..|> Sink
+TensorBoardSink  ..|> Sink
+MultiSink        ..|> Sink
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

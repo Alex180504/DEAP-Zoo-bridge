@@ -51,6 +51,12 @@ logging = [
 tensorboard = [
     "tensorboard>=2.13",
 ]
+docs = [
+    "sphinx>=7.2",
+    "furo>=2024.1",
+    "myst-parser>=2.0",
+    "sphinxcontrib-mermaid>=0.9",
+]
 analysis = [
     "deap-pettingzoo[viz]",
     "pandas>=2.0",
@@ -72,7 +78,7 @@ rl-baselines = [
     #   pip install --no-deps "agilerl>=2.6,<3" && pip install -e ".[service]"
 ]
 aquarium = [
-    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.11",
+    "marl-aquarium @ git+https://github.com/Alex180504/marl-aquarium.git@v0.1.12",
 ]
 supersuit = [
     "supersuit>=3.9",
@@ -96,16 +102,13 @@ qdax = [
 neat = [
     "neat-python>=2.0",
 ]
-scoop = [
-    "scoop>=0.7,<1.0",
-]
 dask = [
     "dask[distributed]>=2024.1",
 ]
 ui = [
     "deap-pettingzoo[analysis]",
     "streamlit>=1.37",  # st.fragment (Queue/Advanced live panels) + st.container(height=...)
-    "streamlit-code-editor>=0.1.20",  # Setup → Advanced script editor (opt-in; reliable st.text_area fallback)
+    "streamlit-code-editor>=0.1.20",  # Setup -> Advanced script editor (opt-in; reliable st.text_area fallback)
     "plotly>=5.0",
     "pillow>=10.0",
     "imageio>=2.31",
@@ -129,7 +132,7 @@ ui-full = [
     "deap-pettingzoo[ui,service]",
 ]
 all = [
-    "deap-pettingzoo[dev,viz,logging,tensorboard,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,scoop,dask,ui,service,ui-full]"
+    "deap-pettingzoo[dev,viz,logging,tensorboard,docs,analysis,rl-baselines,aquarium,supersuit,shimmy,jax,jaxmarl,qdax,neat,dask,ui,service,ui-full]"
 ]
 
 # Plugin entry-point groups.
@@ -157,7 +160,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "scoop: marks tests that launch a real `python -m scoop` subprocess (needs the scoop extra)",
+    "hpc: marks tests requiring the local Docker HPC rig (opt-in via DEAP_HPC_TESTS=1)",
 ]
 addopts = [
     "--verbose",
@@ -165,6 +168,13 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+
+[tool.coverage.run]
+# Emit paths relative to the repo root rather than absolute ones. Without this
+# the XML report names files relative to an absolute <source> that does not
+# exist inside the SonarScanner container, so every coverage measure is
+# discarded ("Cannot resolve N file paths").
+relative_files = true
 
 [tool.black]
 line-length = 88

@@ -1,17 +1,20 @@
-"""``ScriptedOpponentEnvWrapper`` for ``marl_aquarium.aquarium_v0``.
+"""Scripted-opponent env wrappers for ``marl_aquarium.aquarium_v0``.
 
 Wraps the aquarium parallel env so its public PettingZoo API surface
-shows *only* the predator agents.  Prey are stepped internally each
-``step()`` call by a scripted policy
-(:class:`~examples.pursuit_evasion.aquarium.apf_policy.AquariumAPFEvaderPolicy`)
-and never exposed to the learner-facing API.  This lets us train any
-deap-bridge / AgileRL trainer (EA, CMA-ES, MAPPO, ...) on aquarium with
-*pursuers only* against a fixed scripted prey controller.
+shows *only* one side of the predator/prey roster; the other side is
+stepped internally each ``step()`` call by a scripted APF policy
+(:mod:`~examples.pursuit_evasion.aquarium.apf_policy`) and never
+exposed to the learner-facing API.  This lets us train any
+algorithm on aquarium against a fixed scripted opponent, from either side:
 
-The wrapper also exposes ``self.prey_caught`` — a per-episode integer
-counter, derived from the predator-team reward (``+predator_reward``
-per catch in aquarium) — so callers can use a sparse
-``catches-per-episode`` fitness signal.
+* :class:`AquariumScriptedPreyWrapper` — predators are the learners,
+  prey are scripted (fleeing).  Exposes ``self.prey_caught``, a
+  per-episode integer counter derived from the predator-team reward
+  (``+predator_reward`` per catch in aquarium), for a sparse
+  ``catches-per-episode`` fitness signal.
+* :class:`AquariumScriptedPredatorWrapper` — prey are the learners,
+  predators are scripted (pursuing).  Exposes ``self.prey_lost``, a
+  per-episode integer counter of learner agents caught.
 """
 
 from __future__ import annotations
@@ -27,7 +30,11 @@ from deap_pettingzoo.environments.registry import (
     register_env,
 )
 
-from .apf_policy import AquariumAPFConfig, AquariumAPFEvaderPolicy
+from .apf_policy import (
+    AquariumAPFConfig,
+    AquariumAPFEvaderPolicy,
+    AquariumAPFPursuerPolicy,
+)
 
 
 def _patch_aquarium_wrappers(env) -> None:  # noqa: ANN001
@@ -92,7 +99,7 @@ def _patch_aquarium_wrappers(env) -> None:  # noqa: ANN001
             break
 
 
-class ScriptedOpponentEnvWrapper:
+class AquariumScriptedPreyWrapper:
     """Parallel-API facade over a marl-aquarium env that hides prey agents.
 
     Exposes only predator agents to the public API.  Prey are stepped
@@ -159,8 +166,10 @@ class ScriptedOpponentEnvWrapper:
         self._all_possible_agents = list(self.inner.possible_agents)
 
         # Must resolve raw env before creating APF policies so we can
-        # detect ``observable_walls`` and set the correct obs layout.
+        # detect ``observable_walls`` / ``continuous_actions`` and set the
+        # correct obs layout + action encoding.
         self._raw_env = self._find_raw_env(inner_env)
+        self._continuous = bool(getattr(self._raw_env, "continuous_actions", False))
 
         # Per-prey APF policy + last-observation cache.
         # Detect wall-feature count from the raw env so the APF policy
@@ -176,6 +185,7 @@ class ScriptedOpponentEnvWrapper:
                     action_count=self.action_count,
                     config=self._apf_config,
                     wall_features=_wf,
+                    continuous=self._continuous,
                 )
 
         # Per-episode catch counter (sparse fitness signal).
@@ -196,7 +206,7 @@ class ScriptedOpponentEnvWrapper:
             self.observation_spaces = {}
             self.action_spaces = {}
 
-    # ParallelEnv API ------------------------------------------------------
+    # ParallelEnv API
 
     def observation_space(self, agent: str):
         return self.inner.observation_space(agent)
@@ -249,34 +259,31 @@ class ScriptedOpponentEnvWrapper:
         Dict[str, Dict[str, Any]],
     ]:
         # Build full action dict: learner actions + scripted prey actions.
+        fallback = self._fallback_action()
         full_actions: Dict[str, Any] = {}
         for agent_id in self.inner.agents:
             if agent_id.startswith(self.learner_prefix):
                 if agent_id not in actions:
                     raise ValueError(
-                        f"ScriptedOpponentEnvWrapper.step: missing action "
+                        f"AquariumScriptedPreyWrapper.step: missing action "
                         f"for learner agent {agent_id!r}"
                     )
                 full_actions[agent_id] = actions[agent_id]
             elif agent_id.startswith(self.scripted_prefix):
                 pol = self._scripted_policies.get(agent_id)
-                if pol is None:
-                    full_actions[agent_id] = 0
-                    continue
                 last_obs = self._scripted_last_obs.get(agent_id)
-                if last_obs is None:
-                    # First step after a respawn — emit the no-op /
-                    # forward-keep action; the next step will have a
-                    # real observation cached.
-                    full_actions[agent_id] = 0
+                if pol is None or last_obs is None:
+                    # No policy, or first step after a respawn (no cached
+                    # observation yet) — emit the mode-appropriate no-op.
+                    full_actions[agent_id] = fallback
                 else:
                     try:
-                        full_actions[agent_id] = int(pol.get_action(last_obs))
+                        full_actions[agent_id] = pol.get_action(last_obs)
                     except Exception:
-                        full_actions[agent_id] = 0
+                        full_actions[agent_id] = fallback
             else:
                 # Unknown prefix — pass through with a no-op.
-                full_actions[agent_id] = 0
+                full_actions[agent_id] = fallback
 
         observations, rewards, terminations, truncations, infos = self.inner.step(
             full_actions
@@ -299,20 +306,6 @@ class ScriptedOpponentEnvWrapper:
             for a in rewards
             if a.startswith(self.learner_prefix)
         )
-
-        # When keep_prey_count_constant=True (aquarium default), caught prey
-        # are respawned without being marked dead, so the internal catches
-        # list is always empty and team_reward == 0 even after a catch.
-        # Detect catches directly from the recently_died flag on raw prey.
-        _recently_died = 0
-        if team_reward == 0.0 and self._raw_env is not None:
-            try:
-                _recently_died = sum(
-                    1 for p in self._raw_env.prey
-                    if getattr(p, 'recently_died', False)
-                )
-            except Exception:
-                pass
 
         # Filter output dicts to learner-side only.
         self.agents = [
@@ -358,17 +351,8 @@ class ScriptedOpponentEnvWrapper:
         out_truncs = {a: bool(truncations.get(a, False)) for a in learner_keys}
         out_infos = {a: infos.get(a, {}) for a in learner_keys}
 
-        # Inject recently_died-based catch reward and update catch counter.
-        if _recently_died > 0:
-            team_bonus = float(self.predator_reward) * _recently_died
-            if learner_keys:
-                per_agent_bonus = team_bonus / float(len(learner_keys))
-                out_rewards = {
-                    a: out_rewards[a] + per_agent_bonus for a in learner_keys
-                }
-            self.prey_caught += _recently_died
-            team_reward = team_bonus
-        elif self.predator_reward > 0:
+        # Update catch counter from the predator team reward.
+        if self.predator_reward > 0:
             self.prey_caught += int(round(team_reward / self.predator_reward))
 
         # When keep_prey_count_constant=False, terminate the episode as soon
@@ -387,8 +371,13 @@ class ScriptedOpponentEnvWrapper:
 
         return out_obs, out_rewards, out_terms, out_truncs, out_infos
 
-    # ------------------------------------------------------------------
     # Internal helpers
+
+    def _fallback_action(self):
+        """Mode-appropriate no-op action for scripted agents."""
+        if self._continuous:
+            return np.zeros(2, dtype=np.float32)
+        return 0
 
     @staticmethod
     def _find_raw_env(env):
@@ -510,20 +499,17 @@ class ScriptedOpponentEnvWrapper:
             return np.zeros(0)
 
 
-# ---------------------------------------------------------------------------
 # Registry helper
-# ---------------------------------------------------------------------------
-
 
 class _ScriptedAquariumFactory:
     """Picklable factory for a registered scripted-prey aquarium env.
 
-    ``register_env(...)`` accepts a callable.  We use a class instance
+    ``register_env(...)`` accepts a callable.  Use a class instance
     rather than ``functools.partial`` so the captured config is
     explicitly addressable for debugging.
 
     ``__call__(render_mode=..., **kwargs)`` builds a fresh
-    :class:`ScriptedOpponentEnvWrapper` around a new
+    :class:`AquariumScriptedPreyWrapper` around a new
     ``aquarium_v0.parallel_env(...)`` instance.
     """
 
@@ -552,7 +538,7 @@ class _ScriptedAquariumFactory:
         inner = aquarium_v0.parallel_env(render_mode=render_mode, **cfg)
         # Fix PettingZoo KeyError when prey die with keep_prey_count_constant=False.
         _patch_aquarium_wrappers(inner)
-        return ScriptedOpponentEnvWrapper(
+        return AquariumScriptedPreyWrapper(
             inner,
             predator_observe_count=int(cfg["predator_observe_count"]),
             prey_observe_count=int(cfg["prey_observe_count"]),
@@ -607,7 +593,7 @@ def register_scripted_aquarium(
         env_name,
         factory,
         default_episode_len=int(env_config.get("max_time_steps", 3000)),
-        continuous_default=False,
+        continuous_default=bool(env_config.get("continuous_actions", False)),
         notes=(
             "Scripted-prey wrapper around marl_aquarium.aquarium_v0; "
             "exposes only predator agents."
@@ -620,10 +606,428 @@ def register_scripted_aquarium(
     return env_name
 
 
-# ---------------------------------------------------------------------------
-# Compatibility adapter — strip infos from reset() for deap-bridge code paths
-# ---------------------------------------------------------------------------
+# Role-flipped wrapper — scripted APF predators, prey are the learners
 
+class AquariumScriptedPredatorWrapper:
+    """Parallel-API facade over a marl-aquarium env that hides predator agents.
+
+    Mirror of :class:`AquariumScriptedPreyWrapper` with prefixes swapped
+    (prey are learners; predators are scripted APF pursuers).  Prey-side
+    reward composition:
+
+    * Survival: ``+prey_reward`` per active prey per step (emitted natively
+      by the inner env; passes through unmodified).
+    * Catch penalty: ``-prey_punishment`` injected on the step a prey is
+      terminated (with ``keep_prey_count_constant=False`` the native env
+      emits 0 on that step because the caught prey is removed before
+      ``get_prey_rewards()`` runs).
+    * Optional distance shaping: ``+reward_shape_alpha * Δ(min_pred_dist) / 200``
+      per active prey per step — reward for opening distance from the
+      nearest FOV-visible predator.
+    * Optional close-range Gaussian danger penalty near the catch annulus.
+
+    The episode terminates when no learner-prefix prey remain.
+    """
+
+    metadata = {"render_modes": ["human", "rgb_array"], "name": "scripted_aquarium_evader"}
+
+    def __init__(
+        self,
+        inner_env,
+        *,
+        predator_observe_count: int,
+        prey_observe_count: int,
+        action_count: int = 16,
+        learner_prefix: str = "prey",
+        scripted_prefix: str = "predator",
+        apf_config: Optional[AquariumAPFConfig] = None,
+        reward_shape_alpha: float = 0.0,
+        close_range_penalty: float = 0.0,
+        close_range_sigma2: float = 0.01,
+    ) -> None:
+        self.inner = inner_env
+        self.predator_observe_count = int(predator_observe_count)
+        self.prey_observe_count = int(prey_observe_count)
+        self.action_count = int(action_count)
+        self.learner_prefix = learner_prefix
+        self.scripted_prefix = scripted_prefix
+        self._apf_config = apf_config or AquariumAPFConfig()
+        self.reward_shape_alpha = float(reward_shape_alpha)
+        self.close_range_penalty = float(close_range_penalty)
+        self.close_range_sigma2 = float(close_range_sigma2)
+
+        self.possible_agents = [
+            a for a in self.inner.possible_agents if a.startswith(self.learner_prefix)
+        ]
+        self.agents: List[str] = list(self.possible_agents)
+        self._all_possible_agents = list(self.inner.possible_agents)
+
+        # Resolve raw env first: wall/continuous detection drives the APF
+        # policies' obs layout and action encoding.
+        self._raw_env = AquariumScriptedPreyWrapper._find_raw_env(inner_env)
+        self._continuous = bool(getattr(self._raw_env, "continuous_actions", False))
+        _wf = 4 if getattr(self._raw_env, "observable_walls", False) else 0
+
+        self._scripted_policies: Dict[str, AquariumAPFPursuerPolicy] = {}
+        self._scripted_last_obs: Dict[str, np.ndarray] = {}
+        for agent_id in self._all_possible_agents:
+            if agent_id.startswith(self.scripted_prefix):
+                self._scripted_policies[agent_id] = AquariumAPFPursuerPolicy(
+                    predator_observe_count=self.predator_observe_count,
+                    prey_observe_count=self.prey_observe_count,
+                    action_count=self.action_count,
+                    config=self._apf_config,
+                    wall_features=_wf,
+                    continuous=self._continuous,
+                )
+
+        self.prey_lost: int = 0
+        self._initial_prey_count: int = 0
+        self.last_team_reward: float = 0.0
+        self._prev_min_pred_distances: Dict[str, Optional[float]] = {}
+
+        try:
+            self.observation_spaces = {
+                a: self.inner.observation_space(a) for a in self.possible_agents
+            }
+            self.action_spaces = {
+                a: self.inner.action_space(a) for a in self.possible_agents
+            }
+        except Exception:
+            self.observation_spaces = {}
+            self.action_spaces = {}
+
+    # ParallelEnv API
+
+    def observation_space(self, agent: str):
+        return self.inner.observation_space(agent)
+
+    def action_space(self, agent: str):
+        return self.inner.action_space(agent)
+
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Dict[str, Any]]]:
+        observations, infos = self.inner.reset(seed=seed, options=options)
+        self._scripted_last_obs = {
+            a: np.asarray(observations[a], dtype=np.float64)
+            for a in observations
+            if a.startswith(self.scripted_prefix)
+        }
+        for pol in self._scripted_policies.values():
+            pol.reset()
+        self.agents = [
+            a for a in self.inner.agents if a.startswith(self.learner_prefix)
+        ]
+        learner_obs = {a: observations[a] for a in self.agents if a in observations}
+        learner_infos = {a: dict(infos.get(a, {})) for a in self.agents}
+        self.prey_lost = 0
+        self._initial_prey_count = (
+            len(getattr(self._raw_env, "prey", [])) if self._raw_env is not None else len(self.agents)
+        )
+        self.last_team_reward = 0.0
+        self._prev_min_pred_distances = self._compute_min_pred_distances(self.agents)
+        if learner_infos and self.agents:
+            head = learner_infos.setdefault(self.agents[0], {})
+            head.setdefault("prey_lost_total", 0)
+            head.setdefault("prey_remaining", len(self.agents))
+        return learner_obs, learner_infos
+
+    def step(
+        self,
+        actions: Dict[str, Any],
+    ) -> Tuple[
+        Dict[str, np.ndarray],
+        Dict[str, float],
+        Dict[str, bool],
+        Dict[str, bool],
+        Dict[str, Dict[str, Any]],
+    ]:
+        fallback = self._fallback_action()
+        full_actions: Dict[str, Any] = {}
+        for agent_id in self.inner.agents:
+            if agent_id.startswith(self.learner_prefix):
+                if agent_id not in actions:
+                    raise ValueError(
+                        f"AquariumScriptedPredatorWrapper.step: missing action "
+                        f"for learner agent {agent_id!r}"
+                    )
+                full_actions[agent_id] = actions[agent_id]
+            elif agent_id.startswith(self.scripted_prefix):
+                pol = self._scripted_policies.get(agent_id)
+                last_obs = self._scripted_last_obs.get(agent_id)
+                if pol is None or last_obs is None:
+                    full_actions[agent_id] = fallback
+                else:
+                    try:
+                        full_actions[agent_id] = pol.get_action(last_obs)
+                    except Exception:
+                        full_actions[agent_id] = fallback
+            else:
+                full_actions[agent_id] = fallback
+
+        observations, rewards, terminations, truncations, infos = self.inner.step(
+            full_actions
+        )
+
+        # Update predator obs cache.
+        self._scripted_last_obs = {
+            a: np.asarray(observations[a], dtype=np.float64)
+            for a in observations
+            if a.startswith(self.scripted_prefix)
+        }
+
+        # Filter outputs to learner side (active prey) only.
+        active_learners = [
+            a for a in self.inner.agents if a.startswith(self.learner_prefix)
+        ]
+        self.agents = active_learners
+        learner_keys = self.possible_agents
+        public_learners = [
+            a for a in observations if a.startswith(self.learner_prefix)
+        ]
+        inactive_learners = set(learner_keys) - set(public_learners)
+        _live_obs = [observations[a] for a in public_learners if a in observations]
+        _zero_obs = (
+            np.zeros_like(_live_obs[0])
+            if _live_obs
+            else np.zeros(
+                self.inner.observation_space(self.possible_agents[0]).shape,
+                dtype=np.float32,
+            )
+        )
+        out_obs = {a: observations.get(a, _zero_obs) for a in learner_keys}
+        out_rewards: Dict[str, float] = {
+            a: float(rewards.get(a, 0.0)) for a in learner_keys
+        }
+
+        # Catch penalty: with keep_prey_count_constant=False the inner env
+        # gives reward=0 on the catch step (the caught prey is removed from
+        # self.prey before get_prey_rewards() iterates); read prey_punishment
+        # from the raw env and inject it here.
+        caught_this_step: List[str] = [
+            a for a in public_learners
+            if bool(terminations.get(a, False)) and not bool(truncations.get(a, False))
+        ]
+        recently_died = len(caught_this_step)
+        if recently_died > 0:
+            self.prey_lost += recently_died
+            punishment = 0.0
+            if self._raw_env is not None:
+                punishment = float(getattr(self._raw_env, "prey_punishment", 0.0))
+            for a in caught_this_step:
+                out_rewards[a] -= punishment
+
+        # Distance shaping (prey perspective): reward opening distance from
+        # the nearest FOV-visible predator; optional close-range penalty.
+        if self.reward_shape_alpha > 0.0 and self._raw_env is not None:
+            try:
+                current_min_dists = self._compute_min_pred_distances(active_learners)
+                for agent_id in active_learners:
+                    cur = current_min_dists.get(agent_id)
+                    prev = self._prev_min_pred_distances.get(agent_id)
+                    if cur is None or prev is None:
+                        continue
+                    progress = cur - prev   # positive when prey moved AWAY
+                    out_rewards[agent_id] += self.reward_shape_alpha * (progress / 200.0)
+
+                    if self.close_range_penalty > 0.0:
+                        arena_scale = float(
+                            max(
+                                getattr(self._raw_env, "width", 2000),
+                                getattr(self._raw_env, "height", 2000),
+                            )
+                        )
+                        d_norm = cur / max(arena_scale, 1e-9)
+                        out_rewards[agent_id] -= self.close_range_penalty * float(
+                            np.exp(-(d_norm * d_norm) / max(self.close_range_sigma2, 1e-9))
+                        )
+                self._prev_min_pred_distances = current_min_dists
+            except Exception:
+                pass
+
+        out_terms = {
+            a: bool(terminations.get(a, False)) or a in inactive_learners
+            for a in learner_keys
+        }
+        out_truncs = {a: bool(truncations.get(a, False)) for a in learner_keys}
+        out_infos = {a: dict(infos.get(a, {})) for a in learner_keys}
+
+        # Episode-end: no learner-side agents remain (all prey caught).
+        all_caught = not any(
+            a.startswith(self.learner_prefix) for a in self.inner.agents
+        )
+        if all_caught:
+            out_terms = {a: True for a in learner_keys}
+
+        team_reward = sum(out_rewards.values())
+        self.last_team_reward = team_reward
+
+        prey_remaining = len(active_learners)
+        if learner_keys:
+            head = out_infos.setdefault(learner_keys[0], {})
+            head.setdefault("prey_lost_total", int(self.prey_lost))
+            head.setdefault("prey_remaining", int(prey_remaining))
+            head.setdefault("team_reward_step", float(team_reward))
+
+        return out_obs, out_rewards, out_terms, out_truncs, out_infos
+
+    # Internal logic
+
+    def _fallback_action(self):
+        """Mode-appropriate no-op action for scripted agents."""
+        if self._continuous:
+            return np.zeros(2, dtype=np.float32)
+        return 0
+
+    def _compute_min_pred_distances(
+        self, learner_agents: List[str]
+    ) -> Dict[str, Optional[float]]:
+        """Return nearest FOV-visible predator torus distance per prey."""
+        if self._raw_env is None:
+            return {}
+        all_preds = list(getattr(self._raw_env, "predators", []))
+        all_prey = list(getattr(self._raw_env, "prey", []))
+        torus = getattr(self._raw_env, "torus", None)
+        if not all_preds or not all_prey or torus is None:
+            return {}
+        prey_by_name = {p.id(): p for p in all_prey if hasattr(p, "id")}
+
+        fov_enabled: bool = bool(getattr(self._raw_env, "fov_enabled", False))
+        view_dist = getattr(self._raw_env, "prey_view_distance", 2000)
+        fov = getattr(self._raw_env, "prey_fov", 360)
+        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
+
+        min_dists: Dict[str, Optional[float]] = {}
+        for agent_id in learner_agents:
+            prey = prey_by_name.get(agent_id)
+            if prey is None:
+                continue
+            if fov_enabled and check is not None:
+                visible = [pr for pr in all_preds if check(prey, pr, view_dist, fov)]
+            else:
+                visible = all_preds
+            if not visible:
+                min_dists[agent_id] = None
+            else:
+                min_dists[agent_id] = min(
+                    float(torus.get_distance_in_torus(prey.position, pr.position))
+                    for pr in visible
+                )
+        return min_dists
+
+    def render(self, mode: Optional[str] = None):  # pragma: no cover - viz
+        try:
+            return self.inner.render()
+        except SystemExit:
+            return None
+
+    @property
+    def unwrapped(self):
+        return self
+
+    @property
+    def render_mode(self):
+        return getattr(self.inner, "render_mode", None)
+
+    def close(self) -> None:
+        try:
+            self.inner.close()
+        except SystemExit:
+            pass
+
+    def state(self) -> np.ndarray:  # pragma: no cover
+        try:
+            return np.asarray(self.inner.state())
+        except (AttributeError, NotImplementedError):
+            return np.zeros(0)
+
+
+class _ScriptedPredatorAquariumFactory:
+    """Picklable factory for a registered scripted-predator aquarium env."""
+
+    def __init__(
+        self,
+        env_config: Dict[str, Any],
+        apf_config: AquariumAPFConfig,
+        reward_shape_alpha: float = 0.0,
+        close_range_penalty: float = 0.0,
+        close_range_sigma2: float = 0.01,
+    ) -> None:
+        self.env_config = dict(env_config)
+        self.apf_config = apf_config
+        self.reward_shape_alpha = float(reward_shape_alpha)
+        self.close_range_penalty = float(close_range_penalty)
+        self.close_range_sigma2 = float(close_range_sigma2)
+
+    def __call__(self, render_mode: Optional[str] = None, **kwargs):
+        from marl_aquarium import aquarium_v0  # local import — optional dep
+
+        cfg = {**self.env_config, **kwargs}
+        if render_mode is None:
+            render_mode = "rgb_array"
+        inner = aquarium_v0.parallel_env(render_mode=render_mode, **cfg)
+        _patch_aquarium_wrappers(inner)
+        return AquariumScriptedPredatorWrapper(
+            inner,
+            predator_observe_count=int(cfg["predator_observe_count"]),
+            prey_observe_count=int(cfg["prey_observe_count"]),
+            action_count=int(cfg.get("action_count", 16)),
+            apf_config=self.apf_config,
+            reward_shape_alpha=self.reward_shape_alpha,
+            close_range_penalty=self.close_range_penalty,
+            close_range_sigma2=self.close_range_sigma2,
+        )
+
+
+def register_scripted_predator_aquarium(
+    env_name: str,
+    env_config: Dict[str, Any],
+    apf_config: Optional[AquariumAPFConfig] = None,
+    *,
+    reward_shape_alpha: float = 0.0,
+    close_range_penalty: float = 0.0,
+    close_range_sigma2: float = 0.01,
+    wrappers: Sequence[Callable[[Any], Any]] = (),
+    overwrite: bool = True,
+) -> str:
+    """Register a scripted-predator aquarium env (prey are the learners).
+
+    Role-flipped counterpart of :func:`register_scripted_aquarium`; see
+    that function for the shared parameter semantics.  The extra knobs
+    control prey-side shaping (distance shaping + close-range penalty).
+    """
+    if apf_config is None:
+        apf_config = AquariumAPFConfig()
+    factory = _ScriptedPredatorAquariumFactory(
+        env_config=env_config,
+        apf_config=apf_config,
+        reward_shape_alpha=reward_shape_alpha,
+        close_range_penalty=close_range_penalty,
+        close_range_sigma2=close_range_sigma2,
+    )
+    if is_registered(env_name) and not overwrite:
+        return env_name
+    register_env(
+        env_name,
+        factory,
+        default_episode_len=int(env_config.get("max_time_steps", 3000)),
+        continuous_default=bool(env_config.get("continuous_actions", False)),
+        notes=(
+            "Scripted-predator wrapper around marl_aquarium.aquarium_v0; "
+            "exposes only prey agents."
+        ),
+        tags={"aquarium", "scripted_opponent", "evader_training", "third_party"},
+        api="parallel",
+        wrappers=tuple(wrappers),
+        overwrite=True,
+    )
+    return env_name
+
+
+# Compatibility adapter — strip infos from reset() for deap-bridge code paths
 
 class DictResetEnv:
     """Thin adapter that forwards everything to ``inner`` but makes

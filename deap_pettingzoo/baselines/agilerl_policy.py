@@ -3,7 +3,7 @@ Policy wrapper for trained AgileRL multi-agent algorithms.
 
 AgileRL algorithms expose :meth:`get_action` that takes a dict mapping
 ``agent_id -> observation`` and returns per-agent actions. The unified
-baseline API, by contrast, is a stateless-looking :class:`PolicyProtocol`
+baseline API, by contrast, is a stateless :class:`PolicyProtocol`
 that receives one observation at a time with no agent id.
 
 :class:`AgileRLPolicyWrapper` bridges the two by:
@@ -25,8 +25,7 @@ It holds CPU actor ``nn.Module`` objects rebuilt from their ``state_dict``
 (so it works for IPPO's ``StochasticActor`` too, which ``copy.deepcopy``
 rejects) and implements the same :class:`PolicyProtocol` interface without
 any optimizer, replay buffer, or CUDA state, making it safe to ship across
-``ProcessPoolExecutor`` spawn boundaries for parallel co-evolution
-evaluation.
+``ProcessPoolExecutor`` spawn boundaries for parallel co-evolution evaluation.
 """
 
 from typing import Any, Dict, Iterable, List, Optional
@@ -43,7 +42,7 @@ def _ensure_agilerl_imports() -> None:
     ``sys.modules`` as a *partially initialised* module — the
     ``custom_graph_pass`` submodule attribute has not been set yet.  Any
     subsequent attempt to import ``agilerl.networks`` (which drills down
-    through ``torch._dynamo`` → ``torch._inductor.config``) will then fail
+    through ``torch._dynamo`` -> ``torch._inductor.config``) will then fail
     with::
 
         AttributeError: partially initialised module 'torch._inductor'
@@ -58,7 +57,7 @@ def _ensure_agilerl_imports() -> None:
     import sys
 
     if "agilerl.networks" in sys.modules:
-        return  # already fully loaded — fast path
+        return  # already fully loaded (fast path)
 
     # Detect a partially-initialised torch._inductor (missing the
     # 'custom_graph_pass' attribute that config.py needs at annotation time).
@@ -245,7 +244,7 @@ class AgileRLPolicyWrapper:
         return self.action_for(agent_id, observation)
 
     def action_for(self, agent_id: str, observation: np.ndarray) -> Any:
-        """Return this policy's action for an explicitly-named ``agent_id``.
+        """Return this policy's action for an explicitly named ``agent_id``.
 
         Order-independent counterpart to :meth:`get_action`: because the caller
         names the agent, the dispatch stays correct when the active-agent set
@@ -295,13 +294,12 @@ class AgileRLPolicyWrapper:
         """Return ``{agent_id: obs}`` with zero-filled placeholders for any
         agent whose observation has not yet been seen this episode.
 
-        Required because AgileRL's multi-agent algorithms expect every
-        agent they were constructed with to be keyed in the input dict
-        — not just the subset this wrapper dispatches for. Placeholders
-        only matter for decentralized-actor algorithms in the warm-up
-        phase before the first full rotation completes; thereafter
-        every slot holds the most recent real observation for that
-        agent.
+        Required because AgileRL's multi-agent algorithms expect **every**
+        agent they were constructed with to be keyed in the input dict.
+        not just the subset this wrapper dispatches for.
+        Placeholders only matter for decentralized-actor algorithms in the warm-up
+        phase before the first full rotation completes;
+        thereafter every slot holds the most recent real observation for that agent.
         """
         full: Dict[str, np.ndarray] = {}
         fallback_shape = next(iter(self._obs_cache.values())).shape
@@ -389,13 +387,13 @@ class AgileRLPolicyWrapper:
         AgileRL's ``StochasticActor`` (IPPO/GroupedIPPO), which caches a torch
         distribution built from non-leaf tensors.  The resulting
         :class:`FrozenRLPolicyWrapper` is safe to pickle across
-        ``ProcessPoolExecutor`` spawn boundaries — it carries no optimizer
+        ``ProcessPoolExecutor`` spawn boundaries, as it carries no optimizer
         state, replay buffer, or CUDA device references.
 
         Supports both *list-of-actors* layouts (``agent.actors``) and
         *single-actor* layouts (``agent.actor``).  Falls back gracefully
         when neither attribute is present.  For grouped IPPO (shared actors
-        keyed by group), the per-agent → actor mapping is preserved so each
+        keyed by group), the per-agent -> actor mapping is preserved so each
         agent slot is driven by the correct shared actor.
 
         Returns:
@@ -416,7 +414,7 @@ class AgileRLPolicyWrapper:
         actors_raw = getattr(self._agent, "actors", None)
         actor_keys: Optional[List[Any]] = None
         if hasattr(actors_raw, "values"):
-            # ModuleDict or plain dict — keep keys (group/agent ids) so we can
+            # ModuleDict or plain dict — keep keys (group/agent ids) to
             # route each agent slot to the right (possibly shared) actor.
             actor_keys = list(actors_raw.keys())
             actors: List[Any] = list(actors_raw.values())
@@ -443,7 +441,7 @@ class AgileRLPolicyWrapper:
                 f"from {type(self._agent).__name__!r}: {exc}"
             ) from exc
 
-        # Per-agent → actor index map (handles grouped IPPO shared actors);
+        # Per-agent -> actor index map (handles grouped IPPO shared actors);
         # None falls back to positional indexing in FrozenRLPolicyWrapper.
         agent_actor_idx = _build_agent_actor_index(
             self._agent, self._agent_ids, actor_keys
@@ -529,7 +527,7 @@ class FrozenRLPolicyWrapper:
             ``len(nvec)``.
         agent_actor_idx: Optional per-slot index into ``actors`` (aligned to
             ``agent_ids``) routing each agent to its (possibly shared) actor,
-            as needed for grouped IPPO.  ``None`` ⇒ positional
+            as needed for grouped IPPO.  ``None`` => positional
             ``index % len(actors)`` fallback (one actor per agent).
     """
 
@@ -550,7 +548,7 @@ class FrozenRLPolicyWrapper:
         self._is_discrete = is_discrete
         self._md_nvecs = list(multidiscrete_nvecs) if multidiscrete_nvecs else None
         # Per-agent actor index (grouped IPPO shares actors across agents);
-        # None ⇒ positional ``index % len(actors)`` fallback.
+        # None => positional ``index % len(actors)`` fallback.
         self._actor_idx_map = list(agent_actor_idx) if agent_actor_idx else None
         self._call_index = 0
         self._obs_cache: Dict[str, np.ndarray] = {}
@@ -561,8 +559,7 @@ class FrozenRLPolicyWrapper:
         """Return a greedy action for the next agent in rotation.
 
         Accepts and ignores extra keyword arguments for drop-in
-        compatibility with evaluators that pass flags like
-        ``deterministic=True``.
+        compatibility with evaluators that pass flags like ``deterministic=True``.
         """
         import torch  # type: ignore[import]
 
@@ -655,20 +652,39 @@ class FrozenRLPolicyWrapper:
     # hold instance-bound methods or a cached torch distribution), each actor
     # is serialised as pure data via :func:`_serialize_actor` (class +
     # init_dict + CPU state_dict) and rebuilt with :func:`_rebuild_actor` on
-    # the far side.  This is standard-pickle-safe (no cloudpickle) and immune
-    # to non-leaf / cached-distribution tensors, so it survives
-    # multiprocessing's ForkingPickler for both deterministic and stochastic
-    # actors.
+    # the far side.  The state_dict is additionally converted to numpy:
+    # under multiprocessing's ForkingPickler, torch tensors are shared via
+    # one file descriptor per storage (held open by the driver's resource
+    # sharer until the worker detaches), so a snapshot embedded in every
+    # per-episode payload exhausts RLIMIT_NOFILE (ulimit -n 1024 on typical
+    # clusters) and kills the pool with BrokenProcessPool. Numpy arrays
+    # cross as plain bytes.
 
     def __getstate__(self) -> dict:
         state = {k: v for k, v in self.__dict__.items() if k != "_actors"}
-        state["_actor_states"] = [_serialize_actor(a) for a in self._actors]
+        serialized = []
+        for actor in self._actors:
+            data = _serialize_actor(actor)
+            if data.get("mode") == "evolvable":
+                data["state"] = {
+                    k: v.detach().cpu().contiguous().numpy()
+                    for k, v in data["state"].items()
+                }
+            serialized.append(data)
+        state["_actor_states"] = serialized
         return state
 
     def __setstate__(self, state: dict) -> None:
         _ensure_agilerl_imports()
+        import torch  # type: ignore[import]
 
         actor_states = state.pop("_actor_states", [])
+        for data in actor_states:
+            if data.get("mode") == "evolvable":
+                data["state"] = {
+                    k: torch.from_numpy(np.ascontiguousarray(v))
+                    for k, v in data["state"].items()
+                }
         self.__dict__.update(state)
         self._actors = [_rebuild_actor(d) for d in actor_states]
 

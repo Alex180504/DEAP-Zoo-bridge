@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
-    ScriptedOpponentEnvWrapper,
+    AquariumScriptedPreyWrapper,
 )
 
 
@@ -15,10 +15,9 @@ class _Position:
 
 
 class _Entity:
-    def __init__(self, name: str, x: float, y: float, *, recently_died: bool = False) -> None:
+    def __init__(self, name: str, x: float, y: float) -> None:
         self._name = name
         self.position = _Position(x, y)
-        self.recently_died = recently_died
 
     def id(self) -> str:
         return self._name
@@ -44,14 +43,13 @@ class _FakeAquariumEnv:
         width: float = 100.0,
         height: float = 100.0,
         rewards: dict[str, float] | None = None,
-        recently_died: bool = False,
     ) -> None:
         self.predators = [
             _Entity(f"predator_{idx}", x, y)
             for idx, (x, y) in enumerate(predator_positions)
         ]
         self.prey = [
-            _Entity(f"prey_{idx}", x, y, recently_died=(recently_died and idx == 0))
+            _Entity(f"prey_{idx}", x, y)
             for idx, (x, y) in enumerate(prey_positions)
         ]
         self.possible_agents = [entity.id() for entity in self.predators + self.prey]
@@ -92,36 +90,12 @@ class _FakeAquariumEnv:
         return None
 
 
-def test_recently_died_bonus_preserves_team_total() -> None:
-    inner = _FakeAquariumEnv(
-        predator_positions=[(10.0, 10.0)] * 5,
-        prey_positions=[(20.0, 20.0)],
-        recently_died=True,
-    )
-    wrapper = ScriptedOpponentEnvWrapper(
-        inner,
-        predator_observe_count=1,
-        prey_observe_count=1,
-        predator_reward=10,
-        reward_shape_alpha=0.0,
-    )
-
-    observations, _ = wrapper.reset(seed=0)
-    _, rewards, _, _, _ = wrapper.step({agent: 0 for agent in observations})
-
-    assert set(inner.last_actions or {}) == set(inner.possible_agents)
-    assert sum(rewards.values()) == pytest.approx(10.0)
-    assert all(reward == pytest.approx(2.0) for reward in rewards.values())
-    assert wrapper.prey_caught == 1
-    assert wrapper.last_team_reward == pytest.approx(10.0)
-
-
 def test_reward_shaping_uses_torus_distance() -> None:
     inner = _FakeAquariumEnv(
         predator_positions=[(95.0, 50.0)],
         prey_positions=[(5.0, 50.0)],
     )
-    wrapper = ScriptedOpponentEnvWrapper(
+    wrapper = AquariumScriptedPreyWrapper(
         inner,
         predator_observe_count=1,
         prey_observe_count=1,
@@ -139,7 +113,7 @@ def test_reward_shaping_rewards_closing_distance() -> None:
         predator_positions=[(95.0, 50.0)],
         prey_positions=[(5.0, 50.0)],
     )
-    wrapper = ScriptedOpponentEnvWrapper(
+    wrapper = AquariumScriptedPreyWrapper(
         inner,
         predator_observe_count=1,
         prey_observe_count=1,
@@ -165,7 +139,7 @@ def test_fov_shape_alpha_rewards_visible_prey() -> None:
         predator_positions=[(50.0, 50.0)],
         prey_positions=[(60.0, 50.0), (70.0, 50.0)],
     )
-    wrapper = ScriptedOpponentEnvWrapper(
+    wrapper = AquariumScriptedPreyWrapper(
         inner,
         predator_observe_count=1,
         prey_observe_count=1,
@@ -176,7 +150,7 @@ def test_fov_shape_alpha_rewards_visible_prey() -> None:
     observations, _ = wrapper.reset(seed=0)
     _, rewards, _, _, _ = wrapper.step({agent: 0 for agent in observations})
 
-    # 2 prey visible (fov_enabled absent → all visible), alpha=1.0 → bonus = 2.0
+    # 2 prey visible (fov_enabled absent -> all visible), alpha=1.0 -> bonus = 2.0
     assert rewards["predator_0"] == pytest.approx(2.0)
 
 
@@ -185,7 +159,7 @@ def test_fov_shape_alpha_zero_means_no_bonus() -> None:
         predator_positions=[(50.0, 50.0)],
         prey_positions=[(60.0, 50.0)],
     )
-    wrapper = ScriptedOpponentEnvWrapper(
+    wrapper = AquariumScriptedPreyWrapper(
         inner,
         predator_observe_count=1,
         prey_observe_count=1,
@@ -216,7 +190,7 @@ def test_proximity_shaping_skipped_when_prey_outside_fov() -> None:
     inner.predator_fov = 90
     inner.torus.check_if_entity_is_in_view_in_torus = lambda obs, tgt, vd, fov: False
 
-    wrapper = ScriptedOpponentEnvWrapper(
+    wrapper = AquariumScriptedPreyWrapper(
         inner,
         predator_observe_count=1,
         prey_observe_count=1,
@@ -229,5 +203,5 @@ def test_proximity_shaping_skipped_when_prey_outside_fov() -> None:
     inner.predators[0].position.x = 54.0
     _, rewards, _, _, _ = wrapper.step({agent: 0 for agent in observations})
 
-    # Prey is outside FOV → no proximity shaping → reward == 0.0
+    # Prey is outside FOV -> no proximity shaping -> reward == 0.0
     assert rewards["predator_0"] == pytest.approx(0.0)

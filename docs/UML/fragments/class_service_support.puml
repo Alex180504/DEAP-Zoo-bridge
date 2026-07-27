@@ -1,0 +1,58 @@
+@startuml service_support
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Backend service: logging, gating and auxiliary surfaces
+
+package "deap_pettingzoo.service (v0.2+)" {
+    class logging_config <<module>> {
+        + configure_logging(verbose, log_level, log_format, log_file) -> dict
+        + build_dict_config(level, fmt, log_file) -> dict
+        + resolve_level / resolve_format / default_log_dir
+        + JsonFormatter
+        .. env: DEAP_LOG_LEVEL / DEAP_LOG_FORMAT / DEAP_LOG_DIR ..
+        ' WARNING (default) -> INFO (--verbose) -> DEBUG (-vv)
+        ' captureWarnings(True): warnings.warn -> py.warnings logger
+    }
+    class advanced <<module>> {
+        + advanced_enabled() -> bool  ' DEAP_ENABLE_ADVANCED (default True)
+    }
+    class install_jobs <<module>> {
+        + build_command(manager, action, args) -> argv  ' allowlist + reject metachars
+        + start_install(manager, action, args) -> job_id  ' detached subprocess
+        + get_status(job_id, offset, limit, lines) -> dict  ' read_tail(install.log)
+        + InstallValidationError
+    }
+    class script_validate <<module>> {
+        + validate_script_source(src) -> {ok, issues}  ' ast.parse + structure
+    }
+    class export_import <<module>> {
+        + build_export_manifest() -> dict
+        + create_run_export_zip(run_dir, flags) -> bytes
+        + create_experiment_export_zip_generator(...) -> Generator
+        + archive_run_dir(run_dir, remove_source) -> Path
+        + archive_runs_under(root, remove_source) -> List[Path]
+        + validate_import_zip(zip, root) -> ImportValidationResult
+        + extract_import_zip(zip, root) -> list
+        + restore_experiment_to_db(json, dirs, db) -> str
+        ' Restores the archived status (completed/failed/cancelled)
+        '   + timestamps/error, not always 'completed'; queued/running ->
+        '   failed (the original process no longer exists)
+        ' archive_run_dir: on-disk import-ready ZIP of ONE run
+        '   (ALL artifacts incl. checkpoints/videos), optional
+        '   source removal - post-run HPC compression
+    }
+}
+
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

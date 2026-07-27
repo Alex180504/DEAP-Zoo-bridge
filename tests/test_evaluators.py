@@ -381,9 +381,7 @@ class TestEvaluatorIntegration:
             assert len(ind.fitness.values) == 1
 
 
-# ===========================================================================
-# Multi-objective / lexicase evaluator tests (Phase 1.1)
-# ===========================================================================
+# Multi-objective / lexicase evaluator tests.
 
 
 class _MockFitnessSpec:
@@ -487,7 +485,7 @@ class TestSingleEpisodeEvaluatorMultiObjective:
         )
         result = evaluator.evaluate(individual, seed=42)
         assert isinstance(result, tuple)
-        # N agents in the env, 1 objective → N scalars
+        # N agents in the env, 1 objective -> N scalars
         assert len(result) > 0
 
 

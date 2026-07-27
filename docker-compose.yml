@@ -1,10 +1,10 @@
 
 #
-#   MODE 1 (full stack, default)  →  docker compose up
+#   MODE 1 (full stack, default)  ->  docker compose up
 #       Both the FastAPI service AND the Streamlit UI run as containers.
 #       Results are persisted in a named Docker volume.
 #
-#   MODE 2 (native backend)  →  docker compose --profile native-backend up
+#   MODE 2 (native backend)  ->  docker compose --profile native-backend up
 #       Only the Streamlit UI is containerised; it connects to a FastAPI
 #       service running natively on the host.
 
@@ -37,7 +37,7 @@ services:
       # also tailable via the GET /logs endpoint.
       - DEAP_LOG_LEVEL=${DEAP_LOG_LEVEL:-warning}
       - DEAP_LOG_FORMAT=${DEAP_LOG_FORMAT:-plain}
-      # Advanced surface (Setup → Advanced): dependency-install panel + custom
+      # Advanced surface (Setup -> Advanced): dependency-install panel + custom
       # script submission. Arbitrary code/command execution by design — keep the
       # service on localhost. Set DEAP_ENABLE_ADVANCED=0 to disable.
       # CAVEAT: packages installed via the panel land in this container's

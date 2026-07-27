@@ -177,8 +177,12 @@ def _grouped_summary_table(experiment, group_mode: str):
             "algorithm": ", ".join(sorted(set(subset["algorithm"].astype(str)))),
             "env_name": ", ".join(sorted(set(subset["env_name"].astype(str)))),
         }
+        # Surface the action space (discrete/continuous).
+        if "action_mode" in subset.columns:
+            modes = sorted(set(subset["action_mode"].dropna().astype(str)))
+            row["action_mode"] = ", ".join(modes) if modes else None
         for column in subset.columns:
-            if column in {"group", "run_id", "algorithm", "env_name"}:
+            if column in {"group", "run_id", "algorithm", "env_name", "action_mode"}:
                 continue
             values = pd.to_numeric(subset[column], errors="coerce").dropna()
             if not values.empty:

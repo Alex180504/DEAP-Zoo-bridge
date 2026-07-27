@@ -6,7 +6,8 @@ validation (catalog compatibility, budget-mode support by algorithm) is
 delegated to :func:`~deap_pettingzoo.baselines.experiment_spec.validate_spec`
 as a second layer (defense in depth).
 
-Design notes:
+Design notes
+------------
 - The API-layer :class:`BudgetSpec`, :class:`FitnessSettings` etc. mirror the
   dataclasses in :mod:`deap_pettingzoo.baselines.experiment_spec` but are
   **pydantic** so they participate in FastAPI's automatic OpenAPI schema
@@ -32,9 +33,7 @@ except ImportError:  # pragma: no cover
         "Install with: pip install deap-pettingzoo[service]"
     )
 
-# ---------------------------------------------------------------------------
 # Enums
-# ---------------------------------------------------------------------------
 
 
 class ExperimentStatus(str, Enum):
@@ -45,9 +44,7 @@ class ExperimentStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-# ---------------------------------------------------------------------------
 # Spec sub-models (API layer — mirror experiment_spec dataclasses)
-# ---------------------------------------------------------------------------
 
 
 class BudgetSpecModel(BaseModel):
@@ -121,6 +118,7 @@ class RecordingSettingsModel(BaseModel):
 class ParallelismSettingsModel(BaseModel):
     num_workers: int = Field(default=1, ge=0)
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
 
     def to_dataclass(self):
         from deap_pettingzoo.baselines.experiment_spec import ParallelismSettings
@@ -128,6 +126,7 @@ class ParallelismSettingsModel(BaseModel):
         return ParallelismSettings(
             num_workers=self.num_workers,
             parallel_backend=self.parallel_backend,
+            scheduler_address=self.scheduler_address,
         )
 
 
@@ -173,9 +172,7 @@ class CoevolutionSettingsModel(BaseModel):
         )
 
 
-# ---------------------------------------------------------------------------
 # Top-level request model
-# ---------------------------------------------------------------------------
 
 
 class ExperimentSpecModel(BaseModel):
@@ -223,9 +220,7 @@ class ExperimentSpecModel(BaseModel):
         )
 
 
-# ---------------------------------------------------------------------------
 # Response models
-# ---------------------------------------------------------------------------
 
 
 class ValidationIssueModel(BaseModel):
@@ -285,6 +280,52 @@ class StdoutChunk(BaseModel):
     eof: bool
 
 
+class DeletedResponse(BaseModel):
+    """Returned by ``DELETE /experiments/{id}``."""
+
+    deleted: bool
+
+
+class PausedResponse(BaseModel):
+    """Returned by ``POST /queue/pause`` and ``POST /queue/resume``."""
+
+    paused: bool
+
+
+class RunDeleteError(BaseModel):
+    path: str
+    error: str
+
+
+class RunsDeleteResponse(BaseModel):
+    """Returned by ``POST /runs/delete``."""
+
+    ok: bool
+    deleted: List[str] = Field(default_factory=list)
+    errors: List[RunDeleteError] = Field(default_factory=list)
+
+
+class ImportedExperiment(BaseModel):
+    original_exp_id: str
+    new_exp_id: str
+    label: str = ""
+    run_count: int = 0
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ImportResponse(BaseModel):
+    """Returned by ``POST /experiments/import`` on success (HTTP 200)."""
+
+    ok: bool
+    imported: List[ImportedExperiment] = Field(default_factory=list)
+
+
+class SpecResponse(BaseModel):
+    """Returned by ``GET /experiments/{id}/spec`` — the raw stored spec JSON."""
+
+    spec: Dict[str, Any] = Field(default_factory=dict)
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
@@ -292,12 +333,10 @@ class HealthResponse(BaseModel):
     advanced_enabled: bool = True
     """Whether the advanced (install panel + custom-script) surface is enabled.
     Driven by ``DEAP_ENABLE_ADVANCED``; the UI reads this to show/hide the
-    Setup → Advanced section."""
+    Setup -> Advanced section."""
 
 
-# ---------------------------------------------------------------------------
 # Advanced surface — dependency install + custom-script submission
-# ---------------------------------------------------------------------------
 
 
 class InstallRequest(BaseModel):

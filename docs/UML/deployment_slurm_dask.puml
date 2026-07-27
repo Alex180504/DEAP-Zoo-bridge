@@ -1,0 +1,68 @@
+@startuml
+title Slurm + Dask Deployment (single sbatch allocation)
+
+' Compact layout: edge labels are hand-wrapped and the driver note is anchored
+' sideways so the figure stays close to square -- see README, 'Layout'.
+skinparam componentStyle rectangle
+skinparam nodesep 15
+skinparam ranksep 30
+
+actor "Cluster scheduler\n(slurmctld / slurmd)" as Slurm
+
+node "Slurm allocation\n(examples/hpc/slurm/train_dask.sbatch)" {
+  node "Batch step (node 0)" as Batch {
+    component "Driver process\n(examples/hpc/train_ea_dask.py,\nor any make_executor caller)" as Driver
+  }
+
+  node "srun --overlap step 1 (node 0)" as SchedStep {
+    component "dask scheduler\n--scheduler-file $SCHED_FILE" as Scheduler
+  }
+
+  node "srun --overlap step 2\n(--ntasks=$SLURM_JOB_NUM_NODES)" as WorkStep {
+    component "dask worker(s), one task per node\n--nthreads 1\n--nworkers $SLURM_CPUS_PER_TASK\n(node 0's task shares the node\nwith the scheduler and driver)" as W
+  }
+}
+
+database "Shared filesystem\n($SHARED_DIR)" as FS {
+  artifact "$SCHED_FILE\n(connection info)" as SchedFile
+  artifact "TrainingConfig\n.output_dir" as Results
+}
+
+Slurm -> Batch : allocates nodes,\nlaunches sbatch
+Batch -> SchedStep : srun --overlap\n(shares CPUs)
+Batch -> WorkStep : srun --overlap\n(shares CPUs)
+
+Scheduler -> SchedFile : writes address\n+ ports on bind
+Driver -> SchedFile : polls up to 60s,\nthen reads
+W --> SchedFile : reads to locate\nscheduler
+
+Driver ..> Scheduler : DEAP_DASK_SCHEDULER holds\n$SCHED_FILE -> make_executor\n-> resolve_scheduler_address\n-> Client(scheduler_file=...)
+W ..> Scheduler : registers\nas worker
+
+Driver -> Scheduler : client.map(\n_worker_evaluate,\npayloads)
+Scheduler --> W : task
+W --> Scheduler : (fitness,\nsteps_delta)
+Scheduler --> Driver : gathered results\n(ordered; retries=2\non worker death)
+
+Driver -> Results : metrics.csv,\nsummary.json,\ncheckpoint -- sole\nwriter (ExperimentLogger)
+
+note left of Driver
+  Real-cluster deltas vs the
+  Docker Slurm rig (docker/slurm-cluster/,
+  tests/hpc/test_slurm_rig.py) are only
+  partition/account sbatch headers and
+  node counts -- the same .sbatch file
+  is submitted in both.
+end note
+
+note bottom of FS
+  The scheduler-file handshake is the
+  canonical dask-on-Slurm pattern: the
+  scheduler's host/port are unknown
+  before the allocation, so driver and
+  workers discover them through a
+  shared-FS file rather than a fixed
+  tcp:// address (which the Docker Dask
+  rig, docker/dask-cluster/, uses).
+end note
+@enduml

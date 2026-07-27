@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -35,7 +35,7 @@ from deap_pettingzoo.baselines.base import (
 logger = logging.getLogger(__name__)
 
 #: Mutation-probability keys understood by AgileRL's ``Mutations`` and the
-#: order in which the flat ``prob_*`` form-knobs map onto them.
+#: order in which the flat ``prob_*`` form knobs map onto them.
 _MUTATION_PROB_KEYS = (
     "no_mutation",
     "architecture",
@@ -47,6 +47,55 @@ _MUTATION_PROB_KEYS = (
 
 #: Form-group name for the per-mutation-probability knobs.
 _MUT_GROUP = "HPO / Mutation"
+
+
+class _AgentHallOfFame:
+    """Best-N hall-of-fame for AgileRL agents.
+
+    AgileRL agents are not DEAP individuals (they have no ``fitness.wvalues``
+    or comparison operators that :class:`deap.tools.HallOfFame` relies on), so
+    this mirrors that class's semantics for the HPO population: it keeps up to
+    ``maxsize`` cloned snapshots of the best-ever agents by fitness, best
+    first. Cloning (like ``HallOfFame``'s deepcopy) freezes each snapshot so
+    the subsequent tournament/mutation cannot alter it.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = max(1, int(maxsize))
+        self.items: List[Any] = []  # agent clones, best-first
+        self.fitnesses: List[float] = []  # aligned with items, descending
+
+    def update(self, population: List[Any], fitnesses: List[float]) -> None:
+        """Insert this generation's qualifying agents (cloned, best-first).
+
+        Candidates are considered best-first so only agents that actually enter
+        the hall-of-fame are cloned; the descending scan stops as soon as a
+        candidate cannot beat the current worst member.
+        """
+        order = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i], reverse=True)
+        for i in order:
+            fit = float(fitnesses[i])
+            if len(self.items) >= self.maxsize and fit <= self.fitnesses[-1]:
+                break
+            snapshot = population[i].clone()
+            pos = len(self.fitnesses)
+            for j, existing in enumerate(self.fitnesses):
+                if fit > existing:
+                    pos = j
+                    break
+            self.items.insert(pos, snapshot)
+            self.fitnesses.insert(pos, fit)
+            if len(self.items) > self.maxsize:
+                self.items.pop()
+                self.fitnesses.pop()
+
+    @property
+    def champion(self) -> Optional[Any]:
+        """The best-ever agent, or ``None`` before any update."""
+        return self.items[0] if self.items else None
+
+    def __len__(self) -> int:
+        return len(self.items)
 
 
 class EvolveHPOTrainer(AgileRLTrainer):
@@ -90,9 +139,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         self._mutation_probs.setdefault("activation", 0.0)
         self._mutation_probs.setdefault("rl_hp", 0.2)
 
-    # ------------------------------------------------------------------
     # Catalog hyperparameter surface
-    # ------------------------------------------------------------------
 
     @staticmethod
     def describe_hyperparameters():
@@ -152,6 +199,50 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 target=AP,
                 group="HPO",
                 help="Tournament size for survivor selection.",
+            ),
+            ParamSpec(
+                "eval_episodes",
+                I,
+                3,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="HPO",
+                help=(
+                    "Episodes used to score each agent per generation "
+                    "(drives tournament selection). More episodes reduce "
+                    "selection noise at higher cost."
+                ),
+            ),
+            ParamSpec(
+                "final_eval_episodes",
+                I,
+                5,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="HPO",
+                advanced=True,
+                help=(
+                    "Episodes used to re-score the best-ever champion at the "
+                    "end of the run for the reported final fitness."
+                ),
+            ),
+            ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=AP,
+                group="HPO",
+                advanced=True,
+                help=(
+                    "Number of best-ever agents kept in the hall-of-fame. The "
+                    "champion is always hof[0]; with hof_size > 1 the top-N are "
+                    "also checkpointed (hof_NN.pt) and returned in "
+                    "TrainingResult.hall_of_fame."
+                ),
             ),
             ParamSpec(
                 "mutation_sd",
@@ -245,7 +336,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
         """Merge constructor defaults, a nested ``mutation_probs`` dict and the
         flat ``prob_*`` form-knobs into the AgileRL ``Mutations`` probability dict.
 
-        Precedence (lowest → highest): constructor defaults <
+        Precedence (lowest -> highest): constructor defaults <
         ``algorithm_params['mutation_probs']`` (programmatic) <
         ``algorithm_params['prob_<key>']`` (UI form).
         """
@@ -257,9 +348,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 mut_probs[key] = float(flat)
         return mut_probs
 
-    # ------------------------------------------------------------------
     # BaselineTrainer
-    # ------------------------------------------------------------------
 
     def train(
         self,
@@ -281,12 +370,29 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 * ``population_size`` — overrides the constructor default.
                 * ``tournament_size`` — tournament selection size.
                 * ``mutation_probs`` — overrides constructor defaults.
+                * ``eval_episodes`` — episodes used to score each agent per
+                  generation (drives tournament selection; default 3).
+                * ``final_eval_episodes`` — episodes used to re-score the
+                  hall-of-fame members for the reported fitness (default 5).
+                * ``hof_size`` — number of best-ever agents to keep in the
+                  hall-of-fame (default 1). ``hof[0]`` is always the returned
+                  champion; ``hof_size > 1`` additionally checkpoints the top-N
+                  (``hof_NN.pt``) and returns them in
+                  :attr:`~deap_pettingzoo.baselines.base.TrainingResult.hall_of_fame`.
 
                 ``config.seed`` (first-class field) seeds the run; see
                 :class:`~deap_pettingzoo.baselines.base.TrainingConfig`.
 
+        The returned champion is the **best-ever** agent across all
+        generations (a hall-of-fame mirroring
+        :class:`~deap_pettingzoo.baselines.ea_trainer.EATrainer`'s
+        ``tools.HallOfFame``), not merely the best of the final post-mutation
+        population.
+
         Returns:
-            :class:`TrainingResult` with champion policy and metrics.
+            :class:`TrainingResult` with champion policy and metrics. When
+            ``hof_size > 1`` the ``hall_of_fame`` field holds the top-N
+            policies (best first; ``hall_of_fame[0]`` is ``policy``).
         """
         start_time = time.time()
 
@@ -304,7 +410,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 "Install with: pip install 'deap-pettingzoo[rl-baselines]'"
             ) from exc
 
-        # ---- resolve algorithm class and environment ----
+        # Resolve algorithm class and environment.
         alg_cls = self._import_algorithm()
         env, obs_spaces, act_spaces, agent_ids = self._build_env(config)
         is_vec = config.algorithm_params.get("num_envs", 1) > 1
@@ -314,7 +420,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             else 200
         )
 
-        # ---- HPO hyperparameters ----
+        # HPO hyperparameters.
         pop_size = config.algorithm_params.get(
             "population_size", self._hpo_population_size
         )
@@ -322,6 +428,13 @@ class EvolveHPOTrainer(AgileRLTrainer):
             "evo_every_n_steps", self._evo_every_n_steps
         )
         tournament_size = config.algorithm_params.get("tournament_size", 2)
+        # Per-generation selection eval and final champion eval episode counts,
+        # surfaced via algorithm_params (see describe_hyperparameters).
+        eval_episodes = max(1, int(config.algorithm_params.get("eval_episodes", 3)))
+        final_eval_episodes = max(
+            1, int(config.algorithm_params.get("final_eval_episodes", 5))
+        )
+        hof_size = max(1, int(config.algorithm_params.get("hof_size", 1)))
         seed = config.seed
         if seed is not None:
             self._seed_everything(int(seed))
@@ -334,11 +447,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
             RLParameter,
         )
 
-        # ---- build population ----
+        # Build population.
         ctor_kwargs: Dict[str, Any] = {}
         ctor_kwargs["device"] = config.algorithm_params.get("device", self.device)
-        # memory_size and learning_delay are buffer/rollout params consumed by
-        # _train_one_agent; convert them to valid MADDPG/MATD3 constructor args.
+        # memory_size and learning_delay are buffer/rollout params consumed by _train_one_agent;
+        # convert them to valid MADDPG/MATD3 constructor args.
         self._hpo_memory_size = int(config.algorithm_params.get("memory_size", 100_000))
         self._hpo_learning_delay = int(config.algorithm_params.get("learning_delay", 0))
         for key in (
@@ -371,7 +484,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             ctor_kwargs,
         )
 
-        # ---- HPO machinery ----
+        # HPO wiring.
         mut_probs = self._assemble_mutation_probs(config.algorithm_params)
         mutations = Mutations(
             no_mutation=mut_probs["no_mutation"],
@@ -391,7 +504,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             eval_loop=1,
         )
 
-        # ---- training loop ----
+        # Training loop.
         rng = np.random.default_rng(seed)
         budget_steps = self._resolve_budget_steps(config)
         steps_done = 0
@@ -429,12 +542,44 @@ class EvolveHPOTrainer(AgileRLTrainer):
             def _champion():
                 return _champion_policy
 
+            # Best-ever hall-of-fame, mirroring EATrainer's tools.HallOfFame:
+            # AgileRL clones the population every generation via
+            # tournament/mutation, so re-selecting only from the final
+            # post-mutation population can return a champion worse than one seen
+            # mid-run. Snapshot (clone, like HallOfFame's deepcopy) the best
+            # agents each generation; hof[0] drives the recorder/probe champion
+            # and the final returned policy, and hof_size > 1 additionally
+            # retains and exports the top-N.
+            hof = _AgentHallOfFame(hof_size)
+
             self._recorder = RecordingController(
                 config,
                 log,
                 max_steps=_rec_max_steps,
                 seed=seed,
             )
+            from deap_pettingzoo.baselines.probing import ProbeController
+
+            # Periodic held-out champion probe on the same env-step axis
+            # (never counted into the budget). Rides the same _on_progress
+            # champion hook as the recorder; no-op unless config.probe.enabled.
+            self._prober = ProbeController(
+                config,
+                log,
+                max_steps=_rec_max_steps,
+                seed=seed,
+            )
+
+            # Off-policy agents share persistent per-slot replay buffers that
+            # survive across generations. AgileRL's tournament/mutation clone()
+            # strips underscore-prefixed attributes, so the buffers (and their
+            # warm-up/learn transition counters) must be owned here and keyed by
+            # population slot, not attached to the agents. Slot order is
+            # preserved through tournament+mutation, and an off-policy replay
+            # buffer is correctly filled by the successive policies occupying a
+            # slot. Buffers are built lazily on first use per slot.
+            self._hpo_memories: List[Any] = [None] * len(population)
+            self._hpo_transitions: List[int] = [0] * len(population)
 
             # Main loop: evolve for budget_steps.
             while steps_done < budget_steps:
@@ -444,7 +589,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
                 # Train each agent for evo_every steps. On-policy (IPPO) and
                 # off-policy (MADDPG/MATD3) take different rollout/learn paths.
-                for agent in population:
+                for slot, agent in enumerate(population):
                     if self.ON_POLICY:
                         gen_steps = self._train_one_agent_on_policy(
                             agent,
@@ -454,7 +599,11 @@ class EvolveHPOTrainer(AgileRLTrainer):
                             rng,
                         )
                     else:
-                        gen_steps = self._train_one_agent(
+                        if self._hpo_memories[slot] is None:
+                            self._hpo_memories[slot] = self._build_replay_buffer(
+                                agent_ids
+                            )
+                        gen_steps, self._hpo_transitions[slot] = self._train_one_agent(
                             agent,
                             env,
                             agent_ids,
@@ -463,13 +612,14 @@ class EvolveHPOTrainer(AgileRLTrainer):
                             evo_every,
                             seed,
                             rng,
+                            memory=self._hpo_memories[slot],
+                            total_transitions=self._hpo_transitions[slot],
                         )
                     steps_done += gen_steps
                     gen_progress += gen_steps
 
                 # Guard against a non-progressing population (e.g. an agent that
-                # is not actually trainable) so the budget loop can never spin
-                # forever.
+                # is not actually trainable) so the budget loop can never iterate forever.
                 if gen_progress == 0:
                     logger.warning(
                         "[%s] generation %d consumed 0 env steps; stopping early",
@@ -493,12 +643,19 @@ class EvolveHPOTrainer(AgileRLTrainer):
                         max_steps,
                         seed,
                         rng,
-                        num_episodes=3,
+                        num_episodes=eval_episodes,
                     )
                     gen_fitnesses.append(fit)
                     agent.fitness.append(
                         fit
                     )  # append fitness to agent's history for AgileRL's tournament/selection
+
+                # Update the best-ever hall-of-fame from this generation
+                # (pre-mutation, while gen_fitnesses still line up with the
+                # trained population). Clones freeze snapshots the subsequent
+                # tournament/mutation cannot alter — mirrors HallOfFame's deepcopy.
+                if gen_fitnesses:
+                    hof.update(population, gen_fitnesses)
 
                 # Record stats.
                 best_fit = max(gen_fitnesses) if gen_fitnesses else 0.0
@@ -543,14 +700,16 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 _, population = tournament.select(population)
                 population = mutations.mutation(population)
 
-                # Update champion reference for the recording controller.
-                best_idx_gen = int(np.argmax(gen_fitnesses)) if gen_fitnesses else 0
-                _champion_agent = population[best_idx_gen % len(population)]
-                _champion_policy = AgileRLPolicyWrapper(
-                    _champion_agent,
-                    agent_ids,
-                    algorithm_name=algo_tag,
-                )
+                # Point the recorder/probe champion at the best-ever agent (the
+                # hall-of-fame leader), not an index into the freshly-mutated
+                # population, so the recorded/probed champion never regresses.
+                if hof.champion is not None:
+                    _champion_agent = hof.champion
+                    _champion_policy = AgileRLPolicyWrapper(
+                        _champion_agent,
+                        agent_ids,
+                        algorithm_name=algo_tag,
+                    )
                 self._on_progress(
                     progress_callback,
                     ProgressEvent(
@@ -565,46 +724,108 @@ class EvolveHPOTrainer(AgileRLTrainer):
                     champion=_champion,
                 )
 
-            # Champion = best agent by fitness.
-            champ_fits = [
-                self._evaluate_agent(
-                    a, env, agent_ids, max_steps, seed, rng, num_episodes=5
-                )
-                for a in population
-            ]
-            champ_idx = int(np.argmax(champ_fits))
-            champion = population[champ_idx]
+            # Champion = best-ever hall-of-fame leader (mirrors EATrainer's
+            # tools.HallOfFame), with the whole hall-of-fame re-scored under the
+            # configured final eval budget for clean reported fitnesses. Fall
+            # back to the final population's best only if no generation ever
+            # completed (e.g. a zero-progress break on generation 1 left the
+            # hall-of-fame empty).
+            if len(hof):
+                hof_members = list(hof.items)  # best-first
+            else:
+                champ_fits = [
+                    self._evaluate_agent(
+                        a,
+                        env,
+                        agent_ids,
+                        max_steps,
+                        seed,
+                        rng,
+                        num_episodes=final_eval_episodes,
+                    )
+                    for a in population
+                ]
+                best = int(np.argmax(champ_fits)) if champ_fits else 0
+                hof_members = [population[best]] if population else []
 
-            policy = AgileRLPolicyWrapper(
-                champion,
-                agent_ids,
-                algorithm_name=algo_tag,
+            hof_scores = [
+                self._evaluate_agent(
+                    m,
+                    env,
+                    agent_ids,
+                    max_steps,
+                    seed,
+                    rng,
+                    num_episodes=final_eval_episodes,
+                )
+                for m in hof_members
+            ]
+            # Re-order the export by the clean final re-score (descending). The
+            # hall-of-fame is filled under the noisier per-generation eval, so
+            # re-scoring under final_eval_episodes can re-rank members; sorting
+            # here keeps rank 1 / final_fitness / the returned champion the
+            # genuinely best member and the summary monotonically descending.
+            score_order = sorted(
+                range(len(hof_members)), key=lambda i: hof_scores[i], reverse=True
             )
+            hof_members = [hof_members[i] for i in score_order]
+            hof_scores = [hof_scores[i] for i in score_order]
+            final_fitness = hof_scores[0] if hof_scores else 0.0
+
+            # Top-N export policies (best first); [0] is the returned champion.
+            hof_policies = [
+                AgileRLPolicyWrapper(m, agent_ids, algorithm_name=algo_tag)
+                for m in hof_members
+            ]
+            policy = hof_policies[0] if hof_policies else None
             training_time = time.time() - start_time
+
+            # Finalize the recorder/probe on the actually-returned champion (also
+            # covers the zero-progress fallback, where the loop never set it).
+            if policy is not None:
+                _champion_policy = policy
 
             self._recorder.finalize(
                 _champion, iteration=generation, env_steps=steps_done
             )
             self._recorder.close()
+            self._prober.finalize(_champion, iteration=generation, env_steps=steps_done)
+            self._prober.close()
 
-            save_agilerl_agent(
-                log,
-                champion,
-                extra={
-                    "algorithm": algo_tag,
-                    "env_name": config.env_name,
-                    "agent_ids": list(agent_ids),
-                    "num_generations": generation,
-                    "population_size": pop_size,
-                },
-            )
+            # Checkpoint the hall-of-fame: the champion as ``agent.pt`` (rank 1,
+            # unchanged) and any additional members as ``hof_NN.pt`` (rank 2..N).
+            for rank, (member, score) in enumerate(
+                zip(hof_members, hof_scores), start=1
+            ):
+                save_agilerl_agent(
+                    log,
+                    member,
+                    filename="agent.pt" if rank == 1 else f"hof_{rank:02d}.pt",
+                    extra={
+                        "algorithm": algo_tag,
+                        "env_name": config.env_name,
+                        "agent_ids": list(agent_ids),
+                        "num_generations": generation,
+                        "population_size": pop_size,
+                        "hof_rank": rank,
+                        "hof_fitness": float(score),
+                    },
+                )
+            # JSON-safe hall-of-fame summary (fitnesses only; policies/agents
+            # travel via disk checkpoints and TrainingResult.hall_of_fame).
+            hall_of_fame_summary = [
+                {"rank": rank, "fitness": float(score)}
+                for rank, score in enumerate(hof_scores, start=1)
+            ]
             write_summary(
                 log,
                 {
                     "algorithm": algo_tag,
                     "num_generations": generation,
                     "population_size": pop_size,
-                    "final_fitness": champ_fits[champ_idx],
+                    "final_fitness": final_fitness,
+                    "hof_size": len(hof_members),
+                    "hall_of_fame": hall_of_fame_summary,
                     "total_env_steps": steps_done,
                     "mutation_probs": mut_probs,
                 },
@@ -616,7 +837,8 @@ class EvolveHPOTrainer(AgileRLTrainer):
             policy=policy,
             metrics={
                 "fitness_history": fitness_history,
-                "final_fitness": champ_fits[champ_idx],
+                "final_fitness": final_fitness,
+                "hall_of_fame": hall_of_fame_summary,
                 "num_generations": generation,
                 "population_size": pop_size,
                 "total_env_steps": steps_done,
@@ -627,11 +849,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 "mutation_probs": mut_probs,
             },
             training_time=training_time,
+            hall_of_fame=hof_policies or None,
         )
 
-    # ------------------------------------------------------------------
     # BaselineTrainer — capabilities
-    # ------------------------------------------------------------------
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in {BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES}
@@ -648,9 +869,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
             "supports_turn_based": False,
         }
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_hp_config(
@@ -723,6 +942,24 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 pop.append(agent)
             return pop
 
+    def _build_replay_buffer(self, agent_ids: List[str]) -> Any:
+        """Build a persistent off-policy replay buffer for one population slot.
+
+        Owned by the trainer (not the agent) so it survives AgileRL's
+        tournament/mutation ``clone()``, which strips underscore-prefixed
+        attributes. See :meth:`train` for the per-slot ownership rationale.
+        """
+        from agilerl.components.multi_agent_replay_buffer import (  # noqa: WPS433
+            MultiAgentReplayBuffer,
+        )
+
+        return MultiAgentReplayBuffer(
+            memory_size=int(getattr(self, "_hpo_memory_size", 100_000)),
+            field_names=["obs", "action", "reward", "next_obs", "done"],
+            agent_ids=agent_ids,
+            device=self.device,
+        )
+
     def _train_one_agent(
         self,
         agent: Any,
@@ -733,32 +970,25 @@ class EvolveHPOTrainer(AgileRLTrainer):
         target_steps: int,
         seed: Optional[int],
         rng: np.random.Generator,
-    ) -> int:
-        """Run off-policy rollout-and-learn for one agent, returning steps consumed."""
-        from agilerl.components.multi_agent_replay_buffer import (  # noqa: WPS433
-            MultiAgentReplayBuffer,
-        )
+        memory: Any,
+        total_transitions: int = 0,
+    ) -> Tuple[int, int]:
+        """Run off-policy rollout-and-learn for one agent.
 
+        ``memory`` is the persistent per-slot replay buffer (owned by
+        :meth:`train`); ``total_transitions`` is that slot's running transition
+        count driving the warm-up / learn-cadence gate. Returns
+        ``(steps_consumed, total_transitions)`` so the caller can persist the
+        updated counter for the slot.
+        """
         steps = 0
         learn_step = max(1, int(getattr(agent, "learn_step", 100)))
         batch_size = int(getattr(agent, "batch_size", 64))
         learning_delay = int(
             getattr(self, "_hpo_learning_delay", getattr(agent, "learning_delay", 500))
         )
-        total_transitions = int(getattr(agent, "_total_transitions", 0))
         discrete = bool(getattr(agent, "discrete_actions", False))
         num_envs = int(getattr(env, "num_envs", 1))
-
-        memory = MultiAgentReplayBuffer(
-            memory_size=int(
-                getattr(
-                    self, "_hpo_memory_size", getattr(agent, "memory_size", 100_000)
-                )
-            ),
-            field_names=["obs", "action", "reward", "next_obs", "done"],
-            agent_ids=agent_ids,
-            device=self.device,
-        )
 
         while steps < target_steps:
             ep_seed = int(rng.integers(0, 2**31)) if seed is not None else None
@@ -872,9 +1102,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 if done:
                     break
 
-        if hasattr(agent, "_total_transitions"):
-            object.__setattr__(agent, "_total_transitions", total_transitions)
-        return steps
+        return steps, total_transitions
 
     def _train_one_agent_on_policy(
         self,
@@ -1051,7 +1279,7 @@ class GroupedIPPOHPOTrainer(IPPOHPOTrainer):
     agents whose ids share a prefix share one actor/critic network. The
     grouped-IPPO flattening patch is installed and the grouping is validated
     up-front (via :meth:`_prepare_population_build`) before the population is
-    built — no silent fallback to per-agent networks.
+    built to avoid silent fallback to per-agent networks.
     """
 
     ALGORITHM_NAME = "ippo-grouped"

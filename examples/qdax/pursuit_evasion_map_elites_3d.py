@@ -3,9 +3,7 @@
 Same JaxMARL env as :mod:`pursuit_evasion_map_elites` but uses the
 :func:`with_capture_efficiency` descriptor to add a
 *capture-efficiency* axis. The resulting archive separates "tight
-formations that capture" from "tight formations that do not", which
-is the main research reason to pay the 3-D grid cost.
-
+formations that capture" from "tight formations that do not".
 Usage::
 
     python examples/qdax/pursuit_evasion_map_elites_3d.py --smoke

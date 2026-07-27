@@ -1,0 +1,53 @@
+@startuml neat_policies
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title NEAT family policies and substrate
+
+package "deap_pettingzoo.contrib.neat" {
+    class NeatPolicy {
+        - _genome: neat.DefaultGenome
+        - _config: neat.Config
+        - _network: neat.nn.FeedForwardNetwork
+        - _head: Optional[ActionHead]
+        -- lazy; requires neat-python >= 2.0
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+        + from_snapshot_payload(genome, config, action_space, masked) -> NeatPolicy
+    }
+    class HyperNeatPolicy {
+        - _substrate: Substrate
+        - _network: neat.nn.RecurrentNetwork
+        - _activation_steps: int
+        -- CPPN -> substrate-query phenotype
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+    }
+    class ESHyperNeatPolicy {
+        - _es_params: dict
+        - _activation_steps: int
+        -- CPPN -> ESNetwork quadtree phenotype
+        + get_action(obs, action_mask=None) -> Any
+        + reset() -> None
+    }
+    class Substrate {
+        + input_coordinates: List[Coord]
+        + output_coordinates: List[Coord]
+        + hidden_coordinates: List[List[Coord]]
+    }
+}
+
+    HyperNeatPolicy --> Substrate : uses
+    ESHyperNeatPolicy --> Substrate : uses
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

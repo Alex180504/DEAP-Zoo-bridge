@@ -1,13 +1,8 @@
 """Unified champion-rollout recording for all trainers.
 
-Historically every trainer re-implemented champion recording: building a
-:class:`~deap_pettingzoo.utils.logging.replay.FrameRecorder`, constructing a
-:class:`~deap_pettingzoo.baselines.unified_evaluator.UnifiedEvaluator`, deciding
-"record now?" (in per-generation *or* per-env-step units, which are not
-comparable across EA and RL), tracking episode offsets, writing sidecar
-metadata, and swallowing errors. :class:`RecordingController` centralises all of
-that behind one object so each trainer has a single record call site with
-identical, algorithm-agnostic cadence semantics.
+:class:`RecordingController` centralises champion recording behind one object so
+each trainer has a single record call site with identical, algorithm-agnostic
+cadence semantics.
 
 Cadence is expressed on the normalized progress axis shared by every trainer
 (:attr:`~deap_pettingzoo.baselines.base.ProgressEvent.fraction` and
@@ -43,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: leaves ``max_recordings`` unset.
 DEFAULT_COUNT = 10
 
-#: A champion provider returns the policy to roll out — either a single policy
+#: A champion provider returns the policy to roll out: either a single policy
 #: broadcast to all agents, or a per-agent ``{agent_id: policy}`` map for
 #: heterogeneous rollouts (co-evolution). ``None`` skips the recording.
 ChampionProvider = Callable[[], Union[Any, Mapping[str, Any], None]]
@@ -112,8 +107,7 @@ class RecordingController:
             self._interval = max(1, int(cfg.every_n_steps))
             self._next_step = self._interval
 
-    # -- per-iteration hook -------------------------------------------------
-
+    # Per-iteration hook
     def observe(
         self,
         event: ProgressEvent,
@@ -124,8 +118,7 @@ class RecordingController:
         """Record a champion rollout if ``event`` crosses the next checkpoint.
 
         ``champion`` is evaluated lazily — only when a recording is actually
-        due — so trainers pay the rollout cost zero times on non-recording
-        iterations.
+        due, so trainers pay the rollout cost zero times on non-recording iterations.
         """
         if not self.enabled or not self._is_due(event):
             return
@@ -153,7 +146,7 @@ class RecordingController:
             return
         self._record(champion, iteration=iteration, env_steps=env_steps, extra=extra)
 
-    # -- internals ----------------------------------------------------------
+    # Business logic
 
     def _is_due(self, event: ProgressEvent) -> bool:
         """Decide — per :attr:`mode` — whether ``event`` warrants a recording."""

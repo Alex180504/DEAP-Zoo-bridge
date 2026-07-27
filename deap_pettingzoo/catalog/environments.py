@@ -1,11 +1,11 @@
 """Environment catalog — wraps the env registry with UI-facing metadata.
 
-The low-level :class:`~deap_pettingzoo.environments.registry.EnvSpec` now
+The low-level :class:`~deap_pettingzoo.environments.registry.EnvSpec`
 carries a declarative ``params`` schema and ``teams`` metadata (populated for
 the built-ins in :mod:`deap_pettingzoo.environments.builtin`). This module
 projects each registered env into an
 :class:`~deap_pettingzoo.catalog.schema.EnvironmentSpec` — the shape the UI and
-the FastAPI ``/catalog/environments`` endpoint consume — and derives
+the FastAPI ``/catalog/environments`` endpoint consume, and derives
 optional-dependency gating from the env's registry tags.
 
 Only **registered** environments are listed. Because the built-ins

@@ -3,15 +3,6 @@
 Mirrors the EA :class:`~deap_pettingzoo.integration.deap_integration._EvalWorkerSpec`
 pattern: ship picklable genome + environment metadata to worker processes,
 rebuild env + policy on each worker, run episodes, return fitness.
-
-Data flow
----------
-Driver:  genome ──pickle──→ Worker: rebuild genome via pickle
-         _NeatWorkerSpec ──→        rebuild neat.Config from input/output sizes
-                                    rebuild action space from hint
-                                    build PettingZooWrapper from env_name
-                                    build NeatPolicy / HyperNeatPolicy / ESHyperNeatPolicy
-                                    run eval_eps episodes → return mean fitness
 """
 
 from __future__ import annotations
@@ -61,6 +52,14 @@ class _NeatWorkerSpec:
     weight_threshold:
         Minimum absolute CPPN output below which phenotype connection
         weights are zeroed.  Default 0.1 (HyperNEAT / ES-HyperNEAT).
+    stochastic_head:
+        When ``True`` and the action space is discrete, evaluate genomes with
+        a softmax-sampling head instead of argmax (smooth gradient-free search
+        landscape; see :class:`~deap_pettingzoo.contrib.neat.hyperneat.HyperNeatPolicy`).
+        The head RNG is seeded from ``seed`` so identical phenotypes produce
+        identical action streams (common-random-number evaluation).
+    head_temperature:
+        Softmax temperature for the stochastic head (``> 0``).
     max_steps:
         Hard cap on env steps per rollout episode, mirrors
         ``TrainingConfig.max_steps_per_episode`` on the driver.
@@ -78,8 +77,10 @@ class _NeatWorkerSpec:
     es_params: Optional[Dict[str, Any]] = None
     phenotype_activation: str = "sigmoid"
     weight_threshold: float = 0.1
+    stochastic_head: bool = False
+    head_temperature: float = 1.0
     max_steps: int = 500
-    #: Registry snapshot replayed once per worker so SCOOP/Dask workers (and
+    #: Registry snapshot replayed once per worker so Dask workers (and
     #: any worker missing a runtime registration) can resolve ``env_name``.
     registry_snapshot: Optional[List] = None
 
@@ -141,8 +142,8 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
 
     genome, spec = payload
 
-    # Re-register custom envs so SCOOP/Dask workers can resolve env_name; no-op
-    # on repeat calls and for built-in-only snapshots.
+    # Re-register custom envs so Dask workers can resolve env_name;
+    # no-op on repeat calls and for built-in-only snapshots.
     replay_registry_snapshot_once(spec.registry_snapshot)
 
     # Rebuild config — use CPPN config for HyperNEAT / ES-HyperNEAT,
@@ -171,6 +172,9 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
         )
 
         substrate = _rebuild_substrate(spec)
+        # Seed the (optional) softmax head from the shared spec seed so
+        # identical phenotypes sample identically across the population (CRN).
+        _head_rng = np.random.default_rng(spec.seed) if spec.stochastic_head else None
         if spec.es_params is not None:
             policy = ESHyperNeatPolicy(
                 genome,
@@ -178,6 +182,9 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
                 substrate,
                 action_space=action_space,
                 es_params=dict(spec.es_params),
+                stochastic=spec.stochastic_head,
+                temperature=spec.head_temperature,
+                rng=_head_rng,
             )
         else:
             policy = HyperNeatPolicy(
@@ -187,6 +194,9 @@ def _neat_worker_evaluate(payload: tuple) -> tuple:
                 action_space=action_space,
                 activation=spec.phenotype_activation,
                 weight_threshold=spec.weight_threshold,
+                stochastic=spec.stochastic_head,
+                temperature=spec.head_temperature,
+                rng=_head_rng,
             )
     else:
         policy = NeatPolicy(genome, neat_cfg, action_space=action_space)

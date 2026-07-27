@@ -144,8 +144,7 @@ def train_agent_on_policy(
     computes GAE internally). Shared by the standalone HPO trainer
     (:class:`~deap_pettingzoo.baselines.agilerl_hpo_trainer.EvolveHPOTrainer`)
     and the HPO co-evolution side
-    (:class:`~deap_pettingzoo.baselines.coevolution.rl_hpo_side.RLEvolveHPOSideState`)
-    so the two cannot drift.
+    (:class:`~deap_pettingzoo.baselines.coevolution.rl_hpo_side.RLEvolveHPOSideState`).
 
     Args:
         agent: An AgileRL on-policy agent exposing ``get_action`` /

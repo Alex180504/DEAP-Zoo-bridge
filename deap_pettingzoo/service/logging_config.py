@@ -17,20 +17,17 @@ Two backend processes configure logging from here:
 Behaviour is driven by environment variables (so it works unchanged inside a
 container) and by the ``--verbose`` CLI switch:
 
-==================  =========================================================
-``DEAP_LOG_LEVEL``  ``debug`` / ``info`` / ``warning`` (default) / ``error``
-``DEAP_LOG_FORMAT`` ``plain`` (default) or ``json``
-``DEAP_LOG_DIR``    directory for ``service.log`` (default
-                    ``<DEAP_RESULTS_ROOT>/_logs``)
-==================  =========================================================
+``DEAP_LOG_LEVEL``:  ``debug`` / ``info`` / ``warning`` (default) / ``error``
+``DEAP_LOG_FORMAT``: ``plain`` (default) or ``json``
+``DEAP_LOG_DIR``:    directory for ``service.log`` (default: ``<DEAP_RESULTS_ROOT>/_logs``)
 
 Level semantics (the verbose switch):
 
 * default ``WARNING`` — warnings (incl. captured ``warnings.warn``) and
   exceptions only.
-* ``--verbose`` / ``-v`` → ``INFO`` — also normal operation: experiment
+* ``--verbose`` / ``-v`` -> ``INFO`` — also normal operation: experiment
   lifecycle and which components are active.
-* ``-vv`` / ``--log-level debug`` → ``DEBUG`` — also per-request / resolved
+* ``-vv`` / ``--log-level debug`` -> ``DEBUG`` — also per-request / resolved
   hyperparameters / config-merge detail.
 """
 
@@ -85,7 +82,7 @@ def resolve_level(verbose: Optional[int] = None, explicit: Optional[str] = None)
     """Resolve the effective root log level.
 
     Precedence: ``explicit`` (e.g. ``--log-level``) > ``verbose`` count
-    (``-v`` → INFO, ``-vv`` → DEBUG) > ``DEAP_LOG_LEVEL`` env > default WARNING.
+    (``-v`` -> INFO, ``-vv`` -> DEBUG) > ``DEAP_LOG_LEVEL`` env > default WARNING.
     Unknown names fall back to the default.
     """
     if explicit:

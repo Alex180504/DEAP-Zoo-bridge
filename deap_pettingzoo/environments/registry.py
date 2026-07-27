@@ -1,4 +1,4 @@
-"""Open environment registry for deap-bridge.
+"""Open environment registry for the system.
 
 A single source-of-truth mapping a string ``env_name`` to the factory used
 by :class:`~deap_pettingzoo.environments.PettingZooWrapper` and
@@ -29,19 +29,29 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from types import ModuleType
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from deap_pettingzoo.catalog.schema import ParamSpec, TeamSpec
 
-
-class EnvFactory:
-    """Factory for constructing PettingZoo environments.
-
-    Can be either:
-      - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
-        ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
-      - A callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
-    """
+# Factory for constructing PettingZoo environments. Can be either:
+#   - A module exposing ``.parallel_env(render_mode=None, **cfg)`` for
+#     ``api='parallel'`` (or ``.env``/``.raw_env`` for ``api='aec'``).
+#   - A callable ``(render_mode=None, **cfg) -> ParallelEnv | AECEnv``.
+# Spelled as a union rather than an empty marker class so that the callable
+# form is actually callable to a type checker; the marker class had no
+# ``__call__``, which made every ``spec.factory(...)`` site look invalid.
+EnvFactory = Union[ModuleType, Callable[..., Any]]
 
 
 EnvApi = Literal[
@@ -303,7 +313,7 @@ def _instantiate_factory(factory, render_mode, kwargs, preferred: str):
 
     Resolution order:
       1. If ``factory`` exposes ``<preferred>``, call that.
-      2. Else fall back in order: ``parallel_env`` → ``env`` → ``raw_env``.
+      2. Else fall back in order: ``parallel_env`` -> ``env`` -> ``raw_env``.
       3. Else treat ``factory`` itself as callable.
     """
     tried = []
@@ -412,8 +422,8 @@ def _coerce_to_parallel(env, name: str, *, declared: str):
 def _coerce_turn_based(env, name: str, *, mode: str):
     """Wrap a turn-based AEC env in the appropriate adapter.
 
-    ``mode='aec_masked'`` → :class:`MaskedSimultaneousAdapter`;
-    ``mode='aec_sequential'`` → :class:`SequentialTurnAdapter`.
+    ``mode='aec_masked'`` -> :class:`MaskedSimultaneousAdapter`;
+    ``mode='aec_sequential'`` -> :class:`SequentialTurnAdapter`.
     Both are imported lazily from
     :mod:`deap_pettingzoo.environments.turn_based`.
     """
@@ -558,8 +568,19 @@ def clear_registry() -> None:
     _REGISTRY.clear()
 
 
-def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
+def get_registry_snapshot(
+    *, target_remote: bool = False
+) -> List[Tuple[str, "EnvSpec"]]:
     """Return a picklable snapshot of all currently registered environments.
+
+    Args:
+        target_remote: Pass ``True`` when the snapshot will be replayed on
+            **remote** Dask workers (a scheduler address is in play). Factories
+            defined in the driver script pickle *by reference* as
+            ``__main__.<name>`` — resolvable under local spawn but not on a
+            remote worker node — so each such entry additionally emits a
+            :class:`RuntimeWarning` telling the user to move the factory into
+            an installed importable module.
 
     The snapshot is a plain list of ``(name, EnvSpec)`` tuples; both
     strings and :class:`EnvSpec` dataclass instances are picklable as
@@ -588,10 +609,10 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
             ...
 
     .. note::
-        SCOOP and Dask backends do not expose a per-worker
+        The Dask backend does not expose a per-worker
         ``initializer`` hook.  :func:`make_executor` accepts but
-        silently ignores ``initializer``/``initargs`` for those
-        backends.  To propagate custom environments there, the snapshot
+        silently ignores ``initializer``/``initargs`` for that
+        backend.  To propagate custom environments there, the snapshot
         is instead carried on each picklable worker spec/payload and
         replayed lazily in the worker via
         :func:`replay_registry_snapshot_once`.
@@ -628,16 +649,16 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
                 # a factory that actually pickles fine).
                 try:
                     pickle.dumps(spec.factory)
-                    culprit = (
+                    issue_source = (
                         "non-picklable metadata (a wrapper / param / team — "
                         "the factory itself pickles fine)"
                     )
                 except Exception:  # noqa: BLE001
-                    culprit = (
+                    issue_source = (
                         "a non-picklable factory " f"({type(spec.factory).__name__})"
                     )
                 warnings.warn(
-                    f"Environment {name!r} has {culprit} and will not propagate "
+                    f"Environment {name!r} has {issue_source} and will not propagate "
                     "to parallel workers (num_workers>1); it must be "
                     "re-registered there. Use a module-level factory function "
                     "or class (and picklable wrappers) instead of a "
@@ -647,6 +668,20 @@ def get_registry_snapshot() -> List[Tuple[str, "EnvSpec"]]:
                     stacklevel=2,
                 )
             continue
+        if target_remote and getattr(spec.factory, "__module__", None) == "__main__":
+            # Pickles fine (by reference) but ``__main__`` names the driver
+            # script — a remote worker cannot import it back. The classic
+            # non-picklable warning above never fires for these, so surface
+            # the problem here rather than deep inside a remote worker.
+            warnings.warn(
+                f"Environment {name!r} has a factory defined in '__main__' "
+                "(the driver script). It pickles by reference and will not "
+                "resolve on remote Dask workers. Move the factory into an "
+                "installed, importable module that is present on every "
+                "worker node.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         result.append((name, spec))
     return result
 
@@ -684,10 +719,10 @@ def replay_registry_snapshot(snapshot: List[Tuple[str, "EnvSpec"]]) -> None:
         )
 
 
-# Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
-# of env names a snapshot carries, which is stable across pickled copies (each
-# task ships its own copy of the snapshot), so a worker replays a given snapshot
-# at most once even when it has no evaluator cache to gate on.
+#: Per-process guard for :func:`replay_registry_snapshot_once`. Keyed on the set
+#: of env names a snapshot carries, which is stable across pickled copies (each
+#: task ships its own copy of the snapshot), so a worker replays a given snapshot
+#: at most once even when it has no evaluator cache to gate on.
 _REPLAYED_SNAPSHOT_KEYS: set = set()
 
 
@@ -696,7 +731,7 @@ def replay_registry_snapshot_once(
 ) -> None:
     """Replay ``snapshot`` at most once per worker process.
 
-    Worker payloads carry a :func:`get_registry_snapshot` result so SCOOP /
+    Worker payloads carry a :func:`get_registry_snapshot` result so that
     Dask workers (which have no per-worker ``initializer`` hook) can
     re-register custom environments before building any env. This wrapper
     makes that cheap to call on every task: the first call for a given set of

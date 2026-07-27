@@ -1,5 +1,9 @@
 @startuml sequence_import_rerun
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title Experiment Import & Re-Run – Browse -> Backend -> Setup
 
 actor User
@@ -41,7 +45,7 @@ else validation ok
 end
 
 == Re-run (UI-origin experiments only) ==
-User -> Browse: select UI-origin runs → ⚙️ Manage → 🔄 Load spec into Setup
+User -> Browse: select UI-origin runs -> ⚙️ Manage -> 🔄 Load spec into Setup
 Browse -> API: GET /experiments/{exp_id}/spec
 API -> DB: get_experiment(exp_id)
 DB --> API: {spec: ExperimentSpec}

@@ -37,6 +37,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         record_episode_offset: int = 0,
         aggregation: str = "sum",
         score_agents: Optional[Sequence[str]] = None,
+        info_keys: Optional[Sequence[str]] = None,
     ):
         """Initialize unified evaluator.
 
@@ -63,6 +64,11 @@ class UnifiedEvaluator(BaselineEvaluator):
                 competitive envs). Per-agent rewards in
                 :attr:`EvalResult.agent_rewards` always span every agent
                 regardless of this filter.
+            info_keys: Optional env ``info`` keys tracked as per-episode
+                task metrics (episode value = max of ``float(info[key])``
+                over all steps and agents — the running-total convention of
+                counters like ``prey_lost_total``). Results land in
+                :attr:`EvalResult.info_metrics`.
         """
         if aggregation not in ("sum", "mean"):
             raise ValueError(
@@ -74,6 +80,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         self.record_episode_offset = int(record_episode_offset)
         self.aggregation = aggregation
         self.score_agents = set(score_agents) if score_agents is not None else None
+        self.info_keys = tuple(info_keys) if info_keys else ()
 
     def evaluate(
         self,
@@ -161,6 +168,7 @@ class UnifiedEvaluator(BaselineEvaluator):
         episode_rewards = []
         episode_lengths = []
         per_agent_totals: Dict[str, float] = {}
+        info_metrics: Dict[str, list] = {k: [] for k in self.info_keys}
         recorder = self.frame_recorder
         recording = recorder is not None and recorder.enabled
 
@@ -180,7 +188,7 @@ class UnifiedEvaluator(BaselineEvaluator):
                 )
 
             # Run episode
-            agent_rewards, length = self._run_episode(
+            agent_rewards, length, ep_info = self._run_episode(
                 policy,
                 env,
                 ep_seed,
@@ -192,13 +200,15 @@ class UnifiedEvaluator(BaselineEvaluator):
             episode_lengths.append(length)
             for agent, reward in agent_rewards.items():
                 per_agent_totals[agent] = per_agent_totals.get(agent, 0.0) + reward
+            for key in self.info_keys:
+                info_metrics[key].append(ep_info.get(key, 0.0))
 
             if recording:
                 recorder.end_episode()
 
         if recording:
-            # Advance offset so successive evaluate() calls (e.g. one per
-            # generation) keep producing distinct episode_NNNN artefacts.
+            # Advance offset so successive evaluate() calls (e.g. one per generation)
+            # keep producing distinct episode_NNNN artefacts.
             self.record_episode_offset += num_episodes
 
         # Mean-over-episodes reward per agent (decomposition that the
@@ -217,6 +227,7 @@ class UnifiedEvaluator(BaselineEvaluator):
             episode_rewards=episode_rewards,
             episode_lengths=episode_lengths,
             agent_rewards=mean_agent_rewards,
+            info_metrics=info_metrics,
         )
 
     def _aggregate_reward(self, agent_rewards: Mapping[str, float]) -> float:
@@ -260,10 +271,11 @@ class UnifiedEvaluator(BaselineEvaluator):
                 agents not present act randomly via ``action_space.sample()``.
 
         Returns:
-            Tuple of (agent_rewards, episode_length), where
+            Tuple of (agent_rewards, episode_length, info_metrics), where
             ``agent_rewards`` maps each possible agent to its summed
-            reward over the episode. The caller collapses it to a scalar
-            via :meth:`_aggregate_reward`.
+            reward over the episode (the caller collapses it to a scalar
+            via :meth:`_aggregate_reward`) and ``info_metrics`` maps each
+            configured info key to its episode-max value.
         """
         # Reset every distinct policy (recurrent state).
         if policy_map is not None:
@@ -280,8 +292,9 @@ class UnifiedEvaluator(BaselineEvaluator):
             except Exception:
                 logger.debug("frame capture failed", exc_info=True)
 
-        # Track rewards per agent
+        # Track rewards per agent + episode-max task metrics from step infos
         agent_rewards = dict.fromkeys(env.possible_agents, 0.0)
+        ep_info_metrics: Dict[str, float] = dict.fromkeys(self.info_keys, 0.0)
         steps = 0
 
         # Run episode
@@ -310,7 +323,11 @@ class UnifiedEvaluator(BaselineEvaluator):
                     actions[agent] = pol.get_action(observations[agent])
 
             # Step environment
-            observations, rewards, terminations, truncations, _ = env.step(actions)
+            observations, rewards, terminations, truncations, step_infos = env.step(
+                actions
+            )
+            if self.info_keys and step_infos:
+                self._track_info_metrics(ep_info_metrics, step_infos)
 
             # Capture post-step frame for recording.
             if recorder is not None:
@@ -333,7 +350,25 @@ class UnifiedEvaluator(BaselineEvaluator):
             if render:
                 env.render()
 
-        return agent_rewards, steps
+        return agent_rewards, steps, ep_info_metrics
+
+    def _track_info_metrics(
+        self,
+        acc: Dict[str, float],
+        step_infos: Mapping[str, Any],
+    ) -> None:
+        """Fold one step's infos into the episode-max accumulator ``acc``."""
+        for info in step_infos.values():
+            if not isinstance(info, Mapping):
+                continue
+            for key in self.info_keys:
+                value = info.get(key)
+                if value is None:
+                    continue
+                try:
+                    acc[key] = max(acc[key], float(value))
+                except (TypeError, ValueError):
+                    continue
 
     def close(self):
         """Close all cached environments."""

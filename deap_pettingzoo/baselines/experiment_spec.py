@@ -1,15 +1,14 @@
 """Serializable experiment specification + config builder + validator.
 
-This module is the bridge between the experiment-setup UI (Phase 3) and the
+This module provides a bridge between the experiment setup UI and the
 unified training API. The UI produces an :class:`ExperimentSpec` (pure data,
-JSON round-trippable); the subprocess runner (Phase 2) calls
+JSON round-trippable); the subprocess runner calls
 :func:`validate_spec` then :func:`build_configs` to turn it into the
 ``TrainingConfig`` / ``CoEvolutionConfig`` objects the trainers consume.
 
 Three-layer configuration merge
 -------------------------------
-Per the UI-overhaul spec, configuration resolves in three layers with
-increasing precedence:
+The experiment configuration resolves in three layers with increasing precedence:
 
 1. **Catalog defaults** — every ``ParamSpec.default`` from the catalog.
 2. **Raw config overlay** — a free-form YAML/JSON dict the advanced user
@@ -19,9 +18,8 @@ increasing precedence:
    merged last so a single tweaked slider wins over the raw config while the
    rest of the raw config stays intact.
 
-The contract is therefore: *the form submits only explicitly-set values*; the
-catalog fills in everything else. This keeps the "tweak one slider, keep a
-complex raw config" workflow working.
+The contract is therefore: the form submits only explicitly-set values, while the
+catalog fills in everything else.
 """
 
 from __future__ import annotations
@@ -42,9 +40,7 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
@@ -64,9 +60,7 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str,
     return result
 
 
-# ---------------------------------------------------------------------------
 # Spec dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -171,23 +165,34 @@ class RecordingSettings:
 
 @dataclass
 class ParallelismSettings:
-    """Parallel-evaluation options (population-based trainers)."""
+    """Parallel evaluation options (population-based trainers).
+
+    ``scheduler_address`` targets a remote Dask scheduler (a ``tcp://...``
+    URL or a scheduler-file path) and requires ``parallel_backend ==
+    "dask"``. Empty strings are normalised to ``None`` (unset).
+    """
 
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "num_workers": self.num_workers,
             "parallel_backend": self.parallel_backend,
+            "scheduler_address": self.scheduler_address,
         }
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "ParallelismSettings":
         data = data or {}
+        raw_address = data.get("scheduler_address")
         return cls(
             num_workers=int(data.get("num_workers", 1)),
             parallel_backend=str(data.get("parallel_backend", "process")),
+            scheduler_address=(
+                str(raw_address).strip() or None if raw_address is not None else None
+            ),
         )
 
 
@@ -264,7 +269,7 @@ class ExperimentSpec:
 
     ``env_config`` and ``hyperparameters`` should carry only the values the
     user explicitly set; the catalog supplies all other defaults during
-    :func:`build_configs` (see the module docstring's three-layer merge).
+    :func:`build_configs` (see the module docstring).
     """
 
     environment: str
@@ -318,9 +323,7 @@ class ExperimentSpec:
         )
 
 
-# ---------------------------------------------------------------------------
 # Built plan (output of build_configs)
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -349,9 +352,7 @@ class BuiltPlan:
     sub_runs: List[SubRun] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # Effective-value resolution (three-layer merge)
-# ---------------------------------------------------------------------------
 
 
 def _catalog_env_defaults(env_spec) -> Dict[str, Any]:
@@ -423,9 +424,7 @@ def _split_hyperparameters(
     return trainer_params, algorithm_params, run_config
 
 
-# ---------------------------------------------------------------------------
 # Auto-padding for heterogeneous-obs environments
-# ---------------------------------------------------------------------------
 
 _AUTO_PADDED_SUFFIX = "__deap_auto_padded"
 
@@ -468,7 +467,7 @@ def _maybe_auto_pad_env(
     except ImportError:
         return spec.environment  # can't pad — let it fail with a clear error
 
-    # Already padded or already has custom wrappers?
+    # Determine whether a padded variant is already registered; if not, register one.
     padded_name = f"{spec.environment}{_AUTO_PADDED_SUFFIX}"
     from deap_pettingzoo.environments.registry import (
         get_env_spec,
@@ -506,9 +505,7 @@ def _maybe_auto_pad_env(
     return padded_name
 
 
-# ---------------------------------------------------------------------------
-# build_configs
-# ---------------------------------------------------------------------------
+# Build configs
 
 
 def build_configs(
@@ -538,9 +535,9 @@ def build_configs(
     )
 
     # Auto-apply SuperSuit padding when an evolutionary algorithm is used
-    # on a heterogeneous-observation environment.  Python-API users who
-    # construct TrainingConfig directly are unaffected — this only fires
-    # through the ExperimentSpec → build_configs path (UI + programmatic).
+    # on a heterogeneous-observation environment. Python API experiments that
+    # construct TrainingConfig directly are unaffected as this only fires
+    # through the ExperimentSpec -> build_configs path (UI + programmatic).
     effective_env_name = _maybe_auto_pad_env(spec, env_spec)
 
     padded = (
@@ -585,15 +582,16 @@ def build_configs(
             base_algo_params,
             base_run_config,
         )
-        # Population-based trainers consume parallelism via first-class
-        # TrainingConfig fields; MARL trainers ignore them (they parallelise
-        # via num_envs), so leave those at the serial defaults.
+        # Population-based trainers consume parallelism via TrainingConfig fields;
+        # MARL trainers ignore them (they parallelise via num_envs), so leave those at the serial defaults.
         if algo_spec.family == "evolutionary":
             cfg_num_workers = spec.parallelism.num_workers
             cfg_parallel_backend = spec.parallelism.parallel_backend
+            cfg_scheduler_address = spec.parallelism.scheduler_address
         else:
             cfg_num_workers = 1
             cfg_parallel_backend = "process"
+            cfg_scheduler_address = None
         for seed_idx in range(num_seeds):
             algo_params = dict(base_algo_params)
             run_config = dict(base_run_config)
@@ -615,6 +613,7 @@ def build_configs(
                 output_dir=out_dir,
                 num_workers=cfg_num_workers,
                 parallel_backend=cfg_parallel_backend,
+                scheduler_address=cfg_scheduler_address,
                 recording=recording_config,
                 fitness=fitness_config,
                 budget_on_consumed=spec.budget.budget_on_consumed,
@@ -659,8 +658,8 @@ def _build_coevolution_plan(
                     or side_spec.algorithm
                 )
                 # RL / RL-HPO sides resolve their concrete AgileRL algorithm
-                # from ``optimizer_config['algorithm']``; inject the catalog name
-                # the user picked (the UI sends empty per-side hyperparameters).
+                # from ``optimizer_config['algorithm']``;
+                # inject the catalog name the user picked (the UI sends empty per-side hyperparameters).
                 optimizer_config.setdefault("algorithm", side_spec.algorithm)
             sides.append(
                 Side(
@@ -681,6 +680,7 @@ def _build_coevolution_plan(
             seed=seed_idx,
             num_workers=spec.parallelism.num_workers,
             parallel_backend=spec.parallelism.parallel_backend,
+            scheduler_address=spec.parallelism.scheduler_address,
         )
         out_dir = (
             output_root / "coevolution" / f"seed_{seed_idx}"
@@ -712,17 +712,17 @@ def _build_coevolution_plan(
     return BuiltPlan(mode="coevolution", sub_runs=sub_runs)
 
 
-# Validate_spec
+# Validate spec
 
 _VALID_BUDGET_MODES = ("env_steps", "eval_episodes", "generations")
-_SUPPORTED_BACKENDS = ("process", "scoop", "dask")
+_SUPPORTED_BACKENDS = ("process", "dask")
 
 
 def validate_spec(spec: ExperimentSpec) -> "ValidationReport":
     """Validate an :class:`ExperimentSpec` against the catalog.
 
     Produces a :class:`~deap_pettingzoo.catalog.schema.ValidationReport` with
-    field-level, machine-coded issues. This is the single validation entry
+    per-field machine-coded issues. This is the single validation entry
     point: the Setup page calls it client-side and the FastAPI service calls it
     again server-side on submit (defense in depth).
 
@@ -868,15 +868,22 @@ def _validate_parallelism(spec, report):
             f"of {list(_SUPPORTED_BACKENDS)}.",
         )
         return
+    scheduler_address = getattr(par, "scheduler_address", None)
+    if scheduler_address and par.parallel_backend != "dask":
+        report.add(
+            "parallelism.scheduler_address",
+            "backend_mismatch",
+            f"scheduler_address={scheduler_address!r} requires "
+            "parallel_backend='dask'.",
+        )
+        return
     # Warn (non-blocking) when a real parallel backend is selected but its
-    # optional package is not installed — it would otherwise only fail at run
-    # time with an ImportError. The service shares the trainer environment, so
-    # its install state is authoritative.
+    # optional package is not installed — it would otherwise only fail at runtime
+    # with an ImportError.
     if par.num_workers and par.num_workers > 1:
         from deap_pettingzoo.catalog.availability import module_available
 
         _backend_requirement = {
-            "scoop": ("scoop", "deap-pettingzoo[scoop]"),
             "dask": ("dask.distributed", "deap-pettingzoo[dask]"),
         }
         req = _backend_requirement.get(par.parallel_backend)
@@ -989,8 +996,8 @@ def _validate_standard_algorithms(spec, report, env_spec, cat_algorithms):
         _validate_aggregation(spec, report, algo_spec)
 
         # EA / CMA-ES / PSO require homogeneous observation sizes.
-        # When SuperSuit is available, build_configs auto-pads — warn
-        # instead of blocking.  Without SuperSuit, this is a hard error.
+        # When SuperSuit is available, build_configs auto-pads — warn instead of blocking.
+        # Without SuperSuit, this is a hard error.
         if env_has_heterogeneous_obs and algo_spec.family == "evolutionary":
             try:
                 import supersuit  # noqa: F401
@@ -1103,27 +1110,11 @@ def _validate_coevolution(spec, report, env_spec, cat_algorithms):
             f"Reporting side {coev.reporting_side!r} is not a declared side.",
         )
 
-    # QDax sides evaluate an entire JAX batch before returning per-generation
-    # env-step counts, so per-generation overshoot can be orders-of-magnitude
-    # larger than budget_value.  Block the combination rather than let it
-    # silently consume a multiple of the intended budget.
-    _QDAX_COEV_OPTIMIZERS = frozenset({"qdax_map_elites", "qdax_cma_me"})
-    if spec.budget.budget_on_consumed and spec.budget.mode == "env_steps":
-        qdax_sides = []
-        for side in coev.sides:
-            if side.algorithm == "frozen":
-                continue
-            optimizer = cat_algorithms.coevolution_optimizer_for(side.algorithm)
-            if optimizer in _QDAX_COEV_OPTIMIZERS:
-                qdax_sides.append(side.name)
-        if qdax_sides:
-            report.add(
-                "budget.budget_on_consumed",
-                "qdax_coarse_step",
-                f"budget_on_consumed=True with QDax co-evolution sides "
-                f"{qdax_sides!r}: QDax evaluates a full JAX batch "
-                f"(batch_size × eval_episodes × max_steps env ticks) before "
-                f"reporting per-generation counts, so per-generation overshoot "
-                f"can far exceed budget_value. "
-                f"Use budget_on_consumed=False or BudgetMode.GENERATIONS instead.",
-            )
+    # QDax co-evolution sides are allowed under budget_on_consumed: they
+    # evaluate a full batch per generation, so the shared consumed pool's
+    # overshoot bound is one generation's pooled cost *including* that
+    # batch (batch_size × k_opponents × max_steps ticks) — the same
+    # finish-generation-then-stop bound every other side type has, and
+    # negligible at realistic ENV_STEPS budgets. The QDax side reports
+    # real per-generation env ticks into GenerationStats.env_steps, so
+    # the aggregate the trainer stops on is exact.

@@ -43,13 +43,17 @@ from deap_pettingzoo.integration.deap_integration import (
 )
 from deap_pettingzoo.policies import FeedforwardNeuralPolicy
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 def _resolve_shared_action_space(env: PettingZooWrapper) -> Any:
     """Return the single shared action space across ``env.possible_agents``.
 
-    deap-bridge's EA/CMA-ES stack is built around homogeneous-team
+    The system's EA/CMA-ES stack is built around homogeneous-team
     neuroevolution: every agent is driven by the same genome, so the
     action decoding has to be identical across agents.  This helper
     enforces that contract.
@@ -142,6 +146,48 @@ class GenomePolicyWrapper:
         return self._genome
 
 
+def build_genome_hall_of_fame_export(
+    hof: Any,
+    *,
+    env_name: str,
+    action_space: Any,
+    logger: Any,
+    save_genome: Any,
+    kind: str,
+    base_extra: Optional[Dict[str, Any]] = None,
+    skip_champion_checkpoint: bool = True,
+) -> "tuple[List[Any], List[Dict[str, Any]]]":
+    """Export a DEAP ``HallOfFame`` of genome individuals for the shared
+    genome-based trainers (EA / CMA-ES / PSO).
+
+    Wraps each member (best first) as a :class:`GenomePolicyWrapper` and returns
+    ``(policies, summary)`` where ``summary`` is a JSON-safe
+    ``[{"rank", "fitness"}]`` list for ``metrics`` / ``summary.json``. Members
+    with rank >= 2 are checkpointed as ``hof_NN.json``; the champion (rank 1) is
+    skipped by default because the caller already writes it as ``policy.json``
+    (set ``skip_champion_checkpoint=False`` to write it here too).
+    """
+    base_extra = dict(base_extra or {})
+    policies: List[Any] = []
+    summary: List[Dict[str, Any]] = []
+    for rank, ind in enumerate(hof, start=1):  # HallOfFame iterates best-first
+        fitness = float(ind.fitness.values[0])
+        policies.append(
+            GenomePolicyWrapper(ind.genome, env_name, action_space=action_space)
+        )
+        summary.append({"rank": rank, "fitness": fitness})
+        if rank == 1 and skip_champion_checkpoint:
+            continue
+        save_genome(
+            logger,
+            ind.genome,
+            filename=f"hof_{rank:02d}.json",
+            kind=kind,
+            extra={**base_extra, "hof_rank": rank, "final_fitness": fitness},
+        )
+    return policies, summary
+
+
 class EATrainer(BaselineTrainer):
     """Evolutionary Algorithm trainer using DEAP.
 
@@ -163,8 +209,7 @@ class EATrainer(BaselineTrainer):
         (``seed`` / ``max_steps_per_episode``, routed via ``RUN_CONFIG``).
 
         Dict-valued knobs (``selection_params`` / ``crossover_params`` /
-        ``mutation_params``) and ``fitness_spec`` are intentionally omitted —
-        they are raw-config / Python-API territory (see the UI-overhaul spec).
+        ``mutation_params``) and ``fitness_spec`` are omitted — they are raw-config / Python-API only.
         """
         from deap_pettingzoo.catalog.schema import (
             ParamSpec,
@@ -194,6 +239,23 @@ class EATrainer(BaselineTrainer):
                 target=TR,
                 group="Population",
                 help="Number of individuals evaluated per generation.",
+            ),
+            ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                advanced=True,
+                help=(
+                    "Number of best-ever individuals kept in the hall-of-fame. "
+                    "The champion is always hof[0]; with hof_size > 1 the top-N "
+                    "are also checkpointed (hof_NN.json) and returned in "
+                    "TrainingResult.hall_of_fame. Ignored for multi-objective "
+                    "runs (which export the full Pareto front instead)."
+                ),
             ),
             ParamSpec(
                 "strategy",
@@ -351,7 +413,7 @@ class EATrainer(BaselineTrainer):
                 target=TR,
                 group="Parallelism",
                 advanced=True,
-                choices=("process", "scoop", "dask"),
+                choices=("process", "dask"),
                 help="Parallel executor backend.",
             ),
             ParamSpec(
@@ -381,6 +443,7 @@ class EATrainer(BaselineTrainer):
         self,
         hidden_size: int = 64,
         population_size: int = 50,
+        hof_size: int = 1,
         tournament_size: int = 3,
         crossover_alpha: float = 0.5,
         mutation_sigma: float = 0.2,
@@ -398,7 +461,7 @@ class EATrainer(BaselineTrainer):
         mutation_params: Optional[Dict[str, Any]] = None,
         num_workers: int = 1,
         parallel_backend: str = "process",
-        # --- multi-objective (Phase 1.3) ---
+        scheduler_address: Optional[str] = None,
         fitness_spec: Optional[Any] = None,
     ):
         """Initialize EA trainer.
@@ -443,6 +506,14 @@ class EATrainer(BaselineTrainer):
                 config (e.g. ``{'eta': 20.0}`` for SBX).
             mutation_params: Extra kwargs merged into the mutation
                 config.
+            num_workers: Parallel evaluation workers (1 = serial); the
+                ``TrainingConfig`` field wins unless left at its default.
+            parallel_backend: Executor backend (``"process"`` / ``"dask"``);
+                the ``TrainingConfig`` field wins unless left at its default.
+            scheduler_address: Remote Dask scheduler (``tcp://...`` URL or
+                scheduler-file path); requires ``parallel_backend='dask'``.
+                The ``TrainingConfig`` field wins unless left at ``None``;
+                the ``DEAP_DASK_SCHEDULER`` env var is the final fallback.
 
         Raises:
             ValueError: If ``strategy`` is not one of the three recognised
@@ -452,9 +523,14 @@ class EATrainer(BaselineTrainer):
             ValueError: If ``num_workers`` is negative.
             ValueError: If ``parallel_backend`` is not in
                 :data:`~deap_pettingzoo.utils.parallel.SUPPORTED_BACKENDS`.
+            ValueError: If ``scheduler_address`` is set with a non-Dask
+                ``parallel_backend``.
         """
         self.hidden_size = hidden_size
         self.population_size = population_size
+        if hof_size < 1:
+            raise ValueError(f"hof_size must be >= 1, got {hof_size}.")
+        self.hof_size = int(hof_size)
         self.tournament_size = tournament_size
         self.crossover_alpha = crossover_alpha
         self.mutation_sigma = mutation_sigma
@@ -504,8 +580,14 @@ class EATrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     @property
     def _is_multiobjective(self) -> bool:
@@ -589,7 +671,7 @@ class EATrainer(BaselineTrainer):
             fitness_spec=self.fitness_spec,
         )
 
-        # Setup DEAP — with multi-objective weights when appropriate.
+        # Setup DEAP; with multi-objective weights when appropriate.
         if self._is_multiobjective and self.fitness_spec is not None:
             setup_deap_creators(weights=self.fitness_spec.weights)
         else:
@@ -603,7 +685,8 @@ class EATrainer(BaselineTrainer):
             seed_everything(int(seed))
 
         # Create genome configuration.
-        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash. DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
+        # BoxHead applies its own tanh-squash, so use a linear output layer to avoid double-tahn squash.
+        # DiscreteHead applies argmax, so use a tanh output layer to keep the outputs in a reasonable range.
         is_box = hasattr(action_space, "low") and hasattr(action_space, "high")
         genome_config = {
             "layer_sizes": [input_size, self.hidden_size, output_size],
@@ -660,7 +743,7 @@ class EATrainer(BaselineTrainer):
         if self._is_multiobjective:
             hof = tools.ParetoFront()
         else:
-            hof = tools.HallOfFame(1)
+            hof = tools.HallOfFame(self.hof_size)
 
         # Setup random number generator
         rng = np.random.default_rng(seed)
@@ -671,6 +754,17 @@ class EATrainer(BaselineTrainer):
         log = build_logger(config, algorithm="ea")
         env_steps_per_iteration = self.population_size * max_steps_per_episode
         self._recorder = RecordingController(
+            config,
+            log,
+            max_steps=max_steps_per_episode,
+            seed=seed,
+        )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget by construction: probe
+        # episodes run on the controller's own env, outside the evaluator's
+        # consumed-step counter).
+        self._prober = ProbeController(
             config,
             log,
             max_steps=max_steps_per_episode,
@@ -736,19 +830,31 @@ class EATrainer(BaselineTrainer):
             if event is not None:
                 self._on_progress(progress_callback, event, champion=_ea_champion)
 
-        # num_workers / parallel_backend are first-class TrainingConfig fields;
-        # the trainer-constructor value is the fallback used only when the
-        # config leaves them at their defaults.
+        # num_workers / parallel_backend / scheduler_address are TrainingConfig fields;
+        # the trainer-constructor value is used only when the config  leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers live elsewhere,
+        # so skip the driver CPU cap and force the parallel dispatch path
+        # even for num_workers <= 1.
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address) if backend == "dask" else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
-        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        # the worker spec so Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -758,11 +864,15 @@ class EATrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             # Aggregates real env-step deltas from parallel workers (whose
             # per-process evaluator counters never cross back). Stays at 0
@@ -771,7 +881,7 @@ class EATrainer(BaselineTrainer):
             _parallel_steps = [0]
 
             # Register toolbox.map so DEAP's built-in eaMu*Lambda algorithms dispatch through the pool.
-            if effective_workers > 1:
+            if use_parallel:
                 toolbox.register(
                     "map",
                     make_parallel_evaluate_map(
@@ -793,7 +903,7 @@ class EATrainer(BaselineTrainer):
                 """Serial or parallel evaluation based on workers."""
                 inds = list(inds)
                 seeds = _next_seeds(len(inds))
-                if effective_workers > 1:
+                if use_parallel:
                     return evaluate_population_parallel(
                         inds,
                         executor=executor,
@@ -824,7 +934,7 @@ class EATrainer(BaselineTrainer):
             )
             _emit_gen_progress(0)
 
-            # Evolution loop — strategy-dependent. Defaults to the nominal
+            # Evolution loop (strategy-dependent). Defaults to the nominal
             # generation count; the consumed-budgeting ``simple`` path below
             # overrides it with the realized count once the loop stops.
             realized_generations = num_generations
@@ -876,6 +986,11 @@ class EATrainer(BaselineTrainer):
                     iteration=realized_generations,
                     env_steps=realized_generations * env_steps_per_iteration,
                 )
+                self._prober.finalize(
+                    _ea_champion,
+                    iteration=realized_generations,
+                    env_steps=realized_generations * env_steps_per_iteration,
+                )
             elif self.strategy == "mu_plus_lambda":
                 _, logbook = algorithms.eaMuPlusLambda(
                     population,
@@ -906,6 +1021,11 @@ class EATrainer(BaselineTrainer):
                 # eaMu*Lambda doesn't expose a per-gen hook and hof holds only
                 # the final champion; record once at the end.
                 self._recorder.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
+                self._prober.finalize(
                     _ea_champion,
                     iteration=num_generations,
                     env_steps=num_generations * env_steps_per_iteration,
@@ -942,12 +1062,22 @@ class EATrainer(BaselineTrainer):
                     iteration=num_generations,
                     env_steps=num_generations * env_steps_per_iteration,
                 )
+                self._prober.finalize(
+                    _ea_champion,
+                    iteration=num_generations,
+                    env_steps=num_generations * env_steps_per_iteration,
+                )
             else:  # pragma: no cover — guarded in __init__.
                 raise ValueError(f"Unknown strategy {self.strategy!r}")
+
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
 
         # Clean up
         env.close()
         self._recorder.close()
+        self._prober.close()
 
         training_time = time.time() - start_time
 
@@ -960,13 +1090,18 @@ class EATrainer(BaselineTrainer):
             best_genome, config.env_name, action_space=action_space
         )
 
-        # For multi-objective runs, record the full Pareto front.
+        # For multi-objective runs, record the full Pareto front. For
+        # single-objective runs, export the best-N hall-of-fame (top-N when
+        # hof_size > 1); hof_policies[0] is the same policy as ``policy``.
         pareto_front: Optional[List[Any]] = None
+        hof_policies: Optional[List[Any]] = None
+        hall_of_fame_summary: Optional[List[Dict[str, Any]]] = None
         if isinstance(hof, tools.ParetoFront):
             pareto_front = list(hof.items)
 
         # Persist results via the logger
-        # No-op when ``config.output_dir is None`` (NoOpLogger) so the backend stays usable without the analysis stack.
+        # No-op when ``config.output_dir is None`` (NoOpLogger)
+        # so the backend stays usable without the analysis stack.
         try:
             with log:
                 dump_fitness_history(
@@ -988,6 +1123,21 @@ class EATrainer(BaselineTrainer):
                         "env_name": config.env_name,
                     },
                 )
+                if pareto_front is None:
+                    hof_policies, hall_of_fame_summary = (
+                        build_genome_hall_of_fame_export(
+                            hof,
+                            env_name=config.env_name,
+                            action_space=action_space,
+                            logger=log,
+                            save_genome=save_ea_genome,
+                            kind=KIND_EA_GENOME,
+                            base_extra={"env_name": config.env_name},
+                        )
+                    )
+                    # Reuse the champion wrapper so hall_of_fame[0] is policy.
+                    if hof_policies:
+                        hof_policies[0] = policy
                 write_summary(
                     log,
                     {
@@ -996,6 +1146,12 @@ class EATrainer(BaselineTrainer):
                         "num_generations": realized_generations,
                         "population_size": self.population_size,
                         "strategy": self.strategy,
+                        "hof_size": (
+                            len(hall_of_fame_summary)
+                            if hall_of_fame_summary is not None
+                            else None
+                        ),
+                        "hall_of_fame": hall_of_fame_summary,
                     },
                     training_time_s=training_time,
                 )
@@ -1024,6 +1180,7 @@ class EATrainer(BaselineTrainer):
                 "population_size": self.population_size,
                 "env_steps_nominal": nominal_env_steps,
                 "env_steps_consumed": real_env_steps,
+                "hall_of_fame": hall_of_fame_summary,
             },
             metadata={
                 "genome_config": genome_config,
@@ -1045,10 +1202,13 @@ class EATrainer(BaselineTrainer):
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
             pareto_front=pareto_front,
+            hall_of_fame=hof_policies,
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
@@ -1146,7 +1306,7 @@ class EATrainer(BaselineTrainer):
     ) -> int:
         """In-house ``eaSimple``-style generational loop.
 
-        Preserves the historical behaviour of :class:`EATrainer`:
+        Preserves the behaviour of :class:`EATrainer`:
         per-pair crossover probability ``self.crossover_rate`` and
         per-individual mutation probability ``self.mutation_rate``,
         with full replacement.

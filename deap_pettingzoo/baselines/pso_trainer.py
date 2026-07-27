@@ -2,12 +2,12 @@
 PSO trainer mirroring :class:`CMAESTrainer`.
 
 Drives a particle swarm over the flat weight vector of a
-:class:`FixedTopologyGenome`.  The best-found genome is wrapped as a
+:class:`FixedTopologyGenome`.  The best found genome is wrapped as a
 :class:`PolicyProtocol` via :class:`GenomePolicyWrapper`.
 """
 
 import time
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import numpy as np
 from deap import tools
@@ -48,7 +48,11 @@ from deap_pettingzoo.integration.pso_integration import (
     setup_pso_swarm,
 )
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import make_executor, resolve_num_workers
+from deap_pettingzoo.utils.parallel import (
+    make_executor,
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 
 class PSOTrainer(BaselineTrainer):
@@ -89,6 +93,34 @@ class PSOTrainer(BaselineTrainer):
                 target=TR,
                 group="Population",
                 help="Number of particles in the swarm.",
+            ),
+            ParamSpec(
+                "eval_episodes",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                help="Episodes averaged per particle per generation (shared "
+                "common-random-number seeds). >1 de-noises fitness in "
+                "stochastic environments.",
+            ),
+            ParamSpec(
+                "hof_size",
+                I,
+                1,
+                minimum=1,
+                step=1,
+                target=TR,
+                group="Population",
+                advanced=True,
+                help=(
+                    "Number of best-ever particles kept in the hall-of-fame. "
+                    "The champion is always hof[0]; with hof_size > 1 the top-N "
+                    "are also checkpointed (hof_NN.json) and returned in "
+                    "TrainingResult.hall_of_fame."
+                ),
             ),
             ParamSpec(
                 "phi1",
@@ -167,7 +199,7 @@ class PSOTrainer(BaselineTrainer):
                 target=TR,
                 group="Parallelism",
                 advanced=True,
-                choices=("process", "scoop", "dask"),
+                choices=("process", "dask"),
                 help="Parallel executor backend.",
             ),
             ParamSpec(
@@ -204,8 +236,11 @@ class PSOTrainer(BaselineTrainer):
         smax: Optional[float] = None,
         activation: str = "tanh",
         weight_range: tuple = (-1.0, 1.0),
+        eval_episodes: int = 1,
+        hof_size: int = 1,
         num_workers: int = 1,
         parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
     ):
         self.hidden_size = hidden_size
         self.population_size = population_size
@@ -216,6 +251,17 @@ class PSOTrainer(BaselineTrainer):
         self.smax = smax
         self.activation = activation
         self.weight_range = weight_range
+        if eval_episodes < 1:
+            raise ValueError(f"eval_episodes must be >= 1, got {eval_episodes}.")
+        # Episodes averaged per particle per generation, all sharing one set of
+        # per-generation seeds (common random numbers) so particles are ranked
+        # on identical conditions. In a stochastic env a single episode makes
+        # fitness a lottery — gbest/pbest then latch onto lucky draws and the
+        # swarm chases noise; averaging K CRN episodes restores a real signal.
+        self.eval_episodes = int(eval_episodes)
+        if hof_size < 1:
+            raise ValueError(f"hof_size must be >= 1, got {hof_size}.")
+        self.hof_size = int(hof_size)
 
         if num_workers < 0:
             raise ValueError(f"num_workers must be >= 0, got {num_workers}.")
@@ -226,8 +272,14 @@ class PSOTrainer(BaselineTrainer):
                 f"Unknown parallel_backend {parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
             )
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self.num_workers = int(num_workers)
         self.parallel_backend = str(parallel_backend)
+        self.scheduler_address = scheduler_address
 
     def train(
         self,
@@ -290,12 +342,23 @@ class PSOTrainer(BaselineTrainer):
         toolbox = register_pso_toolbox(pso_state, ind_init, evaluator)
 
         stats = make_pso_stats()
-        hof = tools.HallOfFame(1)
+        hof = tools.HallOfFame(self.hof_size)
         fitness_history: list = []
 
         log = build_logger(config, algorithm="pso")
-        env_steps_per_iteration = self.population_size * max_steps
+        env_steps_per_iteration = self.population_size * max_steps * self.eval_episodes
         self._recorder = RecordingController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        # Periodic held-out champion probe (off-budget by construction: probe
+        # episodes run on the controller's own env, outside the evaluator's
+        # consumed-step counter).
+        self._prober = ProbeController(
             config,
             log,
             max_steps=max_steps,
@@ -309,19 +372,32 @@ class PSOTrainer(BaselineTrainer):
                 hof[0].genome, config.env_name, action_space=action_space
             )
 
-        # num_workers / parallel_backend are first-class TrainingConfig fields;
-        # the trainer-constructor value is the fallback used only when the
-        # config leaves them at their defaults.
+        # num_workers / parallel_backend / scheduler_address are TrainingConfig fields;
+        # the trainer constructor value is the fallback
+        # used only when the config leaves them at their defaults.
         requested = config.num_workers if config.num_workers != 1 else self.num_workers
-        effective_workers = resolve_num_workers(requested)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self.parallel_backend
         )
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self.scheduler_address
+        )
+        # Remote scheduler (arg or DEAP_DASK_SCHEDULER env var): the workers
+        # live elsewhere, so skip the driver CPU cap and force the parallel
+        # dispatch path even for num_workers <= 1.
+        effective_scheduler = (
+            resolve_scheduler_address(scheduler_address) if backend == "dask" else None
+        )
+        remote = effective_scheduler is not None
+        effective_workers = resolve_num_workers(requested, cap_to_cpu=not remote)
+        use_parallel = effective_workers > 1 or remote
         # One snapshot, reused for the process-pool initializer and shipped on
-        # the worker spec so SCOOP/Dask workers can re-register custom envs too.
-        registry_snapshot = get_registry_snapshot()
+        # the worker spec so Dask workers can re-register custom envs too.
+        registry_snapshot = get_registry_snapshot(target_remote=remote)
         worker_spec = _EvalWorkerSpec(
             env_name=config.env_name,
             env_config=dict(config.env_config) if config.env_config else None,
@@ -331,11 +407,15 @@ class PSOTrainer(BaselineTrainer):
             registry_snapshot=registry_snapshot,
         )
 
+        # Observed Dask worker hosts, captured before the executor closes.
+        dask_workers: Optional[list] = None
+
         with make_executor(
             effective_workers,
             backend=backend,
             initializer=replay_registry_snapshot,
             initargs=(registry_snapshot,),
+            scheduler_address=scheduler_address,
         ) as executor:
             base_eval_seed = seed
             _eval_counter = [0]
@@ -343,12 +423,43 @@ class PSOTrainer(BaselineTrainer):
             # 0 on the serial path where the evaluator counter is authoritative.
             _parallel_steps = [0]
 
-            def _next_seeds(n):
+            def _next_gen_seeds(k):
+                """Return ``k`` episode seeds shared across the whole swarm this
+                generation (common random numbers), advancing the counter so
+                later generations use fresh seeds."""
                 if base_eval_seed is None:
-                    return [None] * n
+                    return [None] * k
                 lo = int(base_eval_seed) + _eval_counter[0]
-                _eval_counter[0] += n
-                return list(range(lo, lo + n))
+                _eval_counter[0] += k
+                return list(range(lo, lo + k))
+
+            def _evaluate_population(pop):
+                """Mean fitness per particle over ``eval_episodes`` CRN episodes.
+
+                Every particle is scored on the *same* set of per-generation
+                seeds, so ranking reflects the policy rather than episode luck.
+                """
+                gen_seeds = _next_gen_seeds(self.eval_episodes)
+                accum: Optional[list] = None
+                for ep_seed in gen_seeds:
+                    if use_parallel:
+                        ep_fits = evaluate_population_parallel(
+                            pop,
+                            executor=executor,
+                            spec=worker_spec,
+                            eval_seeds=[ep_seed] * len(pop),
+                            step_sink=_parallel_steps,
+                        )
+                    else:
+                        ep_fits = [evaluator.evaluate(ind, seed=ep_seed) for ind in pop]
+                    if accum is None:
+                        accum = [list(f) for f in ep_fits]
+                    else:
+                        for i, f in enumerate(ep_fits):
+                            for j, v in enumerate(f):
+                                accum[i][j] += v
+                k = len(gen_seeds)
+                return [tuple(v / k for v in row) for row in accum]
 
             # Nominal budgeting runs exactly ``num_generations``; consumed
             # budgeting runs until the real budget is exhausted, bounded by a safety cap.
@@ -360,20 +471,7 @@ class PSOTrainer(BaselineTrainer):
             population = toolbox.generate()
             gen = 0
             while gen < max_iters:
-                seeds = _next_seeds(len(population))
-                if effective_workers > 1:
-                    fitnesses = evaluate_population_parallel(
-                        population,
-                        executor=executor,
-                        spec=worker_spec,
-                        eval_seeds=seeds,
-                        step_sink=_parallel_steps,
-                    )
-                else:
-                    fitnesses = [
-                        evaluator.evaluate(ind, seed=s)
-                        for ind, s in zip(population, seeds)
-                    ]
+                fitnesses = _evaluate_population(population)
                 for ind, fit in zip(population, fitnesses):
                     ind.fitness.values = fit
 
@@ -428,15 +526,26 @@ class PSOTrainer(BaselineTrainer):
                         champion=_pso_champion,
                     )
 
+            # Capture at the end of the run so late-joining workers show up.
+            if hasattr(executor, "worker_info"):
+                dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
+
         # Realized generation count (== num_generations on the nominal path).
         num_generations = gen
         env.close()
+        final_env_steps = int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
         self._recorder.finalize(
             _pso_champion,
             iteration=num_generations,
             env_steps=num_generations * env_steps_per_iteration,
         )
         self._recorder.close()
+        self._prober.finalize(
+            _pso_champion,
+            iteration=num_generations,
+            env_steps=final_env_steps,
+        )
+        self._prober.close()
         training_time = time.time() - start_time
 
         best_ind = hof[0]
@@ -444,27 +553,50 @@ class PSOTrainer(BaselineTrainer):
         policy = GenomePolicyWrapper(
             best_genome, config.env_name, action_space=action_space
         )
+        # Best-N hall-of-fame export (top-N when hof_size > 1); populated inside
+        # the logging block, so default to None in case that block is skipped.
+        hof_policies: Optional[List[Any]] = None
+        hall_of_fame_summary: Optional[List[Dict[str, Any]]] = None
 
         try:
             with log:
                 dump_fitness_history(
                     log,
                     fitness_history,
-                    env_steps_per_iteration=self.population_size * max_steps,
+                    env_steps_per_iteration=env_steps_per_iteration,
                     gen_offset=-1,
-                    nominal_env_steps_per_iteration=self.population_size * max_steps,
+                    nominal_env_steps_per_iteration=env_steps_per_iteration,
                 )
-                from deap_pettingzoo.utils.logging import save_ea_genome
+                from deap_pettingzoo.utils.logging import (
+                    KIND_PSO_GENOME,
+                    save_ea_genome,
+                )
 
                 save_ea_genome(
                     log,
                     best_genome,
-                    kind="pso_genome",
+                    kind=KIND_PSO_GENOME,
                     extra={
                         "final_fitness": float(best_ind.fitness.values[0]),
                         "env_name": config.env_name,
                     },
                 )
+                from deap_pettingzoo.baselines.ea_trainer import (
+                    build_genome_hall_of_fame_export,
+                )
+
+                hof_policies, hall_of_fame_summary = build_genome_hall_of_fame_export(
+                    hof,
+                    env_name=config.env_name,
+                    action_space=action_space,
+                    logger=log,
+                    save_genome=save_ea_genome,
+                    kind=KIND_PSO_GENOME,
+                    base_extra={"env_name": config.env_name},
+                )
+                # Reuse the champion wrapper so hall_of_fame[0] is policy.
+                if hof_policies:
+                    hof_policies[0] = policy
                 write_summary(
                     log,
                     {
@@ -473,11 +605,25 @@ class PSOTrainer(BaselineTrainer):
                         "num_generations": num_generations,
                         "population_size": self.population_size,
                         "dimension": dimension,
+                        "hof_size": len(hall_of_fame_summary),
+                        "hall_of_fame": hall_of_fame_summary,
                     },
                     training_time_s=training_time,
                 )
         except Exception:
-            pass
+            # Never let logging failure sink a completed run, but do not
+            # swallow it silently: an unregistered checkpoint kind or a bad
+            # summary row here previously produced an empty run dir with no
+            # trace of why. Surface it so it is diagnosable.
+            import traceback
+            import warnings
+
+            warnings.warn(
+                "PSOTrainer: failed to persist metrics/summary for this run "
+                f"(policy training itself completed):\n{traceback.format_exc()}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         return TrainingResult(
             algorithm="pso",
@@ -494,6 +640,7 @@ class PSOTrainer(BaselineTrainer):
                 "env_steps_consumed": (
                     int(evaluator.env_steps_consumed) + int(_parallel_steps[0])
                 ),
+                "hall_of_fame": hall_of_fame_summary,
             },
             metadata={
                 "genome_config": genome_config,
@@ -504,12 +651,16 @@ class PSOTrainer(BaselineTrainer):
                     "phi2": self.phi2,
                     "weight": self.weight,
                     "activation": self.activation,
+                    "eval_episodes": self.eval_episodes,
                 },
                 "num_workers": effective_workers,
                 "parallel_backend": backend,
+                "scheduler_address": effective_scheduler,
+                "dask_workers": dask_workers,
                 "run_dir": str(log.run_dir) if config.output_dir is not None else None,
             },
             training_time=training_time,
+            hall_of_fame=hof_policies,
         )
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
@@ -538,8 +689,12 @@ class PSOTrainer(BaselineTrainer):
         if config.budget_mode == BudgetMode.GENERATIONS:
             gens = max(1, int(config.budget_value))
         elif config.budget_mode == BudgetMode.ENV_STEPS:
+            # Each generation now spends ``eval_episodes`` episodes per particle.
             gens = derive_generations(
-                config.budget_value, self.population_size, max_steps, label="PSO"
+                config.budget_value,
+                self.population_size * self.eval_episodes,
+                max_steps,
+                label="PSO",
             )
         elif config.budget_mode == BudgetMode.EVAL_EPISODES:
             gens = derive_generations(

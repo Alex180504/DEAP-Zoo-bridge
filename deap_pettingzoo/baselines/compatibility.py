@@ -37,9 +37,7 @@ if TYPE_CHECKING:
     from deap_pettingzoo.baselines.base import BaselineTrainer
 
 
-# ---------------------------------------------------------------------------
 # Data models
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -145,9 +143,7 @@ class CompatibilityResult:
         }
 
 
-# ---------------------------------------------------------------------------
 # Environment introspection
-# ---------------------------------------------------------------------------
 
 
 def inspect_environment(env_name: str) -> EnvironmentInfo:
@@ -226,7 +222,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
     except ValueError:  # pragma: no cover - env_name always registered here
         pass
 
-    # Use the wrapper's close() which guards against SystemExit raised by some third-party envs (e.g. marl-aquarium's aquarium_v0).
+    # Use the wrapper's close() which guards against SystemExit raised by some third-party envs.
     wrapper.close()
 
     return EnvironmentInfo(
@@ -245,9 +241,7 @@ def inspect_environment(env_name: str) -> EnvironmentInfo:
     )
 
 
-# ---------------------------------------------------------------------------
 # Compatibility checking
-# ---------------------------------------------------------------------------
 
 
 def check_compatibility(
@@ -315,7 +309,7 @@ def check_compatibility(
             "or IPPO for turn-based games."
         )
 
-    # --- Warnings -----------------------------------------------------------
+    # Warnings (non-fatal)
 
     if env_info.num_agents > 8:
         warnings.append(
@@ -365,9 +359,7 @@ def validate_compatibility(
     return check_compatibility(trainer, env_info, algorithm_name)
 
 
-# ---------------------------------------------------------------------------
 # Compatibility matrix
-# ---------------------------------------------------------------------------
 
 
 def build_compatibility_matrix(
@@ -473,15 +465,13 @@ def get_compatible_algorithms(
             if result.compatible:
                 compatible.append(algo)
         except Exception:
-            # Trainer cannot be instantiated — skip silently
+            # Trainer cannot be instantiated, skip silently
             pass
 
     return sorted(compatible)
 
 
-# ---------------------------------------------------------------------------
 # Formatting helpers
-# ---------------------------------------------------------------------------
 
 
 def format_compatibility_matrix(

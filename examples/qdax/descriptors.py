@@ -14,7 +14,7 @@ Pass the factory output to a QDax trainer via
 a callable ``(trajectory_summary) -> array`` exposing ``output_shape``,
 ``min_bd`` and ``max_bd``.
 
-Two variants ship:
+Two variants are included:
 
 * :func:`formation_spread_and_mean_distance` — 2-D, recommended v1
   descriptor. Cheap, interpretable, low-collinearity axes.
@@ -41,6 +41,24 @@ from __future__ import annotations
 from typing import Callable, Tuple
 
 
+def _rescale_axis(value, axis_range: "Tuple[float, float]", norm_scale: float):
+    """Map a raw descriptor axis onto [0, 1].
+
+    With an explicit ``axis_range = (lo, hi)`` the *achievable* band is
+    stretched over the full unit interval; otherwise the legacy
+    ``value / norm_scale`` normalisation is used.  Calibrated ranges are
+    what make grid archives actually fill: dividing by a theoretical
+    maximum (arena diagonal) compresses every realistic trajectory into a
+    few cells near the origin.
+    """
+    import jax.numpy as jnp
+
+    if axis_range is not None:
+        lo, hi = float(axis_range[0]), float(axis_range[1])
+        return jnp.clip((value - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+    return jnp.clip(value / norm_scale, 0.0, 1.0)
+
+
 class _FormationSpreadAndMeanDistance:
     """Picklable 2-D pursuit-evasion descriptor.
 
@@ -59,6 +77,8 @@ class _FormationSpreadAndMeanDistance:
         num_pursuers: int,
         num_evaders: int,
         norm_scale: float = None,
+        spread_range: Tuple[float, float] = None,
+        dist_range: Tuple[float, float] = None,
     ) -> None:
         n_p = int(num_pursuers)
         n_e = int(num_evaders)
@@ -75,6 +95,8 @@ class _FormationSpreadAndMeanDistance:
         self.norm_scale: float = (
             float(norm_scale) if norm_scale is not None else 2.0 * (2.0 ** 0.5)
         )
+        self.spread_range = tuple(spread_range) if spread_range is not None else None
+        self.dist_range = tuple(dist_range) if dist_range is not None else None
 
     def __call__(self, trajectory):
         import jax.numpy as jnp
@@ -101,8 +123,8 @@ class _FormationSpreadAndMeanDistance:
 
         return jnp.stack(
             [
-                jnp.clip(spread / norm, 0.0, 1.0),
-                jnp.clip(mean_dist / norm, 0.0, 1.0),
+                _rescale_axis(spread, self.spread_range, norm),
+                _rescale_axis(mean_dist, self.dist_range, norm),
             ]
         )
 
@@ -126,13 +148,21 @@ class _SingleTeamFormation:
     min_bd: Tuple[float, ...] = (0.0, 0.0)
     max_bd: Tuple[float, ...] = (1.0, 1.0)
 
-    def __init__(self, num_agents: int, norm_scale: float = 1.0) -> None:
+    def __init__(
+        self,
+        num_agents: int,
+        norm_scale: float = 1.0,
+        spread_range: Tuple[float, float] = None,
+        pair_range: Tuple[float, float] = None,
+    ) -> None:
         if int(num_agents) <= 0:
             raise ValueError(
                 f"num_agents must be positive, got {num_agents}."
             )
         self.n = int(num_agents)
         self.norm_scale = float(norm_scale)
+        self.spread_range = tuple(spread_range) if spread_range is not None else None
+        self.pair_range = tuple(pair_range) if pair_range is not None else None
 
     def __call__(self, trajectory):
         import jax.numpy as jnp
@@ -156,13 +186,18 @@ class _SingleTeamFormation:
 
         return jnp.stack(
             [
-                jnp.clip(spread / norm, 0.0, 1.0),
-                jnp.clip(mean_pair / norm, 0.0, 1.0),
+                _rescale_axis(spread, self.spread_range, norm),
+                _rescale_axis(mean_pair, self.pair_range, norm),
             ]
         )
 
 
-def single_team_formation(num_agents: int, norm_scale: float = 1.0) -> Callable:
+def single_team_formation(
+    num_agents: int,
+    norm_scale: float = 1.0,
+    spread_range: Tuple[float, float] = None,
+    pair_range: Tuple[float, float] = None,
+) -> Callable:
     """Return a 2-D descriptor ``(centroid_spread, mean_pairwise_dist)``.
 
     Use this when the env only exposes a single agent role (no
@@ -173,36 +208,59 @@ def single_team_formation(num_agents: int, norm_scale: float = 1.0) -> Callable:
         num_agents: Number of agents expected in ``positions``.
         norm_scale: Divisor to normalise distances to ``[0, 1]``.
             Set to the arena diagonal for aquarium envs.
+        spread_range: Optional ``(lo, hi)`` calibrated band for the
+            spread axis; overrides ``norm_scale`` for that axis and
+            stretches the achievable band over [0, 1] so grid archives
+            fill (see ``_rescale_axis``).
+        pair_range: Optional calibrated band for the pairwise axis.
     """
-    return _SingleTeamFormation(num_agents, norm_scale=norm_scale)
+    return _SingleTeamFormation(
+        num_agents,
+        norm_scale=norm_scale,
+        spread_range=spread_range,
+        pair_range=pair_range,
+    )
 
 
 def formation_spread_and_mean_distance(
     num_pursuers: int,
     num_evaders: int,
     norm_scale: float = None,
+    spread_range: Tuple[float, float] = None,
+    dist_range: Tuple[float, float] = None,
 ) -> Callable:
     """Return a 2-D descriptor ``(formation_spread, mean_dist_to_evader)``.
 
     ``formation_spread`` is the mean distance of each pursuer to the
     pursuer centroid (averaged over time). ``mean_dist_to_evader`` is
     the mean distance from every pursuer to every evader (averaged
-    over time). Both are normalised to ``[0, 1]`` by dividing by
-    ``norm_scale``.
+    over time). Both are normalised to ``[0, 1]``.
 
     Args:
         norm_scale: Divisor used to normalise spread and distance into
             ``[0, 1]``. Defaults to ``2 * sqrt(2)`` (the diagonal of
             the 2×2 MPE world). Set to the arena diagonal length for
-            non-MPE environments (e.g. ``3606.0`` for a 2000×3000
-            pixel aquarium).
+            non-MPE environments.
+        spread_range: Optional calibrated ``(lo, hi)`` band for the
+            spread axis (raw units — same coordinate space as
+            ``positions``).  When given, that axis maps ``lo -> 0`` /
+            ``hi -> 1`` instead of dividing by ``norm_scale``.  This is
+            the knob that makes grid archives fill: the achievable band
+            is usually a small fraction of the theoretical maximum.
+        dist_range: Optional calibrated band for the mean-distance axis.
 
     The returned object is a picklable
     :class:`_FormationSpreadAndMeanDistance` instance, so it survives
     cross-process transport via :mod:`pickle` (used by the parallel
     scoring path).
     """
-    return _FormationSpreadAndMeanDistance(num_pursuers, num_evaders, norm_scale=norm_scale)
+    return _FormationSpreadAndMeanDistance(
+        num_pursuers,
+        num_evaders,
+        norm_scale=norm_scale,
+        spread_range=spread_range,
+        dist_range=dist_range,
+    )
 
 
 class _WithCaptureEfficiency:

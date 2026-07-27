@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import pickle
 import time
+import traceback
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -33,10 +34,10 @@ import numpy as np
 from deap_pettingzoo.baselines.base import (
     BaselineTrainer,
     BudgetMode,
+    ProgressCallback,
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.contrib.qdax import _require_qdax
 from deap_pettingzoo.contrib.qdax.progress import (
@@ -99,10 +100,14 @@ _DEFAULT_MAP_ELITES_PARAMS: Dict[str, Any] = {
     "line_sigma": 0.05,
     "episode_length": 25,
     "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
+    # Optional (obs, agents[, env]) -> (positions, velocities) extractor for
+    # the numpy scoring path; None uses the obs-slicing default.
+    "state_extractor": None,
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "scheduler_address": None,
     "worker_imports": (),
     "verbose": True,
     "progress_every": 1,
@@ -120,10 +125,12 @@ _DEFAULT_CMA_ME_PARAMS: Dict[str, Any] = {
     "num_emitters": 1,
     "episode_length": 25,
     "descriptor_fn": None,  # required: a callable with min_bd/max_bd/output_shape
+    "state_extractor": None,
     "seed": 0,
     "save_repertoire": True,
     "num_workers": 1,
     "parallel_backend": "process",
+    "scheduler_address": None,
     "worker_imports": (),
     "verbose": True,
     "progress_every": 1,
@@ -299,6 +306,57 @@ def _budget_to_iterations(config: TrainingConfig, params: Dict[str, Any]) -> int
     )
 
 
+def _resolve_consumed_budget(
+    config: TrainingConfig, scoring_fn: Any, trainer_label: str
+) -> Optional[int]:
+    """Return the real env-step budget under opt-in consumed budgeting.
+
+    ``None`` when ``budget_on_consumed`` is off or budgeting is not
+    ENV_STEPS-based (the flag is inert there, matching the other trainers).
+    Consumed budgeting needs a real per-tick counter, which only the
+    numpy/PettingZoo scoring path maintains; the JAX-native path rolls out
+    inside ``jax.jit``/``vmap`` with no Python-side counter (a documented
+    structural limit) and rejects the flag.
+    """
+    if not (config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS):
+        return None
+    if not hasattr(scoring_fn, "_env_steps_consumed"):
+        raise ValueError(
+            f"{trainer_label} supports budget_on_consumed=True only on the "
+            "numpy/PettingZoo scoring path, whose rollouts report real env "
+            "ticks. The JAX-native scoring path has no per-tick counter "
+            "(rollouts run inside jax.jit/vmap). Use budget_on_consumed=False "
+            "there."
+        )
+    return int(config.budget_value)
+
+
+def _budget_iterations(
+    num_iters: int,
+    consumed_budget: Optional[int],
+    scoring_fn: Any,
+    episode_length: int,
+):
+    """Yield 1-based iteration indices under the active budgeting mode.
+
+    Nominal mode is simply ``range(1, num_iters + 1)``. Under consumed
+    budgeting, iterations are yielded until the scoring function's real
+    tick counter (which already includes the init-repertoire evaluation)
+    reaches the budget. The safety cap mirrors the EA ``simple`` loop:
+    each iteration consumes at least one tick per evaluated candidate and
+    episodes run at most ``episode_length`` ticks, so no more than
+    ``num_iters * episode_length`` iterations are ever needed.
+    """
+    if consumed_budget is None:
+        yield from range(1, num_iters + 1)
+        return
+    safety_cap = num_iters * max(1, episode_length) + 10
+    it = 0
+    while it < safety_cap and int(scoring_fn._env_steps_consumed) < consumed_budget:
+        it += 1
+        yield it
+
+
 def _print_qdax_plan(
     label: str,
     *,
@@ -408,6 +466,7 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
 
     num_workers = int(params.get("num_workers", 1))
     parallel_backend = str(params.get("parallel_backend", "process"))
+    scheduler_address = params.get("scheduler_address")
     eval_episodes = max(1, int(params.get("eval_episodes", 1)))
 
     spec = get_env_spec(config.env_name)
@@ -425,6 +484,13 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
                 "required.",
                 UserWarning,
                 stacklevel=2,
+            )
+        # Mirrors the guard in registry.build_env_from_spec: a factory may also
+        # be a module exposing .parallel_env, which this path cannot use.
+        if not callable(spec.factory):
+            raise TypeError(
+                f"Env {config.env_name!r} registered with api='jax_parallel' "
+                "but factory is not callable."
             )
         raw_jax_env = spec.factory(**(config.env_config or {}))
         # The JAX env may have heterogeneous agents (e.g. simple_tag has
@@ -476,9 +542,11 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
             env_config=config.env_config,
             action_type=np_action_type,
             nvec=np_nvec,
+            state_extractor=params.get("state_extractor"),
             activation=str(params["activation"]),
             num_workers=num_workers,
             parallel_backend=parallel_backend,
+            scheduler_address=scheduler_address,
             eval_episodes=eval_episodes,
             worker_imports=params.get("worker_imports", ()),
         )
@@ -489,12 +557,16 @@ def _build_env_and_scoring(config: TrainingConfig, params: Dict[str, Any]):
     return env, module, layer_sizes, descriptor_fn, scoring_fn, init_params
 
 
+#: Filename the QDax repertoire pickle is written under (inside the run dir).
+_REPERTOIRE_FILENAME = "repertoire.pkl"
+
+
 def _save_repertoire(repertoire, output_dir: Path) -> Path:
     """Pickle the repertoire pytree to ``output_dir/repertoire.pkl``."""
     import jax
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / "repertoire.pkl"
+    target = output_dir / _REPERTOIRE_FILENAME
     with target.open("wb") as f:
         pickle.dump(jax.device_get(repertoire), f)
     return target
@@ -533,10 +605,75 @@ def _extract_champion(repertoire, module, *, action_space=None):
     )
 
 
+def _reeval_select_champion(
+    repertoire,
+    module,
+    scoring_fn,
+    key,
+    *,
+    action_space,
+    top_k: int,
+    rounds: int,
+):
+    """Select the champion by re-evaluating the archive's best cells.
+
+    MAP-Elites keeps whichever genome scored highest on its (noisy) insertion
+    evaluation and never re-scores it, so in a stochastic env the archive's
+    ``max`` fitness is an order statistic of noise. This re-scores the ``top_k`` cells on ``rounds``
+    fresh common-random-number batches and returns the cell with the best
+    *re-evaluated* mean, together with that honest fitness.
+
+    The re-evaluation is a measurement, not training: the scoring function's
+    consumed-step counter is restored afterwards so it does not draw down the
+    training budget or affect the env-step axis.
+
+    Returns ``(policy, reeval_fitness, key)``.
+    """
+    import jax
+    import numpy as _np
+
+    from deap_pettingzoo.contrib.qdax.policy import FlaxPolicyAdapter
+
+    fitnesses = _np.asarray(repertoire.fitnesses)
+    finite_idx = _np.flatnonzero(_np.isfinite(fitnesses))
+    if finite_idx.size == 0:
+        policy, fit = _extract_champion(repertoire, module, action_space=action_space)
+        return policy, fit, key
+
+    k = int(min(max(1, top_k), finite_idx.size))
+    order = finite_idx[_np.argsort(fitnesses[finite_idx])[::-1][:k]]
+    top_geno = jax.tree_util.tree_map(lambda leaf: leaf[order], repertoire.genotypes)
+
+    # Off-budget: snapshot and restore the consumed-step counter.
+    saved_steps = getattr(scoring_fn, "_env_steps_consumed", None)
+    acc = _np.zeros(k, dtype=_np.float64)
+    n_rounds = max(1, int(rounds))
+    for _ in range(n_rounds):
+        key, sub = jax.random.split(key)
+        # QDax scoring returns (fitnesses, descriptors, extra[, key]) — index
+        # rather than unpack so 3- and 4-tuple return shapes both work.
+        scored = scoring_fn(top_geno, sub)
+        acc += _np.asarray(scored[0], dtype=_np.float64).reshape(-1)
+    acc /= n_rounds
+    if saved_steps is not None:
+        scoring_fn._env_steps_consumed = saved_steps  # type: ignore[attr-defined]
+
+    best_local = int(_np.argmax(acc))
+    best_idx = int(order[best_local])
+    champion_params = jax.tree_util.tree_map(
+        lambda leaf: leaf[best_idx], repertoire.genotypes
+    )
+    return (
+        FlaxPolicyAdapter(module, champion_params, action_space=action_space),
+        float(acc[best_local]),
+        key,
+    )
+
+
 class MAPElitesTrainer(BaselineTrainer):
     """MAP-Elites trainer over a Flax MLP policy.
 
-    Supported :class:`BudgetMode`\u200bs: ``ENV_STEPS``, ``EVAL_EPISODES``,
+    Supported :class:`BudgetMode`s: ``ENV_STEPS``, ``EVAL_EPISODES``,
     ``GENERATIONS`` (iterations are the native unit).
     """
 
@@ -558,9 +695,13 @@ class MAPElitesTrainer(BaselineTrainer):
             "produces_repertoire": True,
         }
 
-    def train(self, config: TrainingConfig) -> TrainingResult:
+    def train(
+        self,
+        config: TrainingConfig,
+        *,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> TrainingResult:
         _require_qdax()
-        reject_consumed_budgeting(config, "MAPElitesTrainer")
 
         import jax
         from qdax.core.emitters.mutation_operators import isoline_variation
@@ -572,6 +713,9 @@ class MAPElitesTrainer(BaselineTrainer):
         _apply_universal_keys(config, params)
         env, module, layer_sizes, descriptor_fn, scoring_fn, init_params = (
             _build_env_and_scoring(config, params)
+        )
+        consumed_budget = _resolve_consumed_budget(
+            config, scoring_fn, "MAPElitesTrainer"
         )
 
         min_bd = tuple(getattr(descriptor_fn, "min_bd", (0.0, 0.0)))
@@ -619,6 +763,45 @@ class MAPElitesTrainer(BaselineTrainer):
         num_iters = _budget_to_iterations(config, params)
         verbose = bool(params.get("verbose", True))
         progress_every = max(1, int(params.get("progress_every", 1)))
+
+        # Periodic held-out champion probe. The run's ExperimentLogger only
+        # exists inside _persist_qdax_results, so rows buffer in memory and
+        # are flushed there. env_steps uses the scoring function's real tick
+        # counter on the numpy path, nominal iteration cost on the JAX path.
+        from deap_pettingzoo.baselines.base import ProgressEvent
+        from deap_pettingzoo.baselines.probing import ProbeController
+
+        _probe_ep_len = int(params["episode_length"])
+        _probe_eval_eps = max(1, int(params.get("eval_episodes", 1)))
+        _probe_steps_per_iter = (
+            int(params["batch_size"]) * _probe_ep_len * _probe_eval_eps
+        )
+        _probe_init_steps = (
+            int(params["init_batch_size"]) * _probe_ep_len * _probe_eval_eps
+        )
+        self._prober = ProbeController(
+            config,
+            None,
+            max_steps=_probe_ep_len,
+            seed=int(params["seed"]),
+        )
+        _probe_action_space = (
+            _resolve_shared_action_space(env) if self._prober.enabled else None
+        )
+
+        def _probe_env_steps(iter_idx: int) -> int:
+            consumed = getattr(scoring_fn, "_env_steps_consumed", None)
+            if consumed is not None:
+                return int(consumed)
+            return _probe_init_steps + iter_idx * _probe_steps_per_iter
+
+        # Opt-in champion re-selection: re-score the archive's best cells on
+        # fresh CRN batches and keep the genuinely-best one (0 = off, legacy
+        # argmax-of-archive behaviour). Only the numpy scoring path can be
+        # re-called post-training; the JAX-native path skips it.
+        reeval_top_k = int(params.get("reeval_top_k", 0))
+        reeval_rounds = int(params.get("reeval_rounds", 1))
+
         if verbose:
             _print_qdax_plan(
                 "MAP-Elites",
@@ -646,13 +829,37 @@ class MAPElitesTrainer(BaselineTrainer):
                 )
 
             history: list = [init_metrics]
+            # Real cumulative consumed steps snapshotted per history row so the
+            # metrics.csv env_steps axis advances (None on the JAX-native path,
+            # where there is no Python-side per-tick counter).
+            env_steps_history: list = [getattr(scoring_fn, "_env_steps_consumed", None)]
             start = time.time()
-            for iter_idx in range(1, num_iters + 1):
+            realized_iters = 0
+            for iter_idx in _budget_iterations(
+                num_iters, consumed_budget, scoring_fn, int(params["episode_length"])
+            ):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                env_steps_history.append(
+                    getattr(scoring_fn, "_env_steps_consumed", None)
+                )
+                realized_iters = iter_idx
+                event = ProgressEvent(
+                    unit="generation",
+                    current=iter_idx,
+                    total=num_iters,
+                    env_steps=_probe_env_steps(iter_idx),
+                )
+                self._prober.observe(
+                    event,
+                    lambda _rep=repertoire: _extract_champion(
+                        _rep, module, action_space=_probe_action_space
+                    )[0],
+                )
+                self._emit_progress(progress_callback, event)
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -666,22 +873,49 @@ class MAPElitesTrainer(BaselineTrainer):
                         getattr(scoring_fn, "_last_batch_fitness", None),
                     )
             elapsed = time.time() - start
+            # Champion selection must run before the scoring pool is torn down
+            # in the finally block (re-evaluation re-calls the scoring fn).
+            _champ_action_space = _resolve_shared_action_space(env)
+            champion_policy = champion_fitness = None
+            if reeval_top_k > 0:
+                try:
+                    key, sub = jax.random.split(key)
+                    champion_policy, champion_fitness, key = _reeval_select_champion(
+                        repertoire,
+                        module,
+                        scoring_fn,
+                        sub,
+                        action_space=_champ_action_space,
+                        top_k=reeval_top_k,
+                        rounds=reeval_rounds,
+                    )
+                except Exception:  # noqa: BLE001 - refinement must not abort run
+                    warnings.warn(
+                        "MAP-Elites champion re-evaluation failed; falling back "
+                        "to the archive-argmax champion.\n" + traceback.format_exc(),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    champion_policy = None
+            if champion_policy is None:
+                champion_policy, champion_fitness = _extract_champion(
+                    repertoire, module, action_space=_champ_action_space
+                )
         finally:
             # Tear down the scoring function's worker pool, if any.
             closer = getattr(scoring_fn, "close", None)
             if closer is not None:
                 closer()
-
-        champion_policy, champion_fitness = _extract_champion(
-            repertoire,
-            module,
-            action_space=_resolve_shared_action_space(env),
+        self._prober.finalize(
+            lambda: champion_policy,
+            iteration=realized_iters,
+            env_steps=_probe_env_steps(realized_iters),
         )
 
         metadata: Dict[str, Any] = {
             "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             "layer_sizes": tuple(layer_sizes),
             "init_batch_size": int(params["init_batch_size"]),
             "init_mode": str(params.get("init_mode", "flax_perturb")),
@@ -689,10 +923,16 @@ class MAPElitesTrainer(BaselineTrainer):
             "eval_episodes": max(1, int(params.get("eval_episodes", 1))),
             "num_workers": int(params.get("num_workers", 1)),
             "parallel_backend": str(params.get("parallel_backend", "process")),
+            # Champion provenance: re-evaluated (honest) vs archive-argmax.
+            "champion_reeval_top_k": reeval_top_k,
+            "champion_reeval_rounds": reeval_rounds if reeval_top_k > 0 else 0,
         }
-        if params.get("save_repertoire") and config.output_dir is not None:
-            path = _save_repertoire(repertoire, Path(config.output_dir))
-            metadata["repertoire_path"] = str(path)
+        _want_repertoire = bool(
+            params.get("save_repertoire") and config.output_dir is not None
+        )
+        if _want_repertoire:
+            # Path is under the run dir; recorded once _persist builds the run.
+            metadata["repertoire_path"] = _REPERTOIRE_FILENAME
 
         # Summary metrics: take the last entry of each QDax metric
         last = history[-1]
@@ -705,15 +945,17 @@ class MAPElitesTrainer(BaselineTrainer):
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
-            "num_iterations": num_iters,
-            "env_steps_nominal": int(_init_env_steps + num_iters * _env_steps_per_iter),
+            "num_iterations": realized_iters,
+            "env_steps_nominal": int(
+                _init_env_steps + realized_iters * _env_steps_per_iter
+            ),
             # Real int on the numpy/PettingZoo scoring path; None on the
             # JAX-native path, where scoring runs inside jax.jit/vmap with no
             # Python-side per-tick counter (a documented structural limit).
             "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
-        _persist_qdax_results(
+        metadata["run_dir"] = _persist_qdax_results(
             config,
             algorithm="map_elites",
             history=history,
@@ -722,14 +964,12 @@ class MAPElitesTrainer(BaselineTrainer):
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=_ep_len,
-            repertoire_path=(
-                Path(metadata["repertoire_path"])
-                if "repertoire_path" in metadata
-                else None
-            ),
+            prober=self._prober,
+            repertoire=repertoire if _want_repertoire else None,
             env_steps_per_iteration=_env_steps_per_iter,
             init_env_steps=_init_env_steps,
             env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
+            env_steps_per_row=env_steps_history,
         )
 
         return TrainingResult(
@@ -771,8 +1011,6 @@ class CMAMETrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         _require_qdax()
-        reject_consumed_budgeting(config, "CMAMETrainer")
-
         import jax
         import jax.numpy as jnp
         from qdax.core.emitters.cma_improvement_emitter import CMAImprovementEmitter
@@ -790,6 +1028,7 @@ class CMAMETrainer(BaselineTrainer):
         env, module, layer_sizes, descriptor_fn, scoring_fn, _ = _build_env_and_scoring(
             config, params
         )
+        consumed_budget = _resolve_consumed_budget(config, scoring_fn, "CMAMETrainer")
 
         genotype_dim = flat_count(layer_sizes)
         batch_size = int(params["batch_size"])
@@ -865,13 +1104,23 @@ class CMAMETrainer(BaselineTrainer):
                 )
 
             history = [init_metrics]
+            # Real cumulative consumed steps per history row (None on the
+            # JAX-native path) so metrics.csv env_steps advances per iteration.
+            env_steps_history = [getattr(scoring_fn, "_env_steps_consumed", None)]
             start = time.time()
-            for iter_idx in range(1, num_iters + 1):
+            realized_iters = 0
+            for iter_idx in _budget_iterations(
+                num_iters, consumed_budget, scoring_fn, int(params["episode_length"])
+            ):
                 key, sub = jax.random.split(key)
                 repertoire, emitter_state, metrics = map_elites.update(
                     repertoire, emitter_state, sub
                 )
                 history.append(metrics)
+                env_steps_history.append(
+                    getattr(scoring_fn, "_env_steps_consumed", None)
+                )
+                realized_iters = iter_idx
                 if verbose and (
                     iter_idx == 1
                     or iter_idx == num_iters
@@ -904,16 +1153,18 @@ class CMAMETrainer(BaselineTrainer):
         metadata: Dict[str, Any] = {
             "descriptor": type(params["descriptor_fn"]).__name__,
             "grid_shape": tuple(params["grid_shape"]),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             "layer_sizes": tuple(layer_sizes),
             "genotype_dim": genotype_dim,
             "eval_episodes": max(1, int(params.get("eval_episodes", 1))),
             "num_workers": int(params.get("num_workers", 1)),
             "parallel_backend": str(params.get("parallel_backend", "process")),
         }
-        if params.get("save_repertoire") and config.output_dir is not None:
-            path = _save_repertoire(repertoire, Path(config.output_dir))
-            metadata["repertoire_path"] = str(path)
+        _want_repertoire = bool(
+            params.get("save_repertoire") and config.output_dir is not None
+        )
+        if _want_repertoire:
+            metadata["repertoire_path"] = _REPERTOIRE_FILENAME
 
         last = history[-1]
         _eval_episodes = max(1, int(params.get("eval_episodes", 1)))
@@ -926,15 +1177,15 @@ class CMAMETrainer(BaselineTrainer):
             "qd_score": float(np.asarray(last["qd_score"])),
             "coverage": float(np.asarray(last["coverage"])),
             "max_fitness": float(np.asarray(last["max_fitness"])),
-            "num_iterations": num_iters,
+            "num_iterations": realized_iters,
             # init batch + one batch per iteration.
-            "env_steps_nominal": int((num_iters + 1) * _iter_env_steps),
+            "env_steps_nominal": int((realized_iters + 1) * _iter_env_steps),
             # Real int on the numpy/PettingZoo path; None on the JAX-native
             # path (no Python-side per-tick counter, documented).
             "env_steps_consumed": getattr(scoring_fn, "_env_steps_consumed", None),
         }
 
-        _persist_qdax_results(
+        metadata["run_dir"] = _persist_qdax_results(
             config,
             algorithm="cma_me",
             history=history,
@@ -943,14 +1194,11 @@ class CMAMETrainer(BaselineTrainer):
             extra_summary={"descriptor": type(params["descriptor_fn"]).__name__},
             champion_policy=champion_policy,
             recording_max_steps=_ep_len,
-            repertoire_path=(
-                Path(metadata["repertoire_path"])
-                if "repertoire_path" in metadata
-                else None
-            ),
+            repertoire=repertoire if _want_repertoire else None,
             env_steps_per_iteration=_iter_env_steps,
             init_env_steps=_iter_env_steps,
             env_steps_consumed=getattr(scoring_fn, "_env_steps_consumed", None),
+            env_steps_per_row=env_steps_history,
         )
 
         return TrainingResult(
@@ -1022,12 +1270,23 @@ def _persist_qdax_results(
     extra_summary: Optional[Dict[str, Any]] = None,
     champion_policy=None,
     recording_max_steps: Optional[int] = None,
-    repertoire_path: Optional[Path] = None,
+    repertoire: Optional[Any] = None,
     env_steps_per_iteration: int = 0,
     init_env_steps: int = 0,
     env_steps_consumed: Optional[int] = None,
-) -> None:
+    env_steps_per_row: Optional[list] = None,
+    prober: Optional[Any] = None,
+) -> Optional[str]:
     """Write per-iteration QDax metrics + final summary via ExperimentLogger.
+
+    Returns the run directory path (as ``str``) so callers can expose it in
+    ``TrainingResult.metadata["run_dir"]`` like the other baseline trainers;
+    ``None`` when ``config.output_dir`` is ``None``.
+
+    ``prober``, when given, is the trainer's buffered
+    :class:`~deap_pettingzoo.baselines.probing.ProbeController`; its rows are
+    flushed to ``probe.csv`` here because the run's logger only exists inside
+    this function.
 
     Each entry in ``history`` is a dict-like of QDax scalars (typically
     ``qd_score``, ``coverage``, ``max_fitness``, ``min_fitness``,
@@ -1040,13 +1299,22 @@ def _persist_qdax_results(
     uncharged initial population. Both default to ``0`` for callers
     that do not supply them.
 
+    ``env_steps_per_row``, when given, is the per-history-row real cumulative
+    consumed-step count (one entry per ``history`` row); it is used as the
+    ``env_steps`` axis so the metrics.csv x-axis advances across iterations.
+    Entries that are ``None`` (e.g. the JAX-native path with no Python-side
+    counter) fall back to the nominal cumulative for that row. When the whole
+    list is absent, ``env_steps_consumed`` (the run total) is used for every
+    row only as a last resort.
+
     ``env_steps_consumed``, when not ``None``, is the real env-step counter
     from the numpy/PettingZoo scoring path; on the JAX-native scoring path
     (no Python-side per-tick counter) it is ``None`` and ``env_steps`` falls
     back to the nominal computation.
 
-    If ``repertoire_path`` points to an existing file, it is registered
-    in ``manifest.artifacts['policy']`` so the analysis loader can
+    When ``repertoire`` is given it is pickled to ``<run_dir>/repertoire.pkl``
+    (inside the run dir, so it travels with the run's export zip) and
+    registered in ``manifest.artifacts['policy']`` so the analysis loader can
     rebuild a policy.
     """
     from deap_pettingzoo.baselines._logging_helpers import (
@@ -1059,17 +1327,23 @@ def _persist_qdax_results(
     )
 
     with build_logger(config, algorithm=algorithm) as log:
+        if prober is not None:
+            prober.flush_to(log)
+            prober.close()
         for i, entry in enumerate(history):
             # history[0] is the initial repertoire (init_env_steps); each
             # later iteration adds env_steps_per_iteration.
             _nominal = int(init_env_steps) + i * int(env_steps_per_iteration)
+            # Prefer the real per-row cumulative; fall back to nominal for a
+            # missing/None row, and to the run total only when no list at all.
+            _row_real = (
+                env_steps_per_row[i]
+                if env_steps_per_row is not None and i < len(env_steps_per_row)
+                else env_steps_consumed
+            )
             row: Dict[str, Any] = {
                 "iteration": i,
-                "env_steps": (
-                    int(env_steps_consumed)
-                    if env_steps_consumed is not None
-                    else _nominal
-                ),
+                "env_steps": (int(_row_real) if _row_real is not None else _nominal),
                 "nominal_env_steps": _nominal,
                 "wall_time": 0.0,
             }
@@ -1099,11 +1373,14 @@ def _persist_qdax_results(
         full_summary = {"algorithm": algorithm, **summary}
         if extra_summary:
             full_summary.update(extra_summary)
-        if repertoire_path is not None:
+        if repertoire is not None:
+            # Save under the run dir so the pickle is inside the export zip.
+            path = _save_repertoire(repertoire, Path(log.run_dir))
             register_existing_artifact(
                 log,
                 kind=KIND_QDAX_REPERTOIRE,
-                path=Path(repertoire_path),
+                path=path,
                 extra={"algorithm": algorithm},
             )
         write_summary(log, full_summary, training_time_s=training_time)
+        return str(log.run_dir) if config.output_dir is not None else None

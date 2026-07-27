@@ -2,7 +2,7 @@
 
 This module assembles an :class:`~deap_pettingzoo.catalog.schema.AlgorithmSpec`
 for every standalone algorithm the UI can configure. Each spec combines two
-sources (the hybrid strategy):
+sources:
 
 * **Hyperparameters** come from the trainer's ``describe_hyperparameters()``
   declarative overlay, with defaults refreshed against the live constructor /
@@ -10,13 +10,6 @@ sources (the hybrid strategy):
 * **Cross-cutting metadata** (capabilities, co-evolution mapping, optional-extra
   gating, supported budget modes / aggregations, aliases) is declared here in
   :data:`_ALGORITHM_DEFINITIONS`.
-
-Keeping the cross-cutting facts here — rather than scattered across the trainer
-registry, the compatibility checker and the co-evolution validator — is exactly
-the "deeper refactor unifying the three registries into one catalog" the plan
-calls for. :mod:`deap_pettingzoo.baselines.comparison` and
-:mod:`deap_pettingzoo.baselines.compatibility` are refactored to source their
-algorithm enumeration from here.
 
 Importing this module is cheap and dependency-light: it never imports the
 trainer modules at top level (only lazily, when a spec is actually built) and
@@ -72,7 +65,7 @@ class _AlgorithmDefinition:
             ``multidiscrete_action``, ``needs_global_state``, ``on_policy``,
             ``supports_turn_based``.
         aliases: Alternative names that resolve to this algorithm (e.g.
-            ``"cma"`` → ``"cma-es"``, ``"genetic"`` → ``"ea"``). Populated
+            ``"cma"`` -> ``"cma-es"``, ``"genetic"`` -> ``"ea"``). Populated
             into :data:`_ALIAS_TO_CANONICAL`.
         coevolution_optimizer: The ``Side.optimizer`` token for co-evolution,
             looked up in :data:`~deap_pettingzoo.baselines.coevolution.sides._SIDE_STATE_FACTORIES`.
@@ -331,7 +324,7 @@ def _rebuild_lookups() -> None:
 def canonical_name(name: str) -> Optional[str]:
     """Resolve an algorithm name or alias to its canonical form.
 
-    ``"cma"`` → ``"cma-es"``; ``"ea"`` → ``"ea"``; unknown → ``None``.
+    ``"cma"`` -> ``"cma-es"``; ``"ea"`` -> ``"ea"``; unknown -> ``None``.
     """
     return _ALIAS_TO_CANONICAL.get(name)
 
@@ -563,7 +556,7 @@ def register_algorithm(
             exists in ``_SIDE_STATE_FACTORIES`` (overwrite must be ``True`` to
             replace).
 
-    .. note::
+    Note:
         A programmatic ``register_algorithm`` runs only in the process that
         calls it; like a custom :func:`register_env`, it does **not** auto-
         replay into spawned workers. For parallel/worker runs, ship the

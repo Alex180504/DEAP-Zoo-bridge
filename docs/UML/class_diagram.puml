@@ -3,6 +3,8 @@
 skinparam classAttributeIconSize 0
 skinparam groupInheritance 2
 
+left to right direction
+
 title DEAP-PettingZoo Bridge - Class Diagram
 
 package "deap_pettingzoo.genomes" {
@@ -77,43 +79,39 @@ package "deap_pettingzoo.policies" {
         + low, high: np.ndarray
         .. single-squash contract ..
         + decode(raw) -> np.ndarray
-        .. decode: tanh(raw) → rescale to [low, high] ..
+        .. decode: tanh(raw) -> rescale to [low, high] ..
         .. requires genome.output_activation="linear" so ..
         .. tanh is applied exactly once (not twice) ..
     }
 
-    class "make_head(space, masked=False)" as make_head <<factory>>
+    class SoftmaxSamplingHead {
+        + n: int
+        + temperature: float
+        + rng: np.random.Generator
+        + decode(raw) -> int  (softmax sample)
+        -- smooths the argmax landscape for gradient-free search --
+    }
+
+    class MultiDiscreteSoftmaxSamplingHead {
+        + nvec: np.ndarray
+        + temperature: float
+        + rng: np.random.Generator
+        + decode(raw) -> np.int64[len(nvec)]
+        -- per-sub-action softmax sampling over sum(nvec) logits --
+    }
+
+    class "make_head(space, masked=False, stochastic=False, temperature=1.0, rng=None)" as make_head <<factory>>
     class "required_output_size(space)" as required_output_size <<helper>>
 
     DiscreteHead --|> ActionHead
     MaskedDiscreteHead --|> DiscreteHead
     MultiDiscreteHead --|> ActionHead
     BoxHead --|> ActionHead
+    SoftmaxSamplingHead --|> ActionHead
+    MultiDiscreteSoftmaxSamplingHead --|> ActionHead
     make_head ..> ActionHead : constructs
     FeedforwardNeuralPolicy --> FixedTopologyGenome : uses
     FeedforwardNeuralPolicy --> ActionHead : optional head
-}
-
-package "examples.pursuit_evasion.simple_tag (APF)" {
-    class APFConfig <<dataclass>> {
-        + k_pursuer: float
-        + k_landmark: float
-        + k_boundary: float
-        + boundary_threshold: float
-        + no_op_threshold: float
-        + softening: float
-    }
-
-    class APFEvaderPolicy {
-        - config: APFConfig
-        - layout: ObsLayout
-        --
-        + __init__(layout, config=None)
-        + get_action(observation) -> action
-        + reset() -> None
-    }
-
-    APFEvaderPolicy --> APFConfig : uses
 }
 
 package "deap_pettingzoo.environments" {
@@ -158,7 +156,7 @@ package "deap_pettingzoo.environments" {
         + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
         + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
         + {static} replay_registry_snapshot_once(snapshot) -> None
-        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; SCOOP/Dask ship it on the\n   worker spec and call replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; Dask ships it on the\n   worker spec and calls replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
     }
 
     class builtin <<module>> {
@@ -198,7 +196,7 @@ package "deap_pettingzoo.environments" {
     class JaxEnvToPettingZooAdapter {
         per-step numpy boundary;\nowns a jax.random.PRNGKey;\nexposes ParallelEnv facade over\nany JaxEnvProtocol (JaxMARL, Brax-MARL).
         .. termination contract ..
-        dones["__truncated__"] → truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
+        dones["__truncated__"] -> truncations;\nper-agent done agents pruned from\nobs/infos even when episode continues.
     }
 
     JaxEnvProtocol <.. JaxEnvToPettingZooAdapter : wraps
@@ -226,55 +224,13 @@ package "deap_pettingzoo.contrib.openspiel" {
     }
 
     openspiel ..> registry : register_env
-}
 
-package "examples.pursuit_evasion.simple_tag" {
-    class PursuitEvasionConfig <<dataclass>> {
-        + num_adversaries: int
-        + num_good: int
-        + num_obstacles: int
-        + max_cycles: int
-        + equal_ability: bool
-        + equal_max_speed: float
-        + equal_accel: float
-        + num_agent_neighbors: Optional[int]
-        + num_landmark_neighbors: Optional[int]
-        + boundary_threshold: float
-        -- requires homogeneous obs sizes;\n   raises ValueError otherwise\n   (use SuperSuit padding or\n   MixedPolicyEvaluator) --
-    }
-
-    class SelfPlayEvaluator {
-        - env_wrapper: PettingZooWrapper
-        - max_steps: int
-        - aggregation: str
-        - team_mapping: Dict[str, str]
-        - team: Optional[str]
-        - masked: bool
-        - flatten_obs: bool
-        --
-        + __init__(env_wrapper, max_steps, aggregation, team_mapping, team, masked, flatten_obs)
-        + evaluate(individual, seed=None) -> Tuple[float]
-        -- one shared-weights policy plays\n   every role in a turn-based env;\n   aggregation ∈ {sum, mean,\n     first_agent, team_mapping} --
-        + boundary_scale: float
-        + boundary_sharpness: float
-    }
-
-    class ObsLayout <<dataclass>> {
-        + describes observation vector slicing
-    }
-
-    class PursuitEvasionEnv {
-        + config: PursuitEvasionConfig
-        + obs_layout: ObsLayout
-        --
-        + __init__(config=None, **kwargs)
-        + reset(seed) -> observations
-        + step(actions) -> tuple
-    }
-
-    PursuitEvasionEnv --|> PettingZooWrapper
-    PursuitEvasionEnv --> PursuitEvasionConfig : uses
-    PursuitEvasionEnv --> ObsLayout : uses
+    note bottom of openspiel
+      Opt-in; nothing registered on import.
+      Requires `pip install deap-pettingzoo[shimmy]`.
+      Wraps shimmy.OpenSpielCompatibilityV0
+      for OpenSpiel turn-based games.
+    end note
 }
 
 package "deap_pettingzoo.evaluators" {
@@ -286,12 +242,7 @@ package "deap_pettingzoo.evaluators" {
         - env_wrapper: PettingZooWrapper
         - max_steps: int
         + env_steps_consumed: int
-    BaseEvaluator <|-- SelfPlayEvaluator
-    MultiEpisodeEvaluator --> SingleEpisodeEvaluator : delegates
-    SingleEpisodeEvaluator --> PettingZooWrapper : uses
-    SingleEpisodeEvaluator ..> FeedforwardNeuralPolicy : creates
-    SelfPlayEvaluator --> PettingZooWrapper : uses
-    SelfPlayEvaluator ..> FeedforwardNeuralPolicy : creates (masked head)
+        --
         + __init__(env_wrapper, max_steps, aggregation_method, team_mapping)
         + evaluate(individual, seed=None) -> Tuple[float]
         - _create_policies(genome, observations) -> dict
@@ -381,17 +332,19 @@ package "deap_pettingzoo.integration" {
             executor, spec, eval_seeds=None,
             step_sink=None) -> list
         + make_mixed_parallel_evaluate_map(executor,
-            evaluator, *, eval_episodes=1) -> Callable
+            evaluator, *, eval_episodes=1,
+            step_sink=None) -> Callable
         -- _EvalWorkerSpec / _MixedWorkerSpec carry
            qualnames + a registry_snapshot; picklable
            across spawn workers. Workers replay the
            snapshot via replay_registry_snapshot_once
-           so SCOOP/Dask (no initializer hook) get
+           so Dask (no initializer hook) gets
            custom envs too --
-        -- _worker_evaluate now returns
-           (fitness, steps_delta); make_parallel_evaluate_map /
-           evaluate_population_parallel sum the deltas into the
-           optional step_sink accumulator and return fitness-only --
+        -- _worker_evaluate and
+           _mixed_worker_evaluate_with_steps return
+           (fitness, steps_delta); the pmap factories sum the
+           deltas into the optional step_sink accumulator and
+           return fitness-only --
     }
 
     class "cma_integration (module)" as cma_integration_mod <<module>> {
@@ -432,10 +385,12 @@ package "deap_pettingzoo.baselines" {
         + render: bool
         + num_workers: int = 1
         + parallel_backend: str = "process"
+        + scheduler_address: Optional[str] = None
         + budget_on_consumed: bool = False
         + recording: RecordingConfig
-        -- num_workers/parallel_backend: first-class\n   parallel-eval fields (process|scoop|dask);\n   constructor value is the fallback at default --
-        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool); rejected by mu±lambda / QDax / NEAT --
+        + probe: ProbeConfig
+        -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool or per-side slices via\n   CoEvolutionConfig.budget_split / NEAT+HyperNEAT / QDax numpy\n   scoring path); rejected by mu±lambda and the QDax\n   JAX-native scoring path --
         -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
         -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
     }
@@ -473,6 +428,33 @@ package "deap_pettingzoo.baselines" {
     RecordingController ..> RecordingConfig : reads
     RecordingController ..> UnifiedEvaluator : drives
 
+    class ProbeConfig <<dataclass>> {
+        + enabled: bool
+        + every_n_steps: Optional[int]
+        + n_episodes: int
+        + env_name: Optional[str]
+        + env_config: Optional[Dict]
+        + info_keys: tuple
+        + seed: Optional[int]
+        -- held-out champion probe: off-budget measurement,\n   env-step cadence only (the algorithm-agnostic axis);\n   rows -> <run_dir>/probe.csv --
+    }
+
+    class ProbeController {
+        + enabled: bool
+        + observe(event, champion)
+        + finalize(champion, iteration, env_steps)
+        + flush_to(experiment_logger)
+        --
+        Rides the same _on_progress champion hook as
+        RecordingController. Rolls n_episodes held-out
+        episodes via UnifiedEvaluator (info_keys tracked),
+        writes one probe.csv row per checkpoint; buffers
+        rows when the logger is built late (QDax).
+        Fixed episode seeds per run (CRN across checkpoints).
+    }
+    ProbeController ..> ProbeConfig : reads
+    ProbeController ..> UnifiedEvaluator : drives
+
     class TrainingResult <<dataclass>> {
         + algorithm: str
         + policy: PolicyProtocol
@@ -480,6 +462,8 @@ package "deap_pettingzoo.baselines" {
         + metadata: dict
         + seed: int
         + training_time: float
+        + pareto_front: Optional[list]  ' MO runs (NSGA-II / SPEA2)
+        + hall_of_fame: Optional[list]  ' best-N policies, best first; [0] == policy
     }
 
     class EvalResult <<dataclass>> {
@@ -491,7 +475,9 @@ package "deap_pettingzoo.baselines" {
         + episode_rewards: List[float]
         + episode_lengths: List[int]
         + agent_rewards: Dict[str, float]
+        + info_metrics: Dict[str, List[float]]
         + to_dict() -> dict
+        -- info_metrics: per-episode env-info task metrics\n   (episode-max per key), filled only when the evaluator\n   was built with info_keys --
     }
 
     class ComparisonConfig <<dataclass>> {
@@ -568,12 +554,18 @@ package "deap_pettingzoo.baselines" {
         - phi1: float  ' cognitive coefficient
         - phi2: float  ' social coefficient
         - weight: float  ' inertia weight
-        -- 
-        + __init__(hidden_size, population_size, phi1, phi2, weight, smin, smax, activation, weight_range)
+        - eval_episodes: int  ' CRN episodes averaged per particle/gen
+        --
+        + __init__(hidden_size, population_size, phi1, phi2, weight, smin, smax, activation, weight_range, eval_episodes=1)
         + train(config) -> TrainingResult
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
         - _translate_budget(config) -> dict
+        .. note ..
+        eval_episodes>1 scores every particle on one
+        shared per-gen seed set (CRN) then averages,
+        de-noising fitness in stochastic envs.
+        Champion saved as pso_genome_v1.
     }
 
     class NEATTrainer {
@@ -586,7 +578,11 @@ package "deap_pettingzoo.baselines" {
         + supports_budget_mode(mode) -> bool
         + get_capabilities() -> dict
         - _budget_to_generations(config, pop_size) -> int
-        - _log(config, best_genome, pop_size, elapsed, algorithm) -> None
+        - _log(config, best_genome, pop_size, elapsed, algorithm, logger=None) -> None
+        .. note ..
+        _log reuses the trainer's single run logger
+        (logger=log) so metrics+summary+frames+probe
+        land in ONE run dir with a finalised manifest.
     }
 
     class _RecordingReporter <<neat.reporting.BaseReporter>> {
@@ -603,6 +599,12 @@ package "deap_pettingzoo.baselines" {
         + get_capabilities() -> dict
         + train(config) -> TrainingResult
         - _substrate_to_spec(substrate) -> dict
+        .. note ..
+        algorithm_params.stochastic_head=True routes
+        training+recording through a softmax head
+        (probe+champion stay argmax) so discrete
+        search gets a smooth landscape and agents
+        steer instead of emitting one constant action.
     }
 
     class ESHyperNEATTrainer {
@@ -615,10 +617,14 @@ package "deap_pettingzoo.baselines" {
         # _hpo_population_size: int
         # _evo_every_n_steps: int
         # _mutation_probs: dict
-        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.
+        # _hpo_memories: list  # persistent replay buffer per slot
+        # _hpo_transitions: list[int]  # per-slot warm-up/learn counter
+        # _prober: ProbeController  # held-out champion probe
+        -- AgileRL HPO base.\nThreads progress_callback to the UI.\nFull ExperimentLogger lifecycle:\nper-generation metrics.csv rows,\nsummary.json, agent checkpoint.\nSupports the held-out champion probe.\nReturns the best-ever champion via a\nhall-of-fame (like EATrainer's\ntools.HallOfFame); eval_episodes /\nfinal_eval_episodes / hof_size are\nconfigurable; hof_size > 1 exports top-N.
         + train(config, *, progress_callback) -> TrainingResult
         + describe_hyperparameters() : adds HPO + mutation knobs
-        # _train_one_agent(...) : off-policy replay loop
+        # _build_replay_buffer(agent_ids) : persistent per-slot buffer
+        # _train_one_agent(..., memory, total_transitions) : off-policy\n  replay loop on the persistent per-slot buffer\n  -> (steps, total_transitions)
         # _train_one_agent_on_policy(...) : shared IPPO rollout
         # _prepare_population_build(...) : grouping hook
         # _build_hp_config(spec) -> HyperparameterConfig
@@ -721,11 +727,13 @@ package "deap_pettingzoo.baselines" {
         - env_cache: dict
         - aggregation: str
         - score_agents: Optional[set[str]]
+        - info_keys: tuple
         --
-        + __init__(max_steps, *, aggregation="sum", score_agents=None)
+        + __init__(max_steps, *, aggregation="sum", score_agents=None, info_keys=None)
         + evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
         - _aggregate_reward(agent_rewards) -> float
-        - _run_episode(policy, env, seed) -> (agent_rewards, length)
+        - _run_episode(policy, env, seed) -> (agent_rewards, length, info_metrics)
+        - _track_info_metrics(acc, step_infos)
         + close()
     }
     note bottom of UnifiedEvaluator
@@ -786,7 +794,6 @@ package "deap_pettingzoo.baselines" {
     comparison_mod --> ComparisonConfig : consumes
 
     FeedforwardNeuralPolicy ..|> PolicyProtocol : implements
-    APFEvaderPolicy ..|> PolicyProtocol : implements
 }
 
 ' Cross-package interaction notes
@@ -817,8 +824,9 @@ note bottom of EATrainer
   the parallel path); below nominal when episodes
   truncate early. QDax reports it on the numpy
   scoring path, None on the JAX-native path.
-  budget_on_consumed=True makes EA simple / CMA-ES /
-  PSO run until the real ENV_STEPS budget is spent.
+  budget_on_consumed=True makes EA simple / CMA-ES / PSO /
+  NEAT+HyperNEAT / QDax (numpy path) run until the real
+  ENV_STEPS budget is spent.
 end note
 
 note bottom of GenomePolicyWrapper
@@ -860,22 +868,25 @@ note bottom of registry
   propagate custom envs registered in the main
   process into worker subprocesses. The process pool
   passes them as initializer/initargs to make_executor;
-  SCOOP/Dask have no initializer hook, so trainers also
+  Dask has no initializer hook, so trainers also
   ship the snapshot on each worker spec/payload and the
   worker calls replay_registry_snapshot_once (idempotent,
   guarded once-per-process) before building any env.
   factory must be a picklable callable
   (module-level function / class; not a lambda).
+
+  make_executor resolves the Dask connection as:
+  dask_client > scheduler_address arg > DEAP_DASK_SCHEDULER
+  env var > auto-built local LocalCluster. A remote target
+  (client/address/env var) skips the num_workers<=1 serial
+  fast-path and the os.cpu_count() cap -- explicit remote
+  intent is never silently downgraded or shrunk. On a
+  remote cluster, any executor.map worker fn (not just env
+  factories) resolving to __main__ raises immediately
+  instead of failing opaquely mid-cluster.
 end note
 
-note bottom of openspiel
-  Opt-in; nothing registered on import.
-  Requires `pip install deap-pettingzoo[shimmy]`.
-  Wraps shimmy.OpenSpielCompatibilityV0
-  for OpenSpiel turn-based games.
-end note
-
-package "deap_pettingzoo.contrib.neat" {
+package "deap_pettingzoo.contrib.neat" as neat_pkg {
     class NeatPolicy {
         - _genome: neat.DefaultGenome
         - _config: neat.Config
@@ -891,7 +902,7 @@ package "deap_pettingzoo.contrib.neat" {
         - _substrate: Substrate
         - _network: neat.nn.RecurrentNetwork
         - _activation_steps: int
-        -- CPPN → substrate-query phenotype
+        -- CPPN -> substrate-query phenotype
         + get_action(obs, action_mask=None) -> Any
         + reset() -> None
     }
@@ -899,7 +910,7 @@ package "deap_pettingzoo.contrib.neat" {
     class ESHyperNeatPolicy {
         - _es_params: dict
         - _activation_steps: int
-        -- CPPN → ESNetwork quadtree phenotype
+        -- CPPN -> ESNetwork quadtree phenotype
         + get_action(obs, action_mask=None) -> Any
         + reset() -> None
     }
@@ -930,7 +941,7 @@ package "deap_pettingzoo.contrib.neat" {
     ESHyperNeatSideState --|> NeatSideState
 }
 
-note bottom of "deap_pettingzoo.contrib.neat"
+note bottom of neat_pkg
   Lazy-imported; gated by import neat.
   Requires `pip install deap-pettingzoo[neat]`.
   Vendored pureples core in _pureples/.
@@ -962,6 +973,13 @@ package "deap_pettingzoo.contrib.qdax" {
         + algorithm = "map_elites"
         + train(config): TrainingResult
         -- dispatches to jax scoring\n   when env.api == "jax_parallel",\n   numpy fallback otherwise --
+        .. champion re-selection ..
+        algorithm_params.reeval_top_k>0 re-scores the
+        top-K archive cells on fresh CRN batches
+        (numpy path) and keeps the genuinely-best one,
+        so best_fitness is not an archive max-of-noise.
+        repertoire.pkl saved inside the run dir;
+        metrics.csv env_steps advances per iteration.
     }
 
     class CMAMETrainer {
@@ -1102,9 +1120,13 @@ package "deap_pettingzoo.baselines.coevolution" {
       -- AgileRL HPO champion-as-opponent
       optimizer = "rl_hpo"
       +is_rl_side: bool = True
+      # _replay_slots: list  ' persistent off-policy buffer per slot
+      # _slot_transitions: list[int]  ' per-slot warm-up/learn counter
       + current_pool(): RLPolicyPool
       ' current_pool() returns RLPolicyPool(champion_wrapper) — single policy,
       ' not a list.  No-champion branch returns FrozenPolicyPool([]).
+      ' Off-policy replay buffers persist per population slot across
+      ' generations (owned here, not on the cloned agents).
   }
   class NeatSideState {
       -- optimizer = "neat"
@@ -1120,6 +1142,8 @@ package "deap_pettingzoo.baselines.coevolution" {
   class QDaxSideState {
       -- optimizer = "qdax_map_elites" / "qdax_cma_me"
   }
+
+  class RLPolicyPool {
     - policy: PolicyProtocol
     + update(policy)
     + sample_opponent(rng): PolicyProtocol
@@ -1215,6 +1239,9 @@ package "deap_pettingzoo.baselines.coevolution" {
     +seed: Optional[int]
     +num_workers: int = 1
     +parallel_backend: str = "process"
+    +scheduler_address: Optional[str] = None
+    +budget_split: str = "shared"
+    +on_side_exhausted: str = "freeze"
   }
 
   class CoEvolutionEvaluator {
@@ -1295,6 +1322,12 @@ note bottom of CoEvolutionTrainer
   Honors budget_on_consumed=True (ENV_STEPS): stops when
   the summed per-side real env ticks reach budget_value
   (shared aggregate pool; finish-generation-then-stop).
+  budget_split="per_side" (requires budget_on_consumed)
+  grants each evolving side budget/n slice instead;
+  on_side_exhausted: "freeze" = exhausted side stops
+  evolving but keeps serving its pool (run ends when all
+  slices spent) | "cutoff" = whole run stops at the first
+  exhausted side (pool under-spent).
 end note
 
 ' ---------------- experiment logging ----------------
@@ -1390,8 +1423,8 @@ RunManifest ..> capture_environment_metadata : "fills .environment"
 note bottom of ExperimentLogger
   All baseline trainers use
   baselines._logging_helpers.build_logger()
-  → ExperimentLogger.from_config().
-  When config.output_dir is None →
+  -> ExperimentLogger.from_config().
+  When config.output_dir is None ->
   NoOpLogger (zero disk I/O).
   Backend has no functional dependency
   on artefacts; the analysis & UI
@@ -1410,6 +1443,7 @@ package "deap_pettingzoo.analysis" {
     +trajectories: pd.DataFrame
     +summary: dict
     +algorithm: str
+    +action_mode: Optional[str]
     +env_name: str
     +seed: Optional[int]
     +run_id: str
@@ -1426,6 +1460,10 @@ package "deap_pettingzoo.analysis" {
     comparison_score prefers held-out
     eval_mean_reward; score_provenance tags it
     held_out | training_fitness | training_reward.
+    action_mode resolves from hyperparams then
+    env_config.continuous_actions (works on
+    already-archived runs); surfaced in Browse,
+    summary_table, and the grouped Compare table.
   end note
 
   class Experiment {
@@ -1884,12 +1922,17 @@ package "deap_pettingzoo.service (v0.2+)" #FFF8F0 {
         + build_export_manifest() -> dict
         + create_run_export_zip(run_dir, flags) -> bytes
         + create_experiment_export_zip_generator(...) -> Generator
+        + archive_run_dir(run_dir, remove_source) -> Path
+        + archive_runs_under(root, remove_source) -> List[Path]
         + validate_import_zip(zip, root) -> ImportValidationResult
         + extract_import_zip(zip, root) -> list
         + restore_experiment_to_db(json, dirs, db) -> str
         ' Restores the archived status (completed/failed/cancelled)
         '   + timestamps/error, not always 'completed'; queued/running ->
         '   failed (the original process no longer exists)
+        ' archive_run_dir: on-disk import-ready ZIP of ONE run
+        '   (ALL artifacts incl. checkpoints/videos), optional
+        '   source removal - post-run HPC compression
     }
 }
 

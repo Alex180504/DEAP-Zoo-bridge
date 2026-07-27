@@ -1,0 +1,96 @@
+@startuml environments_registry
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+
+title Environment registry and wrapper
+
+package "deap_pettingzoo.environments" {
+    class PettingZooWrapper {
+        - env
+        + env_name: str
+        + env_spec: EnvSpec
+        + default_episode_len: int
+        + agents: List[str]
+        + num_agents: int
+        --
+        + __init__(env_name, env_config=None, render_mode=None)
+        + reset(seed, options) -> observations
+        + step(actions) -> tuple
+        + observation_space(agent: str) -> Space
+        + action_space(agent: str) -> Space
+        + render() -> np.ndarray
+        + close() -> None
+        + {static} supported_envs() -> List[str]
+    }
+    class EnvSpec <<dataclass>> {
+        + name: str
+        + factory: Any
+        + default_episode_len: int
+        + continuous_default: bool
+        + notes: str
+        + tags: frozenset
+        + api: EnvApi
+        + wrappers: Tuple[Callable, ...]
+        -- api \u2208 {parallel, aec, auto,\n     aec_masked, aec_sequential,\n     jax_parallel} --
+    }
+    class registry <<module>> {
+        + {static} register_env(name, factory, *, api="parallel", wrappers=(), **meta) -> EnvSpec
+        + {static} unregister_env(name): None
+        + {static} get_env_spec(name) -> EnvSpec
+        + {static} is_registered(name) -> bool
+        + {static} list_envs(tag=None, api=None) -> List[str]
+        + {static} build_env(name, env_config, render_mode)
+        + {static} build_env_from_spec(spec: EnvSpec, env_config, render_mode)
+        + {static} get_registry_snapshot() -> List[Tuple[str, EnvSpec]]
+        + {static} replay_registry_snapshot(snapshot: List[Tuple[str, EnvSpec]]) -> None
+        + {static} replay_registry_snapshot_once(snapshot) -> None
+        -- build_env_from_spec: no registry lookup;\n   safe for subprocess workers --\n   build_env applies wrappers\n   left-to-right after api coercion --\n   get_registry_snapshot: ProcessPool uses it as\n   initializer/initargs; Dask ships it on the\n   worker spec and calls replay_registry_snapshot_once\n   (idempotent, guarded once-per-process).\n   Non-picklable factory (lambda/closure/local class)\n   -> RuntimeWarning naming the env + dropped;\n   bare module factory (built-ins) dropped silently. --
+    }
+    class builtin <<module>> {
+        auto-registers MPE2 envs\n+ aquarium_v0 (if installed)
+    }
+
+note bottom of registry
+  EnvSpec.wrappers is an ordered chain
+  of plain (env -> env) callables applied
+  after api coercion. Typical use is
+  composing supersuit transforms
+  (pad_observations_v0, pad_action_space_v0,
+  agent_indicator_v0, ...).
+
+  get_registry_snapshot() + replay_registry_snapshot()
+  propagate custom envs registered in the main
+  process into worker subprocesses. The process pool
+  passes them as initializer/initargs to make_executor;
+  Dask has no initializer hook, so trainers also
+  ship the snapshot on each worker spec/payload and the
+  worker calls replay_registry_snapshot_once (idempotent,
+  guarded once-per-process) before building any env.
+  factory must be a picklable callable
+  (module-level function / class; not a lambda).
+
+  make_executor resolves the Dask connection as:
+  dask_client > scheduler_address arg > DEAP_DASK_SCHEDULER
+  env var > auto-built local LocalCluster. A remote target
+  (client/address/env var) skips the num_workers<=1 serial
+  fast-path and the os.cpu_count() cap — explicit remote
+  intent is never silently downgraded or shrunk. On a
+  remote cluster, any executor.map worker fn (not just env
+  factories) resolving to __main__ raises immediately
+  instead of failing opaquely mid-cluster.
+end note
+}
+
+    PettingZooWrapper ..> registry : resolves env_name
+    registry "1" *-- "*" EnvSpec
+    builtin ..> registry : register_env
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

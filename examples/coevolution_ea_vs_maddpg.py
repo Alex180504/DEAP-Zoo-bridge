@@ -67,11 +67,12 @@ def main() -> None:
         # k_opponents=1 is recommended when an RL side is present:
         # RLPolicyPool is degenerate size-1, so any value > 1 will just
         # resample the same live RL policy each time (no extra diversity).
-        # The hard constraint is num_workers=1, not k_opponents.
         k_opponents=1,
         max_steps_per_episode=25,
-        # num_workers is auto-clamped to 1 when an RL side is present
-        # (with a one-shot RuntimeWarning); leave at default.
+        # num_workers > 1 also works with an RL side: EA generations are
+        # dispatched population-wide with the RL opponent shipped as a
+        # frozen CPU actor snapshot, while RL learning stays in this
+        # process. Kept at the serial default here to keep the demo light.
         seed=42,
     )
 

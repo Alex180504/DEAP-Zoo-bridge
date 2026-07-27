@@ -124,7 +124,7 @@ class TestNumSeedsNotSeed:
     seed was given (ea_trainer.py:446)."""
 
     def test_num_seeds_does_not_affect_seeded_run(self):
-        """Same explicit seed + different num_seeds → identical results."""
+        """Same explicit seed + different num_seeds -> identical results."""
         trainer = EATrainer(hidden_size=8, population_size=6)
 
         def _run(ns):

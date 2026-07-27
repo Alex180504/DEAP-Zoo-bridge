@@ -3,10 +3,10 @@
 Primary use case: let numpy / torch trainers (``EATrainer``,
 ``CMAESTrainer``, ``AgileRLTrainer``) drive environments from
 `JaxMARL <https://github.com/FLAIROx/JaxMARL>`_ without changing any
-downstream code.  Per-step numpy<->JAX marshalling is applied, which
-makes this adapter intentionally *slow* (roughly at the speed of a
-native PettingZoo MPE env); the fast QDax training path bypasses this
-adapter entirely via :mod:`deap_pettingzoo.contrib.qdax.scoring_jax`.
+downstream code.  Per-step numpy<->JAX orchestration is applied, which
+makes this adapter *slow* (roughly at the speed of a native PettingZoo MPE env);
+the fast QDax training path bypasses this adapter entirely via
+:mod:`deap_pettingzoo.contrib.qdax.scoring_jax`.
 
 The adapter expects the underlying env to satisfy :class:`JaxEnvProtocol`
 (a structural type modelled after the JaxMARL ``MultiAgentEnv`` API).
@@ -95,7 +95,7 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
         merged.setdefault("is_parallelizable", True)
         self.metadata = merged
 
-    # -- Space exposure -----------------------------------------------------
+    # Space exposure
 
     def observation_space(self, agent: str):
         return self._env.observation_space(agent)
@@ -103,7 +103,7 @@ class JaxEnvToPettingZooAdapter(ParallelEnv):
     def action_space(self, agent: str):
         return self._env.action_space(agent)
 
-    # -- Lifecycle ----------------------------------------------------------
+    # Lifecycle
 
     def reset(
         self,

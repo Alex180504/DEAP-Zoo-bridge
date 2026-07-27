@@ -53,7 +53,7 @@ class NeatSideState(SideState):
       genome config (overrides default 0 which means no hidden nodes
       initially; NEAT will add nodes via mutation regardless).
     * ``seed`` (int or None).
-    * ``neat_config_overrides`` (dict) — section→key→value dict merged
+    * ``neat_config_overrides`` (dict) — section->key->value dict merged
       into :func:`build_neat_config`.
     * ``eval_episodes_per_genome`` (int, default 1).
     * ``n_generations_per_step`` (int, default 1) — how many NEAT
@@ -79,9 +79,7 @@ class NeatSideState(SideState):
         self._genomes_by_id: Dict[int, neat.DefaultGenome] = {}
         self._best_genome: Optional[neat.DefaultGenome] = None
 
-    # ------------------------------------------------------------------
     # SideState protocol
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -254,9 +252,7 @@ class NeatSideState(SideState):
             raise RuntimeError("NeatSideState: no best genome available.")
         return self._best_genome
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     def _update_best(self) -> None:
         """Update the cached best genome from the current population."""
@@ -275,16 +271,14 @@ class NeatSideState(SideState):
             self._best_genome = next(iter(self._genomes_by_id.values()))
 
 
-# ---------------------------------------------------------------------------
 # Internal pool implementation
-# ---------------------------------------------------------------------------
 
 
 class _NeatPopulationPool(OpponentPool):
     """Population-pool adapter for NEAT genomes.
 
     Satisfies :class:`OpponentPool` by holding a ``dict`` of
-    ``genome_id → genome`` and a policy factory.
+    ``genome_id -> genome`` and a policy factory.
 
     For parallel evaluation, :meth:`snapshot_opponents` produces
     :class:`OpponentSnapshot` items with kind ``"neat"`` so workers can
@@ -351,9 +345,7 @@ class _NeatPopulationPool(OpponentPool):
         return len(self._genomes)
 
 
-# ---------------------------------------------------------------------------
 # RNG isolation helpers
-# ---------------------------------------------------------------------------
 
 import random as _random
 

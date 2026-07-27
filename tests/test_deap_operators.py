@@ -36,13 +36,11 @@ def genome_config():
 
 @pytest.mark.parametrize(
     "method",
-    ["tournament", "roulette", "best", "random", "sus", "double_tournament"],
+    ["tournament", "roulette", "best", "random", "sus"],
 )
 def test_selection_method_dispatch(evaluator, genome_config, method):
     """Every supported selection method must produce a working toolbox."""
     cfg: dict = {"method": method, "tournament_size": 3}
-    if method == "double_tournament":
-        cfg.update({"fitness_size": 2, "parsimony_size": 3})
     toolbox = create_toolbox(
         genome_config=genome_config,
         evaluator=evaluator,
@@ -173,64 +171,8 @@ def test_default_methods_backwards_compatible(evaluator, genome_config):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.2 — Advanced selection operator tests
+# Advanced selection operator tests
 # ---------------------------------------------------------------------------
-
-
-class TestDoubleTournamentSelection:
-    """Double-tournament uses genome.get_weight_count() as parsimony."""
-
-    def test_favours_smaller_networks(self, evaluator, genome_config):
-        setup_deap_creators()
-        toolbox = create_toolbox(
-            genome_config=genome_config,
-            evaluator=evaluator,
-            selection_config={
-                "method": "double_tournament",
-                "fitness_size": 3,
-                "parsimony_size": 5,
-            },
-        )
-        pop = toolbox.population(n=12)
-        # Give half a fitness advantage; double-tournament with
-        # fitness_first=True should select fit individuals with
-        # small networks.  Inflate the LESS fit half so the
-        # fitness tournament reliably picks the fitter (smaller) ones.
-        for i, ind in enumerate(pop):
-            ind.fitness.values = (1.0,)
-            if i >= 6:
-                _orig_wc = ind.genome.get_weight_count
-                ind.genome.get_weight_count = lambda _orig=_orig_wc: _orig_wc() * 10
-
-        chosen = toolbox.select(pop, k=4)
-        assert len(chosen) == 4
-        # At least half of the selected should be non-inflated.
-        small_count = sum(
-            1 for ind in chosen
-            if ind.genome.get_weight_count() < 500
-        )
-        assert small_count >= 2
-
-    def test_fitness_first_false(self, evaluator, genome_config):
-        """Parsimony-first mode selects small networks first, then fit among them."""
-        setup_deap_creators()
-        toolbox = create_toolbox(
-            genome_config=genome_config,
-            evaluator=evaluator,
-            selection_config={
-                "method": "double_tournament",
-                "fitness_size": 2,
-                "parsimony_size": 3,
-                "fitness_first": False,
-            },
-        )
-        pop = toolbox.population(n=8)
-        for ind in pop:
-            ind.fitness.values = (0.0,)
-        chosen = toolbox.select(pop, k=3)
-        assert len(chosen) == 3
-        for ind in chosen:
-            assert hasattr(ind, "genome")
 
 
 class TestLexicaseSelection:

@@ -2,11 +2,12 @@
 AgileRL <-> PettingZoo adapter utilities.
 
 Provides helpers to:
+
 - Build a raw PettingZoo parallel environment compatible with AgileRL's
   multi-agent training APIs (reset -> (obs, info), step -> 5-tuple).
 - Build a vectorized PettingZoo environment via AgileRL's
-    :class:`AsyncPettingZooVecEnv` for AgileRL trainers that opt into
-    ``num_envs > 1``.
+  :class:`AsyncPettingZooVecEnv` for AgileRL trainers that opt into
+  ``num_envs > 1``.
 - Extract per-agent observation/action spaces as the list-aligned structure
   AgileRL constructors expect (works for both single and vec envs).
 - Translate a :class:`BudgetMode` to an environment-step budget.
@@ -65,8 +66,7 @@ def build_vec_parallel_env(
     Workers run in subprocesses (``multiprocessing``); per-env auto-reset
     on episode end is handled inside the worker. Observations, rewards
     and termination/truncation flags returned from ``reset``/``step``
-    have a leading ``num_envs`` axis (i.e. ``obs[a].shape ==
-    (num_envs, *single_obs_shape)``).
+    have a leading ``num_envs`` axis (i.e. ``obs[a].shape == (num_envs, *single_obs_shape)``).
 
     Args:
         env_name: Registered PettingZoo environment name.
@@ -173,7 +173,7 @@ def translate_budget_to_env_steps(
         f"AgileRL trainers cannot translate budget mode {mode} to env steps. "
         "Use BudgetMode.ENV_STEPS or BudgetMode.EVAL_EPISODES; "
         "BudgetMode.GENERATIONS is supported only by the population trainers "
-        "(EA / CMA-ES / PSO / co-evolution / QDax)."
+        "(EA / CMA-ES / PSO / co-evolution / QDax / NEAT / HyperNEAT)."
     )
 
 

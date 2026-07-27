@@ -1,4 +1,4 @@
-"""Tests for the Phase 2 service package: models, db, runner, dispatcher, app.
+"""Tests for the service business logic: models, db, runner, dispatcher, app.
 
 Requires the ``fastapi``, ``pydantic``, ``httpx``, and ``uvicorn`` packages.
 These are part of the ``[service]`` extra and are installed in the dev venv.
@@ -381,7 +381,7 @@ class TestRunner:
         assert result_file.exists()
         result = json.loads(result_file.read_text())
         assert result["status"] == "completed"
-        # output_dir is None → run_dirs may be empty; run_dir is None since
+        # output_dir is None -> run_dirs may be empty; run_dir is None since
         # the spec didn't set an output_dir. That's normal for no-disk-output runs.
 
     def test_hpo_algorithm_validates_and_splits_params(self):

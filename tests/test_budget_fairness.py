@@ -363,8 +363,10 @@ class TestConsumedStepBudgeting:
         assert result.metrics["num_generations"] == 2
 
 
-class TestConsumedStepBudgetingRejection:
-    """Trainers / strategies that can't honor ``budget_on_consumed`` reject it."""
+class TestConsumedStepBudgetingSupport:
+    """Per-trainer ``budget_on_consumed`` contract: co-evolution, NEAT, and
+    QDax (numpy scoring path) honor it; the DEAP built-in EA strategies
+    (fixed-``ngen`` loops) reject it."""
 
     def _env_steps_config(self):
         return TrainingConfig(
@@ -455,19 +457,143 @@ class TestConsumedStepBudgetingRejection:
         assert consumed <= budget + 100
         assert result.metrics["num_generations"] >= 1
 
-    def test_neat_rejects(self):
+    def test_coevolution_qdax_side_consumed_budget(self):
+        """A QDax side participates in the shared consumed-step pool.
+
+        The overshoot bound is the same finish-generation-then-stop bound
+        as every other side type: one generation's pooled cost, which for
+        the QDax side includes one full batch of episodes.
+        """
+        pytest.importorskip("qdax")
+        import jax.numpy as jnp
+
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        def _descriptor(trajectory):
+            return jnp.mean(trajectory["positions"], axis=(0, 1))
+
+        _descriptor.min_bd = (-1.0, -1.0)
+        _descriptor.max_bd = (1.0, 1.0)
+        _descriptor.output_shape = (2,)
+
+        batch = 4
+        pop = 4
+        max_steps = 25
+        budget = 1_000
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(
+                    name="pursuers",
+                    role_prefixes=("adversary",),
+                    optimizer="qdax_map_elites",
+                    optimizer_config={
+                        "batch_size": batch,
+                        "grid_shape": (2, 2),
+                        "episode_length": max_steps,
+                        "descriptor_fn": _descriptor,
+                    },
+                ),
+                Side(
+                    name="evaders",
+                    role_prefixes=("agent",),
+                    optimizer="ea",
+                    optimizer_config={"population_size": pop},
+                ),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=max_steps,
+            seed=11,
+        )
+        config = TrainingConfig(
+            env_name="simple_tag_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": max_steps},
+            coevolution_config=coev_cfg,
+            budget_on_consumed=True,
+        )
+        result = CoEvolutionTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        # Overshoot <= one generation's pooled cost: the QDax batch
+        # (batch x k x max_steps) plus the EA side (pop x k x max_steps).
+        assert consumed <= budget + (batch + pop) * max_steps
+        assert result.metrics["num_generations"] >= 1
+
+    def test_neat_honors_consumed_budget(self):
+        """NEAT steps n=1 generations until the real budget is exhausted."""
         pytest.importorskip("neat")
         from deap_pettingzoo.contrib.neat.trainer import NEATTrainer
 
-        with pytest.raises(ValueError, match="budget_on_consumed"):
-            NEATTrainer().train(self._env_steps_config())
+        pop = 6
+        budget = 2_000
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            max_steps_per_episode=200, seed=0,
+            budget_on_consumed=True,
+            algorithm_params={"pop_size": pop, "eval_episodes_per_genome": 1},
+        )
+        result = NEATTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        # Overshoot at most one generation: pop genomes x 25 real cycles.
+        assert consumed <= budget + pop * 25
+        # Realized generations exceed the nominal derivation (2000 / (6*200)
+        # rounds to 2) because episodes truncate at 25 of 200 nominal steps.
+        nominal_gens = derive_generations(budget, pop, 200)
+        assert result.metrics["final_generation"] > nominal_gens
 
-    def test_qdax_rejects(self):
+    def test_qdax_honors_consumed_budget_numpy_path(self):
+        """MAP-Elites iterates until the scoring counter hits the budget."""
         pytest.importorskip("qdax")
+        import jax.numpy as jnp
+
         from deap_pettingzoo.contrib.qdax.trainer import MAPElitesTrainer
 
-        with pytest.raises(ValueError, match="budget_on_consumed"):
-            MAPElitesTrainer().train(self._env_steps_config())
+        def _descriptor(trajectory):
+            return jnp.mean(trajectory["positions"], axis=(0, 1))
+
+        _descriptor.min_bd = (-1.0, -1.0)
+        _descriptor.max_bd = (1.0, 1.0)
+        _descriptor.output_shape = (2,)
+
+        batch = 8
+        budget = 3_000
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            max_steps_per_episode=200,  # nominal; env truncates at 25
+            seed=0,
+            budget_on_consumed=True,
+            algorithm_params={
+                "descriptor_fn": _descriptor,
+                "batch_size": batch,
+                "init_batch_size": batch,
+                "grid_shape": (4, 4),
+                "save_repertoire": False,
+                "verbose": False,
+                "num_workers": 1,
+            },
+        )
+        result = MAPElitesTrainer().train(config)
+        consumed = result.metrics["env_steps_consumed"]
+        assert isinstance(consumed, int)
+        assert consumed >= budget
+        # Overshoot at most one iteration: batch genotypes x 25 real cycles.
+        assert consumed <= budget + batch * 25
+        # Realized iterations exceed the nominal derivation (which prices
+        # each episode at the 200-step nominal cap).
+        assert result.metrics["num_iterations"] > 1
 
 
 class TestCoevolutionRealSteps:
@@ -599,6 +725,127 @@ class TestRLHPOReporting:
         )
         # Real steps must be greater than evo_every alone (includes eval steps).
         assert g1 > evo_every, f"gen1 env_steps={g1} should exceed evo_every={evo_every}"
+
+
+class TestPerSideBudgetSplit:
+    """``CoEvolutionConfig.budget_split='per_side'`` — equal consumed-step
+    slices per evolving side, with ``on_side_exhausted`` deciding whether an
+    exhausted side freezes (run continues) or cuts the whole run off."""
+
+    @staticmethod
+    def _coev_cfg(schedule="synchronous", **kwargs):
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionConfig
+
+        # Asymmetric populations: side "b" evaluates twice as many episodes
+        # per generation as side "a", so it drains its slice ~2x faster.
+        return CoEvolutionConfig(
+            mode="competitive_2pop",
+            schedule=schedule,
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 8}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=11,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _train_cfg(coev_cfg, budget, budget_on_consumed=True):
+        return TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            coevolution_config=coev_cfg,
+            budget_on_consumed=budget_on_consumed,
+        )
+
+    def test_invalid_budget_split_rejected(self):
+        with pytest.raises(ValueError, match="budget_split"):
+            self._coev_cfg(budget_split="equal")
+
+    def test_invalid_exhausted_policy_rejected(self):
+        with pytest.raises(ValueError, match="on_side_exhausted"):
+            self._coev_cfg(budget_split="per_side", on_side_exhausted="stop")
+
+    def test_per_side_requires_consumed_budget(self):
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        coev_cfg = self._coev_cfg(budget_split="per_side")
+        config = self._train_cfg(coev_cfg, budget=1200, budget_on_consumed=False)
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            CoEvolutionTrainer().train(config)
+
+    def test_freeze_equalizes_per_side_consumption(self):
+        """freeze: every side spends its full slice; the fast-draining side
+        realizes fewer generations but the same env steps."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200  # share = 600/side; a ~100/gen, b ~200/gen
+        coev_cfg = self._coev_cfg(budget_split="per_side", on_side_exhausted="freeze")
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        # Both sides spend their slice; overshoot <= one own generation.
+        assert per_side["a"] >= share
+        assert per_side["a"] <= share + 4 * 25
+        assert per_side["b"] >= share
+        assert per_side["b"] <= share + 8 * 25
+        # The fast-draining side froze earlier in generation terms.
+        hist = result.metrics["per_side_history"]
+        assert len(hist["b"]) < len(hist["a"])
+
+    def test_cutoff_stops_at_first_exhausted_side(self):
+        """cutoff: the run ends when the fast-draining side exhausts; the
+        slow side is left under its slice and the pool is under-spent."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200
+        coev_cfg = self._coev_cfg(budget_split="per_side", on_side_exhausted="cutoff")
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        assert per_side["b"] >= share, "fast side must have exhausted its slice"
+        assert per_side["a"] < share, "slow side must be cut off under its slice"
+        assert result.metrics["env_steps_consumed"] < budget
+
+    def test_freeze_alternating_schedule(self):
+        """The alternating schedule honors per-side slices too."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 1200
+        coev_cfg = self._coev_cfg(
+            schedule="alternating",
+            budget_split="per_side",
+            on_side_exhausted="freeze",
+        )
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        assert per_side["a"] >= share
+        assert per_side["b"] >= share
+        assert per_side["a"] <= share + 4 * 25
+        assert per_side["b"] <= share + 8 * 25
+
+    def test_shared_default_unchanged(self):
+        """Default budget_split='shared' keeps the pooled semantics."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 600
+        coev_cfg = self._coev_cfg()  # defaults: shared
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+        consumed = result.metrics["env_steps_consumed"]
+        assert consumed >= budget
+        # Overshoot <= one pooled generation (a 100 + b 200).
+        assert consumed <= budget + 300
 
 
 class TestNeatRealSteps:

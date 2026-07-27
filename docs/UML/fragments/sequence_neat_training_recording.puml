@@ -1,0 +1,55 @@
+@startuml neat_training_recording
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title NEAT training (3/3) — recording pipeline
+
+participant "NEATTrainer" as Trainer
+participant "ExperimentLogger" as EL
+participant "FrameRecorder" as FR
+participant "UnifiedEvaluator" as UE
+participant "_RecordingReporter" as RR
+participant "neat.Population" as Pop
+
+== Recording setup (if config.recording.enabled) ==
+Trainer -> EL: build_logger(config, algorithm="neat")
+Trainer -> EL: get_frame_recorder(fps, fmt, ...)
+EL -> FR: FrameRecorder(run_dir/'frames', ...)
+FR --> EL: recorder
+Trainer -> UE: UnifiedEvaluator(max_steps=500, frame_recorder=recorder)
+activate UE
+
+Trainer -> Pop: neat.Population(config, seed)
+activate Pop
+
+Trainer -> RR: _RecordingReporter(record_fn)
+Trainer -> Pop: add_reporter(recording_reporter)
+
+== Recording: champion rollout (RecordingController decides per mode) ==
+alt recording enabled
+    loop generation g where g > 0
+        Pop -> RR: post_evaluate(config, pop, species, best_genome)
+        RR -> RR: _record_fn(g, best_genome) -> RecordingController.observe(ProgressEvent(g), champion)
+        RR -> UE: (when due) evaluate(policy=NeatPolicy(best_genome),\n  env_name, num_episodes=1, iteration=g, env_steps)
+        UE -> FR: start_episode()
+        loop rollout steps
+            UE -> UE: env.render('rgb_array')
+            UE -> FR: add_frame(frame)
+            UE -> UE: env.step(actions)
+        end
+        UE -> FR: end_episode()
+        FR -> FR: imwrite(train_episode_{g:04d}.mp4)
+    end
+end
+
+Trainer -> UE: close()
+Trainer -> EL: close()
+
+note over Trainer
+  Fragment of <i>sequence_neat_training.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

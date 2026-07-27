@@ -1,4 +1,4 @@
-"""PSO coevolution smoke test (Phase 1.4)."""
+"""PSO coevolution smoke test."""
 import pytest
 
 pytest.importorskip("deap")

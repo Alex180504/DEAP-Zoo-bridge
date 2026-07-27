@@ -2,10 +2,11 @@
 
 Runs a tiny EA on ``simple_spread_v3`` twice — once serial, once with
 a 4-worker process pool — and prints the best fitness and wall-clock
-time for each. With ``algorithm_params["seed"]`` set, the per-individual
-evaluation seeds are deterministic, so the **fitness arrays match
-bit-for-bit** between the two runs (any divergence in the final
-champion comes from DEAP's unseeded selection / mutation / crossover).
+time for each. With ``seed`` defined in :class:`TrainingConfig`, global RNG
+seeding is enabled (Python's ``random``, NumPy, and PyTorch), so the
+per-individual evaluation seeds are deterministic and DEAP's selection /
+mutation / crossover operators are reproducible. The **fitness arrays and
+final champion policy match bit-for-bit** between the two runs.
 
 Usage:
     python examples/parallel_ea_demo.py
@@ -29,7 +30,7 @@ def _run(num_workers: int) -> tuple[float, float]:
         env_name="simple_spread_v3",
         budget_mode=BudgetMode.EVAL_EPISODES,
         budget_value=64,  # 16 generations * 4 individuals
-        seed=0,
+        seed=42,
         # Each invocation gets its own subdir so the UI shows two
         # comparable runs (serial vs process-pool).
         output_dir=OUTPUT_ROOT / f"workers_{num_workers}",
@@ -60,9 +61,8 @@ def main() -> None:
     print()
     print(f"Speedup: {t1 / t4:.2f}x")
     print(
-        "Note: differences in `final_fitness` come from DEAP's unseeded "
-        "selection/mutation operators, not from evaluation noise — "
-        "per-individual eval seeds are deterministic."
+        "Both runs use global RNG seeding (seed=42), so fitness values and "
+        "final champion policy should match bit-for-bit."
     )
 
 

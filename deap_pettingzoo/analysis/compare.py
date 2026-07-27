@@ -1,6 +1,6 @@
 """Pairwise comparison utilities.
 
-All functions accept two 1-D samples and return a small dataclass-like
+All functions accept two 1-D samples and return a small dataclass
 :class:`dict`. The non-parametric helpers (:func:`mann_whitney`,
 :func:`cliffs_delta`) are pure-numpy implementations so they work
 without ``scipy``; :func:`welch_t` lazy-imports ``scipy.stats`` and

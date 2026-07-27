@@ -1,4 +1,4 @@
-"""Tests for PSO integration (Phase 1.4)."""
+"""Tests for PSO integration."""
 import pytest
 import numpy as np
 from deap import creator

@@ -37,12 +37,12 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
         "algos": spec.get("algorithms", []),
     }
 
-    # env_config → env_values
+    # env_config -> env_values
     env_config = spec.get("env_config") or {}
     if isinstance(env_config, dict):
         form["env_values"] = dict(env_config)
 
-    # hyperparameters → algo_values
+    # hyperparameters -> algo_values
     hyperparams = spec.get("hyperparameters") or {}
     if isinstance(hyperparams, dict):
         form["algo_values"] = {
@@ -103,7 +103,7 @@ def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:
             "sides": coev.get("sides", []),
         }
 
-    # raw_config → raw_text (the free-form YAML/JSON overlay)
+    # raw_config -> raw_text (the free-form YAML/JSON overlay)
     raw_config = spec.get("raw_config") or {}
     if isinstance(raw_config, dict) and raw_config:
         import json

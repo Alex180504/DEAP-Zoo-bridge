@@ -62,7 +62,7 @@ def derive_generations(
     whenever the request is too small to fund more than a single generation.
     Without that signal an "equal budget" EA-vs-RL comparison can silently
     collapse the EA to its random initial population and report a misleading
-    "EA lost"..
+    "EA lost".
 
     Args:
         budget_steps: Total budget, in the same unit as ``pop * max_steps``.
@@ -97,39 +97,12 @@ def derive_generations(
     return generations
 
 
-def reject_consumed_budgeting(config: "TrainingConfig", trainer_label: str) -> None:
-    """Raise when opt-in consumed-step budgeting is requested but unsupported.
-
-    The ``budget_on_consumed`` flag is honoured by: EA ``simple``, CMA-ES,
-    PSO, and co-evolution (shared aggregate pool across all sides). The DEAP
-    built-in EA strategies (``mu_plus_lambda`` / ``mu_comma_lambda``), QDax,
-    and NEAT/HyperNEAT standalone trainers reject the flag with a clear
-    message rather than silently ignoring it.
-
-    Args:
-        config: The training configuration to inspect.
-        trainer_label: Human-readable trainer name for the error message.
-
-    Raises:
-        ValueError: If ``config.budget_on_consumed`` is set while
-            ``config.budget_mode == BudgetMode.ENV_STEPS`` (the only mode the
-            flag would affect).
-    """
-    if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
-        raise ValueError(
-            f"{trainer_label} does not support budget_on_consumed=True "
-            "(consumed-step budgeting). It is supported only by the EA "
-            "'simple' strategy, CMA-ES, and PSO. Use budget_on_consumed=False "
-            "or BudgetMode.GENERATIONS."
-        )
-
-
 class RecordingMode(str, Enum):
     """Champion-rollout recording cadence policy (algorithm-agnostic).
 
     The cadence is expressed once, in terms every trainer shares — the
     normalized training progress (:attr:`ProgressEvent.fraction`) and the
-    cumulative env-step count (:attr:`ProgressEvent.env_steps`) — so EA
+    cumulative env-step count (:attr:`ProgressEvent.env_steps`), so EA
     "generations" and RL "iterations" behave identically.
 
     * ``COUNT`` — record :attr:`RecordingConfig.max_recordings` videos spread
@@ -232,6 +205,58 @@ class RecordingConfig:
             raise ValueError(
                 "RecordingConfig.mode='interval' requires every_n_steps to be set."
             )
+
+
+@dataclass
+class ProbeConfig:
+    """Opt-in periodic held-out evaluation nested on :class:`TrainingConfig`.
+
+    When ``enabled=True``, supported trainers evaluate a frozen snapshot of
+    the current champion for :attr:`n_episodes` episodes every
+    :attr:`every_n_steps` cumulative env steps and append one row per probe
+    to ``<run_dir>/probe.csv`` (columns: ``iteration``, ``env_steps``,
+    ``probe_reward_mean/std``, ``probe_episodes``, plus
+    ``probe_<key>_mean/std`` per :attr:`info_keys` entry). Probe episodes are
+    *measurement*, not training: they run on a separate env instance and are
+    never counted against the training budget, so equal-budget comparisons
+    stay fair when probing is enabled uniformly across algorithms.
+
+    Attributes:
+        enabled: Master on/off switch.
+        every_n_steps: Env-step interval between probes. The first probe
+            fires on the first progress event (baseline point) and a final
+            probe is guaranteed at end of run. Required when ``enabled``.
+        n_episodes: Episodes per probe; the row carries mean/std over these.
+        env_name: Probe env override; ``None`` uses the training env.
+        env_config: Probe env-config override; ``None`` uses the training
+            env config (only consulted when it is not ``None`` — pass ``{}``
+            to force an empty config alongside ``env_name``).
+        info_keys: Env ``info`` dict keys tracked as task metrics. Each key
+            is aggregated per episode as the max of ``float(info[key])``
+            over all steps and agents (the running-total convention used by
+            counters like ``prey_lost_total``).
+        seed: Base seed for probe episodes; ``None`` leaves them unseeded.
+    """
+
+    enabled: bool = False
+    every_n_steps: Optional[int] = None
+    n_episodes: int = 16
+    env_name: Optional[str] = None
+    env_config: Optional[Dict[str, Any]] = None
+    info_keys: tuple = ()
+    seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.enabled and (self.every_n_steps is None or self.every_n_steps <= 0):
+            raise ValueError(
+                "ProbeConfig.enabled=True requires a positive every_n_steps, "
+                f"got {self.every_n_steps}"
+            )
+        if self.n_episodes <= 0:
+            raise ValueError(
+                f"ProbeConfig.n_episodes must be positive, got {self.n_episodes}"
+            )
+        self.info_keys = tuple(self.info_keys)
 
 
 @dataclass
@@ -379,19 +404,33 @@ class TrainingConfig:
             trainer-constructor value is used only when this is left at the
             default of ``1``.
         parallel_backend: Executor backend for parallel evaluation — one of
-            ``"process"`` / ``"scoop"`` / ``"dask"``. The trainer-constructor
+            ``"process"`` / ``"dask"``. The trainer-constructor
             value is used only when this is left at the default ``"process"``.
+        scheduler_address: Remote Dask scheduler for the ``"dask"`` backend —
+            a ``tcp://host:port`` URL or a scheduler-file path. ``None``
+            (default) auto-builds a local cluster, unless the
+            ``DEAP_DASK_SCHEDULER`` environment variable supplies an address.
+            When a remote scheduler is in play, ``num_workers`` is advisory
+            metadata (the cluster decides the real worker count) and the
+            serial fast-path is skipped. Requires
+            ``parallel_backend == "dask"``. The trainer-constructor value is
+            used only when this is left at the default ``None``.
         budget_on_consumed: Opt-in. When ``True`` *and*
-            ``budget_mode == BudgetMode.ENV_STEPS``, the manual-loop trainers
-            (EA ``simple``, CMA-ES, PSO) run until the *real* consumed env-step
-            budget is exhausted instead of a precomputed generation count. This
-            trades the exact/deterministic generation count of nominal
-            budgeting for a real-tick budget (the realized generation count
-            then depends on how early episodes truncate). Default ``False``
-            (nominal/deterministic budgeting). Has no effect under
-            other budget modes, and is rejected (``ValueError``) by trainers /
-            strategies that cannot honor it: EA ``mu_plus_lambda`` /
-            ``mu_comma_lambda``, QDax, co-evolution, and NEAT.
+            ``budget_mode == BudgetMode.ENV_STEPS``, the trainer runs until
+            the *real* consumed env-step budget is exhausted instead of a
+            precomputed generation count. This trades the
+            exact/deterministic generation count of nominal budgeting for a
+            real-tick budget (the realized generation count then depends on
+            how early episodes truncate). Default ``False``
+            (nominal/deterministic budgeting). Honoured by EA ``simple``,
+            CMA-ES, PSO, ``CoEvolutionTrainer`` (shared consumed-step pool
+            across all sides), NEAT/HyperNEAT/ES-HyperNEAT, and the QDax
+            trainers on the numpy/PettingZoo scoring path. Has no effect
+            under other budget modes. Rejected (``ValueError``) only where
+            a real per-tick counter is structurally unavailable: the DEAP
+            built-in EA strategies ``mu_plus_lambda`` / ``mu_comma_lambda``
+            (fixed-``ngen`` DEAP loop) and the QDax JAX-native scoring path
+            (rollouts run inside ``jax.jit``/``vmap``).
     """
 
     env_name: str
@@ -408,8 +447,10 @@ class TrainingConfig:
     render: bool = False
     num_workers: int = 1
     parallel_backend: str = "process"
+    scheduler_address: Optional[str] = None
     budget_on_consumed: bool = False
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    probe: ProbeConfig = field(default_factory=ProbeConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
 
     def __post_init__(self):
@@ -429,6 +470,14 @@ class TrainingConfig:
             raise ValueError(
                 f"Unknown parallel_backend {self.parallel_backend!r}. "
                 f"Expected one of {SUPPORTED_BACKENDS}."
+            )
+        # Empty/whitespace scheduler addresses (e.g. a cleared UI field) mean "unset".
+        if self.scheduler_address is not None:
+            self.scheduler_address = str(self.scheduler_address).strip() or None
+        if self.scheduler_address is not None and self.parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={self.scheduler_address!r} requires "
+                f"parallel_backend='dask', got {self.parallel_backend!r}."
             )
         if isinstance(self.budget_mode, str):
             self.budget_mode = BudgetMode(self.budget_mode)
@@ -502,6 +551,14 @@ class TrainingResult:
         pareto_front: For multi-objective runs (NSGA-II / SPEA2), the
             nondominated individuals from the final population.
             ``None`` for single-objective runs.
+        hall_of_fame: Best-ever policies, best first, from the hall-of-fame
+            trainers (EA, CMA-ES, PSO, ``EvolveHPOTrainer``). Length is
+            ``hof_size`` (default 1, so a single-element ``[policy]``);
+            ``hall_of_fame[0] is policy``. ``None`` for trainers that keep no
+            hall-of-fame (non-HPO AgileRL, NEAT, QDax, co-evolution) and for
+            multi-objective EA runs (which export ``pareto_front`` instead).
+            In-memory only (not serialized); disk checkpoints of the top-N
+            members are written to the run directory.
     """
 
     algorithm: str
@@ -511,6 +568,7 @@ class TrainingResult:
     seed: Optional[int] = None
     training_time: Optional[float] = None
     pareto_front: Optional[List[Any]] = None
+    hall_of_fame: Optional[List[PolicyProtocol]] = None
 
     @property
     def best_policy(self) -> PolicyProtocol:
@@ -534,6 +592,10 @@ class EvalResult:
             the per-agent decomposition that ``mean_reward`` collapses to
             a single team scalar (degenerate on zero-sum competitive
             envs); empty for legacy callers that did not record it.
+        info_metrics: Per-episode task-metric values keyed by env ``info``
+            key, tracked only when the evaluator was built with
+            ``info_keys`` (episode value = max of ``float(info[key])``
+            over all steps and agents). Empty otherwise.
     """
 
     mean_reward: float
@@ -544,6 +606,7 @@ class EvalResult:
     episode_rewards: List[float] = field(default_factory=list)
     episode_lengths: List[int] = field(default_factory=list)
     agent_rewards: Dict[str, float] = field(default_factory=dict)
+    info_metrics: Dict[str, List[float]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -556,6 +619,10 @@ class EvalResult:
             "episode_rewards": [float(r) for r in self.episode_rewards],
             "episode_lengths": [int(l) for l in self.episode_lengths],
             "agent_rewards": {str(k): float(v) for k, v in self.agent_rewards.items()},
+            "info_metrics": {
+                str(k): [float(v) for v in vals]
+                for k, vals in self.info_metrics.items()
+            },
         }
 
 
@@ -572,7 +639,7 @@ class ComparisonConfig:
         eval_episodes: Number of episodes for final evaluation.
         env_config: Environment configuration dict threaded into **both**
             training and the held-out evaluation so every backend trains and is
-            scored on the identical environment (F-3.3-02). Catalog defaults
+            scored on the identical environment. Catalog defaults
             fill in the rest via :func:`build_configs`.
         max_steps_per_episode: Per-episode step cap for the held-out evaluator.
             A first-class field (previously mis-read from the per-algorithm
@@ -642,11 +709,18 @@ class BaselineTrainer(ABC):
         this ``event`` warrants a champion-rollout recording. ``champion`` is
         called lazily (only when a recording is actually due) and returns the
         policy (or per-agent policy map) to roll out, or ``None`` to skip.
+
+        A :class:`~deap_pettingzoo.baselines.probing.ProbeController` set as
+        ``self._prober`` is observed the same way, so any trainer that feeds
+        its champion through this hook supports periodic held-out probes.
         """
         self._emit_progress(callback, event)
         recorder = getattr(self, "_recorder", None)
         if recorder is not None and champion is not None:
             recorder.observe(event, champion, extra=extra)
+        prober = getattr(self, "_prober", None)
+        if prober is not None and champion is not None:
+            prober.observe(event, champion, extra=extra)
 
     @staticmethod
     def _emit_progress(

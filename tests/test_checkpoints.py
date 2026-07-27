@@ -26,7 +26,9 @@ from deap_pettingzoo.analysis.policies import (
 from deap_pettingzoo.genomes.fixed_topology import FixedTopologyGenome
 from deap_pettingzoo.utils.logging import (
     KIND_COEVOLUTION,
+    KIND_PSO_GENOME,
     KIND_QDAX_REPERTOIRE,
+    KNOWN_KINDS,
     ExperimentLogger,
     NoOpLogger,
     register_existing_artifact,
@@ -69,6 +71,16 @@ def test_save_ea_genome_is_noop_for_noop_logger():
     noop = NoOpLogger()
     genome = FixedTopologyGenome(layer_sizes=[3, 2], random_seed=0)
     assert save_ea_genome(noop, genome) is None
+
+
+def test_load_policy_round_trip_pso(tmp_path: Path):
+    genome = FixedTopologyGenome(layer_sizes=[6, 4, 2], activation="tanh", random_seed=7)
+    expected = genome.weights.copy()
+    with _make_logger(tmp_path, algorithm="pso") as log:
+        save_ea_genome(log, genome, kind=KIND_PSO_GENOME)
+    rec = load_run(next(iter(tmp_path.iterdir())))
+    policy = load_policy(rec)
+    np.testing.assert_array_equal(policy._genome.weights, expected)
 
 
 def test_load_policy_round_trip_ea(tmp_path: Path):

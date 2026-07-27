@@ -31,9 +31,7 @@ import numpy as np
 from gymnasium import spaces
 from pettingzoo.utils.env import AECEnv, ParallelEnv
 
-# ---------------------------------------------------------------------------
-# Helpers shared by both adapters
-# ---------------------------------------------------------------------------
+# Shared helpers for both adapters.
 
 
 def _unwrap_obs_space(raw_space):
@@ -73,9 +71,7 @@ def _split_observation(
     return np.asarray(raw_obs), None
 
 
-# ---------------------------------------------------------------------------
 # Adapters
-# ---------------------------------------------------------------------------
 
 
 class _TurnBasedAdapterBase(ParallelEnv):
@@ -89,7 +85,7 @@ class _TurnBasedAdapterBase(ParallelEnv):
         # Keep PettingZoo's ``metadata`` visible to tooling.
         self.metadata = dict(getattr(aec_env, "metadata", {}) or {})
 
-    # -- Space exposure -----------------------------------------------------
+    # Space exposure
 
     def observation_space(self, agent: str):
         return _unwrap_obs_space(self.aec_env.observation_space(agent))
@@ -97,7 +93,7 @@ class _TurnBasedAdapterBase(ParallelEnv):
     def action_space(self, agent: str):
         return self.aec_env.action_space(agent)
 
-    # -- Utility ------------------------------------------------------------
+    # Utility
 
     def _coerce_action(self, action: Any) -> Any:
         """Convert numpy arrays of length 1 / scalars into the int the
@@ -127,7 +123,7 @@ class _TurnBasedAdapterBase(ParallelEnv):
 
 
 class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
-    """Turn-based AEC env → parallel-shaped facade.
+    """Turn-based AEC env -> parallel-shaped facade.
 
     Every ``reset`` / ``step`` returns dicts keyed by all currently-active
     agents. At each ``step`` only the current player's action is executed
@@ -170,9 +166,9 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
         pre_step_agents = list(self.agents)
         action = self._coerce_action(actions[current])
         self.aec_env.step(action)
-        # Refresh our view of active agents after the AEC step, but build all
+        # Refresh the view of active agents after the AEC step, but build all
         # returned dicts from a single stable key set spanning both pre/post
-        # step agent lists so the payload stays key-aligned.
+        # step agent lists so the payload stays aligned to keys.
         self.agents = list(self.aec_env.agents)
         post_step_agents = list(self.agents)
         # Preserve insertion order: pre-step agents first, then any newly
@@ -231,7 +227,7 @@ class MaskedSimultaneousAdapter(_TurnBasedAdapterBase):
 
 
 class SequentialTurnAdapter(_TurnBasedAdapterBase):
-    """Turn-based AEC env → single-agent-per-step facade.
+    """Turn-based AEC env -> single-agent-per-step facade.
 
     ``reset`` / ``step`` return dicts of length 1 keyed by the currently-
     acting player. When the episode terminates, the final ``step`` return

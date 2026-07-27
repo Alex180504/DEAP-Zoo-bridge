@@ -1,0 +1,88 @@
+@startuml coevolution_sides_rl
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Co-evolution sides: reinforcement-learning and plug-in backends
+
+package "deap_pettingzoo.baselines.coevolution" {
+  abstract class SideState {
+    +side: Side
+    +is_rl_side: bool = False
+    +resolved_device: str = "cpu"
+    +{abstract} initialise(env, evaluator, rng)
+    +{abstract} step_generation(evaluator, rng)
+    +{abstract} current_pool(): OpponentPool
+    +{abstract} best_policy(): PolicyProtocol
+    +snapshot_best()
+    ' Trainer detectors use getattr(s, "is_rl_side", False) instead of
+    ' isinstance(RLSideState) so rl_hpo sides trigger the same guards.
+  }
+  class RLSideState
+  class RLSideState {
+    -- one AgileRL algorithm object per side\n   (no population). Generation =\n   rollout_episodes_per_gen rollouts +\n   learn step(s).\n   off-policy (MADDPG/MATD3): replay buffer +\n   learning_steps_per_gen learn() calls.\n   on-policy (IPPO/GroupedIPPO): no replay\n   buffer; serial rollout -> 1 PPO learn().
+    +algorithm: str
+    +is_rl_side: bool = True
+    +is_on_policy: bool
+    +rollout_episodes_per_gen: int
+    +learning_steps_per_gen: int
+    +resolved_device: str
+    + current_pool(): RLPolicyPool
+    + best_policy(): AgileRLPolicyWrapper
+    - _collect_onpolicy_rollout(ctx): list[float]
+  }
+  class RLEvolveHPOSideState {
+      -- AgileRL HPO champion-as-opponent
+      optimizer = "rl_hpo"
+      +is_rl_side: bool = True
+      # _replay_slots: list  ' persistent off-policy buffer per slot
+      # _slot_transitions: list[int]  ' per-slot warm-up/learn counter
+      + current_pool(): RLPolicyPool
+      ' current_pool() returns RLPolicyPool(champion_wrapper) — single policy,
+      ' not a list.  No-champion branch returns FrozenPolicyPool([]).
+      ' Off-policy replay buffers persist per population slot across
+      ' generations (owned here, not on the cloned agents).
+  }
+  class NeatSideState {
+      -- optimizer = "neat"
+      owns neat.Population;
+      RNG isolation (random + np)
+  }
+  class HyperNeatSideState {
+      -- optimizer = "hyperneat"
+  }
+  class ESHyperNeatSideState {
+      -- optimizer = "es_hyperneat"
+  }
+  class QDaxSideState {
+      -- optimizer = "qdax_map_elites" / "qdax_cma_me"
+  }
+  class QDaxSideState {
+    -- runs one QDax iteration\n   per co-evolution generation.\n   Experimental: placeholder descriptor.
+    + current_pool(): QDaxRepertoirePool
+    + best_policy(): FlaxPolicyAdapter
+  }
+}
+
+    NeatSideState --|> SideState
+    HyperNeatSideState --|> NeatSideState
+    ESHyperNeatSideState --|> NeatSideState
+  RLSideState  --|> SideState
+  QDaxSideState      --|> SideState
+  SideState <|-- RLSideState
+  SideState <|-- RLEvolveHPOSideState
+  SideState <|-- NeatSideState
+  SideState <|-- HyperNeatSideState
+  SideState <|-- ESHyperNeatSideState
+  SideState <|-- QDaxSideState
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

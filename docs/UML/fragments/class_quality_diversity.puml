@@ -1,0 +1,66 @@
+@startuml quality_diversity
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+
+title Quality-diversity algorithm trainers
+
+package "deap_pettingzoo.contrib.qdax" {
+    class FlaxPolicyAdapter {
+        - module
+        - params
+        - masked: bool
+        + get_action(obs, action_mask=None) -> Any
+    }
+    class "descriptors <<module>>" as qdax_descriptors {
+        + DescriptorProtocol
+        -- generic contract only: a callable\n   (trajectory) -> array with\n   output_shape / min_bd / max_bd.\n   Concrete descriptors are caller-supplied\n   (e.g. examples/qdax/descriptors.py). --
+    }
+    class "scoring <<module>>" as qdax_scoring {
+        + make_jax_scoring_function(jax_env, module, *, episode_length,\n         descriptor_fn, action_type, agents=None,\n         state_extractor=None) -> Callable
+        + make_numpy_scoring_function(env_name, *, layer_sizes,\n         episode_length, descriptor_fn, env_config=None,\n         action_type="discrete", activation="tanh",\n         num_workers=1, parallel_backend="process") -> Callable
+        -- both return QDax contract:\n   (genotypes, key) -> (fitness, descriptor, extra_scores) --
+    }
+    class MAPElitesTrainer {
+        + algorithm = "map_elites"
+        + train(config): TrainingResult
+        -- dispatches to jax scoring\n   when env.api == "jax_parallel",\n   numpy fallback otherwise --
+        .. champion re-selection ..
+        algorithm_params.reeval_top_k>0 re-scores the
+        top-K archive cells on fresh CRN batches
+        (numpy path) and keeps the genuinely-best one,
+        so best_fitness is not an archive max-of-noise.
+        repertoire.pkl saved inside the run dir;
+        metrics.csv env_steps advances per iteration.
+    }
+    class CMAMETrainer {
+        + algorithm = "cma_me"
+        + train(config): TrainingResult
+        -- CMAImprovementEmitter +\n   CMAPoolEmitter over a\n   euclidean/CVT centroid grid --
+    }
+
+note bottom of MAPElitesTrainer
+  Opt-in; requires `pip install deap-pettingzoo[qdax]`.
+  Takes fast jit+vmap path only when the
+  env is registered with api="jax_parallel";
+  otherwise rolls out through a numpy boundary
+  and warns the user.
+end note
+}
+
+    MAPElitesTrainer ..> qdax_scoring : uses
+    CMAMETrainer     ..> qdax_scoring : uses
+    MAPElitesTrainer ..> qdax_descriptors : injected descriptor_fn
+    CMAMETrainer     ..> qdax_descriptors : injected descriptor_fn
+    MAPElitesTrainer ..> FlaxPolicyAdapter : produces best
+    CMAMETrainer     ..> FlaxPolicyAdapter : produces best
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

@@ -3,12 +3,7 @@
 Every function in this module raises :class:`ImportError` with a clear
 install hint when ``rliable`` is missing, rather than failing later
 inside the wrapped call. Numerical results are passed through
-unchanged so the rliable API contract is preserved.
-
-References
-----------
-Agarwal, R. *et al.* (2021). *Deep Reinforcement Learning at the Edge
-of the Statistical Precipice.* NeurIPS 2021.
+unchanged so that the rliable API contract is preserved.
 """
 
 from __future__ import annotations
@@ -312,7 +307,7 @@ def sample_efficiency_curve(
     ``x``, ``iqm``, ``lo``, ``hi``.
 
     When ``y_col`` is ``None`` (default) the value column is
-    auto-detected (``best`` → ``mean`` → ``max``) across all runs, so
+    auto-detected (``best`` -> ``mean`` -> ``max``) across all runs, so
     product-path runs that log ``mean`` but never ``best`` yield a
     non-empty curve. Mirrors
     :func:`deap_pettingzoo.analysis.aggregate.learning_curve_with_ci`.

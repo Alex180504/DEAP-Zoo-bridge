@@ -1,7 +1,7 @@
 """Hybrid hyperparameter discovery helpers.
 
 The catalog discovers an algorithm's hyperparameters using a **hybrid**
-strategy (see the UI-overhaul plan):
+strategy:
 
 * **Introspection** supplies the *names* and *defaults* — read from
   ``inspect.signature`` of the trainer constructor and/or a class-level
@@ -123,7 +123,7 @@ def drift_report(
 ) -> List[str]:
     """Return human-readable notes where an overlay default disagrees with code.
 
-    Used by the Phase 0 tests as a guard rail: if a trainer constructor
+    Used by the drift tests as a guard rail: if a trainer constructor
     default changes but the declarative overlay is not updated, the drift is
     surfaced rather than silently shipping a stale default.
     """

@@ -1,15 +1,15 @@
-"""QDax \u2194 co-evolution bridge (experimental).
+"""QDax <-> co-evolution bridge (experimental).
 
 Adds two concrete plug-ins that slot into
 :mod:`deap_pettingzoo.baselines.coevolution`:
 
-* :class:`QDaxRepertoirePool` \u2014 an :class:`OpponentPool` backed by a
+* :class:`QDaxRepertoirePool` — an :class:`OpponentPool` backed by a
   QDax :class:`MapElitesRepertoire`. Sampling draws filled cells
   uniformly (default) or weighted by fitness, then decodes the stored
   genotype into a :class:`FlaxPolicyAdapter`. This class is
   production-ready.
 
-* :class:`QDaxSideState` \u2014 a :class:`SideState` that runs one QDax
+* :class:`QDaxSideState` — a :class:`SideState` that runs one QDax
   MAP-Elites (or CMA-ME) iteration per co-evolution generation,
   scoring each proposed genotype by playing episodes against the
   *opponent sides' current pool* via the injected evaluator. This
@@ -20,7 +20,7 @@ Adds two concrete plug-ins that slot into
   (or supply a custom evaluator with a trajectory hook) to use real
   descriptors.
 
-Only the numpy-boundary scoring path is used here \u2014 co-evolution
+Only the numpy-boundary scoring path is used here — co-evolution
 drives episodes through :class:`PettingZooWrapper`, so mixing
 opponents and QDax individuals is straightforward.
 """
@@ -62,9 +62,8 @@ def _mask_optional_pyarrow_imports() -> Any:
 
     The QDax import chain reaches ``pandas.compat.pyarrow`` through
     ``sklearn``. Pandas already handles ``ImportError`` as an optional
-    dependency miss, but some Windows runs surface a native ``OSError`` from
-    pyarrow instead. Masking the import for this narrow window keeps pandas on
-    its supported fallback path.
+    dependency miss, but some Windows runs throw a native ``OSError`` from
+    pyarrow instead.
     """
     if os.name != "nt":
         yield
@@ -121,9 +120,7 @@ def _stack_consistent_positions(
     return np.stack(frames, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# Worker-side helpers for parallel genotype evaluation
-# ---------------------------------------------------------------------------
+# Worker-side helpers for parallel genotype evaluation.
 
 
 @dataclass
@@ -244,7 +241,7 @@ def _run_qdax_worker_episode(
 ) -> Tuple[float, int]:
     """Run one episode in a worker; append position arrays to *positions_out*.
 
-    Returns ``(total_reward, steps)`` where ``steps`` is the real env-tick
+    Returns ``(total_reward, steps)`` where ``steps`` is the real env tick
     count for this episode (truncates below ``max_steps`` on early termination).
     """
     from deap_pettingzoo.baselines.coevolution.evaluator import _invoke_get_action
@@ -289,9 +286,7 @@ def _run_qdax_worker_episode(
     return total, steps
 
 
-# ---------------------------------------------------------------------------
 # Pool
-# ---------------------------------------------------------------------------
 
 
 class QDaxRepertoirePool(_BasePool):
@@ -331,7 +326,7 @@ class QDaxRepertoirePool(_BasePool):
         self._policy_factory = policy_factory
         self._mode = mode
         self._temperature = float(temperature)
-        # Snapshot metadata \u2014 required for parallel evaluation. When
+        # Snapshot metadata — required for parallel evaluation. When
         # left as ``None`` the pool falls back to the default
         # (live-policy) snapshot path, which fails to pickle Flax
         # objects and is therefore only useful in serial mode.
@@ -416,7 +411,7 @@ class QDaxRepertoirePool(_BasePool):
         return snaps
 
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
-        import jax  # noqa: F401 \u2014 required for device_get below
+        import jax  # noqa: F401 — required for device_get below
 
         idx = self._sample_cell(rng)
         params = jax.tree_util.tree_map(
@@ -428,9 +423,7 @@ class QDaxRepertoirePool(_BasePool):
         return self._policy_factory(params)
 
 
-# ---------------------------------------------------------------------------
 # Side state
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -472,7 +465,7 @@ _DEFAULT_QDAX_SIDE_CONFIG: dict = {
     # When ``None`` (default), descriptors fall back to the zero-centre
     # placeholder (all genotypes map to the same archive cell).  Supply a
     # position extractor — e.g. from
-    # :mod:`deap_pettingzoo.contrib.qdax.position_extractors` — to enable
+    # :mod:`deap_pettingzoo.contrib.qdax.position_extractors` to enable
     # real MAP-Elites archive diversity.
     "position_extractor": None,
     "seed": 0,
@@ -533,9 +526,7 @@ class QDaxSideState(SideState):
 
         self._current_evaluator: Any = _NullEvaluator()
 
-    # ------------------------------------------------------------------
     # Lifecycle
-    # ------------------------------------------------------------------
 
     def initialise(
         self,
@@ -573,8 +564,7 @@ class QDaxSideState(SideState):
         self._module = make_flax_mlp(layer_sizes, activation=cfg["activation"])
         self._action_space = action_space
 
-        # Descriptor: injected by the experiment, which owns the
-        # pursuit/evasion semantics (agent partition + descriptor choice).
+        # Descriptor — injected by the experiment, which implements the actual semantics.
         # Concrete descriptors live outside the library.
         descriptor_fn = cfg.get("descriptor_fn")
         if descriptor_fn is None or not (
@@ -719,9 +709,7 @@ class QDaxSideState(SideState):
         if self._pool is not None:
             self._pool.update(self._repertoire)
 
-    # ------------------------------------------------------------------
     # Scoring closure
-    # ------------------------------------------------------------------
 
     def _evaluate_one_genotype(self, params_or_flat) -> tuple:
         """Play one episode against the opponent pool; return (fitness, descriptor).
@@ -866,7 +854,7 @@ class QDaxSideState(SideState):
             flat_weights_list.append(flat)
 
         # Sample opponents from each side's pool up-front (requires picklable
-        # snapshots; EAPool → "feedforward", QDaxRepertoirePool → "qdax_flax").
+        # snapshots; EAPool -> "feedforward", QDaxRepertoirePool -> "qdax_flax").
         side_role_prefixes: Dict[str, Tuple[str, ...]] = {}
         per_side_snaps: Dict[str, List[Any]] = {}
         for side_name, prefixes, pool in evaluator._opponent_sides:
@@ -908,9 +896,7 @@ class QDaxSideState(SideState):
         evaluator.env_steps_consumed += sum(int(r.steps) for r in results)
         return [r.fitness for r in results], [r.descriptor for r in results]
 
-    # ------------------------------------------------------------------
     # SideState contract
-    # ------------------------------------------------------------------
 
     def step_generation(
         self,

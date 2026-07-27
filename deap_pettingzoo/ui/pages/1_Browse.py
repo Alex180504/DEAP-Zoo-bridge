@@ -271,6 +271,7 @@ rows = [
         "name": r.display_name or r.run_id,
         "run_id": r.run_id,
         "algorithm": r.algorithm,
+        "action_mode": r.action_mode,
         "env_name": r.env_name,
         "seed": r.seed,
         "started_at": r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else None,
@@ -295,7 +296,7 @@ preselected_indices = [
 ]
 _table_key = "browse_table"
 
-# Store row data so the on_select callback can resolve indices → run IDs
+# Store row data so the on_select callback can resolve indices -> run IDs
 st.session_state["_browse_rows"] = rows
 
 
@@ -482,7 +483,7 @@ if selected_run_ids:
                             f"Spec loaded from experiment {selected_exp}. "
                             "Go to the Setup page to review and submit."
                         )
-                        st.page_link("pages/8_Setup.py", label="Go to Setup page →")
+                        st.page_link("pages/8_Setup.py", label="Go to Setup page ->")
                     else:
                         st.warning("No valid spec found for this experiment.")
                 except Exception as exc:

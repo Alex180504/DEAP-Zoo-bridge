@@ -1,14 +1,8 @@
 """Catalog-level compatibility queries.
 
-The historical compatibility checker
-(:mod:`deap_pettingzoo.baselines.compatibility`) instantiates a real trainer to
-read its ``get_capabilities()`` dict. That fails for algorithms whose optional
-extra is missing (e.g. ``maddpg`` without ``agilerl``/``torch``), which is
-exactly the case the setup UI must handle gracefully.
-
-This module sources capabilities from the **catalog** instead — the
-:class:`~deap_pettingzoo.catalog.schema.AlgorithmSpec.capabilities` dict — and
-feeds them to the existing, well-tested rule engine via a tiny capability shim.
+This module sources capabilities from the **catalog** — the
+:class:`~deap_pettingzoo.catalog.schema.AlgorithmSpec.capabilities` dict, and
+feeds them to the existing rule engine via a tiny capability shim.
 That keeps one implementation of the compatibility rules while letting the
 catalog answer "which algorithms work with this env?" without importing torch.
 """
@@ -46,8 +40,10 @@ def compatibility_matrix(
             catalog algorithm.
 
     Returns:
-        ``{"env_name", "results": {algo: {compatible, issues, warnings,
-        available}}, "compatible": [algo, ...]}``.
+        A JSON-able report of the shape::
+
+            {"env_name", "results": {algo: {compatible, issues, warnings,
+             available}}, "compatible": [algo, ...]}
     """
     from deap_pettingzoo.baselines.compatibility import (
         check_compatibility,

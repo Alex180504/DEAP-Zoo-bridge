@@ -8,7 +8,7 @@ surface legal-action masks in ``info['action_mask']``, so they slot
 straight into :mod:`deap_pettingzoo`'s ``api='aec_masked'`` adapter
 and :class:`~deap_pettingzoo.evaluators.SelfPlayEvaluator`.
 
-This module is **opt-in**: nothing is registered on import. Call
+This module is **opt-in** so nothing is registered on import. Call
 :func:`register_openspiel_game` explicitly to add a game to the env
 registry. Doing so requires the ``shimmy`` (and transitive
 ``pyspiel``) optional extra — install with::

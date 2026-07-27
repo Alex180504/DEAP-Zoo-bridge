@@ -1,5 +1,10 @@
 @startuml sequence_experiment_logging
-title Experiment (Results / Metrics) Logging Pipeline – Trainer → Sinks → Disk
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title Experiment (Results / Metrics) Logging Pipeline – Trainer -> Sinks -> Disk
 
 ' NOTE: This is the *experiment-results* pipeline (metrics / checkpoints /
 ' manifests).  For backend *diagnostic* logging (exceptions, warnings,
@@ -43,7 +48,7 @@ end
 T -> EL: row("summary", final_summary)
 EL -> MS: log_row("summary", row)
 MS -> JMS: log_row("summary", row)
-JMS -> FS: write summary.json (atomic .tmp → replace)
+JMS -> FS: write summary.json (atomic .tmp -> replace)
 
 T -> EL: close()
 EL -> RM: write(<run_dir>/manifest.json)

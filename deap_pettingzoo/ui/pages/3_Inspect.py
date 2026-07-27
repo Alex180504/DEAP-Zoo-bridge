@@ -64,8 +64,8 @@ def _diff(a: dict, b: dict) -> list[dict]:
     keys = sorted(set(fa) | set(fb))
     rows = []
     for k in keys:
-        va = fa.get(k, "\u2014")
-        vb = fb.get(k, "\u2014")
+        va = fa.get(k, "—")
+        vb = fb.get(k, "—")
         if va == vb:
             continue
         rows.append({"key": k, "left": _to_str(va), "right": _to_str(vb)})

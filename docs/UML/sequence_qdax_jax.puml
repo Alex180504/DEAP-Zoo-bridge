@@ -1,6 +1,10 @@
 @startuml sequence_qdax_jax
 !theme plain
-title Sequence Diagram: MAP-Elites Training over a JaxMARL Env (fast path)
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title QD algorithm training over a JaxMARL Environment
 
 actor "User" as User
 participant "MAPElitesTrainer" as Trainer
@@ -56,6 +60,16 @@ Scoring -> Scoring : jit(vmap(rollout))
 Scoring --> Trainer : scoring_fn(genotypes, key)
 deactivate Scoring
 
+note over Trainer, Scoring
+  CMAMETrainer follows this same flow: both QDax trainers obtain their
+  scoring function from the shared _build_env_and_scoring helper, so the
+  jax_parallel dispatch is common to them. CMA-ME differs at the boundary —
+  CMAImprovementEmitter requires a flat Array population, so _flat_scoring
+  rebuilds a pytree per row in a host-side Python loop before calling
+  scoring_fn. That loop runs outside jit/vmap and erodes part of the speed
+  advantage this path exists to provide.
+end note
+
 Trainer -> QDax : MAPElites(scoring_fn, emitter, metrics_fn)
 activate QDax
 
@@ -110,12 +124,5 @@ deactivate QDax
 deactivate Repertoire
 deactivate JaxEnv
 deactivate Trainer
-
-note over Trainer, QDax
-  Slow path (env api != "jax_parallel"): trainer calls
-  make_numpy_scoring_function instead, which wraps the
-  PettingZooWrapper in a Python rollout loop and emits
-  a UserWarning. Contract back to QDax is identical.
-end note
 
 @enduml

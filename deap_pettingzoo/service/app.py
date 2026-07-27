@@ -1,6 +1,6 @@
 """FastAPI application — the REST sidecar for experiment lifecycle management.
 
-This module exposes the full REST surface described in the UI-overhaul plan.
+This module exposes the full REST API surface for inter-service communication.
 The Streamlit frontend connects to it via ``FASTAPI_URL`` and never imports
 ``torch`` / ``agilerl`` / ``jax``.
 
@@ -29,14 +29,19 @@ from deap_pettingzoo.service import db
 logger = logging.getLogger(__name__)
 from deap_pettingzoo.service.dispatcher import Dispatcher
 from deap_pettingzoo.service.models import (
+    DeletedResponse,
     ExperimentRecord,
     ExperimentSpecModel,
     HealthResponse,
+    ImportResponse,
     InstallRequest,
     InstallStartResponse,
     InstallStatusResponse,
+    PausedResponse,
     QueueState,
+    RunsDeleteResponse,
     ScriptSubmitModel,
+    SpecResponse,
     StdoutChunk,
     SubmitResponse,
     ValidationReportModel,
@@ -51,19 +56,69 @@ except ImportError:  # pragma: no cover
         "Install with: pip install deap-pettingzoo[service]"
     )
 
+# OpenAPI metadata (surfaces in /docs, /redoc, and /openapi.json)
 
-# ---------------------------------------------------------------------------
+_API_DESCRIPTION = (
+    "REST API for experiment lifecycle management. The Streamlit frontend "
+    "consumes this API; third-party clients can use it directly.\n\n"
+    "**Base URL** defaults to `http://127.0.0.1:8100` (override with `--host` "
+    "/ `--port` or the `FASTAPI_URL` environment variable).\n\n"
+    "**Content type** is `application/json` for every request and response "
+    "body except the ZIP download / upload endpoints.\n\n"
+    '**Error model** — every error response is `{"detail": "..."}`; '
+    "request-validation failures (422) return a list of per-field errors "
+    "under `detail`."
+)
+
+_OPENAPI_TAGS = [
+    {"name": "Health", "description": "Liveness probe and service metadata."},
+    {
+        "name": "Catalog",
+        "description": "Read-only algorithm / environment / coevolution "
+        "catalog and compatibility checks. No auth.",
+    },
+    {
+        "name": "Experiments",
+        "description": "Submit, validate, list, inspect, cancel, and delete "
+        "experiments.",
+    },
+    {
+        "name": "Progress & Logs",
+        "description": "Live progress snapshots and stdout / service-log " "tailing.",
+    },
+    {
+        "name": "Export / Import",
+        "description": "Download experiments or run directories as ZIP "
+        "archives, and re-import them.",
+    },
+    {
+        "name": "Runs",
+        "description": "Operations on run directories under the results root.",
+    },
+    {
+        "name": "Queue",
+        "description": "Inspect and control the experiment dispatch queue.",
+    },
+    {
+        "name": "Advanced",
+        "description": "Dependency install and custom-script submission. "
+        "Arbitrary code / command execution by design (trusted-input model), "
+        "gated behind `DEAP_ENABLE_ADVANCED` — every route returns 403 when "
+        "disabled.",
+    },
+]
+
+# Reusable error-response docs.
+_NOT_FOUND = {"description": "Resource not found."}
+
 # Globals (set by lifespan / create_app)
-# ---------------------------------------------------------------------------
 
 _dispatcher: Optional[Dispatcher] = None
 _db_path: Optional[str] = None
 _experiments_dir: Optional[Path] = None
 
 
-# ---------------------------------------------------------------------------
 # Lifespan
-# ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
@@ -91,9 +146,7 @@ async def _lifespan(app: FastAPI):
     logger.info("Service stopped")
 
 
-# ---------------------------------------------------------------------------
 # App factory
-# ---------------------------------------------------------------------------
 
 
 def create_app(
@@ -115,6 +168,8 @@ def create_app(
     app = FastAPI(
         title="DEAP-bridge Experiment Service",
         version="0.1.0",
+        description=_API_DESCRIPTION,
+        openapi_tags=_OPENAPI_TAGS,
         lifespan=_lifespan,
     )
 
@@ -137,9 +192,7 @@ def create_app(
     return app
 
 
-# ---------------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------------------------
 
 
 def _validate_spec(spec: ExperimentSpecModel) -> ValidationReportModel:
@@ -189,21 +242,27 @@ def _experiment_to_record(
     )
 
 
-# ---------------------------------------------------------------------------
 # Log / stdout tailing helper (shared by GET /experiments/{id}/stdout and /logs)
-# ---------------------------------------------------------------------------
 
 
 from deap_pettingzoo.service.logtail import read_tail as _read_tail  # noqa: E402
 
-# ---------------------------------------------------------------------------
 # Health
-# ---------------------------------------------------------------------------
 
 
 def _register_routes(app: FastAPI) -> None:
 
-    @app.get("/health", response_model=HealthResponse)
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        tags=["Health"],
+        summary="Liveness check",
+        description=(
+            "Service liveness probe — the Docker `HEALTHCHECK` uses this. "
+            "`advanced_enabled` reflects `DEAP_ENABLE_ADVANCED` and tells the "
+            "UI whether to show the Setup -> Advanced panel."
+        ),
+    )
     async def health():
         from deap_pettingzoo.catalog.schema import CATALOG_SCHEMA_VERSION
         from deap_pettingzoo.service.advanced import advanced_enabled
@@ -213,15 +272,29 @@ def _register_routes(app: FastAPI) -> None:
             advanced_enabled=advanced_enabled(),
         )
 
-    # -- catalog -----------------------------------------------------------
+    # Catalog
 
-    @app.get("/catalog")
+    @app.get(
+        "/catalog",
+        tags=["Catalog"],
+        summary="Full catalog snapshot",
+        description=(
+            "Complete catalog — algorithms, environments, coevolution options, "
+            "budget modes, and optional-dependency availability. The frontend "
+            "fetches this once on first render."
+        ),
+    )
     async def get_catalog():
         from deap_pettingzoo import catalog
 
         return catalog.to_json()
 
-    @app.get("/catalog/algorithms")
+    @app.get(
+        "/catalog/algorithms",
+        tags=["Catalog"],
+        summary="List algorithms",
+        description="Every registered algorithm with its availability flag.",
+    )
     async def get_catalog_algorithms():
         from deap_pettingzoo import catalog
 
@@ -230,7 +303,13 @@ def _register_routes(app: FastAPI) -> None:
             for a in catalog.list_algorithms()
         ]
 
-    @app.get("/catalog/algorithms/{name}")
+    @app.get(
+        "/catalog/algorithms/{name}",
+        tags=["Catalog"],
+        summary="Get one algorithm",
+        description="A single algorithm with its full hyperparameter schema.",
+        responses={404: _NOT_FOUND},
+    )
     async def get_catalog_algorithm(name: str):
         from deap_pettingzoo import catalog
 
@@ -240,7 +319,12 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"Unknown algorithm {name!r}")
         return spec.to_dict(available=catalog.is_algorithm_available(spec.name))
 
-    @app.get("/catalog/environments")
+    @app.get(
+        "/catalog/environments",
+        tags=["Catalog"],
+        summary="List environments",
+        description="Every registered environment with its availability flag.",
+    )
     async def get_catalog_environments():
         from deap_pettingzoo import catalog
 
@@ -249,7 +333,13 @@ def _register_routes(app: FastAPI) -> None:
             for e in catalog.list_environments()
         ]
 
-    @app.get("/catalog/environments/{name}")
+    @app.get(
+        "/catalog/environments/{name}",
+        tags=["Catalog"],
+        summary="Get one environment",
+        description="A single environment with its config params and team " "metadata.",
+        responses={404: _NOT_FOUND},
+    )
     async def get_catalog_environment(name: str):
         from deap_pettingzoo import catalog
 
@@ -259,14 +349,33 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"Unknown environment {name!r}")
         return spec.to_dict(available=catalog.is_environment_available(spec.name))
 
-    @app.get("/catalog/coevolution")
+    @app.get(
+        "/catalog/coevolution",
+        tags=["Catalog"],
+        summary="Coevolution options",
+        description="Modes, schedules, samplers, aggregation methods, and "
+        "per-side optimizer eligibility.",
+    )
     async def get_catalog_coevolution():
         from deap_pettingzoo import catalog
 
         return catalog.get_coevolution_options()
 
-    @app.get("/catalog/compatibility")
-    async def get_catalog_compatibility(env: str, algorithms: Optional[str] = None):
+    @app.get(
+        "/catalog/compatibility",
+        tags=["Catalog"],
+        summary="Algorithm/environment compatibility",
+        description="Which algorithms are compatible with the given "
+        "environment, plus any warnings.",
+    )
+    async def get_catalog_compatibility(
+        env: str = Query(description="Environment name."),
+        algorithms: Optional[str] = Query(
+            default=None,
+            description="Comma-separated algorithm names. Omit to check all "
+            "registered algorithms.",
+        ),
+    ):
         from deap_pettingzoo import catalog
 
         algo_list = (
@@ -276,9 +385,23 @@ def _register_routes(app: FastAPI) -> None:
         )
         return catalog.compatibility_matrix(env, algo_list)
 
-    # -- experiments -------------------------------------------------------
+    # Experiments
 
-    @app.post("/experiments", status_code=201, response_model=SubmitResponse)
+    @app.post(
+        "/experiments",
+        status_code=201,
+        response_model=SubmitResponse,
+        tags=["Experiments"],
+        summary="Submit an experiment",
+        description="Validate the spec server-side (defense in depth) and, if "
+        "it passes, enqueue it. Returns the new id and queue position.",
+        responses={
+            422: {
+                "description": "Validation failed — field-level "
+                "errors are returned in the body."
+            }
+        },
+    )
     async def submit_experiment(spec: ExperimentSpecModel):
         report = _validate_spec(spec)
         if not report.ok:
@@ -296,22 +419,48 @@ def _register_routes(app: FastAPI) -> None:
         ahead = await db.count_queued_before(exp_id, path=_db_path)
         return SubmitResponse(id=exp_id, status="queued", position=max(0, ahead))
 
-    @app.post("/experiments/validate", response_model=ValidationReportModel)
+    @app.post(
+        "/experiments/validate",
+        response_model=ValidationReportModel,
+        tags=["Experiments"],
+        summary="Dry-run validation",
+        description="Validate a spec without enqueuing it. The Setup page "
+        "calls this behind the 'Validate' button.",
+    )
     async def validate_experiment(spec: ExperimentSpecModel):
         return _validate_spec(spec)
 
-    @app.get("/experiments", response_model=List[ExperimentRecord])
+    @app.get(
+        "/experiments",
+        response_model=List[ExperimentRecord],
+        tags=["Experiments"],
+        summary="List experiments",
+        description="Experiments ordered by submission time (newest first), "
+        "with optional status filtering and pagination.",
+    )
     async def list_experiments(
-        status_filter: Optional[str] = Query(default=None, alias="status"),
-        limit: int = 50,
-        offset: int = 0,
+        status_filter: Optional[str] = Query(
+            default=None,
+            alias="status",
+            description="Filter by status: queued, running, completed, failed, "
+            "cancelled. Omit for all.",
+        ),
+        limit: int = Query(default=50, description="Maximum records to return."),
+        offset: int = Query(default=0, description="Pagination offset."),
     ):
         raw_list = await db.list_experiments(
             status=status_filter, limit=limit, offset=offset, path=_db_path
         )
         return [_experiment_to_record(r) for r in raw_list]
 
-    @app.get("/experiments/{exp_id}", response_model=ExperimentRecord)
+    @app.get(
+        "/experiments/{exp_id}",
+        response_model=ExperimentRecord,
+        tags=["Experiments"],
+        summary="Get one experiment",
+        description="A single experiment by id, including its live queue " "position.",
+        responses={404: _NOT_FOUND},
+    )
     async def get_experiment(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
@@ -324,7 +473,19 @@ def _register_routes(app: FastAPI) -> None:
 
     _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
-    @app.post("/experiments/{exp_id}/cancel")
+    @app.post(
+        "/experiments/{exp_id}/cancel",
+        response_model=ExperimentRecord,
+        tags=["Experiments"],
+        summary="Cancel an experiment",
+        description="Queued experiments are marked cancelled immediately; a "
+        "running experiment has its runner subprocess terminated.",
+        responses={
+            404: _NOT_FOUND,
+            409: {"description": "Experiment is already in a terminal state."},
+            503: {"description": "Dispatcher is not running."},
+        },
+    )
     async def cancel_experiment(exp_id: str):
         if _dispatcher is None:
             raise HTTPException(status_code=503, detail="Dispatcher not running")
@@ -342,7 +503,19 @@ def _register_routes(app: FastAPI) -> None:
         raw = await db.get_experiment(exp_id, path=_db_path)
         return _experiment_to_record(raw or {"id": exp_id, "status": "cancelled"})
 
-    @app.delete("/experiments/{exp_id}")
+    @app.delete(
+        "/experiments/{exp_id}",
+        response_model=DeletedResponse,
+        tags=["Experiments"],
+        summary="Delete an experiment",
+        description="Remove an experiment record. Only terminal or queued "
+        "experiments can be deleted — running experiments must be cancelled "
+        "first. Also removes the experiment scratch directory.",
+        responses={
+            404: _NOT_FOUND,
+            409: {"description": "Experiment is running — cancel it first."},
+        },
+    )
     async def delete_experiment(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
@@ -370,7 +543,15 @@ def _register_routes(app: FastAPI) -> None:
             _shutil.rmtree(exp_dir, ignore_errors=True)
         return {"deleted": True}
 
-    @app.get("/experiments/{exp_id}/progress", response_model=Dict[str, Any])
+    @app.get(
+        "/experiments/{exp_id}/progress",
+        response_model=Dict[str, Any],
+        tags=["Progress & Logs"],
+        summary="Live progress snapshot",
+        description="The current sub-run's progress. The Queue page polls this "
+        "roughly every 2s. Returns an empty object when nothing is running.",
+        responses={404: _NOT_FOUND},
+    )
     async def get_experiment_progress(exp_id: str):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
@@ -389,12 +570,28 @@ def _register_routes(app: FastAPI) -> None:
                     pass
         return prog or {}
 
-    @app.get("/experiments/{exp_id}/stdout", response_model=StdoutChunk)
+    @app.get(
+        "/experiments/{exp_id}/stdout",
+        response_model=StdoutChunk,
+        tags=["Progress & Logs"],
+        summary="Tail experiment stdout",
+        description="Tail the runner subprocess's stdout log. Pass `lines` for "
+        "the last N lines, or `offset`/`limit` to stream forward. A missing "
+        "log returns an empty chunk (not 404).",
+    )
     async def get_experiment_stdout(
         exp_id: str,
-        offset: Optional[int] = None,
-        limit: Optional[int] = None,
-        lines: Optional[int] = None,
+        offset: Optional[int] = Query(
+            default=None, description="Byte offset to start reading from."
+        ),
+        limit: Optional[int] = Query(
+            default=None, description="Maximum number of bytes to return."
+        ),
+        lines: Optional[int] = Query(
+            default=None,
+            description="If set, return the last N lines instead (overrides "
+            "offset/limit).",
+        ),
     ):
         exp_dir = (_experiments_dir or Path("results/_experiments")) / exp_id
         text, next_offset, eof = _read_tail(
@@ -402,11 +599,28 @@ def _register_routes(app: FastAPI) -> None:
         )
         return StdoutChunk(text=text, next_offset=next_offset, eof=eof)
 
-    @app.get("/logs", response_model=StdoutChunk)
+    @app.get(
+        "/logs",
+        response_model=StdoutChunk,
+        tags=["Progress & Logs"],
+        summary="Tail the service log",
+        description="Tail the backend service diagnostic log "
+        "(`<DEAP_LOG_DIR>/service.log`) — queue lifecycle, warnings, and "
+        "exceptions from the app process. Same tailing contract as "
+        "`/experiments/{id}/stdout`; a missing log returns an empty chunk.",
+    )
     async def get_service_logs(
-        offset: Optional[int] = None,
-        limit: Optional[int] = None,
-        lines: Optional[int] = None,
+        offset: Optional[int] = Query(
+            default=None, description="Byte offset to start reading from."
+        ),
+        limit: Optional[int] = Query(
+            default=None, description="Maximum number of bytes to return."
+        ),
+        lines: Optional[int] = Query(
+            default=None,
+            description="If set, return the last N lines instead (overrides "
+            "offset/limit).",
+        ),
     ):
         """Tail the backend service log (``<DEAP_LOG_DIR>/service.log``).
 
@@ -421,12 +635,31 @@ def _register_routes(app: FastAPI) -> None:
 
     # -- export / import --------------------------------------------------
 
-    @app.get("/experiments/{exp_id}/export")
+    @app.get(
+        "/experiments/{exp_id}/export",
+        tags=["Export / Import"],
+        summary="Export an experiment (ZIP)",
+        description="Stream a ZIP bundle of the experiment: spec, manifests, "
+        "metrics, and optionally frames, TensorBoard logs, and trajectories.",
+        responses={
+            200: {
+                "content": {"application/zip": {}},
+                "description": "ZIP archive (attachment).",
+            },
+            404: _NOT_FOUND,
+        },
+    )
     async def export_experiment(
         exp_id: str,
-        include_frames: bool = Query(default=False),
-        include_tb: bool = Query(default=False),
-        include_trajectories: bool = Query(default=False),
+        include_frames: bool = Query(
+            default=False, description="Include recorded video frames."
+        ),
+        include_tb: bool = Query(
+            default=False, description="Include TensorBoard event files."
+        ),
+        include_trajectories: bool = Query(
+            default=False, description="Include trajectory / replay data."
+        ),
     ):
         raw = await db.get_experiment(exp_id, path=_db_path)
         if raw is None:
@@ -459,14 +692,36 @@ def _register_routes(app: FastAPI) -> None:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @app.get("/runs/export")
+    @app.get(
+        "/runs/export",
+        tags=["Export / Import"],
+        summary="Export run directories (ZIP)",
+        description="Stream a ZIP bundle of one or more run directories. Paths "
+        "that resolve outside the results root are rejected with 400.",
+        responses={
+            200: {
+                "content": {"application/zip": {}},
+                "description": "ZIP archive (attachment).",
+            },
+            400: {
+                "description": "No run_dirs given, or a path is outside the "
+                "results root."
+            },
+        },
+    )
     async def export_runs(
         run_dirs: str = Query(
-            default="", description="Comma-separated run directory paths"
+            default="", description="Comma-separated run directory paths."
         ),
-        include_frames: bool = Query(default=False),
-        include_tb: bool = Query(default=False),
-        include_trajectories: bool = Query(default=False),
+        include_frames: bool = Query(
+            default=False, description="Include recorded video frames."
+        ),
+        include_tb: bool = Query(
+            default=False, description="Include TensorBoard event files."
+        ),
+        include_trajectories: bool = Query(
+            default=False, description="Include trajectory / replay data."
+        ),
     ):
         paths = [Path(p.strip()) for p in run_dirs.split(",") if p.strip()]
         if not paths:
@@ -522,12 +777,27 @@ def _register_routes(app: FastAPI) -> None:
             },
         )
 
-    @app.post("/experiments/import")
+    @app.post(
+        "/experiments/import",
+        response_model=ImportResponse,
+        tags=["Export / Import"],
+        summary="Import experiments (ZIP upload)",
+        description="Upload a previously exported ZIP, validate it, and restore "
+        "its experiment records and run directories.",
+        responses={422: {"description": "The uploaded archive failed validation."}},
+    )
     async def import_experiments(
-        file: UploadFile = File(...),
-        overwrite_existing: bool = Query(default=False),
+        file: UploadFile = File(
+            ..., description="A ZIP produced by an export endpoint."
+        ),
+        overwrite_existing: bool = Query(
+            default=False,
+            description="Overwrite run directories that already exist.",
+        ),
     ):
         import tempfile
+
+        from starlette.concurrency import run_in_threadpool
 
         from deap_pettingzoo.service.export_import import (
             extract_import_zip,
@@ -535,11 +805,18 @@ def _register_routes(app: FastAPI) -> None:
             validate_import_zip,
         )
 
-        # Stream upload to a temp file.
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        # Stream upload to a temp file. Opening and writing happen on a worker
+        # thread: at 8 MiB a chunk, writing inline would block the event loop
+        # for the duration of every write and stall every other request.
+        tmp = await run_in_threadpool(
+            tempfile.NamedTemporaryFile, suffix=".zip", delete=False
+        )
+        try:
             while chunk := await file.read(8 * 1024 * 1024):  # 8 MiB chunks
-                tmp.write(chunk)
-            tmp_path = Path(tmp.name)
+                await run_in_threadpool(tmp.write, chunk)
+        finally:
+            await run_in_threadpool(tmp.close)
+        tmp_path = Path(tmp.name)
 
         try:
             results_root = Path(os.environ.get("DEAP_RESULTS_ROOT", "results"))
@@ -567,7 +844,7 @@ def _register_routes(app: FastAPI) -> None:
                     },
                 )
 
-            # Read experiment.json from the ZIP in memory — do not rely on
+            # Read experiment.json from the ZIP in memory; do not rely on
             # it being written to disk (extract_import_zip skips metadata files).
             import zipfile as _zipfile
 
@@ -608,7 +885,15 @@ def _register_routes(app: FastAPI) -> None:
             except OSError:
                 pass
 
-    @app.get("/experiments/{exp_id}/spec")
+    @app.get(
+        "/experiments/{exp_id}/spec",
+        response_model=SpecResponse,
+        tags=["Experiments"],
+        summary="Get the raw experiment spec",
+        description="The raw stored spec JSON, used by the UI to pre-populate "
+        "the Setup form for a re-run.",
+        responses={404: _NOT_FOUND},
+    )
     async def get_experiment_spec(exp_id: str):
         """Return the raw ExperimentSpec JSON for re-run pre-population."""
         raw = await db.get_experiment(exp_id, path=_db_path)
@@ -618,7 +903,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         return {"spec": raw.get("spec", {})}
 
-    # -- run management ----------------------------------------------------
+    # Run management
 
     def _results_root() -> Path:
         return Path(os.environ.get("DEAP_RESULTS_ROOT", "results")).resolve()
@@ -633,10 +918,19 @@ def _register_routes(app: FastAPI) -> None:
                 detail=f"Path '{p}' is outside the results root and cannot be accessed.",
             )
 
-    @app.post("/runs/delete")
+    @app.post(
+        "/runs/delete",
+        response_model=RunsDeleteResponse,
+        tags=["Runs"],
+        summary="Delete run directories",
+        description="Delete one or more run directories from disk. Each path "
+        "must resolve under the results root and contain a manifest.json; "
+        "per-path failures are reported without failing the whole request.",
+        responses={400: {"description": "No run_dirs provided."}},
+    )
     async def delete_runs(
         run_dirs: str = Query(
-            default="", description="Comma-separated run directory paths"
+            default="", description="Comma-separated run directory paths."
         ),
     ):
         """Delete one or more run directories from disk.
@@ -677,26 +971,46 @@ def _register_routes(app: FastAPI) -> None:
                 errors.append({"path": str(p), "error": str(exc)})
         return {"ok": len(errors) == 0, "deleted": deleted, "errors": errors}
 
-    # -- queue control -----------------------------------------------------
+    # Queue control
 
-    @app.get("/queue", response_model=QueueState)
+    @app.get(
+        "/queue",
+        response_model=QueueState,
+        tags=["Queue"],
+        summary="Queue state",
+        description="Which experiment is running, what is waiting, and whether "
+        "the dispatcher is paused.",
+    )
     async def get_queue():
         return QueueState(**(await db.get_queue_state(path=_db_path)))
 
-    @app.post("/queue/pause")
+    @app.post(
+        "/queue/pause",
+        response_model=PausedResponse,
+        tags=["Queue"],
+        summary="Pause the dispatcher",
+        description="Pause dequeuing. The currently-running experiment "
+        "continues; no new experiments start until resumed.",
+    )
     async def pause_queue():
         await db.set_paused(True, path=_db_path)
         return {"paused": True}
 
-    @app.post("/queue/resume")
+    @app.post(
+        "/queue/resume",
+        response_model=PausedResponse,
+        tags=["Queue"],
+        summary="Resume the dispatcher",
+        description="Resume dequeuing of queued experiments.",
+    )
     async def resume_queue():
         await db.set_paused(False, path=_db_path)
         return {"paused": False}
 
-    # -- advanced: dependency install + custom-script submission -----------
+    # Advanced: dependency install + custom-script submission
     #
     # Arbitrary code/command execution by design — gated behind
-    # DEAP_ENABLE_ADVANCED (default on). See docs/known_issues.md.
+    # DEAP_ENABLE_ADVANCED (default on).
 
     def _require_advanced() -> None:
         from deap_pettingzoo.service.advanced import advanced_enabled
@@ -707,7 +1021,19 @@ def _register_routes(app: FastAPI) -> None:
                 detail="Advanced features are disabled (DEAP_ENABLE_ADVANCED).",
             )
 
-    @app.post("/env/install", response_model=InstallStartResponse)
+    @app.post(
+        "/env/install",
+        response_model=InstallStartResponse,
+        tags=["Advanced"],
+        summary="Start a dependency install",
+        description="Start a dependency-install job in the backend environment. "
+        "Only an allowlist is accepted: pip install, pip uninstall, git clone. "
+        "Commands are spawned with an explicit argument list (never a shell).",
+        responses={
+            400: {"description": "Disallowed operation or forbidden argument."},
+            403: {"description": "Advanced features are disabled."},
+        },
+    )
     async def env_install(req: InstallRequest):
         _require_advanced()
         from deap_pettingzoo.service import install_jobs
@@ -718,12 +1044,31 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail=str(exc))
         return InstallStartResponse(job_id=job_id, status="running")
 
-    @app.get("/env/install/{job_id}", response_model=InstallStatusResponse)
+    @app.get(
+        "/env/install/{job_id}",
+        response_model=InstallStatusResponse,
+        tags=["Advanced"],
+        summary="Poll an install job",
+        description="Poll an install job's status and tail its output (same "
+        "tailing contract as the stdout endpoint).",
+        responses={
+            403: {"description": "Advanced features are disabled."},
+            404: {"description": "Unknown job id."},
+        },
+    )
     async def env_install_status(
         job_id: str,
-        offset: Optional[int] = None,
-        limit: Optional[int] = None,
-        lines: Optional[int] = None,
+        offset: Optional[int] = Query(
+            default=None, description="Byte offset to start reading from."
+        ),
+        limit: Optional[int] = Query(
+            default=None, description="Maximum number of bytes to return."
+        ),
+        lines: Optional[int] = Query(
+            default=None,
+            description="If set, return the last N lines instead (overrides "
+            "offset/limit).",
+        ),
     ):
         _require_advanced()
         from deap_pettingzoo.service import install_jobs
@@ -733,7 +1078,16 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"Unknown job {job_id!r}")
         return InstallStatusResponse(**status_dict)
 
-    @app.post("/experiments/script/validate", response_model=ValidationReportModel)
+    @app.post(
+        "/experiments/script/validate",
+        response_model=ValidationReportModel,
+        tags=["Advanced"],
+        summary="Validate a custom script",
+        description="Static validation of a custom experiment script — confirms "
+        "it parses and looks runnable. It cannot prove the script trains "
+        "correctly.",
+        responses={403: {"description": "Advanced features are disabled."}},
+    )
     async def validate_script(req: ScriptSubmitModel):
         _require_advanced()
         from deap_pettingzoo.service.script_validate import validate_script_source
@@ -741,7 +1095,20 @@ def _register_routes(app: FastAPI) -> None:
         report = validate_script_source(req.script)
         return ValidationReportModel(ok=report["ok"], issues=report["issues"])
 
-    @app.post("/experiments/script", status_code=201, response_model=SubmitResponse)
+    @app.post(
+        "/experiments/script",
+        status_code=201,
+        response_model=SubmitResponse,
+        tags=["Advanced"],
+        summary="Submit a custom script",
+        description="Submit a hand-written experiment script as a queued "
+        "experiment. The dispatcher runs it as `python user_script.py` in the "
+        "experiment working directory.",
+        responses={
+            422: {"description": "Script failed static validation."},
+            403: {"description": "Advanced features are disabled."},
+        },
+    )
     async def submit_script(req: ScriptSubmitModel):
         _require_advanced()
         from deap_pettingzoo.service.script_validate import validate_script_source
@@ -752,7 +1119,7 @@ def _register_routes(app: FastAPI) -> None:
 
         # Store the script as a discriminated "script"-kind spec. The dispatcher
         # branches on the "kind" field and runs the source as a subprocess.
-        # NOTE: we serialise the dict directly (not via ExperimentSpecModel) so
+        # NOTE: serialise the dict directly (not via ExperimentSpecModel) so
         # the extra `script`/`kind`/`entry` keys are preserved in spec_json.
         spec_json = json.dumps(
             {

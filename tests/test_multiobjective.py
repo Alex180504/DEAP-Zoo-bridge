@@ -1,4 +1,4 @@
-"""Tests for multi-objective neuroevolution support (Phase 1.3).
+"""Tests for multi-objective neuroevolution support.
 
 Covers: NSGA-II / SPEA2 selection dispatch, EATrainer multi-objective
 integration, TrainingResult.pareto_front, and backward compatibility

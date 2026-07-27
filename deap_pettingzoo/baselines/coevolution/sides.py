@@ -312,8 +312,6 @@ class EASideState(SideState):
         self.activation = cfg.get("activation", "tanh")
         self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
-
-        # Multi-objective support (Phase 1.3).
         self._is_multiobjective = self.selection_method in {"nsga2", "spea2"}
 
         self.toolbox = None
@@ -527,7 +525,7 @@ class EASideState(SideState):
                 sampler=self.side.archive_sampler,
             )
             if len(self.side.hof) == 0:
-                # Archive empty → behave as if pure current-gen pool.
+                # Archive empty -> behave as if pure current-gen pool.
                 return pop_pool
             weights = (1.0 - self.side.archive_mix, self.side.archive_mix)
             return CompositePool([pop_pool, archive_pool], weights=weights)
@@ -789,9 +787,7 @@ class CMAESSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # PSO side
-# ---------------------------------------------------------------------------
 
 
 class PSOSideState(SideState):
@@ -1001,9 +997,7 @@ class PSOSideState(SideState):
         return self.hof[0].genome.clone()
 
 
-# ---------------------------------------------------------------------------
 # Frozen side
-# ---------------------------------------------------------------------------
 
 
 class FrozenSideState(SideState):
@@ -1134,7 +1128,7 @@ def _load_es_hyperneat_side_state() -> type:
 #: returning the matching :class:`SideState` subclass. Each loader owns any
 #: lazy import + the friendly "install the X extra" :class:`ImportError`, so
 #: :func:`make_side_state` stays a one-line lookup and third parties can add a
-#: side without editing this module (see :func:`register_side_state`). This is
+#: side without editing this module (see :func:`register_side_state`). This acts as
 #: the authoritative source for :meth:`Side.__post_init__` validation too.
 _SIDE_STATE_FACTORIES: Dict[str, Callable[[], type]] = {
     "ea": lambda: EASideState,

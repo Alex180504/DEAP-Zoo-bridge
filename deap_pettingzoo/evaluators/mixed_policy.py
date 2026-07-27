@@ -2,8 +2,7 @@
 
 Allows different agents in a PettingZoo environment to be controlled by
 different policies during a single evaluation episode — useful whenever
-*some* agents are the learning subject (e.g. EA-evolved pursuers) and the
-remainder are scripted benchmark targets (e.g. APF evaders).
+*some* agents are the learning subject and the remainder are scripted benchmark targets.
 
 Design
 ------
@@ -22,9 +21,7 @@ On ``evaluate(individual)`` the evaluator constructs one learner-policy
 instance from ``individual.genome`` per agent belonging to the learner
 side, then runs a full episode, summing rewards *only* for agents on the
 learner side (this becomes the fitness).  Scripted-side rewards do not
-contribute to the DEAP fitness — consistent with the methodology's use of
-scripted evaders as a benchmark target rather than a co-optimisation
-partner.
+contribute to the fitness scores.
 
 Parallel evaluation
 -------------------
@@ -306,9 +303,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
             return env, scripted
         return self.env_wrapper, self.scripted_policies  # type: ignore[return-value]
 
-    # ------------------------------------------------------------------
     # BaseEvaluator
-    # ------------------------------------------------------------------
 
     def evaluate(
         self,
@@ -318,7 +313,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
         """Run one episode and return fitness tuple (DEAP contract).
 
         When ``fitness_spec is None`` the returned tuple is ``(fitness,)``
-        — backward-compatible.  When a spec is set the tuple may be
+        (backward-compatible).  When a spec is set the tuple may be
         multi-dimensional (standard multi-objective) or a flat vector
         (lexicase).
         """
@@ -341,9 +336,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
             )
         return (result.fitness,)
 
-    # ------------------------------------------------------------------
     # Core loop (exposed for logging / visualisation)
-    # ------------------------------------------------------------------
 
     def run_episode(
         self,
@@ -398,7 +391,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
                     actions[agent] = _invoke_get_action(
                         scripted_policies[agent], obs, mask
                     )
-                # else: agent terminated — no action required
+                # else: agent terminated, no action required
 
             observations, rewards, terms, truncs, step_infos = env.step(actions)
 
@@ -409,7 +402,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
                 else:
                     scripted_total += reward
 
-            # Accumulate reward components using post-step infos.
+            # Accumulate reward components using post-step info.
             if reward_components is not None and self.fitness_spec is not None:
                 rc_fn = self.fitness_spec.reward_components_fn
                 if rc_fn is not None:
@@ -422,7 +415,7 @@ class MixedPolicyEvaluator(BaseEvaluator):
             if all(terms.values()) or all(truncs.values()):
                 break
 
-        # Close env only when using the factory path (we built it here).
+        # Close env only when using the factory path.
         if self.env_factory is not None:
             env.close()
 

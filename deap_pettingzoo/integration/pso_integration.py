@@ -8,7 +8,7 @@ search instead of CMA-ES.
 Design notes:
 
 * Each particle is a ``creator.PSOParticle`` (``list`` subclass).
-* The evaluator contract (``individual.genome`` → fitness tuple) is
+* The evaluator contract (``individual.genome`` -> fitness tuple) is
   preserved by attaching a transient ``FixedTopologyGenome`` to each
   particle before evaluation.
 * Global best (gbest) is tracked in a per-toolbox mutable dict
@@ -25,9 +25,7 @@ from ..evaluators import BaseEvaluator
 from ..genomes import FixedTopologyGenome
 from .deap_integration import evaluate_individual, setup_deap_creators
 
-# ---------------------------------------------------------------------------
 # Creator management
-# ---------------------------------------------------------------------------
 
 
 def _setup_pso_creators() -> None:
@@ -48,9 +46,7 @@ def _setup_pso_creators() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Swarm setup
-# ---------------------------------------------------------------------------
 
 
 def setup_pso_swarm(
@@ -113,9 +109,7 @@ def setup_pso_swarm(
     }, dimension
 
 
-# ---------------------------------------------------------------------------
 # Particle initialiser
-# ---------------------------------------------------------------------------
 
 
 def make_pso_ind_init(
@@ -155,9 +149,7 @@ def make_pso_ind_init(
     return _ind_init
 
 
-# ---------------------------------------------------------------------------
 # Toolbox registration
-# ---------------------------------------------------------------------------
 
 
 def register_pso_toolbox(
@@ -183,9 +175,7 @@ def register_pso_toolbox(
     return toolbox
 
 
-# ---------------------------------------------------------------------------
 # PSO update (module-level for DEAP picklability)
-# ---------------------------------------------------------------------------
 
 
 def _pso_update_top_level(

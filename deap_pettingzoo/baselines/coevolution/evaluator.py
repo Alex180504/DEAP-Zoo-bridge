@@ -69,7 +69,7 @@ def _resolve_worker_env(
         ``contrib/qdax/scoring_numpy.py``.
 
         ``registry_snapshot`` is replayed once per worker before the env
-        is built so SCOOP/Dask workers (no initializer hook) can resolve
+        is built so Dask workers (no initializer hook) can resolve
         runtime-registered custom envs.
     """
     from deap_pettingzoo.environments.registry import (
@@ -100,15 +100,13 @@ class _EpisodePayload:
     learner_genome: Any  # FixedTopologyGenome (picklable)
     learner_role_prefixes: Tuple[str, ...]
     learner_masked: bool
-    # Per-side opponent snapshot (one snapshot per side, not per
-    # agent — the canonical "one champion drives the team" contract).
+    #: Per-side opponent snapshot (one snapshot per side, not per agent).
     opponent_snapshots: Dict[str, OpponentSnapshot]
-    # Side metadata so the worker can rebuild ``side_agents`` without
-    # a driver round-trip.
+    #: Side metadata so the worker can rebuild ``side_agents`` without a driver round-trip.
     side_role_prefixes: Dict[str, Tuple[str, ...]]
     episode_seed: Optional[int]
     max_steps: int
-    #: Registry snapshot replayed once per worker (SCOOP/Dask custom envs).
+    #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
 
 
@@ -125,7 +123,7 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
     """Top-level worker function: run one co-evolution episode.
 
     Lives at module top level so it is picklable for
-    :class:`ProcessPoolExecutor`, SCOOP, and Dask. All state
+    :class:`ProcessPoolExecutor` and Dask. All state
     (env, genome, opponent policies) is rebuilt from the payload —
     nothing live crosses the process boundary.
 

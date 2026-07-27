@@ -1,6 +1,6 @@
-"""Hydrate on-disk run artefacts into Python objects.
+"""Convert on-disk run artefacts into Python objects.
 
-The loaders are deliberately tolerant: missing optional artefacts
+The loaders are deliberately tolerant to missing imports: missing optional artifacts
 (``episodes.csv``, ``trajectories.parquet``) silently degrade to
 ``None`` rather than raising, so analysis code can branch on
 availability. Only :file:`manifest.json` is required.
@@ -134,6 +134,25 @@ class RunRecord:
     @property
     def env_name(self) -> str:
         return str(self.manifest.get("env_name", "unknown"))
+
+    @property
+    def action_mode(self) -> Optional[str]:
+        """``"continuous"`` / ``"discrete"`` for this run, or ``None``.
+
+        Resolved from the explicit ``action_mode`` hyperparameter when the
+        trainer recorded one, else derived from the env config's
+        ``continuous_actions`` flag (present on every aquarium run). Lets the
+        Browse/Compare tables distinguish otherwise identically-named runs
+        that differ only by action space.
+        """
+        hp = self.manifest.get("hyperparams") or {}
+        mode = hp.get("action_mode")
+        if isinstance(mode, str) and mode:
+            return mode
+        env_config = self.manifest.get("env_config") or {}
+        if "continuous_actions" in env_config:
+            return "continuous" if env_config["continuous_actions"] else "discrete"
+        return None
 
     @property
     def seed(self) -> Optional[int]:
@@ -344,6 +363,21 @@ def load_run(run_dir: str | Path) -> RunRecord:
     episodes = _read_csv_if_exists(run_dir / "episodes.csv")
     trajectories = _read_parquet_if_exists(run_dir / "trajectories.parquet")
 
+    # Held-out probe checkpoints (probe.csv, written by ProbeController or by
+    # experiment-script benchmark callbacks) are merged into the metrics
+    # frame as extra rows: probe rows carry `env_steps` plus `probe_*`
+    # columns, trainer rows keep theirs, and each column pair dropna()s to
+    # its own rows downstream (learning_curve_with_ci, the Compare page).
+    # This makes probe curves selectable in the UI without a dedicated loader path.
+    probe = _read_csv_if_exists(run_dir / "probe.csv")
+    if probe is not None and len(probe) > 0:
+        import pandas as pd
+
+        if metrics is None:
+            metrics = probe
+        else:
+            metrics = pd.concat([metrics, probe], ignore_index=True, sort=False)
+
     summary: Dict[str, Any] = dict(manifest.get("final_summary") or {})
     if not summary:
         summary_path = run_dir / "summary.json"
@@ -426,8 +460,8 @@ class Experiment:
     def summary_table(self):
         """Return a :class:`pandas.DataFrame` with one row per run.
 
-        Columns: ``run_id``, ``algorithm``, ``env_name``, ``seed``,
-        ``wall_time_s``, ``final_fitness``, plus all keys present in
+        Columns: ``run_id``, ``algorithm``, ``action_mode``, ``env_name``,
+        ``seed``, ``wall_time_s``, ``final_fitness``, plus all keys present in
         ``RunRecord.summary`` (numeric only).
         """
         pd = _lazy_pd()
@@ -436,6 +470,7 @@ class Experiment:
             row: Dict[str, Any] = {
                 "run_id": r.run_id,
                 "algorithm": r.algorithm,
+                "action_mode": r.action_mode,
                 "env_name": r.env_name,
                 "seed": r.seed,
                 "wall_time_s": r.wall_time_s,

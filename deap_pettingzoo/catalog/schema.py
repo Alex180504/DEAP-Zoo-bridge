@@ -1,7 +1,7 @@
 """Dependency-free schema primitives for the unified catalog.
 
 This module is the **foundation layer** of :mod:`deap_pettingzoo.catalog`.
-It is deliberately self-contained — it imports only the Python standard
+It is self-contained — it imports only the Python standard
 library, never :mod:`deap_pettingzoo.baselines`, :mod:`...environments`,
 ``torch``, ``agilerl`` or ``jax``. That guarantees two things:
 
@@ -38,7 +38,7 @@ class ParamType(str, Enum):
     """The value type of a single configurable parameter.
 
     Inherits from :class:`str` so instances serialise directly to JSON
-    (``ParamType.INT`` → ``"int"``) and compare equal to their string form.
+    (``ParamType.INT`` -> ``"int"``) and compare equal to their string form.
     """
 
     INT = "int"
@@ -75,7 +75,7 @@ class ParamTarget(str, Enum):
 def humanize(name: str) -> str:
     """Turn a snake_case identifier into a Title Case label.
 
-    ``"population_size"`` → ``"Population Size"``; ``"lr_actor"`` →
+    ``"population_size"`` -> ``"Population Size"``; ``"lr_actor"`` ->
     ``"Lr Actor"``. Used as the fallback display label when a
     :class:`ParamSpec` does not set one explicitly.
     """
@@ -220,7 +220,7 @@ class ParamSpec:
     nullable: bool = False
     unavailable_choices: Tuple[Any, ...] = ()
 
-    # -- presentation -----------------------------------------------------
+    # Presentation
 
     @property
     def display_label(self) -> str:
@@ -235,7 +235,7 @@ class ParamSpec:
         unavailable = set(self.unavailable_choices)
         return tuple(c for c in self.choices if c not in unavailable)
 
-    # -- coercion ---------------------------------------------------------
+    # Coercion
 
     def coerce(self, value: Any) -> Any:
         """Convert a loosely-typed input into this parameter's native type.
@@ -329,7 +329,7 @@ class ParamSpec:
 
         raise ValueError(f"Unsupported ParamType {self.type!r}")  # pragma: no cover
 
-    # -- validation -------------------------------------------------------
+    # Validation
 
     def validate(self, value: Any, path: Optional[str] = None) -> List[ValidationIssue]:
         """Validate ``value`` against this spec, returning any issues.
@@ -380,7 +380,7 @@ class ParamSpec:
 
         return issues
 
-    # -- serialisation ----------------------------------------------------
+    # Serialization
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a JSON-serialisable description for the frontend."""
@@ -443,7 +443,7 @@ class AlgorithmSpec:
         label: Human-readable display name.
         family: Coarse grouping — ``"evolutionary"`` or ``"marl"``.
         aliases: Alternative names that resolve to this algorithm (e.g.
-            ``"cma"`` → ``"cma-es"``), reconciling the historical
+            ``"cma"`` -> ``"cma-es"``), reconciling the historical
             vocabulary drift between the trainer registry and co-evolution.
         hyperparameters: Ordered tuple of :class:`ParamSpec` describing the
             configurable knobs.

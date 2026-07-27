@@ -37,12 +37,15 @@ from deap_pettingzoo.baselines.base import (
     TrainingConfig,
     TrainingResult,
     derive_generations,
-    reject_consumed_budgeting,
 )
 from deap_pettingzoo.baselines.recording import RecordingController
 from deap_pettingzoo.environments import PettingZooWrapper
 from deap_pettingzoo.policies.action_heads import required_output_size
-from deap_pettingzoo.utils.parallel import resolve_num_workers
+from deap_pettingzoo.utils.logging import ExperimentLogger
+from deap_pettingzoo.utils.parallel import (
+    resolve_num_workers,
+    resolve_scheduler_address,
+)
 
 from .config import build_neat_config
 from .policy import NeatPolicy
@@ -130,7 +133,12 @@ class NEATTrainer(BaselineTrainer):
     leaves them at their defaults (mirrors ``EATrainer``).
     """
 
-    def __init__(self, num_workers: int = 1, parallel_backend: str = "process") -> None:
+    def __init__(
+        self,
+        num_workers: int = 1,
+        parallel_backend: str = "process",
+        scheduler_address: Optional[str] = None,
+    ) -> None:
         self._fitness_history: List[float] = []
         self._env_steps_history: List[int] = []
         self._generation_num: int = 0
@@ -140,12 +148,16 @@ class NEATTrainer(BaselineTrainer):
         self._env_steps_consumed: int = 0
         if num_workers < 1:
             raise ValueError(f"num_workers must be >= 1, got {num_workers}")
+        if scheduler_address is not None and parallel_backend != "dask":
+            raise ValueError(
+                f"scheduler_address={scheduler_address!r} requires "
+                f"parallel_backend='dask', got {parallel_backend!r}."
+            )
         self._num_workers = int(num_workers)
         self._parallel_backend = str(parallel_backend)
+        self._scheduler_address = scheduler_address
 
-    # ------------------------------------------------------------------
     # BaselineTrainer interface
-    # ------------------------------------------------------------------
 
     def supports_budget_mode(self, mode: BudgetMode) -> bool:
         return mode in (BudgetMode.ENV_STEPS, BudgetMode.EVAL_EPISODES)
@@ -163,25 +175,43 @@ class NEATTrainer(BaselineTrainer):
             "algorithm": "NEAT",
         }
 
-    def _resolve_parallelism(self, config: TrainingConfig) -> tuple[int, str]:
-        """Resolve ``(effective_workers, backend)``, config-vs-constructor.
+    def _resolve_parallelism(
+        self, config: TrainingConfig
+    ) -> tuple[int, str, Optional[str], bool]:
+        """Resolve ``(effective_workers, backend, scheduler_address, remote)``.
 
-        ``config.num_workers``/``config.parallel_backend`` are primary
-        ``TrainingConfig`` fields; the trainer-constructor value is the
-        fallback used only when the config leaves them at their defaults
-        (mirrors ``EATrainer``). Shared by ``NEATTrainer``/``HyperNEATTrainer``/
-        ``ESHyperNEATTrainer``.
+        ``config.num_workers``/``config.parallel_backend``/
+        ``config.scheduler_address`` are primary ``TrainingConfig`` fields; the
+        trainer-constructor value is the fallback used only when the config
+        leaves them at their defaults (mirrors ``EATrainer``). Shared by
+        ``NEATTrainer``/``HyperNEATTrainer``/``ESHyperNEATTrainer``.
+
+        ``remote`` is ``True`` when a remote Dask scheduler is in play
+        (explicit address or the ``DEAP_DASK_SCHEDULER`` env var): the
+        driver CPU cap is skipped and callers must take the parallel
+        dispatch path even for ``effective_workers <= 1``.
         """
         requested_workers = (
             config.num_workers if config.num_workers != 1 else self._num_workers
         )
-        effective_workers = resolve_num_workers(requested_workers)
         backend = (
             config.parallel_backend
             if config.parallel_backend != "process"
             else self._parallel_backend
         )
-        return effective_workers, backend
+        scheduler_address = (
+            config.scheduler_address
+            if config.scheduler_address is not None
+            else self._scheduler_address
+        )
+        remote = (
+            backend == "dask"
+            and resolve_scheduler_address(scheduler_address) is not None
+        )
+        effective_workers = resolve_num_workers(
+            requested_workers, cap_to_cpu=not remote
+        )
+        return effective_workers, backend, scheduler_address, remote
 
     @staticmethod
     def _resolve_max_steps(config: TrainingConfig, default: int = 500) -> int:
@@ -194,7 +224,11 @@ class NEATTrainer(BaselineTrainer):
 
     def train(self, config: TrainingConfig) -> TrainingResult:
         t0 = time.perf_counter()
-        reject_consumed_budgeting(config, "NEATTrainer")
+        # Opt-in consumed-step budgeting: run until the real env-tick budget
+        # is exhausted instead of the nominal generation count.
+        consumed_budget: Optional[int] = None
+        if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
+            consumed_budget = int(config.budget_value)
         # Reset per-run state so reusing a trainer instance does not carry a
         # previous run's consumed-step count into this run's metrics.
         self._env_steps_consumed = 0
@@ -202,13 +236,13 @@ class NEATTrainer(BaselineTrainer):
         params = dict(config.algorithm_params)
         max_steps = self._resolve_max_steps(config)
 
-        # --- Resolve budget to generations -----------------------------------
+        # Resolve budget to generations
         pop_size = int(params.get("pop_size", 50))
         n_generations = params.get("n_generations", None)
         if n_generations is None:
             n_generations = self._budget_to_generations(config, pop_size)
 
-        # --- Build env -------------------------------------------------------
+        # Build env
         env = PettingZooWrapper(
             config.env_name,
             env_config=config.env_config,
@@ -226,7 +260,7 @@ class NEATTrainer(BaselineTrainer):
             )
         shared_action_space = reference_space
 
-        # --- Build NEAT config -----------------------------------------------
+        # Build NEAT config
         obs_shape = env.observation_space(env.possible_agents[0]).shape
         input_size = int(obs_shape[0]) if obs_shape else 1
         output_size = required_output_size(shared_action_space)
@@ -241,7 +275,7 @@ class NEATTrainer(BaselineTrainer):
             overrides=overrides,
         )
 
-        # --- Logger + unified champion-rollout recording ---------------------
+        # Logger + unified champion-rollout recording
         log = build_logger(config, algorithm="neat")
         self._recorder = RecordingController(
             config,
@@ -249,42 +283,61 @@ class NEATTrainer(BaselineTrainer):
             max_steps=max_steps,
             seed=seed,
         )
+        from deap_pettingzoo.baselines.probing import ProbeController
 
-        # --- Create initial population ---------------------------------------
+        # Periodic held-out champion probe (off-budget: runs on its own env).
+        self._prober = ProbeController(
+            config,
+            log,
+            max_steps=max_steps,
+            seed=seed,
+        )
+
+        # Create initial population
         pop = neat.Population(neat_config, seed=seed)
 
-        # --- Evaluation callback for neat ------------------------------------
+        # Evaluation callback for neat
         eval_eps = int(params.get("eval_episodes_per_genome", 1))
         aggregator = params.get("action_aggregator", "mean")
 
         # Build action-space hint for worker spec.
         _act_hint = _action_space_hint(shared_action_space)
 
-        # --- Recording reporter ----------------------------------------------
+        # Recording reporter
         def _neat_champion(best_genome):
             return NeatPolicy(
                 best_genome, neat_config, action_space=shared_action_space
             )
 
-        if self._recorder.enabled:
+        if self._recorder.enabled or self._prober.enabled:
 
             def _record_champion(gen: int, best_genome) -> None:
-                self._recorder.observe(
-                    ProgressEvent(
-                        unit="generation",
-                        current=gen,
-                        total=n_generations,
-                        env_steps=gen * max_steps,
-                    ),
-                    lambda: _neat_champion(best_genome),
+                # Real cumulative env ticks (serial counter + worker sink):
+                # the recorder's COUNT cadence only uses `fraction`, but the
+                # probe paces on env_steps, which must be the honest counter.
+                consumed = int(self._env_steps_consumed) + int(_parallel_steps[0])
+                event = ProgressEvent(
+                    unit="generation",
+                    current=gen,
+                    total=n_generations,
+                    env_steps=consumed,
                 )
+                champion = lambda: _neat_champion(best_genome)  # noqa: E731
+                self._recorder.observe(event, champion)
+                self._prober.observe(event, champion)
 
             pop.add_reporter(_RecordingReporter(_record_champion))
 
-        effective_workers, backend = self._resolve_parallelism(config)
+        effective_workers, backend, scheduler_address, remote = (
+            self._resolve_parallelism(config)
+        )
 
-        # --- Parallel or sequential eval -------------------------------------
-        if effective_workers > 1:
+        # 1-element sink so worker step-deltas aggregate across generations
+        # (stays at 0 on the serial path, which counts on the trainer itself).
+        _parallel_steps = [0]
+
+        # Parallel or sequential eval
+        if effective_workers > 1 or remote:
             from deap_pettingzoo.environments.registry import (
                 get_registry_snapshot,
                 replay_registry_snapshot,
@@ -293,7 +346,7 @@ class NEATTrainer(BaselineTrainer):
 
             from .parallel import _NeatWorkerSpec, make_neat_parallel_evaluate
 
-            snapshot = get_registry_snapshot()
+            snapshot = get_registry_snapshot(target_remote=remote)
             worker_spec = _NeatWorkerSpec(
                 env_name=config.env_name,
                 env_config=dict(config.env_config),
@@ -311,10 +364,9 @@ class NEATTrainer(BaselineTrainer):
                 backend=backend,
                 initializer=replay_registry_snapshot,
                 initargs=(snapshot,),
+                scheduler_address=scheduler_address,
             )
             _executor_ctx = _executor
-            # 1-element sink so worker step-deltas aggregate across generations.
-            _parallel_steps = [0]
 
             def _on_generation(best_fitness: float, gen_steps: int) -> None:
                 # Parallel path: neat.Population.run() never touches these
@@ -395,18 +447,39 @@ class NEATTrainer(BaselineTrainer):
                 # Per-generation real env steps (serial path).
                 self._env_steps_history.append(int(self._env_steps_consumed) - _before)
 
-        # --- Add reporters ---------------------------------------------------
+        # Add reporters
         pop.add_reporter(neat.StdOutReporter(show_species_detail=False))
 
-        # --- Run NEAT --------------------------------------------------------
+        # Run NEAT
+        def _consumed_total() -> int:
+            return int(self._env_steps_consumed) + int(_parallel_steps[0])
+
+        def _run_population() -> Any:
+            if consumed_budget is None:
+                return pop.run(_eval_genomes, n=n_generations)
+            # Consumed budgeting: step one generation at a time until the
+            # real env-tick budget is exhausted. ``Population`` carries all
+            # state across ``run()`` calls and the NEAT config pins
+            # ``no_fitness_termination=True``, so n=1 stepping is
+            # semantically identical to a single n=N call. The safety cap
+            # mirrors the EA loop: each generation consumes at least one
+            # tick per genome, so nominal_gens * max_steps always suffices.
+            safety_cap = n_generations * max(1, max_steps) + 10
+            best = None
+            for _ in range(safety_cap):
+                if _consumed_total() >= consumed_budget:
+                    break
+                best = pop.run(_eval_genomes, n=1)
+            return best if best is not None else pop.best_genome
+
         try:
             if _is_parallel and _executor_ctx is not None:
                 with _executor_ctx:
-                    best_genome = pop.run(_eval_genomes, n=n_generations)
+                    best_genome = _run_population()
                 # Fold the aggregated worker step-deltas into the run total.
                 self._env_steps_consumed += int(_parallel_steps[0])
             else:
-                best_genome = pop.run(_eval_genomes, n=n_generations)
+                best_genome = _run_population()
         except neat.CompleteExtinctionException:
             warnings.warn(
                 "NEAT population went extinct before completing the budget. "
@@ -415,18 +488,27 @@ class NEATTrainer(BaselineTrainer):
             )
             best_genome = pop.best_genome
 
-        # --- Build result policy --------------------------------------------
+        # Build result policy
         champion = NeatPolicy(
             best_genome, neat_config, action_space=shared_action_space
         )
 
         elapsed = time.perf_counter() - t0
 
+        # Realized count: equals n_generations under nominal budgeting, but
+        # consumed budgeting (and extinction) can realize a different number.
+        realized_gens = int(self._generation_num)
+
         # Guarantee a final capture (dedups against the last per-gen one).
         self._recorder.finalize(
             lambda: _neat_champion(best_genome),
-            iteration=n_generations,
-            env_steps=n_generations * max_steps,
+            iteration=realized_gens,
+            env_steps=realized_gens * max_steps,
+        )
+        self._prober.finalize(
+            lambda: _neat_champion(best_genome),
+            iteration=realized_gens,
+            env_steps=int(self._env_steps_consumed) + int(_parallel_steps[0]),
         )
 
         try:
@@ -434,17 +516,20 @@ class NEATTrainer(BaselineTrainer):
         except Exception:
             pass
         self._recorder.close()
+        self._prober.close()
 
+        # Reuse the single run logger so metrics/summary land in the same run
+        # dir the recorder/prober already wrote to (one run, one manifest).
         self._log(
             config,
             best_genome,
             pop_size,
             elapsed,
-            algorithm="NEAT",
+            algorithm="neat",
             nominal_env_steps_per_iteration=pop_size * eval_eps * max_steps,
+            logger=log,
         )
-        if config.recording.enabled:
-            log.close()
+        log.close()
 
         return TrainingResult(
             algorithm="NEAT",
@@ -454,9 +539,10 @@ class NEATTrainer(BaselineTrainer):
                 "final_generation": self._generation_num,
                 "population_size": pop_size,
                 # Nominal ceiling: every genome evaluated for ``eval_eps``
-                # episodes of up to ``max_steps`` ticks, across ``n_generations``.
+                # episodes of up to ``max_steps`` ticks, across the
+                # generations that actually ran.
                 "env_steps_nominal": int(
-                    n_generations * pop_size * eval_eps * max_steps
+                    realized_gens * pop_size * eval_eps * max_steps
                 ),
                 "env_steps_consumed": int(self._env_steps_consumed),
             },
@@ -468,9 +554,7 @@ class NEATTrainer(BaselineTrainer):
             training_time=elapsed,
         )
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
 
     def _log(
         self,
@@ -481,15 +565,26 @@ class NEATTrainer(BaselineTrainer):
         *,
         algorithm: str = "NEAT",
         nominal_env_steps_per_iteration: int = 0,
+        logger: Optional[ExperimentLogger] = None,
     ) -> None:
-        """Persist fitness history and summary to ``config.output_dir``."""
+        """Persist fitness history and summary to ``config.output_dir``.
+
+        When ``logger`` is provided the metrics/summary are written to that
+        already-open run (the same one the recorder/prober wrote frames and
+        probe rows to), so a single run directory carries every artefact.
+        Passing ``None`` builds a throwaway logger — kept only for callers
+        that do not manage their own logger; it opens a *second* run dir and
+        is closed here.
+        """
         output_dir = config.output_dir
         if output_dir is None:
             return
         output_dir = Path(output_dir)
         if not output_dir.exists():
             output_dir.mkdir(parents=True, exist_ok=True)
-        logger = build_logger(config, algorithm=algorithm)
+        own_logger = logger is None
+        if own_logger:
+            logger = build_logger(config, algorithm=algorithm)
         # Build per-generation entries with real env_steps (cumulative).
         _cumulative = 0
         _entries: list = []
@@ -530,7 +625,13 @@ class NEATTrainer(BaselineTrainer):
                 "pop_size": pop_size,
                 "elapsed_sec": round(elapsed, 2),
             },
+            # Stamp the manifest's wall_time_s: the recorder/prober use the
+            # logger without entering its context, so close() alone would leave
+            # it null.
+            training_time_s=float(elapsed),
         )
+        if own_logger:
+            logger.close()
 
     def _budget_to_generations(self, config: TrainingConfig, pop_size: int) -> int:
         """Translate ``config.budget_mode`` / ``.budget_value`` to generations.

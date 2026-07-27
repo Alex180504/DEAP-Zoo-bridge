@@ -1,4 +1,4 @@
-"""Tests for the ExperimentSpec / build_configs / validate_spec layer (Phase 1)."""
+"""Tests for the ExperimentSpec / build_configs / validate_spec layer."""
 
 from __future__ import annotations
 

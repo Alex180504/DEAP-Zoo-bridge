@@ -1,6 +1,6 @@
 """On-disk schema constants for the logging subsystem.
 
-Bumping :data:`SCHEMA_VERSION` is required whenever the on-disk layout
+Bumping :data:`SCHEMA_VERSION` is required whenever the file layout
 or any required column changes. The analysis layer
 (:mod:`deap_pettingzoo.analysis.loaders`) reads ``schema_version`` from
 ``manifest.json`` and refuses to load incompatible runs.

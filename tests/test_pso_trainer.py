@@ -1,4 +1,4 @@
-"""Tests for PSOTrainer (Phase 1.4)."""
+"""Tests for PSOTrainer."""
 import numpy as np
 import pytest
 from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
@@ -25,6 +25,61 @@ class TestPSOTrainerInit:
     def test_negative_workers_raises(self):
         with pytest.raises(ValueError, match="num_workers"):
             PSOTrainer(num_workers=-1)
+
+    def test_eval_episodes_default_and_validation(self):
+        assert PSOTrainer().eval_episodes == 1
+        assert PSOTrainer(eval_episodes=5).eval_episodes == 5
+        with pytest.raises(ValueError, match="eval_episodes"):
+            PSOTrainer(eval_episodes=0)
+
+
+class TestPSORunPersistence:
+    def test_run_writes_policy_artifact_and_summary(self, tmp_path):
+        """Regression: the PSO checkpoint used an unregistered 'pso_genome'
+        kind, which raised inside a swallowed except — leaving an empty run dir
+        (no policy artefact, empty final_summary, wall_time_s ~0). A completed
+        run must now persist both."""
+        import json
+
+        trainer = PSOTrainer(hidden_size=8, population_size=6, eval_episodes=2)
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.GENERATIONS,
+            budget_value=2,
+            seed=1, max_steps_per_episode=10,
+            env_config={"max_cycles": 10},
+            output_dir=tmp_path,
+        )
+        trainer.train(config)
+        run_dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+        assert len(run_dirs) == 1
+        rd = run_dirs[0]
+        manifest = json.loads((rd / "manifest.json").read_text())
+        assert manifest["artifacts"]["policy"]["kind"] == "pso_genome_v1"
+        assert manifest["final_summary"].get("final_fitness") is not None
+        assert (rd / "checkpoints" / "policy.json").is_file()
+        assert manifest["wall_time_s"] and manifest["wall_time_s"] > 0
+
+    def test_eval_episodes_consumes_more_steps(self):
+        """K CRN episodes per generation must consume ~K× the env steps of a
+        single-episode run over the same generation count."""
+        cfg = dict(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.GENERATIONS,
+            budget_value=2,
+            seed=3, max_steps_per_episode=10,
+            env_config={"max_cycles": 10},
+        )
+        one = PSOTrainer(hidden_size=8, population_size=6, eval_episodes=1).train(
+            TrainingConfig(**cfg)
+        )
+        three = PSOTrainer(hidden_size=8, population_size=6, eval_episodes=3).train(
+            TrainingConfig(**cfg)
+        )
+        assert (
+            three.metrics["env_steps_consumed"]
+            > one.metrics["env_steps_consumed"] * 2
+        )
 
 
 class TestPSOTrainerSmoke:
@@ -105,7 +160,7 @@ class TestPSOChampionFitnessNotStale:
         assert np.isfinite(re_eval), f"Re-eval fitness is non-finite: {re_eval}"
         assert abs(re_eval - reported) < abs(reported) * 2.0 + 20.0, (
             f"Re-eval fitness {re_eval:.2f} diverges from reported "
-            f"{reported:.2f} — stale genome→fitness pairing suspected"
+            f"{reported:.2f} — stale genome->fitness pairing suspected"
         )
 
     def test_champion_genome_produces_valid_actions(self):

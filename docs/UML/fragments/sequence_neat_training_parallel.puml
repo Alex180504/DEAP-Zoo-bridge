@@ -1,0 +1,65 @@
+@startuml neat_training_parallel
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title NEAT training (1/3) — setup, parallel (distributed) evaluation and result
+
+actor User
+participant "NEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "ProcessPoolExecutor\n(parallel)" as Executor
+participant "PettingZooWrapper" as Env
+participant "NeatPolicy" as Policy
+participant "TrainingResult" as Result
+
+User -> Trainer: train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer: _budget_to_generations(config, pop_size)
+Trainer -> Env: PettingZooWrapper(env_name, env_config)
+activate Env
+Trainer <-- Env: env handle
+deactivate Env
+
+Trainer -> Trainer: build_neat_config(input_size, output_size, pop_size, seed)
+
+== Parallel or sequential eval ==
+Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_workers if != 1 else self._num_workers)\n  backend = config.parallel_backend if != "process" else self._parallel_backend\n  (config takes precedence over the trainer-constructor default)
+alt effective_workers > 1
+    Trainer -> Trainer: get_registry_snapshot()
+    Trainer -> Trainer: _NeatWorkerSpec(env_name, env_config,\n  input_size, output_size, action_space_hint, max_steps,\n  registry_snapshot=snapshot, ...)
+    Trainer -> Executor: make_executor(effective_workers, backend=backend,\n  initializer=replay_registry_snapshot, initargs=(snapshot,))\n  note: snapshot also rides on the spec so Dask\n  workers replay it (replay_registry_snapshot_once)
+
+    loop n_generations
+        Trainer -> Pop: run(parallel_eval_function, n=1)
+
+        loop for each genome (distributed)
+            Pop -> Executor: map(_neat_worker_evaluate, [(genome, spec), ...])
+            Executor -> Executor: each worker rebuilds:\n  neat.Config + PettingZooWrapper + NeatPolicy
+            Executor -> Executor: evaluate genome across eval_eps episodes
+            Executor --> Pop: [(genome_id, (fitness, steps)), ...]\n  worker returns real env-tick count;\n  driver sums deltas into step_sink
+        end
+        Pop -> Trainer: on_generation(best_fitness, gen_steps)\n
+        Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)\n  self._env_steps_history.append(gen_steps)
+
+        Pop -> Pop: reproduce / speciate
+    end
+    Trainer -> Executor: executor.~__exit~__()
+    Trainer -> Trainer: self._env_steps_consumed += step_sink[0]
+end
+
+Trainer -> Policy: NeatPolicy(best_genome, config)
+Trainer -> Result: TrainingResult(algorithm="NEAT", policy=champion, metrics)
+note right: metrics include env_steps_nominal\n+ env_steps_consumed (real ticks, serial + parallel)
+
+Trainer --> User: TrainingResult
+deactivate Trainer
+
+note over User
+  Fragment of <i>sequence_neat_training.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

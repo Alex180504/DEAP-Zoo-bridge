@@ -117,7 +117,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
                 rollout (propagated from
                 :class:`SingleEpisodeEvaluator`).
         """
-        # ---- lexicase per_episode path ----
+        # Lexicase per_episode path.
         if (
             self.fitness_spec is not None
             and self.fitness_spec.lexicase_mode == "per_episode"
@@ -130,7 +130,7 @@ class MultiEpisodeEvaluator(BaseEvaluator):
                 flat.extend(ft)
             return tuple(flat)
 
-        # ---- standard (single- or multi-objective) path ----
+        # Standard (single- or multi-objective) path.
         fitness_tuples = self._evaluate_episodes(individual, base_seed=seed)
         if not fitness_tuples:
             return (0.0,)

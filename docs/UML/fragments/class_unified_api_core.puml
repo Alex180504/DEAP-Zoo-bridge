@@ -1,0 +1,78 @@
+@startuml unified_api_core
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Unified training API: configuration and results
+
+package "deap_pettingzoo.baselines" {
+    enum BudgetMode {
+        ENV_STEPS
+        EVAL_EPISODES
+        GENERATIONS
+        -- GENERATIONS: population trainers only;\n   AgileRL rejects it.
+    }
+    class TrainingConfig <<dataclass>> {
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + seed: Optional[int] = None
+        + max_steps_per_episode: Optional[int] = None
+        + coevolution_config: Optional[CoEvolutionConfig] = None
+        + algorithm_params: dict
+        + output_dir: Path
+        + render: bool
+        + num_workers: int = 1
+        + parallel_backend: str = "process"
+        + scheduler_address: Optional[str] = None
+        + budget_on_consumed: bool = False
+        + recording: RecordingConfig
+        + probe: ProbeConfig
+        -- num_workers/parallel_backend/scheduler_address: parallel-eval fields (process|dask); constructor value\n   is the fallback at default. scheduler_address targets a\n   remote dask.distributed scheduler (URL or scheduler-file\n   path); raises if set with parallel_backend != "dask" --
+        -- budget_on_consumed: opt-in; run until the real\n   ENV_STEPS budget is exhausted (EA simple / CMA-ES / PSO /\n   co-evolution shared pool or per-side slices via\n   CoEvolutionConfig.budget_split / NEAT+HyperNEAT / QDax numpy\n   scoring path); rejected by mu±lambda and the QDax\n   JAX-native scoring path --
+        -- seed/max_steps_per_episode: fields read\n   by EA/CMA/PSO/AgileRL trainers  --
+        -- coevolution_config: typed entry point for CoEvolutionTrainer;\n   a non-CoEvolutionConfig value raises TypeError at construction --
+    }
+    class TrainingResult <<dataclass>> {
+        + algorithm: str
+        + policy: PolicyProtocol
+        + metrics: dict
+        + metadata: dict
+        + seed: int
+        + training_time: float
+        + pareto_front: Optional[list]  ' MO runs (NSGA-II / SPEA2)
+        + hall_of_fame: Optional[list]  ' best-N policies, best first; [0] == policy
+    }
+    class EvalResult <<dataclass>> {
+        + mean_reward: float
+        + std_reward: float
+        + min_reward: float
+        + max_reward: float
+        + num_episodes: int
+        + episode_rewards: List[float]
+        + episode_lengths: List[int]
+        + agent_rewards: Dict[str, float]
+        + info_metrics: Dict[str, List[float]]
+        + to_dict() -> dict
+        -- info_metrics: per-episode env-info task metrics\n   (episode-max per key), filled only when the evaluator\n   was built with info_keys --
+    }
+    interface PolicyProtocol <<Protocol>> {
+        + get_action(observation) -> action
+        + reset() -> None
+    }
+}
+
+    TrainingConfig --> BudgetMode : uses
+    TrainingResult --> PolicyProtocol : contains
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

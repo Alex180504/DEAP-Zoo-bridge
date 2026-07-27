@@ -233,7 +233,7 @@ def test_experiment_score_provenances_flags_mixed():
     union = set().union(*provs.values())
     assert len({p for p in union if p != "none"}) > 1  # UI must block this
 
-    # Clean: both groups carry a held-out metric → comparable.
+    # Clean: both groups carry a held-out metric -> comparable.
     clean = Experiment(
         root=Path("x"),
         runs=[
@@ -331,7 +331,7 @@ def test_final_scores_provenance_filter_and_warning(caplog):
         ]
     )
 
-    # Unfiltered pooling spans held_out + training_fitness → a warning is logged.
+    # Unfiltered pooling spans held_out + training_fitness -> a warning is logged.
     with caplog.at_level(logging.WARNING, logger="deap_pettingzoo.analysis.loaders"):
         pooled = exp.final_scores(metric="final_fitness")
     assert sorted(pooled["ea"]) == [-10.0, -8.0]

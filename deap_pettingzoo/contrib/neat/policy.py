@@ -2,7 +2,7 @@
 
 :class:`NeatPolicy` satisfies
 :class:`~deap_pettingzoo.baselines.base.PolicyProtocol` and is the
-bridge between neat-python's genome→network pipeline and the unified
+bridge between neat-python's genome->network pipeline and the unified
 evaluator API.  It supports both discrete and continuous action spaces
 via the same :mod:`~deap_pettingzoo.policies.action_heads` machinery
 used by :class:`~deap_pettingzoo.policies.FeedforwardNeuralPolicy`.
@@ -72,13 +72,12 @@ class NeatPolicy(PolicyProtocol):
             else None
         )
 
-    # ------------------------------------------------------------------
     # PolicyProtocol
-    # ------------------------------------------------------------------
 
     def get_action(
         self,
         observation: np.ndarray,
+        deterministic: bool = True,
         *,
         action_mask: Optional[np.ndarray] = None,
     ) -> Any:
@@ -86,6 +85,9 @@ class NeatPolicy(PolicyProtocol):
 
         Args:
             observation: 1-D array of shape ``(input_dim,)``.
+            deterministic: Accepted for PolicyProtocol compatibility
+                (benchmark probes pass it); the heads are deterministic
+                decoders, so the value has no effect.
             action_mask: Optional boolean mask forwarded to the head
                 when the head supports masking.
 
@@ -93,6 +95,7 @@ class NeatPolicy(PolicyProtocol):
             Decoded action (type depends on the configured head) or
             raw ``np.ndarray`` when no head was configured.
         """
+        del deterministic
         obs = np.asarray(observation, dtype=np.float64)
         raw = self._network.activate(obs)
         raw_arr = np.asarray(raw, dtype=np.float32)
@@ -107,9 +110,7 @@ class NeatPolicy(PolicyProtocol):
         """No-op — the feed-forward policy has no hidden state."""
         pass
 
-    # ------------------------------------------------------------------
-    # Convenience properties
-    # ------------------------------------------------------------------
+    # Utility properties
 
     @property
     def genome(self) -> neat.DefaultGenome:
@@ -121,9 +122,7 @@ class NeatPolicy(PolicyProtocol):
         """The NEAT config (read-only)."""
         return self._config
 
-    # ------------------------------------------------------------------
     # Pickling helpers (used by OpponentSnapshot kind="neat")
-    # ------------------------------------------------------------------
 
     @classmethod
     def from_snapshot_payload(

@@ -42,15 +42,16 @@ def resolve_device(requested: object) -> str:
 
     This guards against the common containerised-deployment failure where an
     experiment (or a pasted script) asks for ``"cuda"`` but the backend ships a
-    **CPU-only** torch build — AgileRL then crashes with
+    **CPU-only** torch build, prompting AgileRL to crash with
     ``AssertionError: Torch not compiled with CUDA enabled``. Instead of
     crashing, fall back to CPU (with a one-time warning).
 
     Rules:
-    * ``None`` → auto: ``"cuda"`` if available, else ``"cpu"``.
+
+    * ``None`` -> auto: ``"cuda"`` if available, else ``"cpu"``.
     * a CUDA device (e.g. ``"cuda"`` / ``"cuda:0"``) when CUDA is unavailable
-      → ``"cpu"`` (+ one :class:`RuntimeWarning` per distinct requested device).
-    * anything else → ``str(requested)`` unchanged.
+      -> ``"cpu"`` (+ one :class:`RuntimeWarning` per distinct requested device).
+    * anything else -> ``str(requested)`` unchanged.
     """
     cuda_ok = _torch_cuda_available()
     if requested is None:

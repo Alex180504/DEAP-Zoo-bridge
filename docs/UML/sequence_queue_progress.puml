@@ -1,5 +1,7 @@
 @startuml sequence_queue_progress
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Queue Page – Live Progress & Control
 
 participant "Queue Page\n(Streamlit)" as QP
@@ -21,7 +23,7 @@ loop Poll interval
     alt running experiment
         QP -> Client: GET /experiments/{id}/progress
         Client -> API: HTTP GET
-        API -> DB: get_experiment(id) → check status=running
+        API -> DB: get_experiment(id) -> check status=running
         DB --> API: experiment record
         API -> API: read _progress.json from experiment dir
         API --> Client: ProgressSnapshot
