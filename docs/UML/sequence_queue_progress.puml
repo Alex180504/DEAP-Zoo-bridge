@@ -1,5 +1,7 @@
 @startuml sequence_queue_progress
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Queue Page – Live Progress & Control
 
 participant "Queue Page\n(Streamlit)" as QP

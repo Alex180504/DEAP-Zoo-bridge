@@ -1,0 +1,71 @@
+@startuml ui_state
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+skinparam wrapWidth 240
+
+title Frontend: state and data services
+
+package "deap_pettingzoo.ui" {
+    class _launcher <<module>> {
+        + StreamlitNotInstalled
+        + run(results_root=None, *, extra_args=None) -> int
+        + main() -> int
+    }
+    class UISettings <<dataclass, frozen>> {
+        + results_root: Path
+        + results_root_exists: bool
+    }
+    class UIState <<dataclass>> {
+        + results_root: Path
+        + selected_run_ids: list[str]
+        + metric: str
+        + statistic: str
+        + ci_level: float
+        + n_resamples: int
+        + pairwise_test: str
+        --
+        + {static} from_mapping(data: Mapping) -> UIState
+        + {static} from_streamlit() -> UIState
+        + persist() -> None
+        + update_selected(run_ids: Iterable[str]) -> None
+    }
+    class RunSummary <<dataclass>> {
+        + run_id: str
+        + run_dir: Path
+        + algorithm: str
+        + env_name: str
+        + seed: int | None
+        + wall_time_s: float | None
+        + final_summary: dict
+        + started_at: datetime | None
+        + display_name: str | None
+    }
+    class data <<module>> {
+        + discover_runs(root: Path) -> list[RunSummary]
+        + load_experiment_cached(run_dirs) -> Experiment
+    }
+    class management <<module>> {
+        + rename_run(run_dir: Path, display_name: str) -> None
+        + delete_run(run_dir: Path) -> None
+        + create_folder(parent: Path, name: str) -> Path
+        + move_run(run_dir: Path, target_dir: Path) -> None
+    }
+    class config <<module>> {
+        + DEFAULT_ROOT_ENV_VAR = "DEAP_RESULTS_ROOT"
+        + DEFAULT_RESULTS_ROOT: Path
+        + load_settings(*, results_root=None) -> UISettings
+    }
+}
+
+config ..> UISettings : returns
+_launcher ..> config : "DEAP_RESULTS_ROOT env"
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

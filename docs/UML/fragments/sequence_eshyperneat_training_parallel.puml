@@ -1,0 +1,56 @@
+@startuml eshyperneat_training_parallel
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title ES-HyperNEAT training (1/3) — substrate setup, parallel evaluation and result
+
+actor User
+participant "ESHyperNEATTrainer" as Trainer
+participant "neat.Population" as Pop
+participant "ProcessPoolExecutor\n(parallel)" as Executor
+participant "ESHyperNeatPolicy" as Policy
+participant "Substrate" as Sub
+
+User -> Trainer: train(TrainingConfig)
+activate Trainer
+
+Trainer -> Trainer: substrate_for_env(obs_size, act_size)
+Trainer -> Sub: make_uniform_substrate(n_in, n_out)
+Trainer <-- Sub: substrate (input + output coords only)
+
+Trainer -> Trainer: build_cppn_config(input_size=5, output_size=1)
+
+== Parallel or sequential eval ==
+Trainer -> Trainer: effective_workers = resolve_num_workers(\n  config.num_workers if != 1 else self._num_workers)\n  backend = config.parallel_backend if != "process" else self._parallel_backend\n  (config takes precedence over the trainer-constructor default;)
+alt effective_workers > 1
+    Trainer -> Trainer: get_registry_snapshot()
+    Trainer -> Trainer: _NeatWorkerSpec(..., substrate_spec, es_params, max_steps,\n  registry_snapshot=snapshot)
+    Trainer -> Executor: make_executor(effective_workers, backend=backend, ...)\n  note: snapshot rides on the spec; workers replay it\n  (replay_registry_snapshot_once) for Dask custom envs
+
+    loop n_generations
+        Trainer -> Pop: run(parallel_eval_function, n=1)
+        loop for each genome (distributed)
+            Pop -> Executor: map(_neat_worker_evaluate, [(genome, spec), ...])
+            Executor -> Executor: each worker rebuilds:\n  CPPN config + PettingZooWrapper\n  + Substrate + ESNetwork + ESHyperNeatPolicy
+            Executor --> Pop: [(genome_id, fitness), ...]
+        end
+        Pop -> Trainer: on_generation(best_fitness, gen_steps)\n  (Keeps final_generation/fitness_history\n  advancing on the parallel path)
+        Trainer -> Trainer: self._generation_num += 1\n  self._fitness_history.append(best_fitness)
+        Pop -> Pop: reproduce / speciate
+    end
+    Trainer -> Executor: executor.~__exit~__()
+end
+
+Trainer -> Policy: ESHyperNeatPolicy(best_genome, config, substrate)
+
+Trainer --> User: TrainingResult(algorithm="ES-HyperNEAT")
+deactivate Trainer
+
+note over User
+  Fragment of <i>sequence_eshyperneat_training.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

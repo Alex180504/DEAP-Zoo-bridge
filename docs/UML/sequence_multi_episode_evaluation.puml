@@ -1,5 +1,7 @@
 @startuml sequence_multi_episode_evaluation
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Sequence Diagram: Multi-Episode Evaluation with Seed Management
 
 actor "DEAP\nAlgorithm" as DEAP
@@ -11,15 +13,15 @@ participant "Logger" as Log
 
 == Initialization ==
 
-DEAP -> MultiEval : __init__(env_wrapper, config)
+DEAP -> MultiEval : ~__init~__(env_wrapper, config)
 activate MultiEval
-MultiEval -> Seeds : __init__(base_seed)
+MultiEval -> Seeds : ~__init~__(base_seed)
 activate Seeds
 Seeds -> Seeds : initialize RNG
 Seeds --> MultiEval : seed_manager
 deactivate Seeds
 
-MultiEval -> SingleEval : __init__(env_wrapper, config)
+MultiEval -> SingleEval : ~__init~__(env_wrapper, config)
 activate SingleEval
 SingleEval --> MultiEval : single_evaluator
 deactivate SingleEval

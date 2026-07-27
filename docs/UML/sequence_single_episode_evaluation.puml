@@ -1,5 +1,7 @@
 @startuml sequence_single_episode_evaluation
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Sequence Diagram: Single Episode Fitness Evaluation
 
 actor "DEAP\nAlgorithm" as DEAP
@@ -18,7 +20,7 @@ Evaluator -> Evaluator : _create_policies(individual)
 activate Evaluator
 
 loop for each agent in environment
-    Evaluator -> Policy : __init__(individual.genome, env_spec)
+    Evaluator -> Policy : ~__init~__(individual.genome, env_spec)
     activate Policy
     Policy -> Policy : build network from genome
     Policy --> Evaluator : policy instance

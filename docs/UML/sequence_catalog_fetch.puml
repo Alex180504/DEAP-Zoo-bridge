@@ -1,5 +1,7 @@
 @startuml sequence_catalog_fetch
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
 title Catalog Fetch – UI Dynamic Form Construction
 
 participant "Setup Page\n(Streamlit)" as Setup

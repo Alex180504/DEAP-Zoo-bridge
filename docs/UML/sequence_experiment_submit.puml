@@ -1,5 +1,9 @@
 @startuml sequence_experiment_submit
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 300
+skinparam wrapWidth 380
 title Experiment Submit – Setup -> Queue
 
 actor User
@@ -58,7 +62,7 @@ alt kind == "script"
     Disp -> Disp: write user_script.py
     Disp -> Runner: Popen([python, user_script.py],\n  cwd=<experiment-dir>, env=PYTHONPATH+=DEAP_PROJECT_ROOT,\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
 else kind == "spec" (default)
-    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  --spec-file <path>, --experiment-dir <dir>],\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
+    Disp -> Runner: Popen([python, -m, deap_pettingzoo.service.runner,\n  ~--spec-file <path>, ~--experiment-dir <dir>],\n  start_new_session/CREATE_NEW_PROCESS_GROUP,\n  stdout=_stdout.log)
 end
 Disp -> DB: set_pid(id, pid)\n(claim already set status/started_at; this only attaches the pid)
 note right of Disp: logger.info "Experiment {id} running (pid, log, timeout)"\n(diagnostic log — see sequence_logging_pipeline.puml)\n Own process group/session so a timeout/cancel\ncan kill the whole tree, not just the immediate process

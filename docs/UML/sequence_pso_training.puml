@@ -1,4 +1,9 @@
 @startuml
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title PSO Training Sequence
 
 actor User

@@ -1,5 +1,9 @@
 @startuml sequence_coevolution_competitive
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Co-evolution — one generation, competitive_2pop mode (synchronous schedule)
 
 actor User
@@ -15,7 +19,7 @@ participant "HallOfFame\n(pursuers)" as HA
 participant "HallOfFame\n(evaders)" as HB
 
 User -> T : train(TrainingConfig)
-T -> C : validate __post_init__
+T -> C : validate ~__post_init~__
 T -> T : _initialize_sides(env, coev_cfg, workers)
 T -> SA : initialise(env, evaluator, rng)
 T -> SB : initialise(env, evaluator, rng)

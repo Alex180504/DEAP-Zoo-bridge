@@ -1,4 +1,9 @@
 @startuml sequence_frame_recording
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title Frame Recording — Trainer -> RecordingController -> FrameRecorder -> frames/{prefix}episode_NNNN.{ext}
 
 actor "Researcher" as R

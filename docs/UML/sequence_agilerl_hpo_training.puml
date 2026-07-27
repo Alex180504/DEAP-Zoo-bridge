@@ -1,5 +1,9 @@
 @startuml sequence_agilerl_hpo_training
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title AgileRL Evolvable-HPO Training Sequence
 
 actor User
@@ -30,7 +34,11 @@ end note
 
 Trainer -> Trainer: ProbeController(config, log) + per-slot replay buffers
 note right
-    Off-policy: one persistent MultiAgentReplayBuffer\nper population slot (owned by the trainer, keyed\nby slot — AgileRL clone() strips underscore attrs),\nreused across generations. ProbeController is\nno-op unless config.probe.enabled.
+    Off-policy: one persistent MultiAgentReplayBuffer
+    per population slot (owned by the trainer, keyed
+    by slot — AgileRL clone() strips underscore attrs),
+    reused across generations. ProbeController is
+    no-op unless config.probe.enabled.
 end note
 
 loop ep_cycle (until env-step budget)
@@ -41,7 +49,18 @@ loop ep_cycle (until env-step budget)
         else off-policy (MADDPG / MATD3)
             Trainer -> Env: _train_one_agent(..., memory=slot_buffer, total_transitions)
             note right
-                Replay-buffer rollout on the slot's\n**persistent** MultiAgentReplayBuffer:\n1. buffer reused across generations\n   (built once per slot, not per call)\n2. save_to_memory(obs, raw_actions, reward,\n   next_obs, done) once per transition\n   using agent-keyed dicts\n3. agent.learn(memory.sample(batch_size))\n   gated on len(buffer)>=batch_size\n   and learning_delay/learn_step cadence\n4. returns (steps, total_transitions) so the\n   trainer persists the slot's counter
+                Replay-buffer rollout on the slot's
+                **persistent** MultiAgentReplayBuffer:
+                1. buffer reused across generations
+                   (built once per slot, not per call)
+                2. save_to_memory(obs, raw_actions, reward,
+                   next_obs, done) once per transition
+                   using agent-keyed dicts
+                3. agent.learn(memory.sample(batch_size))
+                   gated on len(buffer)>=batch_size
+                   and learning_delay/learn_step cadence
+                4. returns (steps, total_transitions) so the
+                   trainer persists the slot's counter
             end note
         end
     end
@@ -50,7 +69,12 @@ loop ep_cycle (until env-step budget)
     Trainer -> Trainer: fitnesses = [mean(ep_rewards) for each agent]
     Trainer -> Trainer: hall-of-fame update (best-ever, size 1)
     note right
-        Mirrors EATrainer's tools.HallOfFame(1):\nclone this generation's best agent (pre-mutation)\nif it beats the incumbent. Champion for the\nrecorder/probe and the final policy comes from\nhere, so a mutation-degraded agent never replaces\na better one seen earlier.
+        Mirrors EATrainer's tools.HallOfFame(1):
+        clone this generation's best agent (pre-mutation)
+        if it beats the incumbent. Champion for the
+        recorder/probe and the final policy comes from
+        here, so a mutation-degraded agent never replaces
+        a better one seen earlier.
     end note
     Trainer -> Log: row("metrics", {generation, env_steps, mean, max, ...})
     Trainer -> User: progress_callback(ProgressEvent)
@@ -84,7 +108,7 @@ note right: Guarantees an end-of-run probe row.
 Trainer -> Env: re-score hall-of-fame champion (final_eval_episodes)
 Trainer -> Log: save_agilerl_agent(champion) + write_summary(...)
 Trainer -> Policy: AgileRLPolicyWrapper(hall_of_fame_best, agent_ids)
-note right: Champion = best-ever HOF member, not the\nbest of the final post-mutation population.
+note right: Champion = best-ever HOF member.
 Trainer --> User: TrainingResult(algorithm="<algo>-hpo", policy=champion)
 deactivate Trainer
 

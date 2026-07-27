@@ -1,0 +1,72 @@
+@startuml trainers_neuroevolution
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title NEAT family trainers
+
+package "deap_pettingzoo.baselines" {
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
+    }
+    class NEATTrainer {
+        - _fitness_history: List[float]
+        - _generation_num: int
+        + _num_workers: int
+        -- requires neat-python >= 2.0
+        + __init__(num_workers=1)
+        + train(config) -> TrainingResult
+        + supports_budget_mode(mode) -> bool
+        + get_capabilities() -> dict
+        - _budget_to_generations(config, pop_size) -> int
+        - _log(config, best_genome, pop_size, elapsed, algorithm, logger=None) -> None
+        .. note ..
+        _log reuses the trainer's single run logger
+        (logger=log) so metrics+summary+frames+probe
+        land in ONE run dir with a finalised manifest.
+    }
+    class HyperNEATTrainer {
+        -- CPPN + fixed substrate phenotype
+        + get_capabilities() -> dict
+        + train(config) -> TrainingResult
+        - _substrate_to_spec(substrate) -> dict
+        .. note ..
+        algorithm_params.stochastic_head=True routes
+        training+recording through a softmax head
+        (probe+champion stay argmax) so discrete
+        search gets a smooth landscape and agents
+        steer instead of emitting one constant action.
+    }
+    class ESHyperNEATTrainer {
+        -- CPPN + quadtree-discovered substrate
+        + get_capabilities() -> dict
+        + train(config) -> TrainingResult
+    }
+    class _RecordingReporter <<neat.reporting.BaseReporter>> {
+        - _record_fn: Callable
+        + start_generation(generation)
+        + post_evaluate(config, population, species, best_genome)
+        --
+        Forwards each generation's champion to
+        RecordingController.observe (which decides per mode).
+    }
+}
+
+    NEATTrainer --|> BaselineTrainer
+    HyperNEATTrainer --|> NEATTrainer
+    ESHyperNEATTrainer --|> NEATTrainer
+    NEATTrainer --> _RecordingReporter : adds to population
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

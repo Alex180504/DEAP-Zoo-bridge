@@ -1,5 +1,9 @@
 @startuml sequence_cma_es_training
 !theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title Sequence Diagram: CMA-ES Training (deap.cma + FixedTopologyGenome)
 
 actor "User" as User

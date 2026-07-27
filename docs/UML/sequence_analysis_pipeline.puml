@@ -1,4 +1,9 @@
 @startuml sequence_analysis_pipeline
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 180
+skinparam wrapWidth 240
 title Analysis Pipeline – Disk -> Experiment -> Stats / Plots / Report
 
 actor "Researcher" as R

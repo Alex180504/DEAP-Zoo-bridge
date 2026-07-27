@@ -1,0 +1,72 @@
+@startuml unified_api_trainer
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam groupInheritance 2
+skinparam dpi 300
+left to right direction
+skinparam wrapWidth 240
+
+title Unified training API: trainer and comparison contracts
+
+package "deap_pettingzoo.baselines" {
+    abstract class BaselineTrainer {
+        + {abstract} train(config: TrainingConfig) -> TrainingResult
+        + {abstract} supports_budget_mode(mode: BudgetMode) -> bool
+        + {abstract} get_capabilities() -> dict
+        -- module helper: derive_generations(budget, pop, max_steps)
+    }
+    abstract class BaselineEvaluator {
+        + {abstract} evaluate(policy, env_name, num_episodes, seed, render) -> EvalResult
+    }
+    class ComparisonConfig <<dataclass>> {
+        + algorithms: List[str]
+        + env_name: str
+        + budget_mode: BudgetMode
+        + budget_value: int
+        + num_seeds: int
+        + eval_episodes: int
+        + algorithm_configs: dict
+        + output_dir: Path
+    }
+    class "comparison (module)" as comparison_mod <<module>> {
+        - _TRAINER_REGISTRY: dict[str, type]
+        --
+        + register_trainer(name, trainer_class) -> None
+        + get_trainer(name, **kwargs) -> BaselineTrainer
+        ' Self-healing cache over the catalog: on a miss get_trainer calls
+        ' _sync_from_catalog() (registers any iter_trainer_bindings() entry not
+        ' yet present) then retries — so a third-party register_algorithm(...)
+        ' resolves with no second call.
+        - _sync_from_catalog() -> None
+        + compare_baselines(config: ComparisonConfig) -> dict
+        - _register_builtins() -> None
+    }
+    class GenomePolicyWrapper {
+        - genome: FixedTopologyGenome
+        - env_name: str
+        - _policies: dict
+        --
+        + __init__(genome, env_name)
+        + get_action(observation) -> action
+        + reset() -> None
+        + genome() -> FixedTopologyGenome
+    }
+
+note bottom of GenomePolicyWrapper
+  Shared adapter used by both EATrainer
+  and CMAESTrainer to expose a trained
+  genome as a PolicyProtocol for
+  UnifiedEvaluator.
+end note
+}
+
+    comparison_mod ..> BaselineTrainer : registry
+    comparison_mod --> ComparisonConfig : consumes
+
+note as FragmentNote
+  Fragment of the full class diagram
+  (<i>class_diagram.puml</i>). Relations to
+  types outside this fragment are omitted.
+end note
+
+@enduml

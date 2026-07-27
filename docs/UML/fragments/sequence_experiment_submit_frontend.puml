@@ -1,0 +1,54 @@
+@startuml experiment_submit_frontend
+!theme plain
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
+title Experiment submit (1/3) — validation, enqueue and the custom-script path
+
+actor User
+participant "Setup Page\n(Streamlit)" as Setup
+participant "api_client\n(httpx)" as Client
+participant "FastAPI\n/app.py" as API
+participant "db.py\n(SQLite WAL)" as DB
+
+== Form fill & validate ==
+User -> Setup: fill tabs (env, algos, params, budget, ...)
+Setup -> Setup: coerce values\n(bound checks, type casts)
+User -> Setup: click "Validate"
+Setup -> Client: POST /experiments/validate\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec)\n(table-driven: env, algo, params, budget, ...)
+API --> Client: 200 {ok, errors[], warnings[]}
+Client --> Setup: ValidationReport
+Setup --> User: render errors/warnings by tab
+
+== Submit ==
+User -> Setup: click "Submit"
+Setup -> Client: POST /experiments\n{ExperimentSpec}
+Client -> API: HTTP POST
+API -> API: validate_spec(spec) (defense in depth)
+note right of API: 422 if invalid
+API -> DB: insert_experiment(spec, status="queued")
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+Client --> Setup: SubmitResponse
+Setup --> User: success toast + navigate to Queue
+
+== Submit (custom script — Setup -> Advanced) ==
+note over Setup, API: gated by DEAP_ENABLE_ADVANCED (else 403)
+User -> Setup: Advanced tab -> paste script -> "Submit to queue"
+Setup -> Client: POST /experiments/script {script, label}
+Client -> API: HTTP POST
+API -> API: validate_script_source(script)\n(ast.parse + structural checks)
+note right of API: 422 {ok:false, issues} if syntax error
+API -> DB: insert_experiment(\n  {kind:"script", environment:"(custom script)", script}, queued)
+DB --> API: experiment_id
+API --> Client: 201 {id, status="queued", position}
+
+note over User
+  Fragment of <i>sequence_experiment_submit.puml</i>.
+  Steps and participants outside this
+  fragment are omitted.
+end note
+
+@enduml

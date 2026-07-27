@@ -1,4 +1,9 @@
 @startuml sequence_ui_replay_envviz
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Streamlit UI – Replay & Live Env Visualisation
 
 actor "User" as U

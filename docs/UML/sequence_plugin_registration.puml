@@ -1,4 +1,9 @@
 @startuml
+!theme plain
+' Compact layout (tuned per diagram — see README, 'Sequence-diagram layout').
+hide footbox
+skinparam maxMessageSize 140
+skinparam wrapWidth 200
 title Plugin Registration Sequence — entry point -> register -> resolve
 
 actor "Third-party plugin" as Plugin
@@ -43,7 +48,7 @@ Cmp --> User: MyTrainer(**kwargs)
 
 == Resolve as a co-evolution side ==
 User -> Sides: Side(optimizer="myopt", ...)
-Sides -> Sides: __post_init__ validates token in set(_SIDE_STATE_FACTORIES)
+Sides -> Sides: ~__post_init~__ validates token in set(_SIDE_STATE_FACTORIES)
 User -> Sides: make_side_state(side)
 Sides -> Sides: loader = _SIDE_STATE_FACTORIES["myopt"]; cls = loader()
 Sides --> User: MySideState(side)
