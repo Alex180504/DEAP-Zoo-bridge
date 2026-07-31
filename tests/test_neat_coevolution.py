@@ -26,7 +26,6 @@ class TestNeatSideState:
             optimizer_config={
                 "pop_size": 10,
                 "seed": 42,
-                "eval_episodes_per_genome": 1,
                 "n_generations_per_step": 1,
             },
         )
@@ -105,3 +104,14 @@ class TestNeatSideState:
         # Should be a neat genome.
         assert hasattr(snapshot, "fitness")
         assert hasattr(snapshot, "key")
+
+    def test_eval_episodes_per_genome_is_rejected(self, env):
+        """The key is a standalone-trainer knob; k_opponents owns it here."""
+        noisy = Side(
+            name="neat_agents",
+            role_prefixes=("agent_",),
+            optimizer="neat",
+            optimizer_config={"pop_size": 4, "eval_episodes_per_genome": 5},
+        )
+        with pytest.warns(RuntimeWarning, match="eval_episodes_per_genome"):
+            make_side_state(noisy)

@@ -234,7 +234,12 @@ def _make_hyperneat_side(cfg: Dict[str, Any], name: str, role_prefix: str, seed:
         optimizer_config={
             "pop_size": cfg["population_size"],
             "substrate_hidden_layers": cfg["substrate_hidden_layers"],
-            "eval_episodes_per_genome": 1,
+            # Match the rest of the evolved family's decoding (tanh
+            # phenotype + softmax head) rather than the sigmoid/argmax
+            # library defaults.
+            "phenotype_activation": XC.HYPERNEAT_PARAMS["phenotype_activation"],
+            "stochastic_head": XC.HYPERNEAT_PARAMS["stochastic_head"],
+            "head_temperature": XC.HYPERNEAT_PARAMS["head_temperature"],
             "seed": seed,
         },
         hof=RingHallOfFame(capacity=HOF_CAPACITY),

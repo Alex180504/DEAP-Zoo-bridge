@@ -39,6 +39,19 @@ LearnerPolicyFactory = Callable[[Any, str, Any], PolicyProtocol]
 VALID_AGGREGATIONS = ("mean", "min", "max", "sum")
 
 
+@dataclass
+class GenomeIndividual:
+    """Minimal picklable carrier satisfying the evaluator's ``.genome`` contract.
+
+    :meth:`CoEvolutionEvaluator.run` requires an object exposing ``.genome``
+    (DEAP individuals do so naturally). Paradigms whose population members
+    are bare genomes — NEAT's ``neat.DefaultGenome``, for instance — wrap
+    each one in this holder so they can use the shared evaluator.
+    """
+
+    genome: Any
+
+
 # Worker-side state for parallel co-evolution
 
 
@@ -108,6 +121,10 @@ class _EpisodePayload:
     max_steps: int
     #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
+    #: Picklable descriptor of the learner phenotype for sides whose policy
+    #: is not a plain MLP (NEAT family). ``None`` keeps the historical path:
+    #: the worker builds a ``FeedforwardNeuralPolicy`` from ``learner_genome``.
+    learner_snapshot: Optional[OpponentSnapshot] = None
 
 
 @dataclass
@@ -165,15 +182,27 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
         for a in members:
             opponent_policies[a] = side_policy
 
-    # Build learner policies fresh per episode (matches serial path).
-    learner_policies: Dict[str, PolicyProtocol] = {
-        a: FeedforwardNeuralPolicy(
-            payload.learner_genome,
-            action_space=env.action_space(a),
-            masked=payload.learner_masked,
+    # Build learner policies fresh per episode (matches serial path). When
+    # the side shipped a phenotype snapshot, build it *once* and share it
+    # across the side's agents — the same contract opponents already use,
+    # and the only affordable option for phenotypes whose construction is
+    # expensive (ES-HyperNEAT's quadtree subdivision).
+    learner_policies: Dict[str, PolicyProtocol]
+    if payload.learner_snapshot is not None and learner_agents:
+        learner_policy = rebuild_opponent_policy(
+            payload.learner_snapshot,
+            action_space=env.action_space(learner_agents[0]),
         )
-        for a in learner_agents
-    }
+        learner_policies = dict.fromkeys(learner_agents, learner_policy)
+    else:
+        learner_policies = {
+            a: FeedforwardNeuralPolicy(
+                payload.learner_genome,
+                action_space=env.action_space(a),
+                masked=payload.learner_masked,
+            )
+            for a in learner_agents
+        }
 
     return _run_episode(
         env=env,
@@ -305,6 +334,9 @@ class CoEvolutionEvaluator(BaseEvaluator):
         env_name: Optional[str] = None,
         env_config: Optional[Dict[str, Any]] = None,
         learner_masked: bool = False,
+        learner_snapshot_fn: Optional[Callable[[Any], Optional[OpponentSnapshot]]] = (
+            None
+        ),
         registry_snapshot: Optional[list] = None,
     ) -> None:
         """Build a co-evolution evaluator.
@@ -325,6 +357,11 @@ class CoEvolutionEvaluator(BaseEvaluator):
           use this to rebuild :class:`FeedforwardNeuralPolicy`
           locally; ignored on the serial path (which uses
           ``learner_factory`` directly).
+        * ``learner_snapshot_fn`` — ``genome -> Optional[OpponentSnapshot]``
+          describing the learner phenotype for workers. Returning ``None``
+          (the default) keeps the :class:`FeedforwardNeuralPolicy` rebuild
+          path; NEAT-family sides supply their own snapshot so the parallel
+          path builds the same phenotype the driver would.
 
         Raises:
             ValueError: on agent-coverage mismatch, invalid
@@ -357,6 +394,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._env_name = env_name
         self._env_config = env_config
         self._learner_masked = bool(learner_masked)
+        self.learner_snapshot_fn = learner_snapshot_fn
         self._registry_snapshot = registry_snapshot
 
         self._partition_agents()
@@ -533,6 +571,14 @@ class CoEvolutionEvaluator(BaseEvaluator):
             )
             side_role_prefixes[side_name] = prefixes
 
+        # Built once per call, not per episode: the descriptor is identical
+        # across the k episodes and can be expensive to produce.
+        learner_snapshot = (
+            None
+            if self.learner_snapshot_fn is None
+            else self.learner_snapshot_fn(individual.genome)
+        )
+
         payloads: List[_EpisodePayload] = []
         for i in range(self.k_opponents):
             episode_seed = None if seed is None else int(seed) + i
@@ -551,6 +597,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
                     episode_seed=episode_seed,
                     max_steps=self.max_steps,
                     registry_snapshot=self._registry_snapshot,
+                    learner_snapshot=learner_snapshot,
                 )
             )
 
@@ -671,5 +718,6 @@ class CoEvolutionEvaluator(BaseEvaluator):
 __all__ = [
     "CoEvolutionEvaluator",
     "CoEvolutionEvalResult",
+    "GenomeIndividual",
     "LearnerPolicyFactory",
 ]

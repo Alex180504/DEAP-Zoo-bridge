@@ -478,7 +478,12 @@ def _make_hyperneat_side(name: str, role_prefix: str, seed: int) -> Side:
         optimizer_config={
             "pop_size": hn_params["pop_size"],
             "substrate_hidden_layers": hn_params["substrate_hidden_layers"],
-            "eval_episodes_per_genome": 1,
+            # Threaded through so HyperNEAT decodes like the rest of the
+            # evolved family (tanh phenotype + softmax head); leaving them
+            # unset silently gave it a sigmoid phenotype and an argmax head.
+            "phenotype_activation": hn_params["phenotype_activation"],
+            "stochastic_head": hn_params["stochastic_head"],
+            "head_temperature": hn_params["head_temperature"],
             "seed": seed,
         },
         hof=RingHallOfFame(capacity=HOF_CAPACITY),

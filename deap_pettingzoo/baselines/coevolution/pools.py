@@ -153,6 +153,47 @@ def _resolve_qdax_module(layer_sizes: Tuple[int, ...], activation: str) -> Any:
     return module
 
 
+# Worker-side caches for the NEAT family. ``build_neat_config`` /
+# ``build_cppn_config`` write *and delete* a temp file on every call and
+# ``substrate_for_env`` rebuilds a full coordinate layout, so rebuilding one
+# opponent per episode would mean thousands of pointless filesystem round
+# trips per worker. Same rationale as ``_QDAX_MODULE_CACHE`` above.
+_NEAT_CONFIG_CACHE: Dict[Tuple[str, int, int], Any] = {}
+_SUBSTRATE_CACHE: Dict[Tuple[int, int, Optional[Tuple[int, ...]]], Any] = {}
+
+
+def _resolve_neat_config(kind: str, input_size: int, output_size: int) -> Any:
+    """Return a cached ``neat.Config`` for ``kind`` in {'neat', 'cppn'}."""
+    key = (kind, int(input_size), int(output_size))
+    cached = _NEAT_CONFIG_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from deap_pettingzoo.contrib.neat.config import build_cppn_config, build_neat_config
+
+    builder = build_cppn_config if kind == "cppn" else build_neat_config
+    config = builder(input_size=key[1], output_size=key[2])
+    _NEAT_CONFIG_CACHE[key] = config
+    return config
+
+
+def _resolve_substrate(
+    env_obs_size: int,
+    env_act_size: int,
+    hidden_layers: Optional[Sequence[int]] = None,
+) -> Any:
+    """Return a cached HyperNEAT substrate for the given env dimensions."""
+    layers = tuple(int(h) for h in hidden_layers) if hidden_layers else None
+    key = (int(env_obs_size), int(env_act_size), layers)
+    cached = _SUBSTRATE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
+
+    substrate = substrate_for_env(key[0], key[1], hidden_layers=layers)
+    _SUBSTRATE_CACHE[key] = substrate
+    return substrate
+
+
 def rebuild_opponent_policy(
     snapshot: OpponentSnapshot, *, action_space: Any
 ) -> PolicyProtocol:
@@ -201,58 +242,61 @@ def rebuild_opponent_policy(
         return FlaxPolicyAdapter(module, params, action_space=action_space)
 
     if kind == "neat":
-        from deap_pettingzoo.contrib.neat.config import build_neat_config
         from deap_pettingzoo.contrib.neat.policy import NeatPolicy
 
-        genome = payload["genome"]
-        input_size = int(payload["config_input_size"])
-        output_size = int(payload["config_output_size"])
-        neat_cfg = build_neat_config(
-            input_size=input_size,
-            output_size=output_size,
+        neat_cfg = _resolve_neat_config(
+            "neat",
+            int(payload["config_input_size"]),
+            int(payload["config_output_size"]),
         )
         return NeatPolicy(
-            genome,
+            payload["genome"],
             neat_cfg,
             action_space=action_space,
+            masked=bool(payload.get("masked", False)),
         )
 
     if kind == "hyperneat":
-        from deap_pettingzoo.contrib.neat.config import build_cppn_config
         from deap_pettingzoo.contrib.neat.hyperneat import HyperNeatPolicy
-        from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
 
-        genome = payload["genome"]
-        env_obs_size = int(payload["env_obs_size"])
-        env_act_size = int(payload["env_act_size"])
-        activation = str(payload.get("activation", "sigmoid"))
-        cppn_cfg = build_cppn_config(input_size=5, output_size=1)
-        substrate = substrate_for_env(env_obs_size, env_act_size)
+        cppn_cfg = _resolve_neat_config("cppn", 5, 1)
+        # ``hidden_layers`` must match what the driver built the substrate
+        # with — omitting it gave workers a topologically different
+        # phenotype from the very same genome.
+        substrate = _resolve_substrate(
+            int(payload["env_obs_size"]),
+            int(payload["env_act_size"]),
+            payload.get("hidden_layers"),
+        )
         return HyperNeatPolicy(
-            genome,
+            payload["genome"],
             cppn_cfg,
             substrate,
             action_space=action_space,
-            activation=activation,
+            masked=bool(payload.get("masked", False)),
+            activation=str(payload.get("activation", "sigmoid")),
+            stochastic=bool(payload.get("stochastic", False)),
+            temperature=float(payload.get("temperature", 1.0)),
+            rng=np.random.default_rng() if payload.get("stochastic") else None,
         )
 
     if kind == "es_hyperneat":
-        from deap_pettingzoo.contrib.neat.config import build_cppn_config
         from deap_pettingzoo.contrib.neat.hyperneat import ESHyperNeatPolicy
-        from deap_pettingzoo.contrib.neat.substrate import substrate_for_env
 
-        genome = payload["genome"]
-        env_obs_size = int(payload["env_obs_size"])
-        env_act_size = int(payload["env_act_size"])
-        es_params = payload.get("es_params", None)
-        cppn_cfg = build_cppn_config(input_size=5, output_size=1)
-        substrate = substrate_for_env(env_obs_size, env_act_size)
+        cppn_cfg = _resolve_neat_config("cppn", 5, 1)
+        substrate = _resolve_substrate(
+            int(payload["env_obs_size"]), int(payload["env_act_size"])
+        )
         return ESHyperNeatPolicy(
-            genome,
+            payload["genome"],
             cppn_cfg,
             substrate,
             action_space=action_space,
-            es_params=es_params,
+            masked=bool(payload.get("masked", False)),
+            es_params=payload.get("es_params", None),
+            stochastic=bool(payload.get("stochastic", False)),
+            temperature=float(payload.get("temperature", 1.0)),
+            rng=np.random.default_rng() if payload.get("stochastic") else None,
         )
 
     raise ValueError(
@@ -474,6 +518,13 @@ class ArchivePool(_BasePool):
     The archive stores opaque snapshots (e.g. cloned genomes); the
     ``policy_factory`` converts one into a :class:`PolicyProtocol` at
     sample time.
+
+    Args:
+        snapshot_fn: Optional ``item -> OpponentSnapshot`` override for the
+            parallel path. When ``None`` (default) archived items go through
+            :func:`_snapshot_for_item`, which only understands the built-in
+            ``"feedforward"`` kind. Sides with their own snapshot format
+            (the NEAT family) pass their own builder here.
     """
 
     def __init__(
@@ -484,12 +535,14 @@ class ArchivePool(_BasePool):
         *,
         snapshot_kind: str = "feedforward",
         snapshot_metadata: Optional[Dict[str, Any]] = None,
+        snapshot_fn: Optional[Callable[[Any], OpponentSnapshot]] = None,
     ) -> None:
         self._archive = archive
         self._policy_factory = policy_factory
         self._sampler = sampler
         self._snapshot_kind = snapshot_kind
         self._snapshot_metadata: Dict[str, Any] = dict(snapshot_metadata or {})
+        self._snapshot_fn = snapshot_fn
 
     @property
     def archive(self) -> HallOfFame:
@@ -527,9 +580,14 @@ class ArchivePool(_BasePool):
         for _ in range(k):
             idx = self._sampler(size, self._archive.fitnesses, rng)
             item = self._archive.items[idx]
-            snaps.append(
-                _snapshot_for_item(item, self._snapshot_kind, self._snapshot_metadata)
-            )
+            if self._snapshot_fn is not None:
+                snaps.append(self._snapshot_fn(item))
+            else:
+                snaps.append(
+                    _snapshot_for_item(
+                        item, self._snapshot_kind, self._snapshot_metadata
+                    )
+                )
         return snaps
 
     def __len__(self) -> int:

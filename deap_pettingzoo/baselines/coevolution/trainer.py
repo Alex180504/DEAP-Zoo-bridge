@@ -835,8 +835,14 @@ class CoEvolutionTrainer(BaselineTrainer):
                 _random.setstate(previous_py_state)
                 np.random.set_state(previous_np_state)
                 raise
-            state._py_state = _random.getstate()
-            state._np_state = np.random.get_state()
+            # Sides that already isolated their own RNG inside initialise()
+            # (the NEAT family — neat.Population seeds the *global* random
+            # module) have captured their continuation state themselves;
+            # overwriting it here would hand them the caller's stream back.
+            if state._py_state is None:
+                state._py_state = _random.getstate()
+            if state._np_state is None:
+                state._np_state = np.random.get_state()
             _random.setstate(previous_py_state)
             np.random.set_state(previous_np_state)
 
@@ -1358,7 +1364,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         """Sum the nominal episodes per generation across evolving sides.
 
         EA/CMA/PSO sides contribute ``population_size * k_opponents``; QDax
-        sides ``batch_size * k_opponents``; RL sides
+        sides ``batch_size * k_opponents``; NEAT-family sides
+        ``pop_size * k_opponents * n_generations_per_step`` (one
+        ``step_generation`` advances the NEAT population by
+        ``n_generations_per_step`` inner generations); RL sides
         ``rollout_episodes_per_gen``. Frozen sides contribute nothing.
         Mirrors the per-side accounting in :meth:`_translate_budget`.
         """
@@ -1371,6 +1380,15 @@ class CoEvolutionTrainer(BaselineTrainer):
             elif s.optimizer in {"qdax_map_elites", "qdax_cma_me"}:
                 ep_per_gen += (
                     int(s.optimizer_config.get("batch_size", 20)) * coev_cfg.k_opponents
+                )
+            elif s.optimizer in {"neat", "hyperneat", "es_hyperneat"}:
+                # NEAT sides size their population with ``pop_size``, not
+                # ``population_size`` — reading the wrong key silently billed
+                # them the 20-individual default.
+                ep_per_gen += (
+                    int(s.optimizer_config.get("pop_size", 50))
+                    * coev_cfg.k_opponents
+                    * int(s.optimizer_config.get("n_generations_per_step", 1))
                 )
             else:
                 ep_per_gen += (
@@ -1506,6 +1524,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         max_steps = evaluator.max_steps
         learner_role_prefixes = evaluator.learner_role_prefixes
         learner_masked = evaluator._learner_masked
+        learner_snapshot_fn = evaluator.learner_snapshot_fn
         opponent_sides = list(evaluator.opponent_sides)  # snapshot at creation time
 
         def _batch_eval(individuals: List[Any]) -> List[tuple]:
@@ -1521,6 +1540,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             # Build N×k payloads.
             payloads: List[_EpisodePayload] = []
             for i, ind in enumerate(individuals):
+                # One phenotype descriptor per individual, shared by its k
+                # episodes (None for the plain feedforward sides).
+                learner_snap = (
+                    None
+                    if learner_snapshot_fn is None
+                    else learner_snapshot_fn(ind.genome)
+                )
                 for ep_i in range(k):
                     global_ep = i * k + ep_i
                     snaps = {
@@ -1539,6 +1565,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                             episode_seed=None,
                             max_steps=max_steps,
                             registry_snapshot=getattr(self, "_registry_snapshot", None),
+                            learner_snapshot=learner_snap,
                         )
                     )
             # Dispatch all N×k episodes in parallel.
@@ -1697,7 +1724,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             executor=executor_for_side,
             env_name=getattr(self, "_env_name", None),
             env_config=getattr(self, "_env_config", None),
-            learner_masked=bool(getattr(learner_state, "masked", False)),
+            learner_masked=learner_state.masked,
+            learner_snapshot_fn=learner_state.learner_snapshot,
             registry_snapshot=getattr(self, "_registry_snapshot", None),
         )
         trainer_rng = self._rng
@@ -1808,17 +1836,12 @@ class CoEvolutionTrainer(BaselineTrainer):
 def _build_learner_factory(learner_state: SideState, coev_cfg: CoEvolutionConfig):
     """Build the ``learner_factory`` the evaluator will call.
 
-    Returns ``(genome, agent_id, action_space) -> PolicyProtocol`` that
-    delegates to the side's own policy factory.
+    Delegates to :meth:`SideState.learner_policy_factory` so paradigms with
+    a non-feedforward phenotype (NEAT, HyperNEAT, ES-HyperNEAT) get their own
+    phenotype builder instead of the MLP default.
     """
-    from .sides import _make_feedforward_policy_factory  # local import to avoid cycle
-
-    masked = bool(learner_state.side.optimizer_config.get("masked", False))
-
-    def _factory(genome: Any, agent_id: str, action_space: Any):
-        return _make_feedforward_policy_factory(action_space, masked=masked)(genome)
-
-    return _factory
+    del coev_cfg
+    return learner_state.learner_policy_factory()
 
 
 __all__ = [

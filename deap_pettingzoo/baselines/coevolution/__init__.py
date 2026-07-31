@@ -20,12 +20,17 @@ Public API:
 """
 
 from .archive import ElitistHallOfFame, HallOfFame, RingHallOfFame
-from .evaluator import CoEvolutionEvalResult, CoEvolutionEvaluator
+from .evaluator import (
+    CoEvolutionEvalResult,
+    CoEvolutionEvaluator,
+    GenomeIndividual,
+)
 from .pools import (
     ArchivePool,
     CompositePool,
     FrozenPolicyPool,
     OpponentPool,
+    OpponentSnapshot,
     PolicyFactory,
     PopulationPool,
     RLPolicyPool,
@@ -80,6 +85,7 @@ __all__ = [
     "CompositePool",
     "RLPolicyPool",
     "PolicyFactory",
+    "OpponentSnapshot",
     # Archives
     "HallOfFame",
     "RingHallOfFame",
@@ -93,4 +99,5 @@ __all__ = [
     # Evaluator
     "CoEvolutionEvaluator",
     "CoEvolutionEvalResult",
+    "GenomeIndividual",
 ]
