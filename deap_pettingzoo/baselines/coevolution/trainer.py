@@ -279,6 +279,7 @@ VALID_MODES = ("competitive_2pop", "self_play_hof", "cooperative")
 VALID_SCHEDULES = ("synchronous", "alternating")
 VALID_BUDGET_SPLITS = ("shared", "per_side")
 VALID_EXHAUSTED_POLICIES = ("freeze", "cutoff")
+VALID_SIDE_PACINGS = ("lockstep", "equal_steps")
 
 
 @dataclass
@@ -345,6 +346,24 @@ class CoEvolutionConfig:
             side exhausts its slice (the arms race stays two-sided
             throughout, but the total consumed budget is under-spent by
             a pairing-dependent amount).
+        side_pacing: How generations are handed out across sides — one of
+            :data:`VALID_SIDE_PACINGS`. ``"lockstep"`` (default) advances
+            every non-exhausted side once per iteration, so a side whose
+            generation costs 8x its opponent's spends its budget 8x
+            faster and then sits frozen for the rest of the run.
+            ``"equal_steps"`` instead orders sides by where their real
+            consumed env steps would land if they stepped now (``consumed
+            + mean cost of their own past generations``) and holds back
+            any side more than half a generation past the earliest such
+            point: cheap-per-generation sides simply take more
+            generations, expensive ones space theirs further apart, and
+            every side reaches the end of the budget together. Sides of
+            comparable cost still step simultaneously. Requires
+            ``TrainingConfig.budget_on_consumed=True`` with
+            ``budget_mode == ENV_STEPS`` (raises ``ValueError`` in
+            ``train()`` otherwise). Independent of ``budget_split``,
+            though the two are usually paired: pacing keeps the sides
+            level, the per-side split guarantees the slices are equal.
     """
 
     mode: str
@@ -362,6 +381,7 @@ class CoEvolutionConfig:
     scheduler_address: Optional[str] = None
     budget_split: str = "shared"
     on_side_exhausted: str = "freeze"
+    side_pacing: str = "lockstep"
     generation_callback: Optional[Callable[[int, Dict[str, Any]], None]] = field(
         default=None, repr=False, compare=False
     )
@@ -380,6 +400,28 @@ class CoEvolutionConfig:
     ``logger.row("probe", ...)`` benchmark rows that must land in the run
     directory) and ``"env_steps_consumed"`` (the pooled real env-tick count
     at this generation, ``None`` when unavailable).
+    """
+
+    final_eval_fn: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = (
+        field(default=None, repr=False, compare=False)
+    )
+    """Optional end-of-run champion evaluation, called once as ``(states, context)``.
+
+    Co-evolution otherwise reports only ``final_best`` — each side's *training*
+    fitness against its co-evolved opponents, which lives on a different scale
+    per algorithm and per pairing and so cannot be compared across runs. A
+    ``final_eval_fn`` supplies the absolute score: evaluate each side's champion
+    against whatever held-out opponent the experiment considers ground truth,
+    and return a flat dict of scalars. Those land in
+    ``TrainingResult.metrics["final_eval"]`` and, prefixed with ``eval_``, in
+    ``summary.json``.
+
+    ``context`` carries ``"env"`` (the live :class:`PettingZooWrapper`),
+    ``"logger"`` (the run's :class:`ExperimentLogger`, so the evaluation can
+    also write a final ``probe`` row), ``"env_steps_consumed"`` and
+    ``"num_generations"``. Called inside the executor scope, before the env is
+    closed. Exceptions are swallowed with a ``RuntimeWarning`` — a failed
+    evaluation must not lose a completed training run.
     """
 
     def __post_init__(self) -> None:
@@ -488,6 +530,11 @@ class CoEvolutionConfig:
                 f"on_side_exhausted={self.on_side_exhausted!r} invalid; "
                 f"must be one of {VALID_EXHAUSTED_POLICIES}."
             )
+        if self.side_pacing not in VALID_SIDE_PACINGS:
+            raise ValueError(
+                f"side_pacing={self.side_pacing!r} invalid; "
+                f"must be one of {VALID_SIDE_PACINGS}."
+            )
         # Empty/whitespace scheduler addresses mean "unset".
         if self.scheduler_address is not None:
             self.scheduler_address = str(self.scheduler_address).strip() or None
@@ -583,8 +630,23 @@ class CoEvolutionTrainer(BaselineTrainer):
             evolving = [s.name for s in coev_cfg.sides if s.optimizer != "frozen"]
             share = consumed_budget // max(1, len(evolving))
             self._side_budgets = {name: share for name in evolving}
+
+        # Equal-env-step pacing compares real per-side consumption, which only
+        # exists on the consumed-step path.
+        if coev_cfg.side_pacing == "equal_steps" and consumed_budget is None:
+            raise ValueError(
+                "CoEvolutionConfig.side_pacing='equal_steps' requires "
+                "TrainingConfig.budget_on_consumed=True with "
+                "budget_mode == BudgetMode.ENV_STEPS (pacing is decided from "
+                "real per-side consumed env steps)."
+            )
         # Safety cap: when budget_on_consumed the real stop is the consumed check;
         # max_iters prevents an infinite loop if every episode terminates in 1 step.
+        # It needs no adjustment for "equal_steps": an iteration there advances a
+        # subset of the sides rather than all of them, but the run still ends when
+        # the cheapest-per-generation side spends its budget, and that side steps
+        # every iteration under both pacings — so the iteration count needed is
+        # the same one "lockstep" already had to cover.
         max_iters = (
             num_generations * max(1, coev_cfg.max_steps_per_episode) + 10
             if consumed_budget is not None
@@ -709,6 +771,18 @@ class CoEvolutionTrainer(BaselineTrainer):
             reporting = states[coev_cfg.reporting_side]
             policy = reporting.best_policy(env)
 
+            # Absolute end-of-run score. final_best is a training fitness
+            # against co-evolved opponents, so it is not comparable across
+            # algorithms or pairings; this is the only run-level number that
+            # is. Still inside the executor scope, before env.close().
+            final_eval = self._run_final_eval(
+                coev_cfg,
+                states,
+                env,
+                consumed=self._aggregate_consumed(per_side_history),
+                num_generations=realized,
+            )
+
             # Capture at the end of the run so late-joining workers show up.
             if hasattr(executor, "worker_info"):
                 dask_workers = sorted({str(w["host"]) for w in executor.worker_info()})
@@ -746,6 +820,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                 for name, state in states.items()
             },
             "num_generations": realized,
+            "final_eval": final_eval,
         }
         metadata = {
             "mode": coev_cfg.mode,
@@ -788,6 +863,7 @@ class CoEvolutionTrainer(BaselineTrainer):
             states,
             training_time,
             realized,
+            final_eval=final_eval,
         )
 
         return TrainingResult(
@@ -1035,6 +1111,10 @@ class CoEvolutionTrainer(BaselineTrainer):
     ) -> int:
         """Drive the synchronous schedule: every side advances each gen.
 
+        Under ``side_pacing='equal_steps'`` an iteration advances only the sides
+        that are not already ahead on real consumed steps, so an iteration is no
+        longer "one generation for everybody".
+
         Returns the number of generations actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
@@ -1047,6 +1127,12 @@ class CoEvolutionTrainer(BaselineTrainer):
             skip: Optional[Set[str]] = None
             if side_budgets is not None and coev_cfg.on_side_exhausted == "freeze":
                 skip = self._exhausted_sides(history, side_budgets)
+            if coev_cfg.side_pacing == "equal_steps":
+                paced = self._paced_skip(
+                    history,
+                    self._pacing_candidates(states, history, side_budgets),
+                )
+                skip = paced if skip is None else (skip | paced)
             self._run_synchronous_generation(env, states, coev_cfg, history, skip=skip)
             realized = _g + 1
             consumed = self._aggregate_consumed(history)
@@ -1057,9 +1143,10 @@ class CoEvolutionTrainer(BaselineTrainer):
             _side_info = "  ".join(
                 _format_progress_entry(h[-1]) for n, h in history.items() if h
             )
+            _held = f"  held={','.join(sorted(skip))}" if skip else ""
             print(
                 f"[CoEv] gen {realized}/{max_iters}  "
-                f"{_side_info}  "
+                f"{_side_info}{_held}  "
                 f"({time.time()-_gt:.1f}s)",
                 flush=True,
             )
@@ -1083,6 +1170,10 @@ class CoEvolutionTrainer(BaselineTrainer):
     ) -> int:
         """Drive the alternating schedule: one side advances at a time.
 
+        Rotating one generation per side still lets the expensive side drain
+        first, so ``side_pacing='equal_steps'`` applies here too: a side that is
+        already ahead on real consumed steps sits out the rotation.
+
         Returns the number of side-steps actually completed (may be less than
         ``max_iters`` when ``consumed_budget`` is reached).
         """
@@ -1097,6 +1188,13 @@ class CoEvolutionTrainer(BaselineTrainer):
                 self._exhausted_sides(history, side_budgets)
             ) == len(side_budgets):
                 break
+            paced_skip: Set[str] = set()
+            if coev_cfg.side_pacing == "equal_steps":
+                paced_skip = self._paced_skip(
+                    history,
+                    self._pacing_candidates(states, history, side_budgets),
+                )
+            rotation_start = total
             for name in rotation:
                 if stop:
                     break
@@ -1107,6 +1205,8 @@ class CoEvolutionTrainer(BaselineTrainer):
                     and name in side_budgets
                     and self._side_consumed(history, name) >= side_budgets[name]
                 ):
+                    continue
+                if name in paced_skip:
                     continue
                 for _inner in range(coev_cfg.alternating_generations):
                     if total >= max_iters or stop:
@@ -1139,9 +1239,48 @@ class CoEvolutionTrainer(BaselineTrainer):
                     elif consumed_budget is not None and consumed >= consumed_budget:
                         stop = True
                         break
+            if total == rotation_start and not stop:
+                # Defensive: a rotation that advanced nothing would spin.
+                break
         return total
 
     # Logging helpers
+
+    def _run_final_eval(
+        self,
+        coev_cfg: CoEvolutionConfig,
+        states: Dict[str, SideState],
+        env: PettingZooWrapper,
+        *,
+        consumed: int,
+        num_generations: int,
+    ) -> Dict[str, Any]:
+        """Run :attr:`CoEvolutionConfig.final_eval_fn`, if one is configured.
+
+        Returns the hook's flat scalar dict, or ``{}`` when no hook is set or
+        the hook raised — a failed evaluation warns but must never discard a
+        completed training run.
+        """
+        if coev_cfg.final_eval_fn is None:
+            return {}
+        context = {
+            "env": env,
+            "logger": getattr(self, "_recording_log", None),
+            "env_steps_consumed": int(consumed),
+            "num_generations": int(num_generations),
+        }
+        try:
+            result = coev_cfg.final_eval_fn(states, context)
+        except Exception as exc:  # noqa: BLE001 - must not lose the run
+            warnings.warn(
+                f"CoEvolutionConfig.final_eval_fn raised "
+                f"({type(exc).__name__}: {exc}); the run is reported without a "
+                "final champion evaluation.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return {}
+        return dict(result) if result else {}
 
     def _persist_results(
         self,
@@ -1151,12 +1290,14 @@ class CoEvolutionTrainer(BaselineTrainer):
         states: Dict[str, Any],
         training_time: float,
         num_generations: int,
+        final_eval: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Write coevolution metrics + summary via :class:`ExperimentLogger`.
 
         Each side's per-generation stats land in ``metrics.csv`` with a
         ``side`` discriminator column; a single ``summary.json`` records
-        per-side final bests.
+        per-side final bests plus, when a ``final_eval_fn`` supplied one,
+        the absolute end-of-run evaluation under ``eval_``-prefixed keys.
 
         Note:
             Reuses the logger built in ``train()`` (so frame recording and
@@ -1214,6 +1355,9 @@ class CoEvolutionTrainer(BaselineTrainer):
                         for name, state in states.items()
                     },
                     "reporting_side": coev_cfg.reporting_side,
+                    # Absolute end-of-run score, mirroring the vs-scripted-arm
+                    # summaries; absent when no final_eval_fn is configured.
+                    **{f"eval_{k}": v for k, v in (final_eval or {}).items()},
                 },
                 training_time_s=training_time,
             )
@@ -1328,6 +1472,68 @@ class CoEvolutionTrainer(BaselineTrainer):
             name
             for name, budget in side_budgets.items()
             if cls._side_consumed(history, name) >= budget
+        }
+
+    @classmethod
+    def _pacing_candidates(
+        cls,
+        states: Dict[str, SideState],
+        history: Dict[str, List[GenerationStats]],
+        side_budgets: Optional[Dict[str, int]],
+    ) -> List[str]:
+        """Sides eligible to be paced against each other this iteration.
+
+        Frozen sides never step, and an exhausted side is already held back by
+        the budget — including either would let a side that cannot step become
+        the pacing laggard and stall the loop.
+        """
+        names = [n for n, st in states.items() if st.side.optimizer != "frozen"]
+        if side_budgets is not None:
+            exhausted = cls._exhausted_sides(history, side_budgets)
+            names = [n for n in names if n not in exhausted]
+        return names
+
+    @classmethod
+    def _paced_skip(
+        cls,
+        history: Dict[str, List[GenerationStats]],
+        candidates: List[str],
+    ) -> Set[str]:
+        """Sides to hold back this iteration under ``side_pacing='equal_steps'``.
+
+        Advancing every side once per iteration lets generation *cost*, not the
+        budget, decide who runs out first: when one side's generation costs 8x
+        its opponent's, it spends its slice at ~0.66 of the run and the rest of
+        the run is not co-evolution at all.
+
+        Sides are ordered instead by *virtual finish time* — where a side's
+        consumption would land if it stepped now, ``consumed + mean cost of its
+        own past generations``. A side is held back while its finish time sits
+        more than half a generation past the earliest one, so an expensive side
+        simply takes its generations further apart and both sides reach the end
+        of the budget together. The mean of a side's own history is the
+        yardstick, so no cost estimate has to be configured up front.
+
+        The half-generation tolerance keeps sides of comparable cost stepping
+        together, preserving the synchronous schedule's simultaneity where the
+        budget does not force otherwise.
+
+        The earliest-finishing side is never in the returned set, so at least
+        one side always steps and the loop cannot stall.
+        """
+        if len(candidates) < 2:
+            return set()
+        consumed = {n: cls._side_consumed(history, n) for n in candidates}
+        cost = {
+            n: (consumed[n] / len(history[n]) if history.get(n) else 0.0)
+            for n in candidates
+        }
+        finish = {n: consumed[n] + cost[n] for n in candidates}
+        target = min(finish.values())
+        return {
+            n
+            for n in candidates
+            if cost[n] > 0 and (finish[n] - target) > 0.5 * cost[n]
         }
 
     @classmethod
@@ -1798,10 +2004,13 @@ class CoEvolutionTrainer(BaselineTrainer):
             pre-learn view consistent with the synchronous-schedule
             contract.
 
-            ``skip`` (per-side budgeting, "freeze" policy): named sides do
-            not step this generation — no evaluation episodes, no stats
-            row — but their pools are still snapshotted above, so other
-            sides keep training against the frozen side's final state.
+            ``skip`` (exhausted sides under the "freeze" policy, plus sides
+            held back by ``side_pacing="equal_steps"``): named sides do not
+            step this generation — no evaluation episodes, no stats row — but
+            their pools are still snapshotted above, so other sides keep
+            training against their current state. Because every side advances
+            at most one generation per call, the "opponents are frozen for the
+            whole generation" contract holds under either pacing.
         """
         pool_snapshot: Dict[str, Any] = {}
         for name, state in states.items():
