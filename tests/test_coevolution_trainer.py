@@ -155,6 +155,102 @@ class TestCompetitive2Pop:
         env.close()
 
 
+class TestFinalChampionEval:
+    """``CoEvolutionConfig.final_eval_fn`` — the absolute end-of-run score.
+
+    ``final_best`` is a training fitness against co-evolved opponents, so it
+    lives on a different scale per algorithm and pairing and cannot carry a
+    cross-run comparison; this hook is where a comparable number comes from.
+    """
+
+    @staticmethod
+    def _cfg(**kwargs) -> CoEvolutionConfig:
+        return CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side("pursuers", ("adversary",), "ea", _tiny_ea_cfg(0)),
+                Side("evaders", ("agent",), "ea", _tiny_ea_cfg(1)),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=20,
+            seed=7,
+            **kwargs,
+        )
+
+    def test_hook_receives_states_and_context(self):
+        seen = {}
+
+        def _final_eval(states, context):
+            seen["sides"] = sorted(states)
+            seen["context"] = dict(context)
+            return {"score": 1.25, "episodes": 4}
+
+        result = CoEvolutionTrainer().train(
+            _base_tcfg(self._cfg(final_eval_fn=_final_eval))
+        )
+
+        assert seen["sides"] == ["evaders", "pursuers"]
+        ctx = seen["context"]
+        assert ctx["env"] is not None
+        assert ctx["num_generations"] == result.metrics["num_generations"]
+        assert ctx["env_steps_consumed"] == result.metrics["env_steps_consumed"]
+        assert result.metrics["final_eval"] == {"score": 1.25, "episodes": 4}
+
+    def test_champions_are_evaluable_from_the_hook(self):
+        """The hook runs before env.close(), so champions can still play."""
+        rewards = {}
+
+        def _final_eval(states, context):
+            env = context["env"]
+            obs = env.reset(seed=0)
+            for name, state in states.items():
+                policy = state.best_policy(env)
+                agent_obs = next(
+                    o for a, o in obs.items()
+                    if a.startswith(state.side.role_prefixes)
+                )
+                rewards[name] = float(policy.get_action(agent_obs) is not None)
+            return rewards
+
+        CoEvolutionTrainer().train(_base_tcfg(self._cfg(final_eval_fn=_final_eval)))
+        assert rewards == {"pursuers": 1.0, "evaders": 1.0}
+
+    def test_absent_hook_leaves_final_eval_empty(self):
+        result = CoEvolutionTrainer().train(_base_tcfg(self._cfg()))
+        assert result.metrics["final_eval"] == {}
+
+    def test_failing_hook_warns_but_keeps_the_run(self):
+        def _boom(states, context):
+            raise RuntimeError("evaluation exploded")
+
+        with pytest.warns(RuntimeWarning, match="final_eval_fn raised"):
+            result = CoEvolutionTrainer().train(
+                _base_tcfg(self._cfg(final_eval_fn=_boom))
+            )
+
+        assert result.metrics["final_eval"] == {}
+        assert result.metrics["num_generations"] >= 1
+        assert result.policy is not None
+
+    def test_summary_carries_eval_prefixed_keys(self, tmp_path):
+        import json
+
+        def _final_eval(states, context):
+            return {"catches_mean": 2.5, "episodes": 8}
+
+        config = _base_tcfg(self._cfg(final_eval_fn=_final_eval))
+        config.output_dir = tmp_path
+        CoEvolutionTrainer().train(config)
+
+        summaries = list(tmp_path.rglob("summary.json"))
+        assert summaries, "no summary.json written"
+        summary = json.loads(summaries[0].read_text(encoding="utf-8"))
+        assert summary["eval_catches_mean"] == 2.5
+        assert summary["eval_episodes"] == 8
+        # The training-fitness score stays alongside, not replaced.
+        assert "final_best" in summary
+
+
 class TestSelfPlayHoF:
     def test_ring_archive_accumulates(self):
         cfg = CoEvolutionConfig(
