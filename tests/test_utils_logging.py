@@ -194,6 +194,55 @@ def test_experiment_logger_from_config_no_output_dir():
     assert isinstance(log, NoOpLogger)
 
 
+def test_from_config_merges_run_metadata_into_manifest_hyperparams(tmp_path: Path):
+    """Descriptive provenance must reach the archive without touching a trainer.
+
+    ``run_metadata`` exists because several trainers splat
+    ``algorithm_params`` into their algorithm constructor, so the obvious
+    place to record "which reward form did this run train on" is the one
+    place it cannot go.
+    """
+    from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
+
+    config = TrainingConfig(
+        env_name="env",
+        budget_mode=BudgetMode.GENERATIONS,
+        budget_value=1,
+        seed=0,
+        output_dir=tmp_path,
+        algorithm_params={"population_size": 4},
+        run_metadata={"shaping_form": "potential", "shape_alpha": 0.3},
+    )
+    log = ExperimentLogger.from_config(config, algorithm="ea")
+    log.close()
+
+    hyperparams = json.loads((log.run_dir / "manifest.json").read_text())["hyperparams"]
+    assert hyperparams["shaping_form"] == "potential"
+    assert hyperparams["shape_alpha"] == 0.3
+    assert hyperparams["population_size"] == 4
+    # The trainer's own view stays clean.
+    assert "shaping_form" not in config.algorithm_params
+
+
+def test_from_config_without_run_metadata_is_unchanged(tmp_path: Path):
+    """Configs that predate the field keep recording exactly what they did."""
+    from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
+
+    config = TrainingConfig(
+        env_name="env",
+        budget_mode=BudgetMode.GENERATIONS,
+        budget_value=1,
+        seed=0,
+        output_dir=tmp_path,
+        algorithm_params={"population_size": 4},
+    )
+    log = ExperimentLogger.from_config(config, algorithm="ea")
+    log.close()
+
+    hyperparams = json.loads((log.run_dir / "manifest.json").read_text())["hyperparams"]
+    assert hyperparams == {"population_size": 4}
+
+
 # ---------------------------------------------------------------------------
 # FrameRecorder
 # ---------------------------------------------------------------------------

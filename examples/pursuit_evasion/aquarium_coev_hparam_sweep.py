@@ -82,7 +82,13 @@ EVO_BUDGET: int = 600_000
 QDAX_BUDGET: int = 500_000
 RL_BUDGET: int = 600_000
 
+# Probe cadence: consumed env steps, with the generation stride as fallback.
+# Under side_pacing="equal_steps" a generation is not a fixed amount of
+# experience, so a generation-indexed probe fires at a config-dependent rate.
+# 50k of the ~600k sweep budget keeps the ~12 checkpoints per run BENCH_EVERY_N
+# used to give.
 BENCH_EVERY_N: int = 2
+BENCH_EVERY_N_STEPS: int = 50_000
 BENCH_EPISODES: int = 8
 FINAL_EVAL_EPISODES: int = 20
 
@@ -390,9 +396,12 @@ def _make_bench_callback(
     pred_name: str, prey_name: str, env_cfg: Dict[str, Any], sink: List[Dict[str, Any]]
 ):
     """Absolute-progress probe: both champions vs frozen APF, logged to *sink*."""
+    cadence = coev._ProbeCadence(BENCH_EVERY_N, BENCH_EVERY_N_STEPS)
 
-    def _callback(gen: int, states: Dict[str, Any]) -> None:
-        if gen % BENCH_EVERY_N != 0:
+    def _callback(
+        gen: int, states: Dict[str, Any], context: Dict[str, Any] | None = None
+    ) -> None:
+        if not cadence.due(gen, (context or {}).get("env_steps_consumed")):
             return
         for side_name, role in ((pred_name, "predator"), (prey_name, "prey")):
             state = states.get(side_name)
@@ -454,6 +463,9 @@ def run_config(cfg: Dict[str, Any], seed: int, run_dir: Path) -> Dict[str, Any]:
         # budget_on_consumed=True (set on the TrainingConfig below).
         budget_split="per_side",
         on_side_exhausted="freeze",
+        # Match the campaign: hand out generations by real consumed steps so
+        # neither side freezes partway through (see aquarium_coevolution.py).
+        side_pacing="equal_steps",
         generation_callback=_make_bench_callback("predators", "prey", ENV_CFG, bench_log),
     )
     train_cfg = TrainingConfig(

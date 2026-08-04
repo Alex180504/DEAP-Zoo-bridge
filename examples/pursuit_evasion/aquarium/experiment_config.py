@@ -51,10 +51,20 @@ def ensure_utf8_stdout() -> None:
 # Ability-symmetric, equal-size 5-pursuer / 5-evader setup on a bounded
 # 1500x1500 rectangle.  The env is kept perfectly symmetric (no ability
 # handicap); with equal team sizes any residual APF-vs-APF imbalance is
-# reported as a caveat rather than calibrated away.  NOTE: the previously
-# documented catch fractions (0.432 discrete / 0.495 continuous) were
-# measured on the earlier 3-pursuer / 6-evader config and no longer apply —
-# re-run aquarium_env_balance.py to remeasure on 5v5.
+# reported as a caveat rather than calibrated away.
+#
+# APF-vs-APF reference, measured on THIS config with
+# ``aquarium_env_balance.py --reference`` (128 episodes/mode, 2026-07-31):
+#
+#   discrete    catch fraction 0.684 +/- 0.019 (SEM), median catch step 111
+#   continuous  catch fraction 0.720 +/- 0.019 (SEM), median catch step 115
+#
+# So the 5v5 setup is materially predator-favoured under scripted play — ~10
+# SEM above the 0.5 balance target, i.e. a real bias, not sampling noise.  It
+# is the reference every learned catch rate is quoted against: 3.4-3.6 of 5
+# prey caught by a scripted pursuer team.  (The 0.432 / 0.495 figures quoted
+# before this measurement were from the earlier 3-pursuer / 6-evader config
+# and do not apply.)
 BALANCED_ENV_CONFIG: Dict[str, Any] = {
     "predator_count": 5,
     "prey_count": 5,
@@ -137,14 +147,66 @@ APF_EVADER_CONFIG = AquariumAPFConfig(
 # step.  A catch (±20) must stay the dominant signal; too-large alpha
 # creates an approach-without-catch local optimum.
 #
-# Coevolution uses 1.0: its shaping is clipped to one step of plausible
-# motion (robust to target-switch spikes) and K_OPPONENTS averaging keeps
-# fitness variance low enough for the gradient to matter.
+# Coevolution shaping is potential-based (see
+# :mod:`examples.pursuit_evasion.aquarium.reward_shaping`): an episode's total
+# telescopes to ``Φ(s_T) − Φ(s_0)``, so at alpha=1.0 it is bounded by the arena
+# diagonal / 200 ≈ ±10.6 regardless of episode length, against ±20 per catch.
+# The ENUCC campaign measured the catch term at only 12–19% of median predator
+# fitness under the *previous* non-telescoping form; alpha is to be re-set from
+# the measured catch share in the gated pilot (probe.csv now records the
+# unshaped and shaping halves separately), not by arithmetic — 1.0 is carried
+# over unchanged until that measurement exists.
 COEV_PRED_SHAPE_ALPHA: float = 1.0
 COEV_PREY_SHAPE_ALPHA: float = 1.0
-# Vs-scripted-APF training uses the sweep-validated 0.3 (unclipped wrapper).
+# Vs-scripted-APF training now shapes on the same potential as coevolution,
+# so the two arms are scored on one reward definition and a co-evolved
+# champion can be compared with a fixed-opponent one directly.  0.3 is carried
+# over from the sweep that validated the old per-step form: the divisor and
+# the sign are unchanged, and dropping the FOV gate can only *reduce* an
+# episode's shaping total (the gate was what stopped it telescoping), so 0.3
+# stays a safe upper bound until the re-run measures its catch share.
 VS_APF_PRED_SHAPE_ALPHA: float = 0.3
 VS_APF_PREY_SHAPE_ALPHA: float = 0.3
+
+
+def run_provenance(
+    alpha: float,
+    *,
+    probe_env_name: str,
+    curriculum: bool,
+    action_mode: str,
+) -> Dict[str, Any]:
+    """Manifest keys describing the conditions a run trained under.
+
+    Every backend must record the same set, because these are exactly the
+    facts that separate two archives whose numbers look equally plausible.
+    ``shaping_form`` in particular is the only reliable way to tell the
+    potential rewrite from what came before — the run timestamp does not
+    survive a re-extract, and a grid missing these keys cannot be told from
+    one that simply ran older code.
+
+    Pass the result as ``TrainingConfig.run_metadata``, never as
+    ``algorithm_params``: AgileRL's trainers splat that dict into their
+    algorithm constructor, where an unknown key is a ``TypeError``.
+
+    Args:
+        alpha: The shaping weight the run actually used.
+        probe_env_name: Env the held-out probe scores on, which differs from
+            the training env whenever the curriculum is active.
+        curriculum: Whether the opponent-speed curriculum was enabled.
+        action_mode: ``"discrete"`` or ``"continuous"``.
+
+    Returns:
+        Dict to assign to a run's ``run_metadata``.
+    """
+    return {
+        "shaping_form": "potential",
+        "shape_alpha": float(alpha),
+        "probe_env_name": probe_env_name,
+        "curriculum": bool(curriculum),
+        "action_mode": action_mode,
+    }
+
 
 # Prey close-range danger penalty (evader training only): Gaussian bump when
 # the nearest predator is inside the catch annulus.
@@ -161,7 +223,11 @@ SWEEP_BUDGET_STEPS: int = 1_000_000     # per sweep config
 VS_APF_BUDGET_STEPS: int = 2_500_000    # per (algorithm, seed) final run
 COEV_BUDGET_STEPS: int = 5_000_000      # per (pairing, seed) final run
 
-EVAL_EPISODES: int = 30                 # post-training champion evaluation
+# Post-training champion evaluation.  128 episodes, not the earlier 30:
+# aquarium catch counts swing enough run-to-run that 30 episodes give SEM
+# ~0.04 catches, the same order as the effects being compared, while 128 give
+# ~0.019 (methodology §5).
+EVAL_EPISODES: int = 128
 
 # Per-candidate fitness episodes for every population-based trainer.
 EVOLUTION_TRAIN_EVAL_EPISODES: int = 10
@@ -502,5 +568,14 @@ ARCHIVE_MIX: float = 0.5
 # the coevolutionary moving-target effect.  Episode count matches
 # PROBE_EPISODES so coevolution probe rows carry the same measurement
 # precision as the vs-APF probe curves they are plotted against.
+#
+# The cadence is in consumed env steps, not generations: under
+# side_pacing="equal_steps" a generation no longer costs a fixed amount (a
+# cheap side takes many more of them), so a generation-indexed probe would
+# fire at a pairing-dependent rate and cost more wall clock than the training
+# it measures.  BENCHMARK_EVERY_N is the fallback for runs with no consumed
+# counter, and 250k steps of the 5M pooled budget gives the same ~20
+# checkpoints per run as the vs-APF PROBE_EVERY_N_STEPS.
 BENCHMARK_EVERY_N: int = 5
+BENCHMARK_EVERY_N_STEPS: int = 250_000
 BENCHMARK_N_EPISODES: int = PROBE_EPISODES

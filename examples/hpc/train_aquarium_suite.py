@@ -98,6 +98,22 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0, help="Base seed.")
     p.add_argument("--seeds", type=int, default=1, help="Number of consecutive seeds.")
     p.add_argument("--budget", type=int, default=None, help="Env-steps budget override.")
+    p.add_argument(
+        "--k-opponents",
+        type=int,
+        default=None,
+        help="Coevolution only: opponents sampled per fitness estimate "
+        "(default: experiment_config.K_OPPONENTS). Lowering it buys "
+        "generations at the cost of selection-ranking noise.",
+    )
+    p.add_argument(
+        "--shape-alpha",
+        type=float,
+        default=None,
+        help="Coevolution only: potential-based shaping weight for BOTH "
+        "sides (default: experiment_config.COEV_*_SHAPE_ALPHA). Applied "
+        "before env registration, so evaluation workers inherit it.",
+    )
     p.add_argument("--action-mode", default="discrete", choices=("discrete", "continuous"))
     p.add_argument("--role", default="pursuer", choices=("pursuer", "evader"),
                    help="Sweep only: which side learns.")
@@ -191,7 +207,16 @@ def main() -> None:
         coev.RECORD_VIDEOS = args.record
         if args.budget:
             coev.COEV_TOTAL_STEPS = args.budget
+        if args.k_opponents:
+            coev.K_OPPONENTS = args.k_opponents
+        if args.shape_alpha is not None:
+            # Must precede _register_envs(): the alphas are baked into the
+            # picklable env factory that evaluation workers rebuild from.
+            coev.PRED_REWARD_SHAPE_ALPHA = args.shape_alpha
+            coev.PREY_REWARD_SHAPE_ALPHA = args.shape_alpha
         coev._register_envs()
+        summary["k_opponents"] = coev.K_OPPONENTS
+        summary["shape_alpha"] = coev.PRED_REWARD_SHAPE_ALPHA
 
         statuses = []
         for offset in range(args.seeds):

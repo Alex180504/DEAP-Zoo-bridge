@@ -16,9 +16,14 @@ Stages (each keeps the previous stage's winner):
   2. view distances     — symmetric vs one-sided information advantage
   3. topology + catch_radius — rectangle vs torus, catch annulus size
 
-Run directly (no CLI)::
+Run directly::
 
-    python examples/pursuit_evasion/aquarium_env_balance.py
+    python examples/pursuit_evasion/aquarium_env_balance.py              # grid
+    python examples/pursuit_evasion/aquarium_env_balance.py --reference  # shipped config
+
+``--reference`` skips the grid and measures only the shipped config, in both
+action modes, at ``REFERENCE_EPISODES`` episodes — the APF-vs-APF baseline the
+campaign quotes its learned catch rates against.
 
 Edit the module constants to change episode counts / the candidate grid.
 The chosen config is what ``examples/pursuit_evasion/aquarium/
@@ -64,6 +69,13 @@ SEED_BASE: int = 0
 TARGET_CATCH_FRACTION: float = 0.5
 VERIFY_CONTINUOUS: bool = True   # re-run the winner in continuous action mode
 OUTPUT_DIR: Path = Path("results/aquarium_env_balance")
+
+# Reference measurement (``--reference``): the shipped config only, at enough
+# episodes to resolve the imbalance.  Catch fractions swing ~±0.04 run to run,
+# so the 12-episode grid pass cannot separate a genuine bias from noise; the
+# methodology reports the residual APF-vs-APF imbalance as a caveat rather
+# than calibrating it away, and that number needs a real CI.
+REFERENCE_EPISODES: int = 128
 
 # ---- Base env config (stage candidates override individual keys) -------------
 # Re-validation workflow: the base IS the shipped canonical config, so
@@ -205,7 +217,46 @@ def _print_stage(title: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return best
 
 
+def run_reference() -> Dict[str, Any]:
+    """Measure the *shipped* config in both action modes, at high precision.
+
+    This is the campaign's APF-vs-APF reference point: how one-sided the env
+    is before any learning, for the exact config the suites train on.  It runs
+    no grid search — the methodology keeps the env perfectly symmetric and
+    reports the residual imbalance as a caveat rather than calibrating it away.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    results = [
+        evaluate_config(
+            f"shipped_{'continuous' if continuous else 'discrete'}",
+            BASE_ENV_CONFIG,
+            episodes=REFERENCE_EPISODES,
+            continuous=continuous,
+        )
+        for continuous in (False, True)
+    ]
+    print(f"\n=== APF-vs-APF reference ({REFERENCE_EPISODES} episodes/mode) ===")
+    print(f"{'mode':<22} {'catch_frac':>10} {'±sem':>7} {'med_step':>9} {'err':>6}")
+    for r in results:
+        sem = r["catch_fraction_std"] / (r["episodes"] ** 0.5)
+        med = f"{r['median_catch_step']:.0f}" if r["median_catch_step"] is not None else "—"
+        print(
+            f"{r['name']:<22} {r['catch_fraction_mean']:>10.3f} "
+            f"{sem:>7.3f} {med:>9} {r['balance_error']:>6.3f}"
+        )
+        r["catch_fraction_sem"] = sem
+
+    report = {"config": dict(BASE_ENV_CONFIG), "results": results}
+    out = OUTPUT_DIR / "reference_report.json"
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"\nreference written to {out}")
+    return report
+
+
 def main() -> None:
+    if "--reference" in sys.argv[1:]:
+        run_reference()
+        return
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     all_results: List[Dict[str, Any]] = []
     config = dict(BASE_ENV_CONFIG)
