@@ -387,6 +387,15 @@ class TrainingConfig:
             ``max_steps_per_episode``, and co-evolution configuration are
             first-class fields above; this dict is for genuinely
             algorithm-specific knobs (e.g. AgileRL's ``batch_size``).
+        run_metadata: Descriptive provenance recorded in the manifest's
+            ``hyperparams`` block but never forwarded to a trainer. Use it
+            for facts about *how a run was configured* that no constructor
+            takes — the reward-shaping form, the probe env name, a
+            curriculum flag. ``algorithm_params`` is the wrong home for
+            these: several trainers (AgileRL's in particular) splat that
+            dict into their algorithm constructor, so an unrecognised key
+            there is a ``TypeError`` at construction rather than a note in
+            the archive.
         env_config: Optional kwargs forwarded to the underlying
             ``parallel_env(...)`` constructor (e.g. ``max_cycles`` for
             MPE2, ``max_time_steps``/``prey_count`` for aquarium_v0).
@@ -441,6 +450,7 @@ class TrainingConfig:
     max_steps_per_episode: Optional[int] = None
     coevolution_config: Optional[Any] = None
     algorithm_params: Dict[str, Any] = field(default_factory=dict)
+    run_metadata: Dict[str, Any] = field(default_factory=dict)
     env_config: Dict[str, Any] = field(default_factory=dict)
     continuous: bool = False
     output_dir: Optional[Path] = None

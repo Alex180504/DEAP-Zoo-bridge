@@ -520,6 +520,10 @@ class EvolveHPOTrainer(AgileRLTrainer):
 
         algo_tag = f"{self.ALGORITHM_NAME}-hpo"
         with build_logger(config, algorithm=algo_tag) as log:
+            # Callers write the held-out champion evaluation into the finished
+            # run's summary post hoc, and locate it through this key; without
+            # it that patch silently no-ops and the run reports no eval at all.
+            run_dir_str = str(log.run_dir) if config.output_dir is not None else None
             _env_cfg = config.env_config or {}
             _rec_max_steps = int(
                 config.recording.max_frames_per_episode
@@ -847,6 +851,7 @@ class EvolveHPOTrainer(AgileRLTrainer):
                 "algorithm_name": self.ALGORITHM_NAME,
                 "population_size": pop_size,
                 "mutation_probs": mut_probs,
+                "run_dir": run_dir_str,
             },
             training_time=training_time,
             hall_of_fame=hof_policies or None,
