@@ -68,6 +68,7 @@ from deap_pettingzoo.utils.parallel import (
 from deap_pettingzoo.utils.rng import seed_everything
 
 from .evaluator import CoEvolutionEvaluator
+from .pools import AnchoredPool, FrozenPolicyPool
 from .rl_side import RLSideState, _RLDriverContext
 from .sides import GenerationStats, Side, SideState, make_side_state
 
@@ -175,11 +176,15 @@ class _QDaxPolicyEvaluator:
         executor=None,
         env_name=None,
         env_config=None,
+        common_random_seeds=False,
+        generation_index=0,
     ):
         self._env = env_wrapper
         self._learner_prefixes = learner_role_prefixes
         self._opponent_sides = opponent_sides
         self._k = k_opponents
+        self._common_random_seeds = bool(common_random_seeds)
+        self._generation_index = int(generation_index)
         self._aggregation = aggregation
         self._max_steps = max_steps
         self._rng_factory = rng_factory  # callable () -> Generator
@@ -209,6 +214,8 @@ class _QDaxPolicyEvaluator:
 
     def evaluate(self, policy) -> float:
         """Run k episodes with *policy* for all learner agents; return fitness."""
+        from .evaluator import episode_seed_for
+
         rng = self._rng_factory()
         rewards = []
         for i in range(self._k):
@@ -218,7 +225,17 @@ class _QDaxPolicyEvaluator:
                 for agent in self._side_agents[side_name]:
                     opp_policies[agent] = side_policy
 
-            learner_total = self._run_episode(policy, opp_policies, seed=i)
+            # base_seed=0 preserves this path's historical ``seed=i``: it has
+            # always pinned the same k starting states, which is why QDax
+            # sides never saw episode-to-episode variation.
+            episode_seed = episode_seed_for(
+                base_seed=0,
+                episode_index=i,
+                k_opponents=self._k,
+                generation_index=self._generation_index,
+                common_random_seeds=self._common_random_seeds,
+            )
+            learner_total = self._run_episode(policy, opp_policies, seed=episode_seed)
             rewards.append(learner_total)
 
         arr = np.asarray(rewards, dtype=np.float64)
@@ -303,6 +320,23 @@ class CoEvolutionConfig:
             ``schedule == "synchronous"``.
         k_opponents: How many opponent-tuples to sample per individual
             evaluation. Default ``3``.
+        common_random_seeds: Give every individual in a generation the same
+            ``k`` episode seeds, so all of them start from the same ``k``
+            environment initial states. The seeds advance with the
+            generation, so no fixed set of initial conditions is trained on
+            for the whole run. Default ``False`` (each episode unseeded).
+
+            This is variance reduction, not a change of objective: the
+            between-individual fitness differences selection acts on stop
+            carrying the environment's own sampling noise, which otherwise
+            enters at the full per-episode spread divided by ``sqrt(k)``.
+
+            Applies to every path that *ranks* individuals — serial,
+            per-individual parallel, and the population batch — through the
+            single :func:`~.evaluator.episode_seed_for` rule. RL sides are
+            deliberately excluded: their rollouts gather replay experience
+            rather than rank a population, and pinning their starting states
+            would narrow the buffer for no ranking benefit.
         aggregation: How to collapse the ``k`` per-sample rewards.
             ``"mean" | "min" | "max" | "sum"``. Default ``"mean"``.
         snapshot_every: Append each side's current best to its HoF
@@ -371,6 +405,7 @@ class CoEvolutionConfig:
     schedule: str = "synchronous"
     alternating_generations: int = 1
     k_opponents: int = 3
+    common_random_seeds: bool = False
     aggregation: str = "mean"
     snapshot_every: int = 1
     reporting_side: Optional[str] = None
@@ -610,6 +645,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         start = time.time()
         num_generations = self._translate_budget(config, coev_cfg)
 
+        # Common-random-numbers state, read by _make_batch_eval_fn.
+        self._common_random_seeds = bool(coev_cfg.common_random_seeds)
+        self._generation_index = 0
+
         consumed_budget: Optional[int] = None
         if config.budget_on_consumed and config.budget_mode == BudgetMode.ENV_STEPS:
             consumed_budget = int(config.budget_value)
@@ -826,6 +865,18 @@ class CoEvolutionTrainer(BaselineTrainer):
             "mode": coev_cfg.mode,
             "schedule": coev_cfg.schedule,
             "k_opponents": coev_cfg.k_opponents,
+            "common_random_seeds": coev_cfg.common_random_seeds,
+            # Realized episode counts, not the requested fraction: this is
+            # what the run actually trained against once rounding applied.
+            "anchor_episodes": {
+                s.name: min(
+                    coev_cfg.k_opponents,
+                    max(1, int(round(s.anchor_mix * coev_cfg.k_opponents))),
+                )
+                for s in coev_cfg.sides
+                if s.anchor_mix > 0.0 and s.anchor_policies
+            }
+            or None,
             "aggregation": coev_cfg.aggregation,
             "budget_split": coev_cfg.budget_split,
             "on_side_exhausted": (
@@ -1122,6 +1173,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         realized = 0
         for _g in range(max_iters):
             _gt = time.time()
+            self._generation_index = _g
             # Per-side split, "freeze" policy: sides that have spent their
             # slice stop evolving but keep serving their pool as opponents.
             skip: Optional[Set[str]] = None
@@ -1182,6 +1234,7 @@ class CoEvolutionTrainer(BaselineTrainer):
         rotation = list(states)
         stop = False
         while total < max_iters and not stop:
+            self._generation_index = total
             # Guard against a zero-progress rotation (every budgeted side
             # already exhausted, e.g. a slice smaller than one generation).
             if side_budgets is not None and len(
@@ -1695,8 +1748,33 @@ class CoEvolutionTrainer(BaselineTrainer):
                 pool = pool_snapshot[name]
             else:
                 pool = state.current_pool()
+            pool = self._anchor_pool(pool, state.side, coev_cfg)
             opp.append((name, state.side.role_prefixes, pool))
         return opp
+
+    @staticmethod
+    def _anchor_pool(pool: Any, side: Side, coev_cfg: CoEvolutionConfig) -> Any:
+        """Wrap an opponent pool so a fixed share of every ``k`` is anchored.
+
+        Returns ``pool`` unchanged when the side declares no anchoring, so
+        runs that do not opt in are bit-for-bit what they were.
+
+        The wrapper is rebuilt per evaluator, which resets its slot cursor —
+        that is the intent. Each evaluator draws whole ``k``-blocks starting
+        from slot 0, so every individual it scores gets the anchors in the
+        same slots.
+        """
+        if side.anchor_mix <= 0.0 or not side.anchor_policies:
+            return pool
+        k = int(coev_cfg.k_opponents)
+        # Round to whole episodes, but never let a declared anchor round away
+        # to nothing — a silently inert anchor would look like a working one.
+        k_anchor = min(k, max(1, int(round(side.anchor_mix * k))))
+        anchors = FrozenPolicyPool(
+            side.anchor_policies,
+            registry_names=side.anchor_registry_names,
+        )
+        return AnchoredPool(pool, anchors, k_opponents=k, k_anchor=k_anchor)
 
     def _make_batch_eval_fn(self, evaluator: Any) -> Optional[Any]:
         """Return a population-level parallel batch-evaluation function.
@@ -1714,7 +1792,12 @@ class CoEvolutionTrainer(BaselineTrainer):
         All opponent sampling happens on the driver before any worker is
         launched, so pool RNGs mutate exactly once per batch call.
         """
-        from .evaluator import CoEvolutionEvaluator, _episode_rollout, _EpisodePayload
+        from .evaluator import (
+            CoEvolutionEvaluator,
+            _episode_rollout,
+            _EpisodePayload,
+            episode_seed_for,
+        )
 
         if not self._use_parallel:
             return None
@@ -1732,6 +1815,10 @@ class CoEvolutionTrainer(BaselineTrainer):
         learner_masked = evaluator._learner_masked
         learner_snapshot_fn = evaluator.learner_snapshot_fn
         opponent_sides = list(evaluator.opponent_sides)  # snapshot at creation time
+        # Read at call time, not capture time: one _batch_eval closure can be
+        # reused across generations and the seed base must move with them.
+        trainer = self
+        common_random_seeds = self._common_random_seeds
 
         def _batch_eval(individuals: List[Any]) -> List[tuple]:
             n = len(individuals)
@@ -1759,6 +1846,13 @@ class CoEvolutionTrainer(BaselineTrainer):
                         name: per_side_snapshots[name][global_ep]
                         for name in per_side_snapshots
                     }
+                    episode_seed = episode_seed_for(
+                        base_seed=None,
+                        episode_index=ep_i,
+                        k_opponents=k,
+                        generation_index=getattr(trainer, "_generation_index", 0),
+                        common_random_seeds=common_random_seeds,
+                    )
                     payloads.append(
                         _EpisodePayload(
                             env_name=env_name,
@@ -1768,7 +1862,7 @@ class CoEvolutionTrainer(BaselineTrainer):
                             learner_masked=learner_masked,
                             opponent_snapshots=snaps,
                             side_role_prefixes=side_role_prefixes,
-                            episode_seed=None,
+                            episode_seed=episode_seed,
                             max_steps=max_steps,
                             registry_snapshot=getattr(self, "_registry_snapshot", None),
                             learner_snapshot=learner_snap,
@@ -1917,6 +2011,8 @@ class CoEvolutionTrainer(BaselineTrainer):
                 executor=executor_for_side,
                 env_name=getattr(self, "_env_name", None),
                 env_config=getattr(self, "_env_config", None),
+                common_random_seeds=coev_cfg.common_random_seeds,
+                generation_index=getattr(self, "_generation_index", 0),
             )
 
         evaluator = CoEvolutionEvaluator(
@@ -1933,6 +2029,8 @@ class CoEvolutionTrainer(BaselineTrainer):
             learner_masked=learner_state.masked,
             learner_snapshot_fn=learner_state.learner_snapshot,
             registry_snapshot=getattr(self, "_registry_snapshot", None),
+            common_random_seeds=coev_cfg.common_random_seeds,
+            generation_index=getattr(self, "_generation_index", 0),
         )
         trainer_rng = self._rng
 

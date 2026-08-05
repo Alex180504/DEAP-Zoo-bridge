@@ -93,6 +93,30 @@ class Side:
             Default :func:`uniform_sampler`.
         frozen_policies: Pre-built policies for ``optimizer='frozen'``.
             Ignored for ``'ea'`` / ``'cma'``.
+        anchor_policies: Fixed reference opponents other sides face
+            alongside this side's evolving population — typically scripted
+            controllers. Purely about what *opponents* see, exactly like
+            ``archive_mix``: this side still evolves normally.
+
+            The point is measurement. In pure co-evolution an individual's
+            fitness is scored against a moving population, so a rising
+            fitness can mean the individual improved or that its opponents
+            got worse, and selection cannot tell those apart. Reserving part
+            of every evaluation for an opponent that never changes gives the
+            fitness a fixed reference and makes it comparable across
+            generations.
+        anchor_mix: Fraction of each individual's ``k_opponents`` drawn
+            from ``anchor_policies``, rounded to a whole number of episodes
+            and never rounded down to zero when non-zero. Default ``0.0``
+            (no anchoring). ``1.0`` anchors every episode, which is training
+            against the fixed opponent inside the co-evolution harness —
+            valid as an ablation, not co-evolution.
+        anchor_registry_names: Names under which ``anchor_policies`` are
+            registered via
+            :func:`~deap_pettingzoo.baselines.coevolution.pools.register_frozen_policy`.
+            Required when anchors cannot be pickled to worker processes,
+            which is the normal case for scripted policies holding an env
+            handle.
     """
 
     name: str
@@ -105,6 +129,9 @@ class Side:
     opponent_sampler: Sampler = uniform_sampler
     archive_sampler: Sampler = uniform_sampler
     frozen_policies: Optional[Sequence[PolicyProtocol]] = None
+    anchor_policies: Optional[Sequence[PolicyProtocol]] = None
+    anchor_mix: float = 0.0
+    anchor_registry_names: Optional[Sequence[str]] = None
 
     def __post_init__(self) -> None:
         # The valid optimizer tokens are exactly the keys of the open
@@ -130,6 +157,25 @@ class Side:
                 f"Side {self.name!r}: optimizer='frozen' requires a "
                 "non-empty frozen_policies= list."
             )
+        if not (0.0 <= self.anchor_mix <= 1.0):
+            raise ValueError(
+                f"Side {self.name!r}: anchor_mix must be in [0, 1]; "
+                f"got {self.anchor_mix}."
+            )
+        if self.anchor_mix > 0.0 and not self.anchor_policies:
+            raise ValueError(
+                f"Side {self.name!r}: anchor_mix={self.anchor_mix} requires a "
+                "non-empty anchor_policies= list."
+            )
+        if self.anchor_registry_names is not None:
+            names = tuple(self.anchor_registry_names)
+            if len(names) != len(self.anchor_policies or ()):
+                raise ValueError(
+                    f"Side {self.name!r}: anchor_registry_names has "
+                    f"{len(names)} entries but anchor_policies has "
+                    f"{len(self.anchor_policies or ())}."
+                )
+            self.anchor_registry_names = names
 
 
 # Runtime state — base class

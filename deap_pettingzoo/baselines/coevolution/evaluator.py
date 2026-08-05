@@ -99,6 +99,52 @@ def _resolve_worker_env(
     return env
 
 
+def episode_seed_for(
+    *,
+    base_seed: Optional[int],
+    episode_index: int,
+    k_opponents: int,
+    generation_index: int = 0,
+    common_random_seeds: bool = False,
+) -> Optional[int]:
+    """Return the env reset seed for one evaluation episode.
+
+    Single source of truth for episode seeding.  Every evaluation path —
+    the serial loop, the per-individual parallel dispatch, the
+    population-level batch dispatch, and the single-policy evaluator the
+    QDax sides use — must call this, because they otherwise drift into
+    different seeding rules that are invisible in the archive and silently
+    change what a run measures.
+
+    Two regimes:
+
+    * ``common_random_seeds``: the seed depends only on the generation and
+      the episode index, so every individual scored in that generation
+      faces the same ``k`` starting states.  Between-individual fitness
+      differences then reflect skill rather than which states each happened
+      to draw.  The generation term keeps the run from training against one
+      fixed set of initial conditions forever.
+    * Otherwise: ``base_seed + episode_index`` when a base seed is given,
+      and ``None`` (unseeded) when it is not.
+
+    Args:
+        base_seed: Caller-supplied base, or ``None`` for unseeded episodes.
+        episode_index: Index of this episode within the individual's ``k``.
+        k_opponents: Episodes per individual; the stride that keeps
+            consecutive generations from reusing seeds.
+        generation_index: Current generation, used only under CRN.
+        common_random_seeds: Select the CRN regime.
+
+    Returns:
+        The seed to pass to ``env.reset``, or ``None`` to leave it unseeded.
+    """
+    if common_random_seeds:
+        return generation_index * max(1, int(k_opponents)) + int(episode_index)
+    if base_seed is None:
+        return None
+    return int(base_seed) + int(episode_index)
+
+
 @dataclass
 class _EpisodePayload:
     """Picklable payload for a single co-evolution episode.
@@ -338,6 +384,8 @@ class CoEvolutionEvaluator(BaseEvaluator):
             None
         ),
         registry_snapshot: Optional[list] = None,
+        common_random_seeds: bool = False,
+        generation_index: int = 0,
     ) -> None:
         """Build a co-evolution evaluator.
 
@@ -362,6 +410,10 @@ class CoEvolutionEvaluator(BaseEvaluator):
           (the default) keeps the :class:`FeedforwardNeuralPolicy` rebuild
           path; NEAT-family sides supply their own snapshot so the parallel
           path builds the same phenotype the driver would.
+        * ``common_random_seeds`` / ``generation_index`` — episode-seeding
+          policy, applied identically on the serial and parallel paths via
+          :func:`episode_seed_for`. The trainer rebuilds the evaluator each
+          generation and passes the current index.
 
         Raises:
             ValueError: on agent-coverage mismatch, invalid
@@ -396,6 +448,8 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._learner_masked = bool(learner_masked)
         self.learner_snapshot_fn = learner_snapshot_fn
         self._registry_snapshot = registry_snapshot
+        self.common_random_seeds = bool(common_random_seeds)
+        self.generation_index = int(generation_index)
 
         self._partition_agents()
         #: Populated after each :meth:`run` call for trainer logging.
@@ -407,6 +461,16 @@ class CoEvolutionEvaluator(BaseEvaluator):
         #: generation, so reading it after a population pass produces that
         #: side's real per-generation env-step count.
         self.env_steps_consumed: int = 0
+
+    def _episode_seed(self, base_seed: Optional[int], episode_index: int) -> Optional[int]:
+        """Seed for episode ``episode_index``; see :func:`episode_seed_for`."""
+        return episode_seed_for(
+            base_seed=base_seed,
+            episode_index=episode_index,
+            k_opponents=self.k_opponents,
+            generation_index=self.generation_index,
+            common_random_seeds=self.common_random_seeds,
+        )
 
     # Agent partitioning
 
@@ -531,7 +595,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         total_steps = 0
 
         for i in range(self.k_opponents):
-            episode_seed = None if seed is None else int(seed) + i
+            episode_seed = self._episode_seed(seed, i)
             opp_policies: Dict[str, PolicyProtocol] = {}
             for side_name, _prefixes, pool in self.opponent_sides:
                 side_policy = pool.sample_opponent(rng)
@@ -581,7 +645,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
 
         payloads: List[_EpisodePayload] = []
         for i in range(self.k_opponents):
-            episode_seed = None if seed is None else int(seed) + i
+            episode_seed = self._episode_seed(seed, i)
             episode_snaps = {
                 name: per_side_snapshots[name][i] for name in per_side_snapshots
             }

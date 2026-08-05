@@ -10,7 +10,8 @@ Public API:
   side.
 * :class:`OpponentPool` Protocol + :class:`PopulationPool`,
   :class:`ArchivePool`, :class:`FrozenPolicyPool`,
-  :class:`CompositePool` — source-agnostic opponent sampling surface.
+  :class:`CompositePool`, :class:`AnchoredPool` — source-agnostic
+  opponent sampling surface.
   Custom implementations (e.g. backed by a QDax repertoire) only need
   to satisfy the Protocol.
 * :class:`HallOfFame` (+ :class:`RingHallOfFame`,
@@ -24,8 +25,10 @@ from .evaluator import (
     CoEvolutionEvalResult,
     CoEvolutionEvaluator,
     GenomeIndividual,
+    episode_seed_for,
 )
 from .pools import (
+    AnchoredPool,
     ArchivePool,
     CompositePool,
     FrozenPolicyPool,
@@ -83,6 +86,7 @@ __all__ = [
     "ArchivePool",
     "FrozenPolicyPool",
     "CompositePool",
+    "AnchoredPool",
     "RLPolicyPool",
     "PolicyFactory",
     "OpponentSnapshot",
@@ -100,4 +104,5 @@ __all__ = [
     "CoEvolutionEvaluator",
     "CoEvolutionEvalResult",
     "GenomeIndividual",
+    "episode_seed_for",
 ]

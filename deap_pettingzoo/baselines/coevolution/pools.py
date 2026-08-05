@@ -652,6 +652,37 @@ class FrozenPolicyPool(_BasePool):
         # The user is responsible for re-supplying registry_names via a fresh constructor if they were using the registry path.
         self._registry_names = None
 
+    def policy_at(self, index: int) -> PolicyProtocol:
+        """Return the policy at ``index`` (wraps around).
+
+        Deterministic counterpart to :meth:`sample_opponent`, used by
+        :class:`AnchoredPool` to hand every individual the *same* fixed
+        opponent at a given slot.
+        """
+        if not self._policies:
+            raise ValueError("FrozenPolicyPool.policy_at: pool is empty.")
+        return self._policies[index % len(self._policies)]
+
+    def snapshot_at(self, index: int) -> OpponentSnapshot:
+        """Return a picklable payload for the policy at ``index``.
+
+        Prefers the registry path when ``registry_names`` was supplied —
+        scripted policies are frequently closures over an env handle and do
+        not survive pickling, which is the whole reason that path exists.
+        """
+        if not self._policies:
+            raise ValueError("FrozenPolicyPool.snapshot_at: pool is empty.")
+        idx = index % len(self._policies)
+        if self._registry_names is not None:
+            return OpponentSnapshot(
+                kind="frozen_registered",
+                payload={"name": self._registry_names[idx]},
+            )
+        # Ship the policy object directly. Fails fast with a clear
+        # PicklingError if the caller supplied a non-picklable wrapper; the
+        # fix is the registry path (see ``registry_names=`` ctor kwarg).
+        return OpponentSnapshot(kind="frozen", payload={"policy": self._policies[idx]})
+
     def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
         if not self._policies:
             raise ValueError("FrozenPolicyPool.sample_opponent: pool is empty.")
@@ -665,26 +696,10 @@ class FrozenPolicyPool(_BasePool):
             raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
         if not self._policies:
             raise ValueError("FrozenPolicyPool.snapshot_opponents: pool is empty.")
-        snaps: List[OpponentSnapshot] = []
-        for _ in range(k):
-            idx = self._sampler(len(self._policies), self._fitnesses, rng)
-            if self._registry_names is not None:
-                snaps.append(
-                    OpponentSnapshot(
-                        kind="frozen_registered",
-                        payload={"name": self._registry_names[idx]},
-                    )
-                )
-            else:
-                # Try to ship the policy object directly.
-                # Fails fast with a clear PicklingError if the user supplied a non-picklable wrapper.
-                # In this case, switch to the registry path (see ``registry_names=`` ctor kwarg).
-                snaps.append(
-                    OpponentSnapshot(
-                        kind="frozen", payload={"policy": self._policies[idx]}
-                    )
-                )
-        return snaps
+        return [
+            self.snapshot_at(self._sampler(len(self._policies), self._fitnesses, rng))
+            for _ in range(k)
+        ]
 
     def __len__(self) -> int:
         return len(self._policies)
@@ -767,6 +782,120 @@ class CompositePool(_BasePool):
     def sub_pools(self) -> Tuple[OpponentPool, ...]:
         """The underlying sub-pools (exposed for introspection / testing)."""
         return self._pools
+
+
+class AnchoredPool(_BasePool):
+    """Fixed ``k_anchor`` of every ``k`` opponents come from a static anchor set.
+
+    Why not :class:`CompositePool` with a weight: that draws each opponent
+    independently, so the *number* of anchor matches an individual happens to
+    get is itself random. Two individuals of identical skill can then differ in
+    fitness purely because one drew more anchor episodes than the other, which
+    adds exactly the selection noise anchoring exists to remove. Here the split
+    is deterministic — every individual faces precisely ``k_anchor`` anchor
+    opponents and ``k - k_anchor`` co-evolved ones.
+
+    Anchor *identity* is deterministic too: slot ``j`` always yields anchor
+    ``j % len(anchors)``, never a sampled one. Within a generation that makes
+    the anchor episodes common random numbers across the whole population —
+    every individual is measured against the same fixed reference, so a fitness
+    difference on those episodes is a skill difference.
+
+    The split is enforced by a draw cursor of period ``k``, so what it
+    guarantees depends on how a side draws:
+
+    * Population sides (EA / CMA / PSO / QDax / NEAT) request an individual's
+      ``k`` opponents as ``k`` consecutive draws, on both the serial and the
+      population-parallel path. Each individual therefore gets exactly
+      ``k_anchor`` anchors, in the same slots, against the same references —
+      the full guarantee above.
+    * RL sides draw a single opponent per rollout episode, having no
+      population of individuals to make mutually comparable. There the cursor
+      delivers the same anchor *fraction* across a generation (exact when the
+      episode count is a multiple of ``k``) rather than a per-individual
+      split, which is the meaningful reading of anchoring for a single
+      learner.
+
+    Args:
+        coevolved: Pool supplying the co-evolving opponents (typically the
+            other side's :class:`PopulationPool`, possibly already wrapped in a
+            :class:`CompositePool` with its Hall of Fame).
+        anchors: Fixed reference opponents, e.g. scripted controllers.
+        k_opponents: Opponents drawn per individual — the cursor's period.
+        k_anchor: How many of those ``k`` come from ``anchors``.
+
+    Raises:
+        ValueError: If ``k_anchor`` is outside ``[0, k_opponents]`` or the
+            anchor pool is empty.
+    """
+
+    def __init__(
+        self,
+        coevolved: OpponentPool,
+        anchors: FrozenPolicyPool,
+        *,
+        k_opponents: int,
+        k_anchor: int,
+    ) -> None:
+        if k_opponents < 1:
+            raise ValueError(
+                f"AnchoredPool: k_opponents must be >= 1, got {k_opponents}."
+            )
+        if not 0 <= k_anchor <= k_opponents:
+            raise ValueError(
+                f"AnchoredPool: k_anchor must be in [0, {k_opponents}]; "
+                f"got {k_anchor}."
+            )
+        if len(anchors) == 0:
+            raise ValueError("AnchoredPool: the anchor pool is empty.")
+        self._coevolved = coevolved
+        self._anchors = anchors
+        self._k = int(k_opponents)
+        self._k_anchor = int(k_anchor)
+        self._cursor = 0
+
+    @property
+    def k_anchor(self) -> int:
+        """Anchor episodes per individual (exposed for logging / testing)."""
+        return self._k_anchor
+
+    @property
+    def sub_pools(self) -> Tuple[OpponentPool, OpponentPool]:
+        """``(coevolved, anchors)`` — for introspection and testing."""
+        return (self._coevolved, self._anchors)
+
+    def _next_slot(self) -> Tuple[bool, int]:
+        """Advance the cursor; return ``(is_anchor, slot_within_k)``."""
+        slot = self._cursor % self._k
+        self._cursor += 1
+        return slot < self._k_anchor, slot
+
+    def update(self, population_like: Any) -> None:
+        """Forward to the co-evolving pool; anchors are fixed by definition."""
+        self._coevolved.update(population_like)
+
+    def sample_opponent(self, rng: np.random.Generator) -> PolicyProtocol:
+        is_anchor, slot = self._next_slot()
+        if is_anchor:
+            return self._anchors.policy_at(slot)
+        return self._coevolved.sample_opponent(rng)
+
+    def snapshot_opponents(
+        self, rng: np.random.Generator, k: int
+    ) -> List[OpponentSnapshot]:
+        if k < 1:
+            raise ValueError(f"snapshot_opponents: k must be >= 1, got {k}.")
+        snaps: List[OpponentSnapshot] = []
+        for _ in range(k):
+            is_anchor, slot = self._next_slot()
+            if is_anchor:
+                snaps.append(self._anchors.snapshot_at(slot))
+            else:
+                snaps.extend(self._coevolved.snapshot_opponents(rng, 1))
+        return snaps
+
+    def __len__(self) -> int:
+        return len(self._coevolved) + len(self._anchors)
 
 
 # RL pool (degenerate size-1; wraps a live AgileRLPolicyWrapper)
