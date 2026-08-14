@@ -564,3 +564,184 @@ class AquariumAPFPursuerPolicy:
         if bottom < thresh:
             fy -= cfg.k_wall / max(bottom, cfg.softening)
         return fx, fy
+
+
+class AquariumFeatureAPFPolicy:
+    """APF controller reading the *featurized* observation both sides learn on.
+
+    :class:`AquariumAPFEvaderPolicy` and :class:`AquariumAPFPursuerPolicy`
+    parse the raw marl-aquarium layout, which is what the scripted-opponent
+    envs feed them.  Co-evolution instead runs every agent through
+    :class:`~examples.pursuit_evasion.aquarium.observation_features.AquariumObservationFeatureWrapper`,
+    so a raw-layout policy dropped in there would parse the wrong fields and
+    silently steer on noise.  This reads the featurized layout directly:
+
+    ``[heading_x, heading_y, speed] + walls[4] + P x [present, rel_x, rel_y,
+    distance, speed] + Q x [present, rel_x, rel_y, distance, speed]``
+
+    The relative offsets are exactly what an APF force needs, so this is if
+    anything a more direct expression of the same controller — but it is a
+    reimplementation, and only the *shape* of its behaviour is guaranteed to
+    match the raw-layout policies, not their step-for-step actions.
+
+    Args:
+        role: ``"evader"`` (flee predators) or ``"pursuer"`` (chase prey).
+        predator_observe_count: Env kwarg of the same name.
+        prey_observe_count: Env kwarg of the same name.
+        action_count: Env kwarg ``action_count``; quantises the force
+            vector onto evenly spaced headings (discrete mode only).
+        config: Gains. Defaults to :class:`AquariumAPFConfig`.
+        wall_features: 4 when the env exposes walls, else 0.
+        continuous: Emit ``Box(-1, 1, (2,))`` velocities instead of a
+            discrete heading index.
+    """
+
+    _SELF_SIZE = 3
+    _ENTRY_SIZE = 5
+
+    def __init__(
+        self,
+        role: str,
+        predator_observe_count: int,
+        prey_observe_count: int,
+        action_count: int = 16,
+        config: Optional[AquariumAPFConfig] = None,
+        wall_features: int = 0,
+        continuous: bool = False,
+    ) -> None:
+        if role not in {"evader", "pursuer"}:
+            raise ValueError(
+                f"AquariumFeatureAPFPolicy: role must be 'evader' or "
+                f"'pursuer'; got {role!r}."
+            )
+        self.role = role
+        self.predator_observe_count = int(predator_observe_count)
+        self.prey_observe_count = int(prey_observe_count)
+        self.action_count = int(action_count)
+        self.config = config or AquariumAPFConfig()
+        self._wall_features = int(wall_features)
+        self.continuous = bool(continuous)
+        self._turn_sign: int = 1
+
+        head = self._SELF_SIZE + self._wall_features
+        pred_end = head + self._ENTRY_SIZE * self.predator_observe_count
+        prey_end = pred_end + self._ENTRY_SIZE * self.prey_observe_count
+        self._walls = slice(self._SELF_SIZE, head)
+        self._predators = slice(head, pred_end)
+        self._prey = slice(pred_end, prey_end)
+
+    def reset(self) -> None:
+        """Re-draw the tangential turn direction held for the episode."""
+        self._turn_sign = random.choice((-1, 1))
+
+    def _emit(self, heading_x: float, heading_y: float):
+        if self.continuous:
+            return continuous_action_for_heading(heading_x, heading_y)
+        return _action_for_heading(heading_x, heading_y, self.action_count)
+
+    def _entries(self, block: np.ndarray) -> List[Tuple[float, float, float]]:
+        """Return ``(rel_x, rel_y, distance)`` for present entries only."""
+        out: List[Tuple[float, float, float]] = []
+        for i in range(block.size // self._ENTRY_SIZE):
+            base = i * self._ENTRY_SIZE
+            if block[base] < 0.5:      # ``present`` flag is 0.0 for padding
+                continue
+            out.append(
+                (float(block[base + 1]), float(block[base + 2]), float(block[base + 3]))
+            )
+        return out
+
+    def get_action(self, observation, deterministic: bool = True):
+        del deterministic  # APF is deterministic given the turn sign.
+        obs = np.asarray(observation, dtype=np.float64).ravel()
+        force_x, force_y, any_visible = self._compute_force(obs)
+        if math.hypot(force_x, force_y) < self.config.no_op_threshold and not any_visible:
+            # Nothing in view — hold heading rather than stall.
+            return self._emit(float(obs[0]), float(obs[1]))
+        return self._emit(force_x, force_y)
+
+    def _compute_force(self, obs: np.ndarray) -> Tuple[float, float, bool]:
+        cfg = self.config
+        fx = fy = 0.0
+        any_visible = False
+        # Closest opponent, kept for the cancellation fallback below.
+        closest: Optional[Tuple[float, float, float]] = None
+
+        opponents = self._entries(
+            obs[self._predators if self.role == "evader" else self._prey]
+        )
+        # Evaders push away from predators, pursuers pull toward prey.
+        sign = -1.0 if self.role == "evader" else 1.0
+        for rel_x, rel_y, distance in opponents:
+            any_visible = True
+            if closest is None or distance < closest[0]:
+                closest = (distance, rel_x, rel_y)
+            inv_sq = 1.0 / (distance * distance + cfg.softening)
+            fx += sign * cfg.k_predator * rel_x * inv_sq
+            fy += sign * cfg.k_predator * rel_y * inv_sq
+            if self.role == "evader" and cfg.k_tangential > 0.0:
+                # Perpendicular dodge with 1/d falloff (not 1/d²) so it still
+                # bites at range where the radial term has faded. The turn
+                # sign is fixed per episode so neighbouring predators' dodges
+                # reinforce instead of cancelling.
+                inv_d = 1.0 / (distance + math.sqrt(cfg.softening))
+                fx += self._turn_sign * cfg.k_tangential * (-rel_y) * inv_d
+                fy += self._turn_sign * cfg.k_tangential * rel_x * inv_d
+
+        # Symmetric-squeeze fallback: opponents on opposite sides cancel both
+        # the radial and the tangential terms, and the caller's hold-heading
+        # branch would then drive straight through the line joining them.
+        # Steering by the nearest opponent alone is always defined.
+        if any_visible and math.hypot(fx, fy) < cfg.no_op_threshold * 10.0:
+            distance, rel_x, rel_y = closest        # any_visible => not None
+            inv_sq = 1.0 / (distance * distance + cfg.softening)
+            fx = sign * cfg.k_predator * rel_x * inv_sq
+            fy = sign * cfg.k_predator * rel_y * inv_sq
+
+        if cfg.k_prey_separation > 0.0:
+            fx, fy = self._add_separation(obs, fx, fy)
+
+        if cfg.k_wall > 0.0 and self._wall_features >= 4:
+            wfx, wfy = self._compute_wall_avoidance(obs)
+            fx += wfx
+            fy += wfy
+        return fx, fy, any_visible
+
+    def _add_separation(
+        self, obs: np.ndarray, fx: float, fy: float
+    ) -> Tuple[float, float]:
+        """Add capped teammate repulsion so the team does not collapse."""
+        cfg = self.config
+        teammates = self._entries(
+            obs[self._prey if self.role == "evader" else self._predators]
+        )
+        sx = sy = 0.0
+        for rel_x, rel_y, distance in teammates:
+            inv_sq = 1.0 / (distance * distance + cfg.softening)
+            sx -= cfg.k_prey_separation * rel_x * inv_sq
+            sy -= cfg.k_prey_separation * rel_y * inv_sq
+        # Cap relative to the opponent force: uncapped, coincident teammates
+        # dominate and the team flees each other instead of the threat.
+        cap = cfg.separation_cap_ratio * math.hypot(fx, fy)
+        mag = math.hypot(sx, sy)
+        if cap > 0.0 and mag > cap:
+            sx *= cap / mag
+            sy *= cap / mag
+        return fx + sx, fy + sy
+
+    def _compute_wall_avoidance(self, obs: np.ndarray) -> Tuple[float, float]:
+        """Return a repulsive force away from nearby walls (1/d falloff)."""
+        cfg = self.config
+        walls = obs[self._walls]
+        left, right, top, bottom = (float(walls[i]) for i in range(4))
+        fx = fy = 0.0
+        thresh = cfg.wall_threshold
+        if left < thresh:
+            fx += cfg.k_wall / max(left, cfg.softening)
+        if right < thresh:
+            fx -= cfg.k_wall / max(right, cfg.softening)
+        if top < thresh:
+            fy += cfg.k_wall / max(top, cfg.softening)
+        if bottom < thresh:
+            fy -= cfg.k_wall / max(bottom, cfg.softening)
+        return fx, fy

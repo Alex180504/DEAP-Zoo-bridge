@@ -11,7 +11,32 @@ pre-populate the Setup form.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
+
+
+def catalog_option_names(entries: Optional[Iterable[Any]]) -> List[str]:
+    """Normalise a catalog option list to the plain tokens the spec accepts.
+
+    Catalog option lists are inconsistently shaped: some are plain strings
+    (``aggregations``, ``samplers``) while others are ``{"name", "label",
+    "help"}`` dicts (``modes``, ``schedules``).  The spec models only accept
+    the bare token, so every dropdown must feed on ``name``.
+
+    Args:
+        entries: A catalog option list, or ``None``.
+
+    Returns:
+        The option tokens as strings, skipping entries with no usable name.
+    """
+    names: List[str] = []
+    for entry in entries or []:
+        if isinstance(entry, dict):
+            name = entry.get("name")
+        else:
+            name = entry
+        if name:
+            names.append(str(name))
+    return names
 
 
 def spec_to_form_defaults(spec: Dict[str, Any]) -> Dict[str, Any]:

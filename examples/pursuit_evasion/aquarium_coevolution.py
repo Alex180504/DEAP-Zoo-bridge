@@ -35,6 +35,7 @@ import os
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,7 @@ if _REPO_ROOT not in sys.path:
 from examples.pursuit_evasion.aquarium import experiment_config as XC
 
 XC.ensure_utf8_stdout()
+from examples.pursuit_evasion.aquarium.apf_policy import AquariumFeatureAPFPolicy
 from examples.pursuit_evasion.aquarium.observation_features import (
     AquariumObservationFeatureWrapper,
 )
@@ -123,6 +125,23 @@ PREY_REWARD_SHAPE_ALPHA: float = XC.COEV_PREY_SHAPE_ALPHA
 K_OPPONENTS: int = XC.K_OPPONENTS
 HOF_CAPACITY: int = XC.HOF_CAPACITY
 ARCHIVE_MIX: float = XC.ARCHIVE_MIX
+# Fitness anchoring (AQUARIUM_ANCHOR_MIX=0 disables). Predators only: the
+# prey side carries the anchors, because a side's anchors are what *other*
+# sides face. Prey are already near the scripted reference, so there is no
+# headroom for an anchor to buy them and the extra episodes are better spent
+# on the role that never learned.
+ANCHOR_MIX: float = float(os.environ.get("AQUARIUM_ANCHOR_MIX", XC.ANCHOR_MIX))
+# Overridable so the ablation can separate anchoring from the variance
+# reduction: anchored-and-seeded runs otherwise change two things at once and
+# a single grid cannot say which one moved the number.
+COMMON_RANDOM_SEEDS: bool = (
+    os.environ.get(
+        "AQUARIUM_COMMON_RANDOM_SEEDS", "1" if XC.COMMON_RANDOM_SEEDS else "0"
+    )
+    .strip()
+    .lower()
+    in ("1", "true", "yes")
+)
 BENCHMARK_EVERY_N: int = XC.BENCHMARK_EVERY_N
 BENCHMARK_EVERY_N_STEPS: int = XC.BENCHMARK_EVERY_N_STEPS
 BENCHMARK_N_EPISODES: int = XC.BENCHMARK_N_EPISODES
@@ -551,6 +570,57 @@ SIDE_BUILDERS = {
 
 
 # ===========================================================================
+# Fitness anchors
+# ===========================================================================
+
+
+def _make_anchor_evaders() -> List[Any]:
+    """Scripted prey the predator side is partly scored against.
+
+    Co-evolutionary fitness is measured against a moving population, so it
+    says nothing about absolute skill: a generation's score can rise because
+    the individuals improved or because their opponents got worse.  Anchoring
+    reserves part of every evaluation for opponents that never change, which
+    is what lets selection compare a generation against the one before it.
+
+    These read the *featurized* observation the co-evolution env produces,
+    so :class:`AquariumFeatureAPFPolicy` is used rather than the raw-layout
+    scripted policies the vs-APF envs embed.
+
+    The gains are perturbed variants, never the shipped
+    :data:`XC.APF_EVADER_CONFIG`.  That config is what the periodic probe and
+    the final evaluation score against, and training directly on it would let
+    a run learn the specific controller it is about to be graded by.
+    """
+    wall_features = 4 if ENV_CONFIG.get("observable_walls", False) else 0
+    return [
+        AquariumFeatureAPFPolicy(
+            role="evader",
+            predator_observe_count=int(ENV_CONFIG["predator_observe_count"]),
+            prey_observe_count=int(ENV_CONFIG["prey_observe_count"]),
+            action_count=int(ENV_CONFIG["action_count"]),
+            config=cfg,
+            wall_features=wall_features,
+            continuous=bool(ENV_CONFIG.get("continuous_actions", False)),
+        )
+        for cfg in XC.anchor_apf_configs(XC.APF_EVADER_CONFIG)
+    ]
+
+
+def _with_anchors(side: Side) -> Side:
+    """Attach the scripted anchor set to *side* (no-op when disabled)."""
+    if ANCHOR_MIX <= 0.0:
+        return side
+    # dataclasses.replace re-runs Side.__post_init__, so the anchor fields
+    # get the same validation a directly-constructed Side would.
+    return replace(
+        side,
+        anchor_policies=_make_anchor_evaders(),
+        anchor_mix=ANCHOR_MIX,
+    )
+
+
+# ===========================================================================
 # Scripted-APF benchmark
 # ===========================================================================
 
@@ -952,6 +1022,7 @@ def _run_coev(
         sides=[pred_side, prey_side],
         schedule="synchronous",
         k_opponents=K_OPPONENTS,
+        common_random_seeds=COMMON_RANDOM_SEEDS,
         aggregation="mean",
         reporting_side=pred_side.name,
         max_steps_per_episode=int(ENV_CONFIG["max_time_steps"]),
@@ -1002,6 +1073,9 @@ def _run_coev(
             "k_opponents": K_OPPONENTS,
             "hof_capacity": HOF_CAPACITY,
             "archive_mix": ARCHIVE_MIX,
+            "anchor_mix": ANCHOR_MIX,
+            "anchor_side": prey_side.name if ANCHOR_MIX > 0.0 else None,
+            "common_random_seeds": COMMON_RANDOM_SEEDS,
             "pred_shape_alpha": PRED_REWARD_SHAPE_ALPHA,
             "prey_shape_alpha": PREY_REWARD_SHAPE_ALPHA,
             # Distinguishes these archives from the ENUCC campaign's, whose
@@ -1049,7 +1123,8 @@ def run_pairing(pairing: str, seed: int, run_dir: Path) -> Dict[str, Any]:
     _section(f"{pred_algo} vs {prey_algo} | seed={seed}")
     return _run_coev(
         pred_side=SIDE_BUILDERS[pred_algo]("predators", "predator", seed),
-        prey_side=SIDE_BUILDERS[prey_algo]("prey", "prey", seed),
+        # Anchors go on the prey side because that is what predators face.
+        prey_side=_with_anchors(SIDE_BUILDERS[prey_algo]("prey", "prey", seed)),
         seed=seed,
         run_dir=run_dir,
         label=pairing,
@@ -1066,6 +1141,14 @@ def main() -> None:
     _section("Aquarium competitive coevolution")
     print(f"  ENV       : {ENV_NAME_COEV}  ({ACTION_MODE})")
     print(f"  budget    : {COEV_TOTAL_STEPS:,} env_steps × {NUM_SEEDS} seeds × pairings")
+    if ANCHOR_MIX > 0.0:
+        n_anchor = min(K_OPPONENTS, max(1, round(ANCHOR_MIX * K_OPPONENTS)))
+        print(
+            f"  anchoring : {n_anchor}/{K_OPPONENTS} predator episodes vs "
+            f"{XC.ANCHOR_VARIANTS} scripted prey (probe config held out)"
+        )
+    else:
+        print("  anchoring : off (pure coevolution)")
     print(f"  enabled   : {[p for p, on in PAIRINGS.items() if on]}")
     print(f"  output    : {OUTPUT_DIR}")
 

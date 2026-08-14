@@ -24,7 +24,9 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
 
 from .apf_policy import AquariumAPFConfig
 
@@ -139,6 +141,73 @@ APF_EVADER_CONFIG = AquariumAPFConfig(
     k_predator=5.0, k_tangential=3.0, k_prey_separation=0.5
 )
 
+# Gains perturbed for the anchor set. The shipped configs above stay held
+# out for scoring, so a run cannot post a good probe number by fitting the
+# one opponent it trained against.
+ANCHOR_GAIN_SPREAD: float = 0.35
+ANCHOR_VARIANTS: int = 4
+
+
+def anchor_apf_configs(
+    base: AquariumAPFConfig,
+    n: int = ANCHOR_VARIANTS,
+    *,
+    seed: int = 0,
+    spread: float = ANCHOR_GAIN_SPREAD,
+) -> List[AquariumAPFConfig]:
+    """Return ``n`` perturbed APF configs for use as fitness anchors.
+
+    An anchor's job is to be a *fixed* reference, not a strong opponent, so
+    what matters is that the set stays constant for the whole run and is
+    disjoint from the config used to score it.  Training on the exact
+    scoring opponent would let a run overfit the one controller it will be
+    measured against and report progress that does not generalise; a small
+    family of perturbed variants keeps the reference stable while leaving
+    the shipped config genuinely held out.
+
+    The gains are perturbed log-uniformly so a 35% spread means the same
+    proportional change up as down.  ``wall_threshold`` is a normalised
+    distance rather than a gain, so it is clipped to a sane band.
+
+    Args:
+        base: Config to perturb — :data:`APF_EVADER_CONFIG` or
+            :data:`APF_PURSUER_CONFIG`.
+        n: How many variants to produce.
+        seed: Fixes the perturbations; the same seed always yields the same
+            anchor set, which is what makes runs comparable.
+        spread: Fractional gain spread.
+
+    Returns:
+        ``n`` configs, none equal to ``base``.
+    """
+    if n < 1:
+        raise ValueError(f"anchor_apf_configs: n must be >= 1, got {n}.")
+    rng = np.random.default_rng(seed)
+
+    def jitter(value: float) -> float:
+        if abs(value) < 1e-12:
+            return 0.0   # A disabled term stays disabled.
+        return float(value * np.exp(rng.uniform(-1.0, 1.0) * np.log1p(spread)))
+
+    out: List[AquariumAPFConfig] = []
+    for _ in range(n):
+        out.append(
+            AquariumAPFConfig(
+                k_predator=jitter(base.k_predator),
+                k_tangential=jitter(base.k_tangential),
+                k_prey_separation=jitter(base.k_prey_separation),
+                k_wall=jitter(base.k_wall),
+                wall_threshold=float(
+                    np.clip(jitter(base.wall_threshold), 0.05, 0.6)
+                ),
+                separation_cap_ratio=base.separation_cap_ratio,
+                softening=base.softening,
+                no_op_threshold=base.no_op_threshold,
+            )
+        )
+    return out
+
+
 # ===========================================================================
 # Reward shaping
 # ===========================================================================
@@ -152,10 +221,13 @@ APF_EVADER_CONFIG = AquariumAPFConfig(
 # telescopes to ``Φ(s_T) − Φ(s_0)``, so at alpha=1.0 it is bounded by the arena
 # diagonal / 200 ≈ ±10.6 regardless of episode length, against ±20 per catch.
 # The ENUCC campaign measured the catch term at only 12–19% of median predator
-# fitness under the *previous* non-telescoping form; alpha is to be re-set from
-# the measured catch share in the gated pilot (probe.csv now records the
-# unshaped and shaping halves separately), not by arithmetic — 1.0 is carried
-# over unchanged until that measurement exists.
+# fitness under the *previous* non-telescoping form, which is what put alpha
+# under suspicion.  Measured since on the 40-run K sweep, whose archives record
+# the unshaped and shaping halves of each probe separately: the catch term is
+# a median 0.686 of predator fitness, against the 0.50 the gate asks for.  So
+# alpha=1.0 stands on measurement rather than inheritance, and shaping
+# dominance is ruled out as an explanation for the co-evolution plateau —
+# selection is already looking at a fitness that is mostly catches.
 COEV_PRED_SHAPE_ALPHA: float = 1.0
 COEV_PREY_SHAPE_ALPHA: float = 1.0
 # Vs-scripted-APF training now shapes on the same potential as coevolution,
@@ -564,6 +636,21 @@ K_OPPONENTS: int = 16
 # Past-champion snapshots kept per side for archive-based opponent sampling.
 HOF_CAPACITY: int = 10
 ARCHIVE_MIX: float = 0.5
+# Fraction of each individual's K_OPPONENTS episodes played against a fixed
+# scripted anchor instead of the co-evolving opponent.  Off: the 4-arm grid of
+# 2026-08-04 (10 seeds/arm) found no benefit at any dose — 4/16 scored
+# -0.152 +- 0.164 against the unanchored control and 8/16 -0.109 +- 0.162,
+# with the control the best arm.  The mechanism did fire (within-generation
+# spread fell 22% at the heavier dose), so this is the technique failing on
+# this task rather than the implementation failing; the machinery is kept and
+# reachable via AQUARIUM_ANCHOR_MIX.
+ANCHOR_MIX: float = 0.0
+# Give every individual in a generation the same K episode seeds. Off for the
+# same grid: CRN halved between-run spread (sd 0.44 -> 0.24) exactly as
+# intended, but carried an unexplained -0.200 +- 0.159 on the mean, the
+# largest single contrast in the grid.  Leaving it on would make every future
+# run non-comparable with the archive for no demonstrated benefit.
+COMMON_RANDOM_SEEDS: bool = False
 # Scripted-APF benchmark cadence: an absolute progress signal decoupled from
 # the coevolutionary moving-target effect.  Episode count matches
 # PROBE_EPISODES so coevolution probe rows carry the same measurement

@@ -56,7 +56,7 @@ from examples.pursuit_evasion.aquarium.apf_policy import (
 from examples.pursuit_evasion.aquarium.experiment_config import (
     APF_EVADER_CONFIG,
     APF_PURSUER_CONFIG,
-    BALANCED_ENV_CONFIG,
+    make_env_config,
 )
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
     _patch_aquarium_wrappers,
@@ -82,7 +82,12 @@ REFERENCE_EPISODES: int = 128
 # re-running this script after an env upgrade checks whether the canonical
 # choice still sits closest to the balance target.
 
-BASE_ENV_CONFIG: Dict[str, Any] = dict(BALANCED_ENV_CONFIG)
+# Via make_env_config so AQUARIUM_ENV_OVERRIDES reaches the reference the same
+# way it reaches training. A reference measured on a different env than the
+# runs it scales is worse than no reference at all.
+BASE_ENV_CONFIG: Dict[str, Any] = {
+    k: v for k, v in make_env_config("discrete").items() if k != "continuous_actions"
+}
 
 PURSUER_APF = APF_PURSUER_CONFIG
 EVADER_APF = APF_EVADER_CONFIG
@@ -141,7 +146,15 @@ def _play_episode(env_config: Dict[str, Any], seed: int, continuous: bool) -> Di
         evader.reset()
 
         prey_total = int(env_config["prey_count"])
-        alive = prey_total
+        # Count catch *events* from the predator team reward rather than from
+        # the prey population shrinking.  Under
+        # ``keep_prey_count_constant=True`` the population never shrinks, so a
+        # decline-based count silently reports zero for every episode.
+        # Aquarium splits one catch's reward across the predators sharing the
+        # catch zone, so the team sum is still exactly one reward per catch.
+        predator_reward = float(env_config.get("predator_reward", 10)) or 10.0
+        respawns = bool(env_config.get("keep_prey_count_constant", False))
+        catches = 0
         catch_steps: List[int] = []
         for step in range(int(env_config["max_time_steps"])):
             if not env.agents:
@@ -150,18 +163,22 @@ def _play_episode(env_config: Dict[str, Any], seed: int, continuous: bool) -> Di
             for agent, obs in observations.items():
                 policy = pursuer if agent.startswith("predator") else evader
                 actions[agent] = policy.get_action(obs)
-            observations, _, _, _, _ = env.step(actions)
-            now_alive = sum(1 for a in env.agents if a.startswith("prey"))
-            for _ in range(alive - now_alive):
-                catch_steps.append(step)
-            alive = now_alive
-            if alive == 0:
+            observations, rewards, _, _, _ = env.step(actions)
+            team_reward = sum(
+                float(r) for a, r in rewards.items() if a.startswith("predator")
+            )
+            caught_now = max(0, int(round(team_reward / predator_reward)))
+            catch_steps.extend([step] * caught_now)
+            catches += caught_now
+            if not respawns and not any(a.startswith("prey") for a in env.agents):
                 break
 
-        catches = prey_total - alive
         return {
             "catches": catches,
+            # Only a fraction when prey are not replaced; with respawn on it is
+            # catches per prey slot and may exceed 1.
             "catch_fraction": catches / float(prey_total),
+            "respawns": respawns,
             "median_catch_step": float(np.median(catch_steps)) if catch_steps else None,
         }
     finally:
