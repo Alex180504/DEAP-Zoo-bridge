@@ -189,7 +189,14 @@ _baseline_pylint.txt
 _baseline_pytest.txt
 
 *.jar
+*.svg
+*.png
 
 smoke.py
 
 archive/
+code_review/
+runs-enucc/
+
+# SonarScanner working directory
+.scannerwork/

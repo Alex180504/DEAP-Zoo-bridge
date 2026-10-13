@@ -35,6 +35,7 @@ from deap_pettingzoo.ui.services.api_client import (
     get_client,
 )
 from deap_pettingzoo.ui.services.spec_utils import (
+    catalog_option_names,
     extract_loaded_spec,
     spec_to_form_defaults,
 )
@@ -763,12 +764,14 @@ with tab_coev:
             "configure each side's algorithm below instead."
         )
         coev_opts = catalog.get("coevolution", {})
-        modes = [m["name"] for m in coev_opts.get("modes", [])]
+        # Every dropdown must submit the bare catalog token, never the
+        # {"name", "label", "help"} option dict the catalog serves.
+        modes = catalog_option_names(coev_opts.get("modes"))
         if modes:
             coevolution_values["mode"] = st.selectbox(
                 "Mode", options=modes, index=0, key="_coev_mode"
             )
-        schedules = coev_opts.get("schedules", [])
+        schedules = catalog_option_names(coev_opts.get("schedules"))
         if schedules:
             coevolution_values["schedule"] = st.selectbox(
                 "Schedule", options=schedules, index=0, key="_coev_sched"
@@ -778,7 +781,7 @@ with tab_coev:
         )
         coevolution_values["aggregation"] = st.selectbox(
             "Aggregation",
-            options=list(coev_opts.get("aggregations", ["mean"])),
+            options=catalog_option_names(coev_opts.get("aggregations")) or ["mean"],
             key="_coev_agg",
         )
 

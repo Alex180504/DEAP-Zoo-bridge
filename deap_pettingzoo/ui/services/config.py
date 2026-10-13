@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -50,3 +51,37 @@ def load_settings(*, results_root: Optional[str] = None) -> UISettings:
         env_value = os.environ.get(DEFAULT_ROOT_ENV_VAR)
         root = Path(env_value) if env_value else DEFAULT_RESULTS_ROOT
     return UISettings(results_root=root.expanduser().resolve())
+
+
+def resolve_output_dir(raw: str | Path, results_root: Path) -> Path:
+    """Resolve a report output directory against ``results_root``.
+
+    Relative paths are anchored to the results root rather than the
+    process working directory, which is unreliable when the UI is
+    launched from a protected or read-only location (e.g. the Docker UI
+    image, where ``/app`` is root-owned). Absolute paths and ``~`` are
+    honoured as-is.
+    """
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = results_root / path
+    return path.resolve()
+
+
+def pick_writable_output_dir(requested: Path) -> tuple[Path, bool]:
+    """Return a directory that can actually be written to.
+
+    Returns ``(directory, fell_back)``. When ``requested`` cannot be
+    created or probed for writes — e.g. the Docker UI mounts the results
+    root read-only, so ``/app/results/reports`` raises ``EROFS`` — fall
+    back to a fresh temporary directory so the inline report preview still
+    works.
+    """
+    try:
+        requested.mkdir(parents=True, exist_ok=True)
+        probe = requested / ".deap-write-probe"
+        probe.touch(exist_ok=True)
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return Path(tempfile.mkdtemp(prefix="deap-report-")), True
+    return requested, False

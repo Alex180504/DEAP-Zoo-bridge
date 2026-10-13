@@ -130,7 +130,10 @@ CURRICULUM: bool = (
 # ---- Reproducibility / hardware --------------------------------------------
 
 SEED_BASE: int = 0
-NUM_SEEDS: int = 3
+# Methodology §5 prescribes 10 seeds per (algorithm, mode): at a seed-level SD
+# of ~0.215 catches, fewer cannot carry a CI and the arm stays descriptive.
+# The HPC launcher shards these one seed per job (--seed N --seeds 1).
+NUM_SEEDS: int = 10
 DEVICE: str = "cuda"           # RL trainer; falls back to CPU if cuda unavailable
 N_WORKERS: int = 0             # 0 = os.cpu_count(); 1 = sequential
 
@@ -155,6 +158,15 @@ TRAIN_ENV_NAME: str = ENV_NAME + "_curriculum" if CURRICULUM else ENV_NAME
 ENV_CONFIG: Dict[str, Any] = XC.make_env_config(ACTION_MODE)
 APF_CONFIG = XC.APF_EVADER_CONFIG
 REWARD_SHAPE_ALPHA: float = XC.VS_APF_PRED_SHAPE_ALPHA
+
+# Descriptive keys every backend records identically, so one archive can be
+# told apart from another without consulting the code that produced it.
+RUN_PROVENANCE: Dict[str, Any] = XC.run_provenance(
+    REWARD_SHAPE_ALPHA,
+    probe_env_name=ENV_NAME,
+    curriculum=CURRICULUM,
+    action_mode=ACTION_MODE,
+)
 
 # ---- EA / CMA-ES -------------------------------------------------------------
 
@@ -538,7 +550,10 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
     logger = ExperimentLogger.create(
         run_dir,
         algorithm="ea",
-        env_name=ENV_NAME,
+        # The env actually trained on, matching what the library trainers
+        # record. Probes still run on ENV_NAME (see probe_env_name below), so
+        # a curriculum run is identifiable from the manifest alone.
+        env_name=TRAIN_ENV_NAME,
         seed=seed,
         env_config=ENV_CONFIG,
         budget_mode="env_steps",
@@ -551,9 +566,8 @@ def run_ea(seed: int, run_dir: Path) -> Dict[str, Any]:
             "elite_size": EA_ELITE_SIZE,
             "mut_sigma": EA_MUT_SIGMA,
             "cxpb": EA_CXPB,
-            "action_mode": ACTION_MODE,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
-            "curriculum": CURRICULUM,
+            **RUN_PROVENANCE,
         },
     )
     recorder = (
@@ -741,7 +755,7 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
     logger = ExperimentLogger.create(
         run_dir,
         algorithm="cmaes",
-        env_name=ENV_NAME,
+        env_name=TRAIN_ENV_NAME,
         seed=seed,
         env_config=ENV_CONFIG,
         budget_mode="env_steps",
@@ -752,9 +766,8 @@ def run_cmaes(seed: int, run_dir: Path) -> Dict[str, Any]:
             "hidden_size": CMA_HIDDEN_SIZE,
             "sigma0": CMA_SIGMA0,
             "dimension": dimension,
-            "action_mode": ACTION_MODE,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
-            "curriculum": CURRICULUM,
+            **RUN_PROVENANCE,
         },
     )
     recorder = (
@@ -911,6 +924,7 @@ def run_pso(seed: int, run_dir: Path) -> Dict[str, Any]:
             "action_mode": ACTION_MODE,
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
         },
+        run_metadata=dict(RUN_PROVENANCE),
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
         # Probes stay on the canonical env so curves are comparable across
@@ -1003,6 +1017,7 @@ def run_map_elites(seed: int, run_dir: Path) -> Dict[str, Any]:
             "reeval_rounds": MAP_ELITES_PARAMS["reeval_rounds"],
             "action_mode": ACTION_MODE,
         },
+        run_metadata=dict(RUN_PROVENANCE),
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
         probe=ProbeConfig(
@@ -1079,6 +1094,7 @@ def run_hyperneat(seed: int, run_dir: Path) -> Dict[str, Any]:
             "head_temperature": HYPERNEAT_PARAMS["head_temperature"],
             "action_mode": ACTION_MODE,
         },
+        run_metadata=dict(RUN_PROVENANCE),
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
         probe=ProbeConfig(
@@ -1144,6 +1160,7 @@ def run_matd3(seed: int, run_dir: Path) -> Dict[str, Any]:
         seed=int(seed),
         max_steps_per_episode=_episode_steps_per_episode(),
         algorithm_params=XC.matd3_hpo_algorithm_params(ACTION_MODE),
+        run_metadata=dict(RUN_PROVENANCE),
         env_config=dict(ENV_CONFIG),
         output_dir=run_dir,
         probe=ProbeConfig(

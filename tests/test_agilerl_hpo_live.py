@@ -3,6 +3,8 @@
 Requires the ``rl-baselines`` extra.  Gated behind ``importorskip`` and
 marked ``slow``.
 """
+from pathlib import Path
+
 import pytest
 
 agilerl = pytest.importorskip(
@@ -94,6 +96,60 @@ class TestHPOProbe:
         assert expected.issubset(rows[0].keys()), (
             f"probe.csv missing expected columns; got {list(rows[0].keys())}"
         )
+
+
+class TestHPORunDirMetadata:
+    """``metadata["run_dir"]`` is how callers find a finished run to patch.
+
+    Experiment drivers write the held-out champion evaluation into the run's
+    summary after the trainer has closed its logger, locating it through this
+    key.  Every other trainer sets it; when this one did not, the patch became
+    a silent no-op and MATD3 runs reported no evaluation at all — a whole
+    algorithm missing from the comparison with nothing in the logs to say so.
+    """
+
+    def test_run_dir_is_reported_when_output_dir_is_set(self, tmp_path):
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=200,
+            num_seeds=1,
+            seed=0,
+            output_dir=tmp_path,
+            algorithm_params={
+                "max_steps_per_episode": 10,
+                "population_size": 2,
+                "evo_every_n_steps": 50,
+                "learn_step": 50,
+            },
+            env_config={"max_cycles": 10},
+        )
+        result = MATD3HPOTrainer(population_size=2, device="cpu").train(config)
+
+        run_dir = result.metadata.get("run_dir")
+        assert run_dir, "metadata['run_dir'] missing — summary patching no-ops"
+        run_path = Path(run_dir)
+        assert run_path.is_dir()
+        assert (run_path / "summary.json").is_file()
+
+    def test_run_dir_is_none_without_an_output_dir(self):
+        config = TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=200,
+            num_seeds=1,
+            seed=0,
+            algorithm_params={
+                "max_steps_per_episode": 10,
+                "population_size": 2,
+                "evo_every_n_steps": 50,
+                "learn_step": 50,
+            },
+            env_config={"max_cycles": 10},
+        )
+        result = MATD3HPOTrainer(population_size=2, device="cpu").train(config)
+
+        assert result.metadata.get("run_dir") is None
 
 
 class TestIPPOHPOLive:

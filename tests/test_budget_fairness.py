@@ -848,6 +848,191 @@ class TestPerSideBudgetSplit:
         assert consumed <= budget + 300
 
 
+class TestEqualStepPacing:
+    """``CoEvolutionConfig.side_pacing='equal_steps'`` — sides are handed
+    generations by real consumed env steps rather than one each per iteration,
+    so the expensive side no longer drains its slice early and freezes."""
+
+    @staticmethod
+    def _coev_cfg(schedule="synchronous", **kwargs):
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionConfig
+
+        # Side "b" evaluates 4x the episodes of side "a" per generation, so
+        # under lockstep it spends its slice 4x faster.
+        return CoEvolutionConfig(
+            mode="competitive_2pop",
+            schedule=schedule,
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 2}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 8}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=11,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _train_cfg(coev_cfg, budget, budget_on_consumed=True):
+        return TrainingConfig(
+            env_name="simple_spread_v3",
+            budget_mode=BudgetMode.ENV_STEPS,
+            budget_value=budget,
+            env_config={"max_cycles": 25},
+            coevolution_config=coev_cfg,
+            budget_on_consumed=budget_on_consumed,
+        )
+
+    def _active_fractions(self, budget=2400, **kwargs):
+        """Run a pairing and return, per side, how far into the run it last stepped.
+
+        1.0 means the side was still evolving at the final iteration; the
+        campaign's frozen sides sat at a median 0.66.
+        """
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        timeline: list = []
+        coev_cfg = self._coev_cfg(
+            generation_callback=lambda gen, states: timeline.append(
+                (gen, {n: len(s.history) for n, s in states.items()})
+            ),
+            **kwargs,
+        )
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+        total = timeline[-1][0]
+        fractions = {}
+        for name in timeline[-1][1]:
+            final = timeline[-1][1][name]
+            first_at_final = min(g for g, counts in timeline if counts[name] == final)
+            fractions[name] = first_at_final / total
+        return fractions, result
+
+    def test_invalid_side_pacing_rejected(self):
+        with pytest.raises(ValueError, match="side_pacing"):
+            self._coev_cfg(side_pacing="fair")
+
+    def test_equal_steps_requires_consumed_budget(self):
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        coev_cfg = self._coev_cfg(side_pacing="equal_steps")
+        config = self._train_cfg(coev_cfg, budget=1200, budget_on_consumed=False)
+        with pytest.raises(ValueError, match="budget_on_consumed"):
+            CoEvolutionTrainer().train(config)
+
+    def test_lockstep_freezes_the_expensive_side_early(self):
+        """Baseline: the behaviour equal_steps exists to remove.
+
+        Side "b" costs 4x side "a" per generation, so under lockstep it spends
+        its equal slice in the first quarter of the run and the remaining
+        three quarters are not co-evolution at all.
+        """
+        fractions, _ = self._active_fractions(
+            budget_split="per_side", on_side_exhausted="freeze",
+        )
+        assert fractions["a"] == pytest.approx(1.0)
+        assert fractions["b"] < 0.4
+
+    def test_equal_steps_keeps_both_sides_running(self):
+        """Neither side stops materially before the other."""
+        fractions, result = self._active_fractions(
+            budget_split="per_side",
+            on_side_exhausted="freeze",
+            side_pacing="equal_steps",
+        )
+        assert fractions["a"] == pytest.approx(1.0)
+        assert fractions["b"] >= 0.8, (
+            f"expensive side froze at {fractions['b']:.2f} of the run"
+        )
+
+        # Equal slices are still spent in full ...
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = 2400 // 2
+        assert per_side["a"] >= share
+        assert per_side["b"] >= share
+        # ... the cheap side just takes more generations to spend its own.
+        hist = result.metrics["per_side_history"]
+        assert len(hist["a"]) > len(hist["b"])
+
+    def test_equal_costs_still_step_together(self):
+        """Pacing must not serialise sides that cost the same per generation."""
+        from deap_pettingzoo.baselines.coevolution.sides import Side
+        from deap_pettingzoo.baselines.coevolution.trainer import (
+            CoEvolutionConfig,
+            CoEvolutionTrainer,
+        )
+
+        coev_cfg = CoEvolutionConfig(
+            mode="competitive_2pop",
+            sides=[
+                Side(name="a", role_prefixes=("agent_0",),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+                Side(name="b", role_prefixes=("agent_1", "agent_2"),
+                     optimizer="ea", optimizer_config={"population_size": 4}),
+            ],
+            k_opponents=1,
+            max_steps_per_episode=25,
+            seed=11,
+            budget_split="per_side",
+            on_side_exhausted="freeze",
+            side_pacing="equal_steps",
+        )
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, 2400))
+
+        hist = result.metrics["per_side_history"]
+        gens = result.metrics["num_generations"]
+        # Every side stepped in every iteration — identical to lockstep.
+        assert len(hist["a"]) == gens
+        assert len(hist["b"]) == gens
+
+    def test_pacing_never_stalls_when_one_side_is_far_ahead(self):
+        """The laggard always steps, so the loop cannot spin without progress."""
+        from deap_pettingzoo.baselines.coevolution.sides import GenerationStats
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        def _stats(name, steps):
+            return GenerationStats(
+                generation=1, side_name=name, mean=0.0, std=0.0,
+                min=0.0, max=0.0, best_fitness=0.0, env_steps=steps,
+            )
+
+        # No history yet: nothing to pace against, everybody steps.
+        assert CoEvolutionTrainer._paced_skip({"a": [], "b": []}, ["a", "b"]) == set()
+
+        # "b" is three of its own generations ahead — held back, "a" is not.
+        history = {
+            "a": [_stats("a", 1000)],
+            "b": [_stats("b", 1000)] * 3,
+        }
+        assert CoEvolutionTrainer._paced_skip(history, ["a", "b"]) == {"b"}
+
+        # Level sides both step, preserving simultaneity when costs match.
+        history = {"a": [_stats("a", 1000)], "b": [_stats("b", 1000)]}
+        assert CoEvolutionTrainer._paced_skip(history, ["a", "b"]) == set()
+
+    def test_equal_steps_alternating_schedule(self):
+        """The alternating rotation honours pacing too."""
+        from deap_pettingzoo.baselines.coevolution.trainer import CoEvolutionTrainer
+
+        budget = 2400
+        coev_cfg = self._coev_cfg(
+            schedule="alternating",
+            budget_split="per_side",
+            on_side_exhausted="freeze",
+            side_pacing="equal_steps",
+        )
+        result = CoEvolutionTrainer().train(self._train_cfg(coev_cfg, budget))
+
+        per_side = result.metrics["env_steps_consumed_per_side"]
+        share = budget // 2
+        assert per_side["a"] >= share
+        assert per_side["b"] >= share
+        hist = result.metrics["per_side_history"]
+        assert len(hist["a"]) > len(hist["b"])
+
+
 class TestNeatRealSteps:
     """NEAT surfaces real consumed steps below the nominal ceiling."""
 

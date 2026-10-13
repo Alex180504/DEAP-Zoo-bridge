@@ -1,0 +1,56 @@
+# Local SonarQube Community Build for static analysis of deap_pettingzoo.
+#
+# Community Build is the free edition and works on private code, unlike the
+# SonarQube Cloud free tier (public projects only). Analysis is pushed here by
+# a scanner run; this is the server-side counterpart to the SonarQube for IDE
+# (SonarLint) extension, which runs standalone in the editor and so cannot
+# produce duplication, quality-gate or coverage metrics on its own.
+#
+#   docker compose -f docker/sonarqube/docker-compose.yml up -d
+#   -> http://localhost:9000   (first login admin / admin, then set a password)
+#
+# The embedded H2 database is fine for a single-developer local instance; it is
+# not upgradable between versions, which does not matter here because the
+# analysis history is a working aid rather than a long-lived record.
+
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: deap-sonarqube
+    # Fixed hostname so the bundled Elasticsearch's getLocalHost() resolves
+    # from /etc/hosts instead of Docker's embedded DNS, which fails to resolve
+    # the default container-ID hostname on Docker Desktop and crashes ES at
+    # startup (UnknownHostException: <container-id>).
+    hostname: sonarqube
+    ports:
+      - "9000:9000"
+    environment:
+      # The bundled Elasticsearch refuses to start without a writable data dir
+      # and a raised map count; Docker Desktop's WSL2 VM already ships
+      # vm.max_map_count=262144, so only the bootstrap check needs relaxing.
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      # Named volumes so the project, token and analysis history survive a
+      # container replacement (an anonymous volume would not).
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    healthcheck:
+      # The web API reports UP only once Elasticsearch and the compute engine
+      # are both ready, which is later than the port becoming connectable.
+      # curl is used because the 26.8+ image no longer ships wget.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    stop_grace_period: 1m
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:

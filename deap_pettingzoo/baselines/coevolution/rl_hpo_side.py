@@ -189,6 +189,17 @@ class RLEvolveHPOSideState(SideState):
         *,
         batch_eval_fn=None,
     ) -> GenerationStats:
+        """Train, evaluate and mutate the HPO population for one generation.
+
+        Note:
+            Two stated asymmetries versus the evolutionary sides, kept
+            deliberately and recorded in ``docs/known_issues.md``: opponents
+            are sampled **once per generation** rather than per episode (so
+            this side gets no ``k_opponents`` variance reduction), and the
+            reported ``env_steps`` covers training steps **plus**
+            fitness-evaluation steps, where EA / CMA-ES / PSO / QDax count
+            evaluation ticks only.
+        """
         self.generation += 1
         _gen_t0 = time.time()
 

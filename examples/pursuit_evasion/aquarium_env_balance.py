@@ -16,9 +16,14 @@ Stages (each keeps the previous stage's winner):
   2. view distances     — symmetric vs one-sided information advantage
   3. topology + catch_radius — rectangle vs torus, catch annulus size
 
-Run directly (no CLI)::
+Run directly::
 
-    python examples/pursuit_evasion/aquarium_env_balance.py
+    python examples/pursuit_evasion/aquarium_env_balance.py              # grid
+    python examples/pursuit_evasion/aquarium_env_balance.py --reference  # shipped config
+
+``--reference`` skips the grid and measures only the shipped config, in both
+action modes, at ``REFERENCE_EPISODES`` episodes — the APF-vs-APF baseline the
+campaign quotes its learned catch rates against.
 
 Edit the module constants to change episode counts / the candidate grid.
 The chosen config is what ``examples/pursuit_evasion/aquarium/
@@ -51,7 +56,7 @@ from examples.pursuit_evasion.aquarium.apf_policy import (
 from examples.pursuit_evasion.aquarium.experiment_config import (
     APF_EVADER_CONFIG,
     APF_PURSUER_CONFIG,
-    BALANCED_ENV_CONFIG,
+    make_env_config,
 )
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
     _patch_aquarium_wrappers,
@@ -65,12 +70,24 @@ TARGET_CATCH_FRACTION: float = 0.5
 VERIFY_CONTINUOUS: bool = True   # re-run the winner in continuous action mode
 OUTPUT_DIR: Path = Path("results/aquarium_env_balance")
 
+# Reference measurement (``--reference``): the shipped config only, at enough
+# episodes to resolve the imbalance.  Catch fractions swing ~±0.04 run to run,
+# so the 12-episode grid pass cannot separate a genuine bias from noise; the
+# methodology reports the residual APF-vs-APF imbalance as a caveat rather
+# than calibrating it away, and that number needs a real CI.
+REFERENCE_EPISODES: int = 128
+
 # ---- Base env config (stage candidates override individual keys) -------------
 # Re-validation workflow: the base IS the shipped canonical config, so
 # re-running this script after an env upgrade checks whether the canonical
 # choice still sits closest to the balance target.
 
-BASE_ENV_CONFIG: Dict[str, Any] = dict(BALANCED_ENV_CONFIG)
+# Via make_env_config so AQUARIUM_ENV_OVERRIDES reaches the reference the same
+# way it reaches training. A reference measured on a different env than the
+# runs it scales is worse than no reference at all.
+BASE_ENV_CONFIG: Dict[str, Any] = {
+    k: v for k, v in make_env_config("discrete").items() if k != "continuous_actions"
+}
 
 PURSUER_APF = APF_PURSUER_CONFIG
 EVADER_APF = APF_EVADER_CONFIG
@@ -129,7 +146,15 @@ def _play_episode(env_config: Dict[str, Any], seed: int, continuous: bool) -> Di
         evader.reset()
 
         prey_total = int(env_config["prey_count"])
-        alive = prey_total
+        # Count catch *events* from the predator team reward rather than from
+        # the prey population shrinking.  Under
+        # ``keep_prey_count_constant=True`` the population never shrinks, so a
+        # decline-based count silently reports zero for every episode.
+        # Aquarium splits one catch's reward across the predators sharing the
+        # catch zone, so the team sum is still exactly one reward per catch.
+        predator_reward = float(env_config.get("predator_reward", 10)) or 10.0
+        respawns = bool(env_config.get("keep_prey_count_constant", False))
+        catches = 0
         catch_steps: List[int] = []
         for step in range(int(env_config["max_time_steps"])):
             if not env.agents:
@@ -138,18 +163,22 @@ def _play_episode(env_config: Dict[str, Any], seed: int, continuous: bool) -> Di
             for agent, obs in observations.items():
                 policy = pursuer if agent.startswith("predator") else evader
                 actions[agent] = policy.get_action(obs)
-            observations, _, _, _, _ = env.step(actions)
-            now_alive = sum(1 for a in env.agents if a.startswith("prey"))
-            for _ in range(alive - now_alive):
-                catch_steps.append(step)
-            alive = now_alive
-            if alive == 0:
+            observations, rewards, _, _, _ = env.step(actions)
+            team_reward = sum(
+                float(r) for a, r in rewards.items() if a.startswith("predator")
+            )
+            caught_now = max(0, int(round(team_reward / predator_reward)))
+            catch_steps.extend([step] * caught_now)
+            catches += caught_now
+            if not respawns and not any(a.startswith("prey") for a in env.agents):
                 break
 
-        catches = prey_total - alive
         return {
             "catches": catches,
+            # Only a fraction when prey are not replaced; with respawn on it is
+            # catches per prey slot and may exceed 1.
             "catch_fraction": catches / float(prey_total),
+            "respawns": respawns,
             "median_catch_step": float(np.median(catch_steps)) if catch_steps else None,
         }
     finally:
@@ -205,7 +234,46 @@ def _print_stage(title: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return best
 
 
+def run_reference() -> Dict[str, Any]:
+    """Measure the *shipped* config in both action modes, at high precision.
+
+    This is the campaign's APF-vs-APF reference point: how one-sided the env
+    is before any learning, for the exact config the suites train on.  It runs
+    no grid search — the methodology keeps the env perfectly symmetric and
+    reports the residual imbalance as a caveat rather than calibrating it away.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    results = [
+        evaluate_config(
+            f"shipped_{'continuous' if continuous else 'discrete'}",
+            BASE_ENV_CONFIG,
+            episodes=REFERENCE_EPISODES,
+            continuous=continuous,
+        )
+        for continuous in (False, True)
+    ]
+    print(f"\n=== APF-vs-APF reference ({REFERENCE_EPISODES} episodes/mode) ===")
+    print(f"{'mode':<22} {'catch_frac':>10} {'±sem':>7} {'med_step':>9} {'err':>6}")
+    for r in results:
+        sem = r["catch_fraction_std"] / (r["episodes"] ** 0.5)
+        med = f"{r['median_catch_step']:.0f}" if r["median_catch_step"] is not None else "—"
+        print(
+            f"{r['name']:<22} {r['catch_fraction_mean']:>10.3f} "
+            f"{sem:>7.3f} {med:>9} {r['balance_error']:>6.3f}"
+        )
+        r["catch_fraction_sem"] = sem
+
+    report = {"config": dict(BASE_ENV_CONFIG), "results": results}
+    out = OUTPUT_DIR / "reference_report.json"
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"\nreference written to {out}")
+    return report
+
+
 def main() -> None:
+    if "--reference" in sys.argv[1:]:
+        run_reference()
+        return
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     all_results: List[Dict[str, Any]] = []
     config = dict(BASE_ENV_CONFIG)

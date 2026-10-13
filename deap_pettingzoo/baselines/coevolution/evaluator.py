@@ -39,6 +39,19 @@ LearnerPolicyFactory = Callable[[Any, str, Any], PolicyProtocol]
 VALID_AGGREGATIONS = ("mean", "min", "max", "sum")
 
 
+@dataclass
+class GenomeIndividual:
+    """Minimal picklable carrier satisfying the evaluator's ``.genome`` contract.
+
+    :meth:`CoEvolutionEvaluator.run` requires an object exposing ``.genome``
+    (DEAP individuals do so naturally). Paradigms whose population members
+    are bare genomes — NEAT's ``neat.DefaultGenome``, for instance — wrap
+    each one in this holder so they can use the shared evaluator.
+    """
+
+    genome: Any
+
+
 # Worker-side state for parallel co-evolution
 
 
@@ -86,6 +99,52 @@ def _resolve_worker_env(
     return env
 
 
+def episode_seed_for(
+    *,
+    base_seed: Optional[int],
+    episode_index: int,
+    k_opponents: int,
+    generation_index: int = 0,
+    common_random_seeds: bool = False,
+) -> Optional[int]:
+    """Return the env reset seed for one evaluation episode.
+
+    Single source of truth for episode seeding.  Every evaluation path —
+    the serial loop, the per-individual parallel dispatch, the
+    population-level batch dispatch, and the single-policy evaluator the
+    QDax sides use — must call this, because they otherwise drift into
+    different seeding rules that are invisible in the archive and silently
+    change what a run measures.
+
+    Two regimes:
+
+    * ``common_random_seeds``: the seed depends only on the generation and
+      the episode index, so every individual scored in that generation
+      faces the same ``k`` starting states.  Between-individual fitness
+      differences then reflect skill rather than which states each happened
+      to draw.  The generation term keeps the run from training against one
+      fixed set of initial conditions forever.
+    * Otherwise: ``base_seed + episode_index`` when a base seed is given,
+      and ``None`` (unseeded) when it is not.
+
+    Args:
+        base_seed: Caller-supplied base, or ``None`` for unseeded episodes.
+        episode_index: Index of this episode within the individual's ``k``.
+        k_opponents: Episodes per individual; the stride that keeps
+            consecutive generations from reusing seeds.
+        generation_index: Current generation, used only under CRN.
+        common_random_seeds: Select the CRN regime.
+
+    Returns:
+        The seed to pass to ``env.reset``, or ``None`` to leave it unseeded.
+    """
+    if common_random_seeds:
+        return generation_index * max(1, int(k_opponents)) + int(episode_index)
+    if base_seed is None:
+        return None
+    return int(base_seed) + int(episode_index)
+
+
 @dataclass
 class _EpisodePayload:
     """Picklable payload for a single co-evolution episode.
@@ -108,6 +167,10 @@ class _EpisodePayload:
     max_steps: int
     #: Registry snapshot replayed once per worker (Dask custom envs).
     registry_snapshot: Optional[list] = None
+    #: Picklable descriptor of the learner phenotype for sides whose policy
+    #: is not a plain MLP (NEAT family). ``None`` keeps the historical path:
+    #: the worker builds a ``FeedforwardNeuralPolicy`` from ``learner_genome``.
+    learner_snapshot: Optional[OpponentSnapshot] = None
 
 
 @dataclass
@@ -165,15 +228,27 @@ def _episode_rollout(payload: _EpisodePayload) -> _EpisodeResult:
         for a in members:
             opponent_policies[a] = side_policy
 
-    # Build learner policies fresh per episode (matches serial path).
-    learner_policies: Dict[str, PolicyProtocol] = {
-        a: FeedforwardNeuralPolicy(
-            payload.learner_genome,
-            action_space=env.action_space(a),
-            masked=payload.learner_masked,
+    # Build learner policies fresh per episode (matches serial path). When
+    # the side shipped a phenotype snapshot, build it *once* and share it
+    # across the side's agents — the same contract opponents already use,
+    # and the only affordable option for phenotypes whose construction is
+    # expensive (ES-HyperNEAT's quadtree subdivision).
+    learner_policies: Dict[str, PolicyProtocol]
+    if payload.learner_snapshot is not None and learner_agents:
+        learner_policy = rebuild_opponent_policy(
+            payload.learner_snapshot,
+            action_space=env.action_space(learner_agents[0]),
         )
-        for a in learner_agents
-    }
+        learner_policies = dict.fromkeys(learner_agents, learner_policy)
+    else:
+        learner_policies = {
+            a: FeedforwardNeuralPolicy(
+                payload.learner_genome,
+                action_space=env.action_space(a),
+                masked=payload.learner_masked,
+            )
+            for a in learner_agents
+        }
 
     return _run_episode(
         env=env,
@@ -305,7 +380,12 @@ class CoEvolutionEvaluator(BaseEvaluator):
         env_name: Optional[str] = None,
         env_config: Optional[Dict[str, Any]] = None,
         learner_masked: bool = False,
+        learner_snapshot_fn: Optional[Callable[[Any], Optional[OpponentSnapshot]]] = (
+            None
+        ),
         registry_snapshot: Optional[list] = None,
+        common_random_seeds: bool = False,
+        generation_index: int = 0,
     ) -> None:
         """Build a co-evolution evaluator.
 
@@ -325,6 +405,15 @@ class CoEvolutionEvaluator(BaseEvaluator):
           use this to rebuild :class:`FeedforwardNeuralPolicy`
           locally; ignored on the serial path (which uses
           ``learner_factory`` directly).
+        * ``learner_snapshot_fn`` — ``genome -> Optional[OpponentSnapshot]``
+          describing the learner phenotype for workers. Returning ``None``
+          (the default) keeps the :class:`FeedforwardNeuralPolicy` rebuild
+          path; NEAT-family sides supply their own snapshot so the parallel
+          path builds the same phenotype the driver would.
+        * ``common_random_seeds`` / ``generation_index`` — episode-seeding
+          policy, applied identically on the serial and parallel paths via
+          :func:`episode_seed_for`. The trainer rebuilds the evaluator each
+          generation and passes the current index.
 
         Raises:
             ValueError: on agent-coverage mismatch, invalid
@@ -357,7 +446,10 @@ class CoEvolutionEvaluator(BaseEvaluator):
         self._env_name = env_name
         self._env_config = env_config
         self._learner_masked = bool(learner_masked)
+        self.learner_snapshot_fn = learner_snapshot_fn
         self._registry_snapshot = registry_snapshot
+        self.common_random_seeds = bool(common_random_seeds)
+        self.generation_index = int(generation_index)
 
         self._partition_agents()
         #: Populated after each :meth:`run` call for trainer logging.
@@ -369,6 +461,18 @@ class CoEvolutionEvaluator(BaseEvaluator):
         #: generation, so reading it after a population pass produces that
         #: side's real per-generation env-step count.
         self.env_steps_consumed: int = 0
+
+    def _episode_seed(
+        self, base_seed: Optional[int], episode_index: int
+    ) -> Optional[int]:
+        """Seed for episode ``episode_index``; see :func:`episode_seed_for`."""
+        return episode_seed_for(
+            base_seed=base_seed,
+            episode_index=episode_index,
+            k_opponents=self.k_opponents,
+            generation_index=self.generation_index,
+            common_random_seeds=self.common_random_seeds,
+        )
 
     # Agent partitioning
 
@@ -493,7 +597,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
         total_steps = 0
 
         for i in range(self.k_opponents):
-            episode_seed = None if seed is None else int(seed) + i
+            episode_seed = self._episode_seed(seed, i)
             opp_policies: Dict[str, PolicyProtocol] = {}
             for side_name, _prefixes, pool in self.opponent_sides:
                 side_policy = pool.sample_opponent(rng)
@@ -533,9 +637,17 @@ class CoEvolutionEvaluator(BaseEvaluator):
             )
             side_role_prefixes[side_name] = prefixes
 
+        # Built once per call, not per episode: the descriptor is identical
+        # across the k episodes and can be expensive to produce.
+        learner_snapshot = (
+            None
+            if self.learner_snapshot_fn is None
+            else self.learner_snapshot_fn(individual.genome)
+        )
+
         payloads: List[_EpisodePayload] = []
         for i in range(self.k_opponents):
-            episode_seed = None if seed is None else int(seed) + i
+            episode_seed = self._episode_seed(seed, i)
             episode_snaps = {
                 name: per_side_snapshots[name][i] for name in per_side_snapshots
             }
@@ -551,6 +663,7 @@ class CoEvolutionEvaluator(BaseEvaluator):
                     episode_seed=episode_seed,
                     max_steps=self.max_steps,
                     registry_snapshot=self._registry_snapshot,
+                    learner_snapshot=learner_snapshot,
                 )
             )
 
@@ -671,5 +784,6 @@ class CoEvolutionEvaluator(BaseEvaluator):
 __all__ = [
     "CoEvolutionEvaluator",
     "CoEvolutionEvalResult",
+    "GenomeIndividual",
     "LearnerPolicyFactory",
 ]

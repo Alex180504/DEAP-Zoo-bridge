@@ -157,12 +157,17 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
         """Build a logger from a :class:`TrainingConfig`-shaped object.
 
         Reads ``output_dir``, ``env_name``, ``env_config``,
-        ``budget_mode``, ``budget_value``, ``algorithm_params`` from
-        ``config``. ``algorithm_params`` may contain
+        ``budget_mode``, ``budget_value``, ``algorithm_params`` and
+        ``run_metadata`` from ``config``. ``algorithm_params`` may contain
         ``logging_tensorboard`` / ``logging_parquet`` boolean overrides
         which are honored when the explicit kwargs are ``None``.
+
+        The manifest's ``hyperparams`` block is ``algorithm_params``
+        overlaid with ``run_metadata``, so descriptive provenance lands in
+        the archive without ever reaching a trainer constructor.
         """
         algorithm_params = getattr(config, "algorithm_params", {}) or {}
+        run_metadata = getattr(config, "run_metadata", {}) or {}
         # Fall back to the legacy
         # ``algorithm_params['seed']`` escape hatch for config-shaped objects
         # that don't declare the attribute (e.g. NEAT / QDax raw dicts).
@@ -190,7 +195,7 @@ class ExperimentLogger(AbstractContextManager["ExperimentLogger"]):
             env_config=getattr(config, "env_config", None),
             budget_mode=budget_mode_str,
             budget_value=getattr(config, "budget_value", None),
-            hyperparams=algorithm_params,
+            hyperparams={**algorithm_params, **run_metadata},
             notes=notes,
             run_id=run_id,
             enable_tensorboard=enable_tensorboard,

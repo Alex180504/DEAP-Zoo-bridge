@@ -11,6 +11,8 @@ from deap_pettingzoo.ui.services.config import (
     DEFAULT_ROOT_ENV_VAR,
     UISettings,
     load_settings,
+    pick_writable_output_dir,
+    resolve_output_dir,
 )
 from deap_pettingzoo.ui.services.data import (
     discover_runs,
@@ -34,5 +36,7 @@ __all__ = [
     "load_experiment_cached",
     "load_settings",
     "move_run",
+    "pick_writable_output_dir",
     "rename_run",
+    "resolve_output_dir",
 ]

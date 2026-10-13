@@ -15,6 +15,11 @@ algorithm on aquarium against a fixed scripted opponent, from either side:
 * :class:`AquariumScriptedPredatorWrapper` — prey are the learners,
   predators are scripted (pursuing).  Exposes ``self.prey_lost``, a
   per-episode integer counter of learner agents caught.
+
+Both wrappers shape on the same *potential* as the coevolution adapter
+(:mod:`~examples.pursuit_evasion.aquarium.reward_shaping`), so the vs-APF and
+coevolution arms are measured on one reward definition and their scores are
+directly comparable.
 """
 
 from __future__ import annotations
@@ -34,6 +39,12 @@ from .apf_policy import (
     AquariumAPFConfig,
     AquariumAPFEvaderPolicy,
     AquariumAPFPursuerPolicy,
+)
+from .reward_shaping import (
+    entities_by_id,
+    find_raw_env,
+    nearest_opponent_distances,
+    potential_shaping,
 )
 
 
@@ -112,6 +123,10 @@ class AquariumScriptedPreyWrapper:
             on every :meth:`reset`).
         last_team_reward: Sum of predator rewards from the most recent
             :meth:`step` (useful for diagnostics / shaping).
+        shaping_total: Potential-shaping reward injected during the current
+            episode (reset by :meth:`reset`).  Diagnostic only — it lets a
+            caller split an episode return into its env and shaping parts,
+            matching what the coevolution probe records.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "name": "scripted_aquarium"}
@@ -146,6 +161,15 @@ class AquariumScriptedPreyWrapper:
             scripted_prefix: Agent-name prefix for scripted-side agents
                 (default ``"prey"`` — driven internally by APF).
             apf_config: Optional :class:`AquariumAPFConfig`.
+            reward_shape_alpha: Weight on the potential-based progress
+                shaping ``alpha * (Phi(s') - Phi(s))`` with
+                ``Phi(s) = -d(nearest prey) / 200``.  0 disables it.
+            fov_shape_alpha: Weight on the separate FOV-presence bonus.
+                Not potential-based — see :meth:`_count_fov_visible_prey`.
+
+        Raises:
+            RuntimeError: when shaping is requested but the raw aquarium env
+                is not reachable through the wrapper chain.
         """
         self.inner = inner_env
         self.predator_observe_count = int(predator_observe_count)
@@ -169,6 +193,13 @@ class AquariumScriptedPreyWrapper:
         # detect ``observable_walls`` / ``continuous_actions`` and set the
         # correct obs layout + action encoding.
         self._raw_env = self._find_raw_env(inner_env)
+        if self._raw_env is None and self.reward_shape_alpha > 0.0:
+            # Shaping needs entity positions; failing loudly beats a run that
+            # silently trains on the unshaped reward.
+            raise RuntimeError(
+                "AquariumScriptedPreyWrapper: reward shaping requested but "
+                "the raw aquarium env was not found in the wrapper chain"
+            )
         self._continuous = bool(getattr(self._raw_env, "continuous_actions", False))
 
         # Per-prey APF policy + last-observation cache.
@@ -191,7 +222,15 @@ class AquariumScriptedPreyWrapper:
         # Per-episode catch counter (sparse fitness signal).
         self.prey_caught: int = 0
         self.last_team_reward: float = 0.0
-        self._prev_min_prey_distances: Dict[str, Optional[float]] = {}
+        self.shaping_total: float = 0.0
+        self._prev_min_prey_distances: Dict[str, float] = {}
+        # Bound on the raw distance delta, sized to the fastest closing speed
+        # either side can produce in one step.  Ordinary motion never reaches
+        # it; a caught prey being removed (which switches the nearest target)
+        # would otherwise inject a large spurious reward on the catch step.
+        pred_v = float(getattr(self._raw_env, "predator_max_velocity", 18.0) or 18.0)
+        prey_v = float(getattr(self._raw_env, "prey_max_velocity", 12.0) or 12.0)
+        self._shape_progress_cap = 1.5 * (pred_v + prey_v)
 
         # Public observation/action space dicts (PettingZoo convention),
         # filtered to learner side only.
@@ -245,7 +284,9 @@ class AquariumScriptedPreyWrapper:
         # Reset episode counters.
         self.prey_caught = 0
         self.last_team_reward = 0.0
-        self._prev_min_prey_distances = self._compute_min_prey_distances(self.agents)
+        self.shaping_total = 0.0
+        if self.reward_shape_alpha > 0.0:
+            self._prev_min_prey_distances = self._nearest_prey_distances()
         return learner_obs, learner_infos
 
     def step(
@@ -315,24 +356,24 @@ class AquariumScriptedPreyWrapper:
         out_obs = {a: observations[a] for a in learner_keys if a in observations}
         out_rewards = {a: float(rewards.get(a, 0.0)) for a in learner_keys}
 
-        # Progress-based reward shaping: reward only when predators close
-        # distance to prey, rather than for merely occupying a stable lane.
-        if self.reward_shape_alpha > 0.0 and self._raw_env is not None:
-            try:
-                prey = list(getattr(self._raw_env, "prey", []))
-                torus = getattr(self._raw_env, "torus", None)
-                if prey and torus is not None:
-                    current_min_dists = self._compute_min_prey_distances(learner_keys)
-                    for idx, agent_id in enumerate(learner_keys):
-                        current_min_dist = current_min_dists.get(agent_id)
-                        prev_min_dist = self._prev_min_prey_distances.get(agent_id)
-                        if current_min_dist is None or prev_min_dist is None:
-                            continue
-                        progress = prev_min_dist - current_min_dist
-                        out_rewards[agent_id] += self.reward_shape_alpha * (progress / 200.0)
-                    self._prev_min_prey_distances = current_min_dists
-            except Exception:
-                pass
+        # Potential-based progress shaping: predators earn
+        # ``alpha * (Phi(s') - Phi(s))`` for closing on the nearest prey.
+        # Errors are *not* swallowed — a silently unshaped run is
+        # indistinguishable from a shaped one that failed to learn.
+        if self.reward_shape_alpha > 0.0:
+            current_min_dists = self._nearest_prey_distances()
+            shaped = potential_shaping(
+                current_min_dists,
+                self._prev_min_prey_distances,
+                alpha=self.reward_shape_alpha,
+                closing=True,
+                cap=self._shape_progress_cap,
+            )
+            for agent_id, bonus in shaped.items():
+                if agent_id in out_rewards:
+                    out_rewards[agent_id] += bonus
+                    self.shaping_total += bonus
+            self._prev_min_prey_distances = current_min_dists
 
         # FOV-presence reward shaping: small bonus per prey visible in the
         # predator's view cone each step.  Unlike proximity shaping this
@@ -340,12 +381,9 @@ class AquariumScriptedPreyWrapper:
         # prey to earn the signal, and the bonus is observation-coherent
         # (the policy can only observe prey it earns reward for).
         if self.fov_shape_alpha > 0.0 and self._raw_env is not None:
-            try:
-                for idx, agent_id in enumerate(learner_keys):
-                    n_visible = self._count_fov_visible_prey(idx)
-                    out_rewards[agent_id] += self.fov_shape_alpha * n_visible
-            except Exception:
-                pass
+            for idx, agent_id in enumerate(learner_keys):
+                n_visible = self._count_fov_visible_prey(idx)
+                out_rewards[agent_id] += self.fov_shape_alpha * n_visible
 
         out_terms = {a: bool(terminations.get(a, False)) for a in learner_keys}
         out_truncs = {a: bool(truncations.get(a, False)) for a in learner_keys}
@@ -368,6 +406,7 @@ class AquariumScriptedPreyWrapper:
             head = out_infos.setdefault(learner_keys[0], {})
             head.setdefault("prey_caught_total", int(self.prey_caught))
             head.setdefault("team_reward_step", float(team_reward))
+            head.setdefault("shaping_total", float(self.shaping_total))
 
         return out_obs, out_rewards, out_terms, out_truncs, out_infos
 
@@ -383,22 +422,11 @@ class AquariumScriptedPreyWrapper:
     def _find_raw_env(env):
         """Walk the PettingZoo wrapper chain to find the raw env.
 
-        The raw env is identified by having both ``predators`` and ``prey``
-        attributes (marl-aquarium's ``raw_env`` class).
+        Thin alias for :func:`.reward_shaping.find_raw_env`, kept because the
+        predator wrapper and several call sites reach for it through this
+        class.
         """
-        inner = env
-        for _ in range(12):
-            if hasattr(inner, 'predators') and hasattr(inner, 'prey'):
-                return inner
-            advanced = False
-            for attr in ('aec_env', 'env'):
-                if hasattr(inner, attr):
-                    inner = getattr(inner, attr)
-                    advanced = True
-                    break
-            if not advanced:
-                break
-        return None
+        return find_raw_env(env)
 
     def _count_fov_visible_prey(self, predator_idx: int) -> int:
         """Return number of live prey visible inside predator's FOV cone."""
@@ -420,45 +448,23 @@ class AquariumScriptedPreyWrapper:
             return len(prey)
         return sum(1 for p in prey if check(pred, p, view_dist, fov))
 
-    def _compute_min_prey_distances(self, learner_agents: List[str]) -> Dict[str, Optional[float]]:
-        """Return nearest FOV-visible prey torus distance for each learner agent.
+    def _nearest_prey_distances(self) -> Dict[str, float]:
+        """Nearest-prey torus distance per live predator, keyed by identity.
 
-        Only prey inside the predator's view cone count.  When no prey is
-        visible the entry is ``None`` so the shaping step skips that agent
-        (no reward for chasing prey you cannot observe).
-        If ``fov_enabled`` is False on the raw env every prey counts as
-        visible (backward-compatible behaviour).
+        Deliberately *not* FOV-gated: a potential must be defined on every
+        step for the episode total to telescope, and the shipped config sees
+        only 400 of a 1500-unit arena.  See
+        :mod:`~examples.pursuit_evasion.aquarium.reward_shaping`.
         """
-        if self._raw_env is None:
+        raw = self._raw_env
+        if raw is None:
             return {}
-        all_prey = list(getattr(self._raw_env, "prey", []))
-        predators = list(getattr(self._raw_env, "predators", []))
-        torus = getattr(self._raw_env, "torus", None)
-        if not all_prey or torus is None:
-            return {}
-
-        fov_enabled: bool = bool(getattr(self._raw_env, "fov_enabled", False))
-        view_dist = getattr(self._raw_env, "predator_view_distance", 2000)
-        fov = getattr(self._raw_env, "predator_fov", 360)
-        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
-
-        min_dists: Dict[str, Optional[float]] = {}
-        for idx, agent_id in enumerate(learner_agents):
-            if idx >= len(predators):
-                continue
-            pred = predators[idx]
-            if fov_enabled and check is not None:
-                visible = [p for p in all_prey if check(pred, p, view_dist, fov)]
-            else:
-                visible = all_prey
-            if not visible:
-                min_dists[agent_id] = None  # no visible prey — skip shaping
-            else:
-                min_dists[agent_id] = min(
-                    float(torus.get_distance_in_torus(pred.position, p.position))
-                    for p in visible
-                )
-        return min_dists
+        return nearest_opponent_distances(
+            self.possible_agents,
+            entities_by_id(getattr(raw, "predators", [])),
+            getattr(raw, "prey", []),
+            getattr(raw, "torus", None),
+        )
 
     def render(self, mode: Optional[str] = None):  # pragma: no cover - viz
         try:
@@ -621,10 +627,12 @@ class AquariumScriptedPredatorWrapper:
       terminated (with ``keep_prey_count_constant=False`` the native env
       emits 0 on that step because the caught prey is removed before
       ``get_prey_rewards()`` runs).
-    * Optional distance shaping: ``+reward_shape_alpha * Δ(min_pred_dist) / 200``
-      per active prey per step — reward for opening distance from the
-      nearest FOV-visible predator.
+    * Optional potential shaping: ``+reward_shape_alpha * (Phi(s') - Phi(s))``
+      with ``Phi(s) = +d(nearest predator) / 200`` per active prey per step —
+      reward for opening distance from the nearest predator.
     * Optional close-range Gaussian danger penalty near the catch annulus.
+      This term is *not* potential-based and breaks the telescoping property
+      when enabled; it is a separate mechanism kept for the evader arm.
 
     The episode terminates when no learner-prefix prey remain.
     """
@@ -665,6 +673,11 @@ class AquariumScriptedPredatorWrapper:
         # Resolve raw env first: wall/continuous detection drives the APF
         # policies' obs layout and action encoding.
         self._raw_env = AquariumScriptedPreyWrapper._find_raw_env(inner_env)
+        if self._raw_env is None and self.reward_shape_alpha > 0.0:
+            raise RuntimeError(
+                "AquariumScriptedPredatorWrapper: reward shaping requested "
+                "but the raw aquarium env was not found in the wrapper chain"
+            )
         self._continuous = bool(getattr(self._raw_env, "continuous_actions", False))
         _wf = 4 if getattr(self._raw_env, "observable_walls", False) else 0
 
@@ -684,7 +697,11 @@ class AquariumScriptedPredatorWrapper:
         self.prey_lost: int = 0
         self._initial_prey_count: int = 0
         self.last_team_reward: float = 0.0
-        self._prev_min_pred_distances: Dict[str, Optional[float]] = {}
+        self.shaping_total: float = 0.0
+        self._prev_min_pred_distances: Dict[str, float] = {}
+        pred_v = float(getattr(self._raw_env, "predator_max_velocity", 18.0) or 18.0)
+        prey_v = float(getattr(self._raw_env, "prey_max_velocity", 12.0) or 12.0)
+        self._shape_progress_cap = 1.5 * (pred_v + prey_v)
 
         try:
             self.observation_spaces = {
@@ -728,7 +745,9 @@ class AquariumScriptedPredatorWrapper:
             len(getattr(self._raw_env, "prey", [])) if self._raw_env is not None else len(self.agents)
         )
         self.last_team_reward = 0.0
-        self._prev_min_pred_distances = self._compute_min_pred_distances(self.agents)
+        self.shaping_total = 0.0
+        if self.reward_shape_alpha > 0.0:
+            self._prev_min_pred_distances = self._nearest_pred_distances()
         if learner_infos and self.agents:
             head = learner_infos.setdefault(self.agents[0], {})
             head.setdefault("prey_lost_total", 0)
@@ -820,33 +839,45 @@ class AquariumScriptedPredatorWrapper:
             for a in caught_this_step:
                 out_rewards[a] -= punishment
 
-        # Distance shaping (prey perspective): reward opening distance from
-        # the nearest FOV-visible predator; optional close-range penalty.
-        if self.reward_shape_alpha > 0.0 and self._raw_env is not None:
-            try:
-                current_min_dists = self._compute_min_pred_distances(active_learners)
-                for agent_id in active_learners:
-                    cur = current_min_dists.get(agent_id)
-                    prev = self._prev_min_pred_distances.get(agent_id)
-                    if cur is None or prev is None:
-                        continue
-                    progress = cur - prev   # positive when prey moved AWAY
-                    out_rewards[agent_id] += self.reward_shape_alpha * (progress / 200.0)
+        # Potential shaping (prey perspective): reward opening distance from
+        # the nearest predator.  Errors are not swallowed — see the mirror
+        # block in AquariumScriptedPreyWrapper.step.
+        current_min_dists: Dict[str, float] = {}
+        if self.reward_shape_alpha > 0.0 or self.close_range_penalty > 0.0:
+            current_min_dists = self._nearest_pred_distances()
 
-                    if self.close_range_penalty > 0.0:
-                        arena_scale = float(
-                            max(
-                                getattr(self._raw_env, "width", 2000),
-                                getattr(self._raw_env, "height", 2000),
-                            )
-                        )
-                        d_norm = cur / max(arena_scale, 1e-9)
-                        out_rewards[agent_id] -= self.close_range_penalty * float(
-                            np.exp(-(d_norm * d_norm) / max(self.close_range_sigma2, 1e-9))
-                        )
-                self._prev_min_pred_distances = current_min_dists
-            except Exception:
-                pass
+        if self.reward_shape_alpha > 0.0:
+            shaped = potential_shaping(
+                current_min_dists,
+                self._prev_min_pred_distances,
+                alpha=self.reward_shape_alpha,
+                closing=False,
+                cap=self._shape_progress_cap,
+            )
+            for agent_id, bonus in shaped.items():
+                if agent_id in out_rewards:
+                    out_rewards[agent_id] += bonus
+                    self.shaping_total += bonus
+            self._prev_min_pred_distances = current_min_dists
+
+        # Close-range danger penalty: a Gaussian bump on the *current* state,
+        # so unlike the potential term it needs no previous distance and is
+        # gated on its own weight rather than on reward_shape_alpha.
+        if self.close_range_penalty > 0.0 and self._raw_env is not None:
+            arena_scale = float(
+                max(
+                    getattr(self._raw_env, "width", 2000),
+                    getattr(self._raw_env, "height", 2000),
+                )
+            )
+            for agent_id in active_learners:
+                cur = current_min_dists.get(agent_id)
+                if cur is None or agent_id not in out_rewards:
+                    continue
+                d_norm = cur / max(arena_scale, 1e-9)
+                out_rewards[agent_id] -= self.close_range_penalty * float(
+                    np.exp(-(d_norm * d_norm) / max(self.close_range_sigma2, 1e-9))
+                )
 
         out_terms = {
             a: bool(terminations.get(a, False)) or a in inactive_learners
@@ -871,6 +902,7 @@ class AquariumScriptedPredatorWrapper:
             head.setdefault("prey_lost_total", int(self.prey_lost))
             head.setdefault("prey_remaining", int(prey_remaining))
             head.setdefault("team_reward_step", float(team_reward))
+            head.setdefault("shaping_total", float(self.shaping_total))
 
         return out_obs, out_rewards, out_terms, out_truncs, out_infos
 
@@ -882,41 +914,24 @@ class AquariumScriptedPredatorWrapper:
             return np.zeros(2, dtype=np.float32)
         return 0
 
-    def _compute_min_pred_distances(
-        self, learner_agents: List[str]
-    ) -> Dict[str, Optional[float]]:
-        """Return nearest FOV-visible predator torus distance per prey."""
-        if self._raw_env is None:
-            return {}
-        all_preds = list(getattr(self._raw_env, "predators", []))
-        all_prey = list(getattr(self._raw_env, "prey", []))
-        torus = getattr(self._raw_env, "torus", None)
-        if not all_preds or not all_prey or torus is None:
-            return {}
-        prey_by_name = {p.id(): p for p in all_prey if hasattr(p, "id")}
+    def _nearest_pred_distances(self) -> Dict[str, float]:
+        """Nearest-predator torus distance per live prey, keyed by identity.
 
-        fov_enabled: bool = bool(getattr(self._raw_env, "fov_enabled", False))
-        view_dist = getattr(self._raw_env, "prey_view_distance", 2000)
-        fov = getattr(self._raw_env, "prey_fov", 360)
-        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
-
-        min_dists: Dict[str, Optional[float]] = {}
-        for agent_id in learner_agents:
-            prey = prey_by_name.get(agent_id)
-            if prey is None:
-                continue
-            if fov_enabled and check is not None:
-                visible = [pr for pr in all_preds if check(prey, pr, view_dist, fov)]
-            else:
-                visible = all_preds
-            if not visible:
-                min_dists[agent_id] = None
-            else:
-                min_dists[agent_id] = min(
-                    float(torus.get_distance_in_torus(prey.position, pr.position))
-                    for pr in visible
-                )
-        return min_dists
+        Mirror of :meth:`AquariumScriptedPreyWrapper._nearest_prey_distances`;
+        not FOV-gated, for the same telescoping reason.  Keying by the prey's
+        own ``id()`` matters more here than on the predator side: caught prey
+        are removed from the raw env, so positional indexing would silently
+        re-pair a surviving prey with a different entity.
+        """
+        raw = self._raw_env
+        if raw is None:
+            return {}
+        return nearest_opponent_distances(
+            self.possible_agents,
+            entities_by_id(getattr(raw, "prey", [])),
+            getattr(raw, "predators", []),
+            getattr(raw, "torus", None),
+        )
 
     def render(self, mode: Optional[str] = None):  # pragma: no cover - viz
         try:

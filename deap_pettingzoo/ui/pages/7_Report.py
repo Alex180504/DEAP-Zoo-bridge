@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
 
-from deap_pettingzoo.ui.services import UIState, load_settings
+from deap_pettingzoo.ui.services import (
+    UIState,
+    load_settings,
+    pick_writable_output_dir,
+    resolve_output_dir,
+)
 from deap_pettingzoo.ui.services.data import discover_runs, load_experiment_cached
 
 try:
@@ -79,16 +82,30 @@ else:
 
 st.divider()
 
-out_dir = Path(st.text_input("Output directory", value=".report-out"))
+out_dir_raw = st.text_input(
+    "Output directory",
+    value=str(settings.results_root / "reports"),
+    help=(
+        "Report and figures are written here. Relative paths resolve "
+        "under the results root."
+    ),
+)
 fmt = st.selectbox("Format", ["html", "md"], index=0)
 metric = st.text_input("Metric", value="final_fitness")
 
 if st.button("Render"):
+    out_dir = resolve_output_dir(out_dir_raw, settings.results_root)
+    out_dir, fell_back = pick_writable_output_dir(out_dir)
     try:
         out_path = build_report(experiment, out_dir, fmt=fmt, metric=metric)
     except Exception as exc:  # noqa: BLE001 - surface any rendering error
         st.error(f"Report rendering failed: {exc}")
         st.stop()
+    if fell_back:
+        st.info(
+            f"The requested output directory is read-only, so the report was "
+            f"written to a temporary directory: **{out_dir}**"
+        )
     st.success(f"Report written to **{out_path}**")
     if fmt == "html":
         try:

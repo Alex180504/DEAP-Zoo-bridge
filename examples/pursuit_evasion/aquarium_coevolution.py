@@ -22,9 +22,11 @@ experiment variant.  Env config, side hyperparameters, coevolution knobs,
 and QDax descriptor ranges come from
 :mod:`examples.pursuit_evasion.aquarium.experiment_config`.
 
-Every ``BENCHMARK_EVERY_N`` generations each side's champion also plays a
-fixed scripted APF opponent — an absolute progress signal that is immune to
-the coevolutionary moving-target effect.
+Every ``BENCHMARK_EVERY_N_STEPS`` consumed env steps each side's champion
+also plays a fixed scripted APF opponent — an absolute progress signal that
+is immune to the coevolutionary moving-target effect — and one final
+``FINAL_EVAL_EPISODES`` evaluation closes every run with a score that is
+comparable across pairings.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import os
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,8 +59,15 @@ if _REPO_ROOT not in sys.path:
 from examples.pursuit_evasion.aquarium import experiment_config as XC
 
 XC.ensure_utf8_stdout()
+from examples.pursuit_evasion.aquarium.apf_policy import AquariumFeatureAPFPolicy
 from examples.pursuit_evasion.aquarium.observation_features import (
     AquariumObservationFeatureWrapper,
+)
+from examples.pursuit_evasion.aquarium.reward_shaping import (
+    entities_by_id,
+    find_raw_env,
+    nearest_opponent_distances,
+    potential_shaping,
 )
 from examples.pursuit_evasion.aquarium.scripted_opponent_env import (
     AquariumScriptedPredatorWrapper,
@@ -115,8 +125,29 @@ PREY_REWARD_SHAPE_ALPHA: float = XC.COEV_PREY_SHAPE_ALPHA
 K_OPPONENTS: int = XC.K_OPPONENTS
 HOF_CAPACITY: int = XC.HOF_CAPACITY
 ARCHIVE_MIX: float = XC.ARCHIVE_MIX
+# Fitness anchoring (AQUARIUM_ANCHOR_MIX=0 disables). Predators only: the
+# prey side carries the anchors, because a side's anchors are what *other*
+# sides face. Prey are already near the scripted reference, so there is no
+# headroom for an anchor to buy them and the extra episodes are better spent
+# on the role that never learned.
+ANCHOR_MIX: float = float(os.environ.get("AQUARIUM_ANCHOR_MIX", XC.ANCHOR_MIX))
+# Overridable so the ablation can separate anchoring from the variance
+# reduction: anchored-and-seeded runs otherwise change two things at once and
+# a single grid cannot say which one moved the number.
+COMMON_RANDOM_SEEDS: bool = (
+    os.environ.get(
+        "AQUARIUM_COMMON_RANDOM_SEEDS", "1" if XC.COMMON_RANDOM_SEEDS else "0"
+    )
+    .strip()
+    .lower()
+    in ("1", "true", "yes")
+)
 BENCHMARK_EVERY_N: int = XC.BENCHMARK_EVERY_N
+BENCHMARK_EVERY_N_STEPS: int = XC.BENCHMARK_EVERY_N_STEPS
 BENCHMARK_N_EPISODES: int = XC.BENCHMARK_N_EPISODES
+# End-of-run champion evaluation — more episodes than the periodic probe
+# because it is the number the cross-run comparison rests on.
+FINAL_EVAL_EPISODES: int = XC.EVAL_EPISODES
 
 # ---- Recording ------------------------------------------------------------------------
 
@@ -164,12 +195,19 @@ class _CoevBothSidesAdapter:
     ``reset()`` to the modern ``(obs, infos)`` tuple, and exposes *all*
     agents (predators and prey) as learners.
 
-    Optional dense progress shaping: predators earn
-    ``+alpha * Δ(dist to nearest visible prey) / 200`` per step, prey the
-    symmetric flee bonus.  The per-step delta is clipped to one step of
-    plausible motion so discontinuities (a caught prey being removed, a
-    target leaving the FOV cone) cannot inject a large spurious reward at
-    the exact step a catch happens.
+    Optional dense *potential-based* progress shaping: predators earn
+    ``alpha * (Φ(s') − Φ(s))`` with ``Φ(s) = −d(nearest prey) / 200``, prey the
+    symmetric evasion potential.  The episode total therefore telescopes to
+    ``Φ(s_T) − Φ(s_0)`` — bounded by the arena diagonal and impossible to farm
+    by circling — instead of accumulating unrelated per-step deltas.  See
+    :mod:`examples.pursuit_evasion.aquarium.reward_shaping`; the raw distance
+    delta keeps a symmetric clip so a caught prey being removed cannot inject a
+    large spurious reward at the exact step a catch happens.
+
+    Attributes:
+        shaping_totals: Per-side shaping reward injected during the current
+            episode (reset by :meth:`reset`).  Diagnostic only — it lets a
+            caller split an episode return into its env and shaping parts.
     """
 
     metadata: Dict[str, Any] = {"render_modes": ["human", "rgb_array"], "name": "coev_aquarium"}
@@ -189,9 +227,19 @@ class _CoevBothSidesAdapter:
         self.agents: List[str] = list(getattr(inner, "agents", self.possible_agents))
         self._pred_shape_alpha = float(pred_shape_alpha)
         self._prey_shape_alpha = float(prey_shape_alpha)
-        self._raw_env = self._find_raw_env(inner)
-        self._prev_min_prey_dists: Dict[str, Optional[float]] = {}
-        self._prev_min_pred_dists: Dict[str, Optional[float]] = {}
+        self._predator_agents = [a for a in self.possible_agents if a.startswith("predator")]
+        self._prey_agents = [a for a in self.possible_agents if a.startswith("prey")]
+        self._raw_env = find_raw_env(inner)
+        if self._raw_env is None and (self._pred_shape_alpha > 0.0 or self._prey_shape_alpha > 0.0):
+            # Shaping needs entity positions; failing loudly beats a run that
+            # silently trains on the unshaped reward.
+            raise RuntimeError(
+                "_CoevBothSidesAdapter: reward shaping requested but the raw "
+                "aquarium env was not found in the wrapper chain"
+            )
+        self._prev_min_prey_dists: Dict[str, float] = {}
+        self._prev_min_pred_dists: Dict[str, float] = {}
+        self.shaping_totals: Dict[str, float] = {"predator": 0.0, "prey": 0.0}
         pred_v = float(getattr(self._raw_env, "predator_max_velocity", 18.0) or 18.0)
         prey_v = float(getattr(self._raw_env, "prey_max_velocity", 12.0) or 12.0)
         self._shape_progress_cap = 1.5 * (pred_v + prey_v)
@@ -208,10 +256,11 @@ class _CoevBothSidesAdapter:
     def reset(self, seed=None, options=None):
         result = self.inner.reset(seed=seed, options=options)
         self.agents = list(getattr(self.inner, "agents", self.possible_agents))
+        self.shaping_totals = {"predator": 0.0, "prey": 0.0}
         if self._pred_shape_alpha > 0.0:
-            self._prev_min_prey_dists = self._compute_min_prey_dists_for_predators()
+            self._prev_min_prey_dists = self._nearest_prey_distances()
         if self._prey_shape_alpha > 0.0:
-            self._prev_min_pred_dists = self._compute_min_pred_dists_for_prey()
+            self._prev_min_pred_dists = self._nearest_pred_distances()
         if isinstance(result, tuple) and len(result) == 2:
             return result
         return result, {}
@@ -220,44 +269,43 @@ class _CoevBothSidesAdapter:
         obs, rewards, terminations, truncations, infos = self.inner.step(actions)
         self.agents = list(getattr(self.inner, "agents", self.possible_agents))
 
+        # Shaping errors are *not* swallowed: a silently unshaped run is
+        # indistinguishable from a shaped one that failed to learn.
         if self._pred_shape_alpha > 0.0:
-            try:
-                curr = self._compute_min_prey_dists_for_predators()
-                self._apply_progress_shaping(
-                    rewards, curr, self._prev_min_prey_dists,
-                    prefix="predator", alpha=self._pred_shape_alpha, closing=True,
-                )
-                self._prev_min_prey_dists = curr
-            except Exception:
-                pass
+            curr = self._nearest_prey_distances()
+            self._apply_potential_shaping(
+                rewards, curr, self._prev_min_prey_dists,
+                side="predator", alpha=self._pred_shape_alpha, closing=True,
+            )
+            self._prev_min_prey_dists = curr
 
         if self._prey_shape_alpha > 0.0:
-            try:
-                curr = self._compute_min_pred_dists_for_prey()
-                self._apply_progress_shaping(
-                    rewards, curr, self._prev_min_pred_dists,
-                    prefix="prey", alpha=self._prey_shape_alpha, closing=False,
-                )
-                self._prev_min_pred_dists = curr
-            except Exception:
-                pass
+            curr = self._nearest_pred_distances()
+            self._apply_potential_shaping(
+                rewards, curr, self._prev_min_pred_dists,
+                side="prey", alpha=self._prey_shape_alpha, closing=False,
+            )
+            self._prev_min_pred_dists = curr
 
         return obs, rewards, terminations, truncations, infos
 
-    def _apply_progress_shaping(
-        self, rewards, curr, prev, *, prefix: str, alpha: float, closing: bool
+    def _apply_potential_shaping(
+        self,
+        rewards: Dict[str, float],
+        curr: Dict[str, float],
+        prev: Dict[str, float],
+        *,
+        side: str,
+        alpha: float,
+        closing: bool,
     ) -> None:
-        cap = self._shape_progress_cap
-        for agent_id in self.possible_agents:
-            if not agent_id.startswith(prefix):
-                continue
-            cur_d = curr.get(agent_id)
-            prev_d = prev.get(agent_id)
-            if cur_d is None or prev_d is None:
-                continue
-            progress = (prev_d - cur_d) if closing else (cur_d - prev_d)
-            progress = max(-cap, min(cap, progress))
-            rewards[agent_id] = rewards.get(agent_id, 0.0) + alpha * (progress / 200.0)
+        """Add ``alpha * (Φ(s') − Φ(s))`` to one side's rewards, in place."""
+        shaped = potential_shaping(
+            curr, prev, alpha=alpha, closing=closing, cap=self._shape_progress_cap
+        )
+        for agent_id, bonus in shaped.items():
+            rewards[agent_id] = rewards.get(agent_id, 0.0) + bonus
+            self.shaping_totals[side] += bonus
 
     def render(self, *args, **kwargs):
         return self.inner.render(*args, **kwargs)
@@ -265,80 +313,30 @@ class _CoevBothSidesAdapter:
     def close(self) -> None:
         self.inner.close()
 
-    # ------------------------------------------------------------------
     # Internal helpers
 
-    @staticmethod
-    def _find_raw_env(env):
-        """Walk the PettingZoo wrapper chain to find the raw aquarium env."""
-        inner = env
-        for _ in range(12):
-            if hasattr(inner, "predators") and hasattr(inner, "prey"):
-                return inner
-            advanced = False
-            for attr in ("aec_env", "env"):
-                if hasattr(inner, attr):
-                    inner = getattr(inner, attr)
-                    advanced = True
-                    break
-            if not advanced:
-                break
-        return None
-
-    def _min_visible_distances(
-        self, observers, targets, *, observer_prefix: str,
-        view_dist, fov,
-    ) -> Dict[str, Optional[float]]:
-        """Nearest FOV-visible target torus distance per observer agent."""
-        raw = self._raw_env
-        torus = getattr(raw, "torus", None)
-        if not observers or not targets or torus is None:
-            return {}
-        fov_enabled = bool(getattr(raw, "fov_enabled", False))
-        check = getattr(torus, "check_if_entity_is_in_view_in_torus", None)
-        result: Dict[str, Optional[float]] = {}
-        observer_agents = [
-            a for a in self.possible_agents if a.startswith(observer_prefix)
-        ]
-        for idx, agent_id in enumerate(observer_agents):
-            if idx >= len(observers):
-                continue
-            entity = observers[idx]
-            if fov_enabled and check is not None:
-                visible = [t for t in targets if check(entity, t, view_dist, fov)]
-            else:
-                visible = targets
-            if not visible:
-                result[agent_id] = None
-            else:
-                result[agent_id] = min(
-                    float(torus.get_distance_in_torus(entity.position, t.position))
-                    for t in visible
-                )
-        return result
-
-    def _compute_min_prey_dists_for_predators(self) -> Dict[str, Optional[float]]:
+    def _nearest_prey_distances(self) -> Dict[str, float]:
+        """Nearest-prey torus distance per live predator, keyed by identity."""
         raw = self._raw_env
         if raw is None:
             return {}
-        return self._min_visible_distances(
-            list(getattr(raw, "predators", [])),
-            list(getattr(raw, "prey", [])),
-            observer_prefix="predator",
-            view_dist=getattr(raw, "predator_view_distance", 2000),
-            fov=getattr(raw, "predator_fov", 360),
+        return nearest_opponent_distances(
+            self._predator_agents,
+            entities_by_id(getattr(raw, "predators", [])),
+            getattr(raw, "prey", []),
+            getattr(raw, "torus", None),
         )
 
-    def _compute_min_pred_dists_for_prey(self) -> Dict[str, Optional[float]]:
+    def _nearest_pred_distances(self) -> Dict[str, float]:
+        """Nearest-predator torus distance per live prey, keyed by identity."""
         raw = self._raw_env
         if raw is None:
             return {}
-        return self._min_visible_distances(
-            list(getattr(raw, "prey", [])),
-            list(getattr(raw, "predators", [])),
-            observer_prefix="prey",
-            view_dist=getattr(raw, "prey_view_distance", 2000),
-            fov=getattr(raw, "prey_fov", 360),
+        return nearest_opponent_distances(
+            self._prey_agents,
+            entities_by_id(getattr(raw, "prey", [])),
+            getattr(raw, "predators", []),
+            getattr(raw, "torus", None),
         )
 
 
@@ -478,7 +476,12 @@ def _make_hyperneat_side(name: str, role_prefix: str, seed: int) -> Side:
         optimizer_config={
             "pop_size": hn_params["pop_size"],
             "substrate_hidden_layers": hn_params["substrate_hidden_layers"],
-            "eval_episodes_per_genome": 1,
+            # Threaded through so HyperNEAT decodes like the rest of the
+            # evolved family (tanh phenotype + softmax head); leaving them
+            # unset silently gave it a sigmoid phenotype and an argmax head.
+            "phenotype_activation": hn_params["phenotype_activation"],
+            "stochastic_head": hn_params["stochastic_head"],
+            "head_temperature": hn_params["head_temperature"],
             "seed": seed,
         },
         hof=RingHallOfFame(capacity=HOF_CAPACITY),
@@ -567,8 +570,109 @@ SIDE_BUILDERS = {
 
 
 # ===========================================================================
+# Fitness anchors
+# ===========================================================================
+
+
+def _make_anchor_evaders() -> List[Any]:
+    """Scripted prey the predator side is partly scored against.
+
+    Co-evolutionary fitness is measured against a moving population, so it
+    says nothing about absolute skill: a generation's score can rise because
+    the individuals improved or because their opponents got worse.  Anchoring
+    reserves part of every evaluation for opponents that never change, which
+    is what lets selection compare a generation against the one before it.
+
+    These read the *featurized* observation the co-evolution env produces,
+    so :class:`AquariumFeatureAPFPolicy` is used rather than the raw-layout
+    scripted policies the vs-APF envs embed.
+
+    The gains are perturbed variants, never the shipped
+    :data:`XC.APF_EVADER_CONFIG`.  That config is what the periodic probe and
+    the final evaluation score against, and training directly on it would let
+    a run learn the specific controller it is about to be graded by.
+    """
+    wall_features = 4 if ENV_CONFIG.get("observable_walls", False) else 0
+    return [
+        AquariumFeatureAPFPolicy(
+            role="evader",
+            predator_observe_count=int(ENV_CONFIG["predator_observe_count"]),
+            prey_observe_count=int(ENV_CONFIG["prey_observe_count"]),
+            action_count=int(ENV_CONFIG["action_count"]),
+            config=cfg,
+            wall_features=wall_features,
+            continuous=bool(ENV_CONFIG.get("continuous_actions", False)),
+        )
+        for cfg in XC.anchor_apf_configs(XC.APF_EVADER_CONFIG)
+    ]
+
+
+def _with_anchors(side: Side) -> Side:
+    """Attach the scripted anchor set to *side* (no-op when disabled)."""
+    if ANCHOR_MIX <= 0.0:
+        return side
+    # dataclasses.replace re-runs Side.__post_init__, so the anchor fields
+    # get the same validation a directly-constructed Side would.
+    return replace(
+        side,
+        anchor_policies=_make_anchor_evaders(),
+        anchor_mix=ANCHOR_MIX,
+    )
+
+
+# ===========================================================================
 # Scripted-APF benchmark
 # ===========================================================================
+
+
+class _ShapingAccountant:
+    """Replays the training shaping term over an *unshaped* probe episode.
+
+    The benchmark scores pure env reward, but choosing alpha needs the shaped
+    and unshaped halves of the same trajectory — the previous schema recorded
+    only their sum, so reward misalignment and plain disengagement could not be
+    told apart.  This recomputes exactly what :class:`_CoevBothSidesAdapter`
+    would have injected, without perturbing the reward the probe reports.
+    """
+
+    def __init__(self, raw_env, role: str, alpha: float, cap: float) -> None:
+        self._raw = raw_env
+        self._alpha = float(alpha)
+        self._cap = float(cap)
+        self._closing = role == "predator"
+        self._observer_attr = "predators" if self._closing else "prey"
+        self._target_attr = "prey" if self._closing else "predators"
+        self._prev: Dict[str, float] = {}
+        self.total: float = 0.0
+
+    def _distances(self) -> Dict[str, float]:
+        if self._raw is None or self._alpha <= 0.0:
+            return {}
+        observers = entities_by_id(getattr(self._raw, self._observer_attr, []))
+        return nearest_opponent_distances(
+            list(observers),
+            observers,
+            getattr(self._raw, self._target_attr, []),
+            getattr(self._raw, "torus", None),
+        )
+
+    def reset(self) -> None:
+        """Latch the episode-start potential and zero the running total."""
+        self._prev = self._distances()
+        self.total = 0.0
+
+    def step(self) -> None:
+        """Accumulate one step of shaping after the env has advanced."""
+        if self._alpha <= 0.0:
+            return
+        curr = self._distances()
+        self.total += sum(
+            potential_shaping(
+                curr, self._prev,
+                alpha=self._alpha, closing=self._closing, cap=self._cap,
+            ).values()
+        )
+        self._prev = curr
 
 
 def _run_scripted_benchmark(
@@ -581,17 +685,29 @@ def _run_scripted_benchmark(
     """Episode stats of *policy* against a fixed scripted APF opponent.
 
     ``role="predator"``: policy drives predators vs APF prey;
-    ``role="prey"``: policy drives prey vs APF predators.  Pure env reward —
-    no shaping.  ``catches`` is the episode-max of the wrapper's cumulative
-    catch counter (``prey_caught_total`` for the predator role,
-    ``prey_lost_total`` for the prey role) — one physical quantity, so the
-    two sides share a column: high is good for predators, bad for prey.
+    ``role="prey"``: policy drives prey vs APF predators.  The reported
+    ``reward`` is pure env reward — no shaping — while ``shaping`` records, on
+    the same trajectory, what the configured alpha *would* have added, so the
+    two halves of training fitness can be compared without conflating them.
+    ``catches`` is the episode-max of the wrapper's cumulative catch counter
+    (``prey_caught_total`` for the predator role, ``prey_lost_total`` for the
+    prey role) — one physical quantity, so the two sides share a column: high
+    is good for predators, bad for prey.
     """
     from marl_aquarium import aquarium_v0
 
     info_key = "prey_caught_total" if role == "predator" else "prey_lost_total"
+    shape_alpha = (
+        PRED_REWARD_SHAPE_ALPHA if role == "predator" else PREY_REWARD_SHAPE_ALPHA
+    )
+    # Same clip the training adapter applies to the raw distance delta.
+    shape_cap = 1.5 * (
+        float(env_cfg.get("predator_max_velocity", 18.0))
+        + float(env_cfg.get("prey_max_velocity", 12.0))
+    )
     rewards: List[float] = []
     catches: List[int] = []
+    shapings: List[float] = []
     for ep in range(n_episodes):
         inner = aquarium_v0.parallel_env(render_mode="rgb_array", **env_cfg)
         _patch_aquarium_wrappers(inner)
@@ -616,7 +732,11 @@ def _run_scripted_benchmark(
 
         # Same observation transform as coevolution training.
         bench_env = AquariumObservationFeatureWrapper(bench_env, append_agent_id=False)
+        accountant = _ShapingAccountant(
+            find_raw_env(inner), role, shape_alpha, shape_cap
+        )
         obs, _ = bench_env.reset(seed=seed + ep)
+        accountant.reset()
         # RL policy wrappers dispatch actions round-robin through an agent
         # roster; reset the rotation at every episode start.
         if hasattr(policy, "reset"):
@@ -637,6 +757,7 @@ def _run_scripted_benchmark(
                 break
             obs, rews, _, _, infos = bench_env.step(actions)
             ep_reward += sum(rews.values())
+            accountant.step()
             for info in (infos or {}).values():
                 if isinstance(info, dict) and info.get(info_key) is not None:
                     try:
@@ -650,90 +771,215 @@ def _run_scripted_benchmark(
         # pygame resources and plain GC is enough.
         rewards.append(ep_reward)
         catches.append(ep_catches)
+        shapings.append(accountant.total)
 
     return {
         "reward_mean": float(np.mean(rewards)) if rewards else 0.0,
         "reward_std": float(np.std(rewards)) if rewards else 0.0,
         "catches_mean": float(np.mean(catches)) if catches else 0.0,
         "catches_std": float(np.std(catches)) if catches else 0.0,
+        "shaping_mean": float(np.mean(shapings)) if shapings else 0.0,
+        "shaping_std": float(np.std(shapings)) if shapings else 0.0,
         "n_episodes": len(rewards),
     }
 
 
-def _make_benchmark_callback(
-    pred_side_name: str,
-    prey_side_name: str,
-    env_cfg: Dict[str, Any],
-    n_episodes: int,
-    every_n: int,
-    probe_seed: int = 77_000,
-):
-    """Generation callback benchmarking each champion vs a scripted APF opponent.
+class _ProbeCadence:
+    """Decides when the scripted-APF benchmark fires.
 
-    The benchmark evaluates each side's noise-free champion on pure env
-    reward (no shaping) — the only absolute progress signal in a coevolution
-    run.  Returns ``None`` when *every_n* <= 0 (disabled).
+    Generations are not a fixed amount of experience under
+    ``side_pacing="equal_steps"`` — a cheap side runs many more of them — so a
+    generation-indexed probe fires at a pairing-dependent rate and can cost
+    more wall clock than the training it measures.  Cadence is therefore in
+    consumed env steps whenever the trainer reports them, with the generation
+    stride as the fallback for runs that do not.
 
-    The callback takes the trainer's three-argument context form: besides
-    printing, each benchmark writes one row per side into the run's
-    ``probe.csv`` via ``context["logger"]`` with ``env_steps`` set to the
-    pooled consumed-step count — the same probe schema as the vs-APF suites,
-    so the UI/rliable curves work across regimes.  Episode seeds are fixed
-    per run (common random numbers across checkpoints).
+    Args:
+        every_n: Generation stride; ``<= 0`` disables the fallback.
+        every_n_steps: Consumed-step stride; ``<= 0`` disables step cadence.
     """
-    if every_n <= 0:
-        return None
 
-    from deap_pettingzoo.baselines.coevolution.rl_side import RLSideState
+    def __init__(self, every_n: int, every_n_steps: int) -> None:
+        self.every_n = int(every_n)
+        self.every_n_steps = int(every_n_steps)
+        self._last_bucket = -1
 
-    def _callback(
+    @property
+    def enabled(self) -> bool:
+        return self.every_n > 0 or self.every_n_steps > 0
+
+    def due(self, gen: int, consumed: Optional[int]) -> bool:
+        """Whether a probe should run now, advancing the cadence state."""
+        if self.every_n_steps > 0 and consumed is not None:
+            bucket = int(consumed) // self.every_n_steps
+            if bucket <= self._last_bucket:
+                return False
+            self._last_bucket = bucket
+            return True
+        return self.every_n > 0 and gen % self.every_n == 0
+
+
+class _ScriptedBenchmark:
+    """Each side's champion vs a fixed scripted APF opponent.
+
+    The only absolute progress signal in a coevolution run: training fitness is
+    measured against co-evolved opponents, so it moves with the opponent and
+    lives on a different scale per algorithm and pairing.  This benchmark plays
+    the noise-free champion against a frozen scripted opponent on pure env
+    reward, which is comparable across every run in the campaign.
+
+    It serves two cadences from one place:
+
+    * :meth:`callback` — the periodic probe during training, on consumed env
+      steps (falling back to a generation stride).  Generations are not a fixed
+      amount of experience under ``side_pacing="equal_steps"``, so a
+      generation-indexed probe would fire at a pairing-dependent rate.
+    * :meth:`final_eval` — one higher-precision evaluation at the end of the
+      run, wired as ``CoEvolutionConfig.final_eval_fn``.  It writes the
+      end-of-run probe row (so every run has a probe at its final consumed
+      count, which the generation gate alone never guaranteed) *and* returns
+      the summary scalars, which are the run's only comparable final score.
+
+    Probe rows carry a superset of the vs-APF probe schema, so the UI/rliable
+    curves work across regimes; the ``probe_shaping_*`` /
+    ``probe_shaped_reward_mean`` columns split what training fitness would have
+    been on those same episodes into its env and shaping halves.  Episode seeds
+    are fixed per run (common random numbers across checkpoints).
+    """
+
+    def __init__(
+        self,
+        pred_side_name: str,
+        prey_side_name: str,
+        env_cfg: Dict[str, Any],
+        n_episodes: int,
+        every_n: int,
+        probe_seed: int = 77_000,
+        every_n_steps: int = 0,
+        final_episodes: int = 0,
+    ) -> None:
+        self.roles = ((pred_side_name, "predator"), (prey_side_name, "prey"))
+        self.env_cfg = env_cfg
+        self.n_episodes = int(n_episodes)
+        self.final_episodes = int(final_episodes or n_episodes)
+        self.probe_seed = int(probe_seed)
+        self.cadence = _ProbeCadence(every_n, every_n_steps)
+
+    def callback(
+        self,
         gen: int,
         states: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if gen % every_n != 0:
-            return
+        """Generation callback: probe both champions when the cadence is due."""
         ctx = context or {}
-        logger = ctx.get("logger")
         consumed = ctx.get("env_steps_consumed")
-        for side_name, role in [
-            (pred_side_name, "predator"),
-            (prey_side_name, "prey"),
-        ]:
+        if not self.cadence.due(gen, consumed):
+            return
+        self._benchmark_all(
+            states,
+            logger=ctx.get("logger"),
+            gen=gen,
+            consumed=consumed,
+            n_episodes=self.n_episodes,
+            tag=f"gen {gen:4d}",
+        )
+
+    def final_eval(
+        self, states: Dict[str, Any], context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """End-of-run champion evaluation; also lands as the final probe row."""
+        results = self._benchmark_all(
+            states,
+            logger=context.get("logger"),
+            gen=int(context.get("num_generations") or 0),
+            consumed=context.get("env_steps_consumed"),
+            n_episodes=self.final_episodes,
+            tag="final",
+        )
+        summary: Dict[str, Any] = {"episodes": self.final_episodes}
+        for side_name, bench in results.items():
+            for key in (
+                "reward_mean", "reward_std",
+                "catches_mean", "catches_std",
+                "shaping_mean",
+            ):
+                summary[f"{side_name}_{key}"] = bench[key]
+            summary[f"{side_name}_shaped_reward_mean"] = (
+                bench["reward_mean"] + bench["shaping_mean"]
+            )
+        return summary
+
+    def _benchmark_all(
+        self,
+        states: Dict[str, Any],
+        *,
+        logger: Any,
+        gen: int,
+        consumed: Optional[int],
+        n_episodes: int,
+        tag: str,
+    ) -> Dict[str, Dict[str, float]]:
+        """Benchmark every side, print, and write one probe row each."""
+        from deap_pettingzoo.baselines.coevolution.rl_side import RLSideState
+
+        results: Dict[str, Dict[str, float]] = {}
+        for side_name, role in self.roles:
             state = states.get(side_name)
             if state is None:
                 continue
             try:
-                policy = state.best_policy(None)
                 bench = _run_scripted_benchmark(
-                    policy, role, env_cfg, n_episodes, seed=probe_seed
+                    state.best_policy(None), role, self.env_cfg,
+                    n_episodes, seed=self.probe_seed,
                 )
-                scripted_role = "prey" if role == "predator" else "predator"
-                kind = "RL" if isinstance(state, RLSideState) else "EA"
-                print(
-                    f"[Bench] gen {gen:4d}  {side_name} ({kind}) vs "
-                    f"APF-scripted {scripted_role}: {bench['reward_mean']:.2f}  "
-                    f"catches {bench['catches_mean']:.2f}",
-                    flush=True,
-                )
-                if logger is not None:
-                    logger.row("probe", {
-                        "side": side_name,
-                        "iteration": int(gen),
-                        "env_steps": int(consumed) if consumed is not None else 0,
-                        "probe_reward_mean": bench["reward_mean"],
-                        "probe_reward_std": bench["reward_std"],
-                        "probe_episodes": bench["n_episodes"],
-                        "probe_catches_mean": bench["catches_mean"],
-                        "probe_catches_std": bench["catches_std"],
-                    })
             except Exception as exc:
-                print(
-                    f"[Bench] gen {gen:4d}  {side_name} benchmark failed: {exc}",
-                    flush=True,
-                )
+                print(f"[Bench] {tag}  {side_name} benchmark failed: {exc}", flush=True)
+                continue
+            results[side_name] = bench
+            scripted_role = "prey" if role == "predator" else "predator"
+            kind = "RL" if isinstance(state, RLSideState) else "EA"
+            print(
+                f"[Bench] {tag}  {side_name} ({kind}) vs "
+                f"APF-scripted {scripted_role}: {bench['reward_mean']:.2f}  "
+                f"catches {bench['catches_mean']:.2f}  "
+                f"shaping {bench['shaping_mean']:+.2f}  "
+                f"({bench['n_episodes']} eps)",
+                flush=True,
+            )
+            if logger is not None:
+                self._write_probe_row(logger, side_name, gen, consumed, bench)
+        return results
 
-    return _callback
+    @staticmethod
+    def _write_probe_row(
+        logger: Any,
+        side_name: str,
+        gen: int,
+        consumed: Optional[int],
+        bench: Dict[str, float],
+    ) -> None:
+        try:
+            logger.row("probe", {
+                "side": side_name,
+                "iteration": int(gen),
+                "env_steps": int(consumed) if consumed is not None else 0,
+                "probe_reward_mean": bench["reward_mean"],
+                "probe_reward_std": bench["reward_std"],
+                "probe_episodes": bench["n_episodes"],
+                "probe_catches_mean": bench["catches_mean"],
+                "probe_catches_std": bench["catches_std"],
+                # Unshaped (env) and shaping halves of what training fitness
+                # would have been on these same episodes — separate columns so
+                # the realised catch share is measurable rather than inferred.
+                "probe_shaping_mean": bench["shaping_mean"],
+                "probe_shaping_std": bench["shaping_std"],
+                "probe_shaped_reward_mean": (
+                    bench["reward_mean"] + bench["shaping_mean"]
+                ),
+            })
+        except Exception as exc:
+            print(f"[Bench] probe row for {side_name} failed: {exc}", flush=True)
 
 
 # ===========================================================================
@@ -752,13 +998,15 @@ def _run_coev(
     """Run one coevolution training run and return a result dict."""
     from deap_pettingzoo.baselines.base import BudgetMode, TrainingConfig
 
-    generation_callback = _make_benchmark_callback(
+    benchmark = _ScriptedBenchmark(
         pred_side.name,
         prey_side.name,
         ENV_CONFIG,
         BENCHMARK_N_EPISODES,
         BENCHMARK_EVERY_N,
         probe_seed=77_000 + seed,
+        every_n_steps=BENCHMARK_EVERY_N_STEPS,
+        final_episodes=FINAL_EVAL_EPISODES,
     )
 
     # Consumed-step budgeting keeps the aggregate real env-tick pool equal
@@ -774,6 +1022,7 @@ def _run_coev(
         sides=[pred_side, prey_side],
         schedule="synchronous",
         k_opponents=K_OPPONENTS,
+        common_random_seeds=COMMON_RANDOM_SEEDS,
         aggregation="mean",
         reporting_side=pred_side.name,
         max_steps_per_episode=int(ENV_CONFIG["max_time_steps"]),
@@ -793,7 +1042,18 @@ def _run_coev(
         # side drain a shared pool. Requires budget_on_consumed=True below.
         budget_split="per_side",
         on_side_exhausted="freeze",
-        generation_callback=generation_callback,
+        # Equal-env-step pacing: without it a side steps once per generation
+        # regardless of what a generation costs it, so the expensive side
+        # drained its slice at ~0.66 of the run and the last third was not
+        # co-evolution at all (84% of the ENUCC runs froze a side). Cheap
+        # sides now simply take more generations to spend the same slice.
+        side_pacing="equal_steps",
+        generation_callback=benchmark.callback,
+        # Absolute end-of-run score: final_best is a training fitness against
+        # co-evolved opponents (84 -> 661 across backends) and cannot be
+        # compared across runs. This also guarantees a probe row at the run's
+        # final consumed count, which the periodic cadence alone does not.
+        final_eval_fn=benchmark.final_eval,
     )
     train_cfg = TrainingConfig(
         env_name=ENV_NAME_COEV,
@@ -802,9 +1062,10 @@ def _run_coev(
         budget_on_consumed=XC.BUDGET_ON_CONSUMED,
         num_seeds=1,
         seed=seed,
-        # Run-manifest hyperparams (the trainer ignores these; the logger's
-        # from_config picks them up so Browse/Compare can identify the cell).
-        algorithm_params={
+        # Descriptive only — the logger merges these into the manifest's
+        # hyperparams so Browse/Compare can identify the cell, and no trainer
+        # ever sees them.
+        run_metadata={
             "pairing": label,
             "predator_algo": label.partition("_vs_")[0],
             "prey_algo": label.partition("_vs_")[2],
@@ -812,11 +1073,18 @@ def _run_coev(
             "k_opponents": K_OPPONENTS,
             "hof_capacity": HOF_CAPACITY,
             "archive_mix": ARCHIVE_MIX,
+            "anchor_mix": ANCHOR_MIX,
+            "anchor_side": prey_side.name if ANCHOR_MIX > 0.0 else None,
+            "common_random_seeds": COMMON_RANDOM_SEEDS,
             "pred_shape_alpha": PRED_REWARD_SHAPE_ALPHA,
             "prey_shape_alpha": PREY_REWARD_SHAPE_ALPHA,
+            # Distinguishes these archives from the ENUCC campaign's, whose
+            # shaping summed unrelated per-step deltas at the same alphas.
+            "shaping_form": "potential",
             "budget_on_consumed": XC.BUDGET_ON_CONSUMED,
             "budget_split": "per_side",
             "on_side_exhausted": "freeze",
+            "side_pacing": "equal_steps",
         },
         coevolution_config=coev_cfg,
         max_steps_per_episode=int(ENV_CONFIG["max_time_steps"]),
@@ -855,7 +1123,8 @@ def run_pairing(pairing: str, seed: int, run_dir: Path) -> Dict[str, Any]:
     _section(f"{pred_algo} vs {prey_algo} | seed={seed}")
     return _run_coev(
         pred_side=SIDE_BUILDERS[pred_algo]("predators", "predator", seed),
-        prey_side=SIDE_BUILDERS[prey_algo]("prey", "prey", seed),
+        # Anchors go on the prey side because that is what predators face.
+        prey_side=_with_anchors(SIDE_BUILDERS[prey_algo]("prey", "prey", seed)),
         seed=seed,
         run_dir=run_dir,
         label=pairing,
@@ -872,6 +1141,14 @@ def main() -> None:
     _section("Aquarium competitive coevolution")
     print(f"  ENV       : {ENV_NAME_COEV}  ({ACTION_MODE})")
     print(f"  budget    : {COEV_TOTAL_STEPS:,} env_steps × {NUM_SEEDS} seeds × pairings")
+    if ANCHOR_MIX > 0.0:
+        n_anchor = min(K_OPPONENTS, max(1, round(ANCHOR_MIX * K_OPPONENTS)))
+        print(
+            f"  anchoring : {n_anchor}/{K_OPPONENTS} predator episodes vs "
+            f"{XC.ANCHOR_VARIANTS} scripted prey (probe config held out)"
+        )
+    else:
+        print("  anchoring : off (pure coevolution)")
     print(f"  enabled   : {[p for p, on in PAIRINGS.items() if on]}")
     print(f"  output    : {OUTPUT_DIR}")
 
@@ -888,10 +1165,12 @@ def main() -> None:
             run_dir.mkdir(parents=True, exist_ok=True)
             try:
                 result = run_pairing(pairing, seed, run_dir)
+                final_eval = result.get("metrics", {}).get("final_eval") or {}
                 summary.append({
                     "pairing": pairing,
                     "seed": seed,
                     "training_time_s": result.get("training_time_s", 0.0),
+                    "pred_catches": final_eval.get("predators_catches_mean"),
                     "status": "ok",
                 })
             except Exception as exc:
@@ -901,17 +1180,23 @@ def main() -> None:
                     "pairing": pairing,
                     "seed": seed,
                     "training_time_s": 0.0,
+                    "pred_catches": None,
                     "status": f"error: {exc}",
                 })
 
     _section("Summary")
-    header = f"{'Pairing':<20}  {'Seed':>4}  {'Time (s)':>9}  Status"
+    header = (
+        f"{'Pairing':<20}  {'Seed':>4}  {'Time (s)':>9}  "
+        f"{'Catches':>8}  Status"
+    )
     print(header)
     print("-" * len(header))
     for row in summary:
+        catches = row.get("pred_catches")
+        catches_txt = f"{catches:.2f}" if catches is not None else "—"
         print(
             f"{row['pairing']:<20}  {row['seed']:>4}  "
-            f"{row['training_time_s']:>9.1f}  {row['status']}"
+            f"{row['training_time_s']:>9.1f}  {catches_txt:>8}  {row['status']}"
         )
 
 

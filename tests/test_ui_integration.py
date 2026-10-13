@@ -75,9 +75,14 @@ _STUB_CATALOG = {
     "catalog_version": "1",
     "algorithms": [_MOCK_ALGO_EA_JSON, _MOCK_ALGO_MADDPG_JSON],
     "environments": [_MOCK_ENV_ALGO_JSON],
+    # Shapes mirror ``catalog.get_coevolution_options()``: modes/schedules are
+    # option dicts, aggregations are bare strings.
     "coevolution": {
         "modes": [{"name": "competitive_2pop", "label": "Competitive (2 pop)"}],
-        "schedules": ["synchronous", "alternating"],
+        "schedules": [
+            {"name": "synchronous", "label": "Synchronous", "help": ""},
+            {"name": "alternating", "label": "Alternating", "help": ""},
+        ],
         "aggregations": ["mean", "min", "max", "sum"],
     },
     "budget_modes": [{"name": "env_steps"}, {"name": "eval_episodes"}],
@@ -164,6 +169,65 @@ class TestGroupIssues:
 
     def test_empty(self):
         assert group_issues_by_tab([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# resolve_output_dir — report output anchoring
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOutputDir:
+    def test_relative_path_anchors_to_results_root(self):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        root = Path("/data/results")
+        assert resolve_output_dir(".report-out", root) == (root / ".report-out").resolve()
+
+    def test_absolute_path_is_kept(self):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        target = Path("/tmp/reports").resolve()
+        assert resolve_output_dir(str(target), Path("/data/results")) == target
+
+    def test_home_tilde_is_expanded(self, tmp_path):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        assert resolve_output_dir("~/reports", tmp_path) == Path.home() / "reports"
+
+
+# ---------------------------------------------------------------------------
+# pick_writable_output_dir — read-only mount fallback
+# ---------------------------------------------------------------------------
+
+
+class TestPickWritableOutputDir:
+    def test_writable_dir_kept(self, tmp_path):
+        from deap_pettingzoo.ui.services import pick_writable_output_dir
+
+        target = tmp_path / "reports"
+        directory, fell_back = pick_writable_output_dir(target)
+        assert not fell_back
+        assert directory == target
+        assert directory.is_dir()
+
+    def test_unwritable_dir_falls_back_to_temp(self, tmp_path):
+        from deap_pettingzoo.ui.services import pick_writable_output_dir
+
+        # A file in place of a parent component makes mkdir raise OSError
+        # (NotADirectoryError), mirroring a read-only mount (EROFS).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("file", encoding="utf-8")
+        requested = blocker / "reports"
+        directory, fell_back = pick_writable_output_dir(requested)
+        assert fell_back
+        assert directory != requested
+        assert directory.is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +377,82 @@ class TestFormValidationRoundtrip:
         assert not report.ok
         codes = {i.code for i in report.errors}
         assert "unknown_env" in codes
+
+
+# ---------------------------------------------------------------------------
+# Co-evolution dropdown options — catalog shape -> submittable spec
+# ---------------------------------------------------------------------------
+
+
+class TestCatalogOptionNames:
+    def test_unwraps_option_dicts_and_passes_strings_through(self):
+        from deap_pettingzoo.ui.services.spec_utils import catalog_option_names
+
+        assert catalog_option_names(
+            [{"name": "synchronous", "label": "Synchronous", "help": "x"}]
+        ) == ["synchronous"]
+        assert catalog_option_names(["mean", "min"]) == ["mean", "min"]
+        assert catalog_option_names(None) == []
+        assert catalog_option_names([{"label": "no name"}, ""]) == []
+
+    def test_real_catalog_coev_options_normalise_to_valid_tokens(self):
+        """The live catalog serves modes/schedules as option dicts; the Setup
+        page must submit the bare token, not the dict."""
+        from deap_pettingzoo.catalog import coevolution as cat_coevolution
+        from deap_pettingzoo.ui.services.spec_utils import catalog_option_names
+
+        opts = cat_coevolution.get_coevolution_options()
+        assert catalog_option_names(opts["modes"]) == list(cat_coevolution.COEV_MODES)
+        assert catalog_option_names(opts["schedules"]) == list(
+            cat_coevolution.COEV_SCHEDULES
+        )
+        assert catalog_option_names(opts["aggregations"]) == list(
+            cat_coevolution.COEV_AGGREGATIONS
+        )
+
+    def test_coev_form_values_from_catalog_validate(self):
+        """Regression: the Setup page fed raw schedule dicts into the spec,
+        so every co-evolution submit failed pydantic with 'Input should be a
+        valid string' at coevolution.schedule."""
+        import deap_pettingzoo.environments  # noqa: F401
+
+        from deap_pettingzoo.baselines.experiment_spec import validate_spec
+        from deap_pettingzoo.catalog import coevolution as cat_coevolution
+        from deap_pettingzoo.catalog import environments as cat_environments
+        from deap_pettingzoo.service.models import ExperimentSpecModel
+        from deap_pettingzoo.ui.services.spec_utils import catalog_option_names
+
+        opts = cat_coevolution.get_coevolution_options()
+        env_json = cat_environments.get_environment("simple_tag_v3").to_dict(
+            available=True
+        )
+
+        # Mirrors the co-evolution tab of ui/pages/8_Setup.py.
+        coev_values = {
+            "enabled": True,
+            "mode": catalog_option_names(opts["modes"])[0],
+            "schedule": catalog_option_names(opts["schedules"])[0],
+            "k_opponents": 3,
+            "aggregation": catalog_option_names(opts["aggregations"])[0],
+            "sides": [
+                {
+                    "name": team["name"],
+                    "algorithm": "ea",
+                    "role_prefixes": team["agent_prefixes"],
+                    "hyperparameters": {},
+                }
+                for team in env_json["teams"]
+            ],
+        }
+
+        model = ExperimentSpecModel(
+            environment="simple_tag_v3",
+            algorithms=["ea"],
+            coevolution=coev_values,
+        )
+        assert isinstance(model.coevolution.schedule, str)
+        report = validate_spec(model.to_dataclass())
+        assert report.ok, [i.message for i in report.errors]
 
 
 # ---------------------------------------------------------------------------

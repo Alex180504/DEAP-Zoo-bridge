@@ -93,6 +93,30 @@ class Side:
             Default :func:`uniform_sampler`.
         frozen_policies: Pre-built policies for ``optimizer='frozen'``.
             Ignored for ``'ea'`` / ``'cma'``.
+        anchor_policies: Fixed reference opponents other sides face
+            alongside this side's evolving population — typically scripted
+            controllers. Purely about what *opponents* see, exactly like
+            ``archive_mix``: this side still evolves normally.
+
+            The point is measurement. In pure co-evolution an individual's
+            fitness is scored against a moving population, so a rising
+            fitness can mean the individual improved or that its opponents
+            got worse, and selection cannot tell those apart. Reserving part
+            of every evaluation for an opponent that never changes gives the
+            fitness a fixed reference and makes it comparable across
+            generations.
+        anchor_mix: Fraction of each individual's ``k_opponents`` drawn
+            from ``anchor_policies``, rounded to a whole number of episodes
+            and never rounded down to zero when non-zero. Default ``0.0``
+            (no anchoring). ``1.0`` anchors every episode, which is training
+            against the fixed opponent inside the co-evolution harness —
+            valid as an ablation, not co-evolution.
+        anchor_registry_names: Names under which ``anchor_policies`` are
+            registered via
+            :func:`~deap_pettingzoo.baselines.coevolution.pools.register_frozen_policy`.
+            Required when anchors cannot be pickled to worker processes,
+            which is the normal case for scripted policies holding an env
+            handle.
     """
 
     name: str
@@ -105,6 +129,9 @@ class Side:
     opponent_sampler: Sampler = uniform_sampler
     archive_sampler: Sampler = uniform_sampler
     frozen_policies: Optional[Sequence[PolicyProtocol]] = None
+    anchor_policies: Optional[Sequence[PolicyProtocol]] = None
+    anchor_mix: float = 0.0
+    anchor_registry_names: Optional[Sequence[str]] = None
 
     def __post_init__(self) -> None:
         # The valid optimizer tokens are exactly the keys of the open
@@ -130,6 +157,25 @@ class Side:
                 f"Side {self.name!r}: optimizer='frozen' requires a "
                 "non-empty frozen_policies= list."
             )
+        if not (0.0 <= self.anchor_mix <= 1.0):
+            raise ValueError(
+                f"Side {self.name!r}: anchor_mix must be in [0, 1]; "
+                f"got {self.anchor_mix}."
+            )
+        if self.anchor_mix > 0.0 and not self.anchor_policies:
+            raise ValueError(
+                f"Side {self.name!r}: anchor_mix={self.anchor_mix} requires a "
+                "non-empty anchor_policies= list."
+            )
+        if self.anchor_registry_names is not None:
+            names = tuple(self.anchor_registry_names)
+            if len(names) != len(self.anchor_policies or ()):
+                raise ValueError(
+                    f"Side {self.name!r}: anchor_registry_names has "
+                    f"{len(names)} entries but anchor_policies has "
+                    f"{len(self.anchor_policies or ())}."
+                )
+            self.anchor_registry_names = names
 
 
 # Runtime state — base class
@@ -180,6 +226,17 @@ class SideState:
         self.best_fitness: float = -np.inf
         self.history: List[GenerationStats] = []
 
+        #: Whether this side's policies attach a
+        #: :class:`MaskedDiscreteHead` (turn-based envs). Normalised here so
+        #: the trainer, the learner-policy factory and the opponent pools all
+        #: read one source rather than re-parsing ``optimizer_config``.
+        self.masked: bool = bool(side.optimizer_config.get("masked", False))
+        #: Per-side deterministic RNG. Replaced in :meth:`initialise` with the
+        #: trainer-provided generator (derived from
+        #: :attr:`CoEvolutionConfig.seed`) so one side's stochastic operators
+        #: never influence another side's evolution.
+        self._rng: np.random.Generator = np.random.default_rng()
+
         self._np_state: Optional[Any] = None
         self._py_state: Optional[Any] = None
         # True for RL sides; read by trainer GPU-contention and worker-fallback detectors.
@@ -219,6 +276,48 @@ class SideState:
         if self.side.hof is None:
             return
         self.side.hof.add(self.best_snapshot(), float(self.best_fitness))
+
+    # Learner-policy hooks — how this side's genomes become live policies
+
+    def learner_policy_factory(self) -> Callable[[Any, str, Any], PolicyProtocol]:
+        """Return the ``learner_factory`` the co-evolution evaluator calls.
+
+        The returned callable maps ``(genome, agent_id, action_space)`` to a
+        live :class:`PolicyProtocol`, one per learner agent per episode. The
+        default builds a :class:`FeedforwardNeuralPolicy`, which is what
+        EA / CMA-ES / PSO need; paradigms with a different phenotype (NEAT,
+        HyperNEAT) override this so they can drive the *shared*
+        :class:`~deap_pettingzoo.baselines.coevolution.evaluator.CoEvolutionEvaluator`
+        rather than rolling a bespoke rollout loop.
+        """
+        masked = self.masked
+
+        def _factory(genome: Any, agent_id: str, action_space: Any) -> PolicyProtocol:
+            # Homogeneous side — every agent shares one action space, so the
+            # agent id does not affect how the policy is built.
+            del agent_id
+            return _make_feedforward_policy_factory(action_space, masked=masked)(genome)
+
+        return _factory
+
+    def learner_snapshot(self, genome: Any) -> Optional[Any]:
+        """Return a picklable descriptor of *genome* for worker processes.
+
+        ``None`` (the default) means "ship the genome itself and let the
+        worker build a :class:`FeedforwardNeuralPolicy`" — the historical
+        behaviour of the parallel path. Sides whose phenotype needs more than
+        a genome (NEAT's config, HyperNEAT's substrate) return an
+        :class:`~deap_pettingzoo.baselines.coevolution.pools.OpponentSnapshot`
+        that
+        :func:`~deap_pettingzoo.baselines.coevolution.pools.rebuild_opponent_policy`
+        understands.
+
+        Deliberately separate from :meth:`learner_policy_factory`: collapsing
+        the two would rebuild this (potentially expensive) descriptor once per
+        agent per episode instead of once per evaluation.
+        """
+        del genome
+        return None
 
 
 # EA side
@@ -310,7 +409,6 @@ class EASideState(SideState):
         self.mutation_method = cfg.get("mutation_method", "gaussian")
         self.weight_range = tuple(cfg.get("weight_range", (-1.0, 1.0)))
         self.activation = cfg.get("activation", "tanh")
-        self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
         self._is_multiobjective = self.selection_method in {"nsga2", "spea2"}
 
@@ -322,14 +420,8 @@ class EASideState(SideState):
             self.hof = tools.HallOfFame(1)
         self._policy_factory: Optional[PolicyFactory] = None
         self._action_space: Any = None
-        #: Per-side deterministic RNG. Seeded from the trainer-provided
-        #: ``rng`` (derived from :attr:`CoEvolutionConfig.seed`) in
-        #: :meth:`initialise`, falling back to ``self.seed`` or
-        #: ``np.random.default_rng()``. Used for all stochastic EA
-        #: operations in :meth:`step_generation` so one side's RNG draws
-        #: never influence another side's evolution.
-        self._rng: np.random.Generator = np.random.default_rng()
-        # _np_state inherited from SideState — set by the trainer after seeding.
+        # _rng / _np_state inherited from SideState — the trainer seeds
+        # _rng in initialise() and captures _np_state after it.
 
     def initialise(
         self,
@@ -585,7 +677,6 @@ class CMAESSideState(SideState):
         self.activation = cfg.get("activation", "tanh")
         self.weight_range = tuple(cfg.get("weight_range", (-1.0, 1.0)))
         self.variant = cfg.get("variant", "mu_mu_lambda")
-        self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
 
         self.strategy = None
@@ -813,7 +904,6 @@ class PSOSideState(SideState):
         self.smax = cfg.get("smax", None)
         self.activation = cfg.get("activation", "tanh")
         self.weight_range = tuple(cfg.get("weight_range", (-1.0, 1.0)))
-        self.masked = bool(cfg.get("masked", False))
         self.seed = cfg.get("seed", None)
 
         self.pso_state: Optional[Dict[str, Any]] = None
