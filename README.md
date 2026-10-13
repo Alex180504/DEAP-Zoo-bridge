@@ -1,8 +1,8 @@
 # DEAP-bridge
 
-`deap_pettingzoo` (**DEAP-bridge**) is a research library for running
-**evolutionary algorithms** against **multi-agent reinforcement learning**
-on the same footing. It lets [DEAP](https://github.com/DEAP/deap) evolutionary
+`deap_pettingzoo` (**DEAP-bridge**) is a research library for running and evaluating
+**evolutionary algorithms** against **multi-agent reinforcement learning** policies
+in the same enviroments. It lets [DEAP](https://github.com/DEAP/deap) evolutionary
 optimisers drive [PettingZoo](https://pettingzoo.farama.org/) / MPE2
 environments, and benchmarks them head-to-head against
 [AgileRL](https://github.com/AgileRL/AgileRL) MARL learners — all behind one
@@ -145,13 +145,13 @@ report_path = build_report(experiment, "results/quickstart_demo/report")
 print(report_path)
 ```
 
-More runnable scripts live in [`examples/`](examples) — parallel evaluation,
-continuous control, turn-based self-play, co-evolution, and EA-vs-RL suites.
+More runnable scripts live in [`examples/`](examples) — including parallel evaluation,
+continuous control, turn-based self-play and co-evolution EA-vs-RL experiment suites.
 
 ## Quick start — via Docker
 
-The app runs as two containers: a FastAPI **service** (owns the queue and runs
-the trainers) and a Streamlit **UI** (talks to it over HTTP).
+The app runs as two containers: a FastAPI **service** (owns the task queue and runs
+the backend) and a Streamlit-based **UI** service.
 
 ```bash
 docker compose up
@@ -178,9 +178,7 @@ python -m deap_pettingzoo.ui --with-service
 ```
 
 > The service executes Python import paths from experiment specs and (under the
-> Setup -> Advanced tab) can install dependencies and run pasted scripts. That's
-> arbitrary code execution by design — keep it bound to localhost. Set
-> `DEAP_ENABLE_ADVANCED=0` to disable the advanced surface.
+> Setup -> Advanced tab) can install dependencies and run pasted scripts.
 
 ## Distributed / HPC runs
 
@@ -191,12 +189,13 @@ auto-built local Dask cluster) to a multi-node Slurm allocation by pointing
 for the walkthrough and [`examples/hpc/`](examples/hpc) for launch scripts and
 Slurm `.sbatch` templates.
 
-## Documentation & layout
-
+## Documentation
 - [docs/architecture.md](docs/architecture.md) — system overview
 - [docs/api/](docs/api) — API + REST service reference
 - [docs/ui/](docs/ui) — UI architecture and user guide
+- [docs/uml/](docs/uml) — Full UML modelling of the system
 
+Auto-generated HTML docs are available at https://alex180504.github.io/DEAP-Zoo-bridge/.
 ## Testing
 
 ```bash
