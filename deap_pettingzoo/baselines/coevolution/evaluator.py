@@ -462,7 +462,9 @@ class CoEvolutionEvaluator(BaseEvaluator):
         #: side's real per-generation env-step count.
         self.env_steps_consumed: int = 0
 
-    def _episode_seed(self, base_seed: Optional[int], episode_index: int) -> Optional[int]:
+    def _episode_seed(
+        self, base_seed: Optional[int], episode_index: int
+    ) -> Optional[int]:
         """Seed for episode ``episode_index``; see :func:`episode_seed_for`."""
         return episode_seed_for(
             base_seed=base_seed,

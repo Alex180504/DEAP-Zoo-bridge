@@ -437,9 +437,9 @@ class CoEvolutionConfig:
     at this generation, ``None`` when unavailable).
     """
 
-    final_eval_fn: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = (
-        field(default=None, repr=False, compare=False)
-    )
+    final_eval_fn: Optional[
+        Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
+    ] = field(default=None, repr=False, compare=False)
     """Optional end-of-run champion evaluation, called once as ``(states, context)``.
 
     Co-evolution otherwise reports only ``final_best`` — each side's *training*
