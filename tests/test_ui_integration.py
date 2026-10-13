@@ -172,6 +172,65 @@ class TestGroupIssues:
 
 
 # ---------------------------------------------------------------------------
+# resolve_output_dir — report output anchoring
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOutputDir:
+    def test_relative_path_anchors_to_results_root(self):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        root = Path("/data/results")
+        assert resolve_output_dir(".report-out", root) == (root / ".report-out").resolve()
+
+    def test_absolute_path_is_kept(self):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        target = Path("/tmp/reports").resolve()
+        assert resolve_output_dir(str(target), Path("/data/results")) == target
+
+    def test_home_tilde_is_expanded(self, tmp_path):
+        from pathlib import Path
+
+        from deap_pettingzoo.ui.services import resolve_output_dir
+
+        assert resolve_output_dir("~/reports", tmp_path) == Path.home() / "reports"
+
+
+# ---------------------------------------------------------------------------
+# pick_writable_output_dir — read-only mount fallback
+# ---------------------------------------------------------------------------
+
+
+class TestPickWritableOutputDir:
+    def test_writable_dir_kept(self, tmp_path):
+        from deap_pettingzoo.ui.services import pick_writable_output_dir
+
+        target = tmp_path / "reports"
+        directory, fell_back = pick_writable_output_dir(target)
+        assert not fell_back
+        assert directory == target
+        assert directory.is_dir()
+
+    def test_unwritable_dir_falls_back_to_temp(self, tmp_path):
+        from deap_pettingzoo.ui.services import pick_writable_output_dir
+
+        # A file in place of a parent component makes mkdir raise OSError
+        # (NotADirectoryError), mirroring a read-only mount (EROFS).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("file", encoding="utf-8")
+        requested = blocker / "reports"
+        directory, fell_back = pick_writable_output_dir(requested)
+        assert fell_back
+        assert directory != requested
+        assert directory.is_dir()
+
+
+# ---------------------------------------------------------------------------
 # api_client — mock httpx
 # ---------------------------------------------------------------------------
 

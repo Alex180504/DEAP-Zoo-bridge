@@ -17,6 +17,11 @@ services:
   sonarqube:
     image: sonarqube:community
     container_name: deap-sonarqube
+    # Fixed hostname so the bundled Elasticsearch's getLocalHost() resolves
+    # from /etc/hosts instead of Docker's embedded DNS, which fails to resolve
+    # the default container-ID hostname on Docker Desktop and crashes ES at
+    # startup (UnknownHostException: <container-id>).
+    hostname: sonarqube
     ports:
       - "9000:9000"
     environment:
@@ -33,10 +38,11 @@ services:
     healthcheck:
       # The web API reports UP only once Elasticsearch and the compute engine
       # are both ready, which is later than the port becoming connectable.
+      # curl is used because the 26.8+ image no longer ships wget.
       test:
         [
           "CMD-SHELL",
-          "wget -qO- http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'",
+          "curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'",
         ]
       interval: 10s
       timeout: 5s
